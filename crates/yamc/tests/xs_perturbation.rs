@@ -56,7 +56,7 @@ fn iron(dir: &std::path::Path) -> Material {
 }
 
 fn fe56_field(m: &Material) -> TransportField {
-    let (fields, _) = transport_fields(m);
+    let (fields, _) = transport_fields(m, &Default::default());
     fields.get("Fe56").cloned().expect("Fe56 has covariance")
 }
 
@@ -82,7 +82,7 @@ fn a_zero_draw_changes_nothing() {
     let (relative, absolute) = raise(&field, 102, 0.0);
     let nominal = &m.nuclide_data["Fe56"];
     let (perturbed, floored) =
-        perturbed_nuclide(nominal, &field, &relative, &absolute).expect("perturb");
+        perturbed_nuclide(nominal, &field, &relative, &absolute, None).expect("perturb");
     assert_eq!(floored, 0);
     for (t, rows) in nominal.reactions.iter().enumerate() {
         for (mt, r) in rows {
@@ -114,7 +114,8 @@ fn raising_capture_moves_capture_and_its_sums_by_exactly_that() {
     );
     let (relative, absolute) = raise(&field, 102, 0.1);
     let nominal = &m.nuclide_data["Fe56"];
-    let (perturbed, _) = perturbed_nuclide(nominal, &field, &relative, &absolute).expect("perturb");
+    let (perturbed, _) =
+        perturbed_nuclide(nominal, &field, &relative, &absolute, None).expect("perturb");
 
     let t = nominal
         .loaded_temperatures
@@ -241,7 +242,8 @@ fn a_perturbed_material_reaches_transport() {
 
     let mut perturbed = m.clone();
     let (nuclide, _) =
-        perturbed_nuclide(&m.nuclide_data["Fe56"], &field, &relative, &absolute).expect("perturb");
+        perturbed_nuclide(&m.nuclide_data["Fe56"], &field, &relative, &absolute, None)
+            .expect("perturb");
     perturbed
         .nuclide_data
         .insert("Fe56".to_string(), Arc::new(nuclide));
@@ -265,7 +267,7 @@ fn a_sampled_draw_perturbs_a_copy_and_keeps_the_totals_consistent() {
         return;
     };
     let m = iron(&dir);
-    let (fields, _) = transport_fields(&m);
+    let (fields, _) = transport_fields(&m, &Default::default());
     let cells = fields
         .iter()
         .filter_map(|(n, t)| t.field.clone().map(|f| (n.clone(), f)))
@@ -273,7 +275,8 @@ fn a_sampled_draw_perturbs_a_copy_and_keeps_the_totals_consistent() {
     let sampler = Sampler::new(&cells, &[]);
     let draw = sampler.draw(3, 0);
     let before = m.nuclide_data["Fe56"].reactions.clone();
-    let (perturbed, _) = perturbed_material(&m, &fields, &draw).expect("perturb");
+    let (perturbed, _) =
+        perturbed_material(&m, &fields, &draw, &Default::default()).expect("perturb");
 
     assert!(
         perturbed.fast_xs.is_none(),
@@ -319,7 +322,7 @@ fn raising_lithium_6_n_t_moves_tritium_production_by_exactly_that() {
     )
     .expect("read Li6");
     m.ensure_covariance_loaded().expect("covariance");
-    let (fields, _) = transport_fields(&m);
+    let (fields, _) = transport_fields(&m, &Default::default());
     let field = fields.get("Li6").cloned().expect("Li6 has covariance");
     assert_eq!(
         field.reads[&105],
@@ -328,7 +331,8 @@ fn raising_lithium_6_n_t_moves_tritium_production_by_exactly_that() {
     );
     let (relative, absolute) = raise(&field, 105, 0.1);
     let nominal = &m.nuclide_data["Li6"];
-    let (perturbed, _) = perturbed_nuclide(nominal, &field, &relative, &absolute).expect("perturb");
+    let (perturbed, _) =
+        perturbed_nuclide(nominal, &field, &relative, &absolute, None).expect("perturb");
     let t = nominal
         .loaded_temperatures
         .iter()

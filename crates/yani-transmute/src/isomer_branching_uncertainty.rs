@@ -45,8 +45,8 @@
 //!   production is the evaluation's absolute partial, so the isomer is made at
 //!   its drawn production whatever the replica's MF=33 draw did to the
 //!   reaction total, and the ground state takes the rest. Above the drawn
-//!   total the stated productions are scaled back to it, and the draw is
-//!   counted (`Info::isomer_branchings_clipped`). A state with no MF=40 keeps
+//!   total the stated productions are scaled back to it, and each is
+//!   counted by name (`Info::isomer_branchings_clipped`). A state with no MF=40 keeps
 //!   its nominal share of the total, as without this source, and so moves
 //!   with the total's MF=33 draw.
 //!
@@ -92,10 +92,15 @@
 //! parent the material does not carry are folded from the union-grid flux
 //! moments bin by bin, a bin a covariance edge cuts split by energy width.
 //!
-//! The weights are the nominal transport's. An MF=40 draw moves no transport
-//! cross section, so it has no flux response of its own; what is held is the
-//! response of the weights `w_j / P` to the cross-section draws that do move
-//! the flux, which is second order in the split.
+//! Where the transport carried replica weights (the cross-section source on,
+//! `FluxResponse::ReplicaWeights`), the tally keeps these interval
+//! productions per replica too, scored under replica `k`'s weight and cross
+//! sections as its partials are, and replica `k` folds its draw with its own
+//! `w_j / P` on the lists folded from its own partials. An MF=40 draw moves no
+//! transport cross section, so it has no flux response of its own; what the
+//! replica weights carry is the response of the weights to the cross-section
+//! draw of the same replica. With the flux held, the weights are the nominal
+//! transport's, which holds that response, second order in the split.
 //!
 //! # Sampling
 //!
@@ -494,7 +499,7 @@ fn curve_integral(energy: &[f64], values: &[f64], a: f64, b: f64) -> f64 {
 
 /// One curve's stated part under one spectrum.
 #[derive(Debug, Clone)]
-struct CurveTerms {
+pub(crate) struct CurveTerms {
     list: usize,
     curve: usize,
     /// The share of the curve's nominal production its stated states carry.
@@ -510,7 +515,7 @@ struct SpectrumTerms {
     /// already has.
     nominal: HashMap<String, Vec<Option<ListRates>>>,
     /// Per drawn parent, its stated curves.
-    curves: BTreeMap<String, Vec<CurveTerms>>,
+    curves: StatedCurves,
 }
 
 /// What [`IsomerRun::new`] found to report, for `Info`.
@@ -618,6 +623,22 @@ impl IsomerIntervalProductions {
     pub fn states(&self) -> usize {
         self.productions.len()
     }
+
+    /// Every tallied state: its parent, `(MT, LFS)` and production on each
+    /// interval.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, (i32, i32), &[f64])> {
+        self.productions
+            .iter()
+            .map(|((p, key), w)| (p.as_str(), *key, w.as_slice()))
+    }
+
+    /// The tallied production of `parent`'s state `(MT, LFS)` summed over
+    /// its intervals, or `None` when it was not tallied.
+    pub fn interval_sum(&self, parent: &str, state: (i32, i32)) -> Option<f64> {
+        self.productions
+            .get(&(parent.to_string(), state))
+            .map(|w| w.iter().sum())
+    }
 }
 
 /// One stated state as a transport tally scores it: the list it sits on, the
@@ -665,6 +686,91 @@ impl IsomerCovariance {
 /// One replica's draw: per drawn parent, its multipliers minus one.
 pub(crate) type IsomerDraw = Vec<crate::covariance_sample::GaussianDraw>;
 
+/// Per `(parent, reaction, product)`, the list draws whose stated production
+/// of the product was scaled back to the drawn reaction total.
+pub(crate) type Clipped = BTreeMap<(String, String, String), usize>;
+
+/// Per drawn parent, the curves its stated states move and each interval's
+/// share of the curve's nominal production, under one spectrum.
+pub(crate) type StatedCurves = BTreeMap<String, Vec<CurveTerms>>;
+
+/// Read `covariance` against one spectrum's list folds `nominal` and the
+/// state weights `s` gives, for the parents in `reachable`.
+fn stated_curves(
+    covariance: &IsomerCovariance,
+    lists: &Lists<'_>,
+    s: &IsomerSpectrum<'_>,
+    nominal: &HashMap<String, Vec<Option<ListRates>>>,
+    reachable: &BTreeSet<String>,
+) -> StatedCurves {
+    let mut curves: StatedCurves = BTreeMap::new();
+    for (parent, field) in &covariance.fields {
+        if !reachable.contains(parent) {
+            continue;
+        }
+        let Some(per) = nominal.get(parent) else {
+            continue;
+        };
+        let mut out: Vec<CurveTerms> = Vec::new();
+        for state in &field.states {
+            let Some(Some(folded)) = per.get(state.list) else {
+                continue;
+            };
+            let rule = &lists[parent][state.list];
+            let Some((curve, weights)) = s.weights(parent, state, rule) else {
+                continue;
+            };
+            let total = folded.production[curve];
+            if total <= 0.0 {
+                continue;
+            }
+            let entry = match out
+                .iter_mut()
+                .position(|c| c.list == state.list && c.curve == curve)
+            {
+                Some(i) => &mut out[i],
+                None => {
+                    out.push(CurveTerms {
+                        list: state.list,
+                        curve,
+                        stated: 0.0,
+                        cells: Vec::new(),
+                    });
+                    out.last_mut().expect("just pushed")
+                }
+            };
+            for (j, w) in weights.into_iter().enumerate() {
+                if w > 0.0 {
+                    entry.stated += w / total;
+                    entry.cells.push((state.first + j, w / total));
+                }
+            }
+        }
+        out.retain(|c| !c.cells.is_empty());
+        if !out.is_empty() {
+            curves.insert(parent.clone(), out);
+        }
+    }
+    curves
+}
+
+/// The stated curves of one transport replica: `nominal` the lists folded
+/// from replica `k`'s partials and `productions` its interval productions,
+/// so the weights `w_j / P` are the ones that replica's flux gives.
+pub(crate) fn tallied_curves(
+    covariance: &IsomerCovariance,
+    lists: &Lists<'_>,
+    nominal: &HashMap<String, Vec<Option<ListRates>>>,
+    productions: &IsomerIntervalProductions,
+    reachable: &BTreeSet<String>,
+) -> StatedCurves {
+    let s = IsomerSpectrum::Tallied {
+        nominal,
+        productions,
+    };
+    stated_curves(covariance, lists, &s, nominal, reachable)
+}
+
 impl IsomerRun {
     /// Read `covariance` against `spectra` for the parents in `reachable`.
     ///
@@ -698,51 +804,10 @@ impl IsomerRun {
                     .collect(),
                 IsomerSpectrum::Tallied { nominal, .. } => (*nominal).clone(),
             };
-            let mut curves: BTreeMap<String, Vec<CurveTerms>> = BTreeMap::new();
-            for (parent, field) in &covariance.fields {
-                if !reachable.contains(parent) {
-                    continue;
-                }
-                let Some(per) = nominal.get(parent) else {
-                    continue;
-                };
-                let mut out: Vec<CurveTerms> = Vec::new();
-                for state in &field.states {
-                    let Some(Some(folded)) = per.get(state.list) else {
-                        continue;
-                    };
-                    let rule = &lists[parent][state.list];
-                    let Some((curve, weights)) = s.weights(parent, state, rule) else {
-                        continue;
-                    };
-                    let total = folded.production[curve];
-                    if total <= 0.0 {
-                        continue;
-                    }
-                    let entry = match out
-                        .iter_mut()
-                        .position(|c| c.list == state.list && c.curve == curve)
-                    {
-                        Some(i) => &mut out[i],
-                        None => {
-                            out.push(CurveTerms {
-                                list: state.list,
-                                curve,
-                                stated: 0.0,
-                                cells: Vec::new(),
-                            });
-                            out.last_mut().expect("just pushed")
-                        }
-                    };
-                    for (j, w) in weights.into_iter().enumerate() {
-                        if w > 0.0 {
-                            entry.stated += w / total;
-                            entry.cells.push((state.first + j, w / total));
-                        }
-                    }
-                }
-                out.retain(|c| !c.cells.is_empty());
-                for c in &out {
+            let curves = stated_curves(covariance, lists, s, &nominal, reachable);
+            for (parent, out) in &curves {
+                let field = &covariance.fields[parent];
+                for c in out {
                     let rule = &lists[parent][c.list];
                     report.perturbed.insert((parent.clone(), rule.kind.clone()));
                     let var: f64 = c
@@ -762,9 +827,6 @@ impl IsomerRun {
                     let sigma = var.max(0.0).sqrt();
                     let slot = report.production_sigma.entry(key).or_insert(0.0);
                     *slot = slot.max(sigma);
-                }
-                if !out.is_empty() {
-                    curves.insert(parent.clone(), out);
                 }
             }
             terms.push(SpectrumTerms { nominal, curves });
@@ -860,29 +922,34 @@ impl IsomerRun {
     /// them, with `draw` applied by the branching rule (see the module
     /// documentation), ready to re-fold into the chain.
     ///
+    /// `curves` replaces the spectrum's own stated curves where the weights
+    /// are the replica's own (a transport replica's tally, see
+    /// [`tallied_curves`]).
+    ///
     /// `total_ratio(parent, kind)` is the replica's draw of the reaction rate
     /// the list is a split of, over the rate before that draw: the MF=33 and
     /// resonance draws, one where neither moved it. A stated production of a
     /// list whose ground takes the rest does not follow it; everything else
     /// on such a list does, so the shares nothing states are kept. Returns the
-    /// folds and how many lists' stated productions had to be scaled back to
-    /// the drawn total.
+    /// folds and, keyed `(parent, reaction, product)`, the stated productions
+    /// that had to be scaled back to the drawn total (one each).
     pub(crate) fn perturb(
         &self,
         idx: usize,
         draw: &IsomerDraw,
         lists: &Lists<'_>,
         base: &HashMap<String, Vec<Option<ListRates>>>,
+        curves: Option<&StatedCurves>,
         total_ratio: &dyn Fn(&str, &str) -> f64,
-    ) -> (HashMap<String, Vec<Option<ListRates>>>, usize) {
-        let spectrum = &self.spectra[idx];
-        let mut clipped = 0usize;
+    ) -> (HashMap<String, Vec<Option<ListRates>>>, Clipped) {
+        let stated_curves = curves.unwrap_or(&self.spectra[idx].curves);
+        let mut clipped = Clipped::new();
         let mut out = base.clone();
         for (parent, per) in out.iter_mut() {
             let Some(rules) = lists.get(parent) else {
                 continue;
             };
-            let stated = spectrum.curves.get(parent);
+            let stated = stated_curves.get(parent);
             let deviates = stated.and_then(|_| {
                 let i = self.parents.iter().position(|(p, _, _)| p == parent)?;
                 Some(&draw[i].0)
@@ -927,7 +994,12 @@ impl IsomerRun {
                 // clips an absolute partial above it.
                 let room = folded.total - held;
                 let scale = if folded.has_total && drawn > 0.0 && held + drawn > folded.total {
-                    clipped += 1;
+                    for (k, curve) in rule.curves.iter().enumerate() {
+                        if rule.produces[k] && s[k] > 0.0 {
+                            let key = (parent.clone(), rule.kind.clone(), curve.target.clone());
+                            *clipped.entry(key).or_insert(0) += 1;
+                        }
+                    }
                     room.max(0.0) / drawn
                 } else {
                     1.0
@@ -1373,8 +1445,8 @@ mod tests {
         let (mut ground, mut isomer) = (Vec::new(), Vec::new());
         for replica in 0..4000 {
             let draw = run.draw(7, replica);
-            let (out, clipped) = run.perturb(0, &draw, &lists, &base, &|_, _| 1.0);
-            assert_eq!(clipped, 0);
+            let (out, clipped) = run.perturb(0, &draw, &lists, &base, None, &|_, _| 1.0);
+            assert!(clipped.is_empty());
             let p = &out["Nb93"][0].as_ref().unwrap().production;
             ground.push(p[0] / 3.0);
             isomer.push(p[1]);
@@ -1399,7 +1471,7 @@ mod tests {
         let (mut a, mut b) = (Vec::new(), Vec::new());
         for replica in 0..4000 {
             let draw = run.draw(3, replica);
-            let (out, _) = run.perturb(0, &draw, &lists, &base, &|_, _| 1.0);
+            let (out, _) = run.perturb(0, &draw, &lists, &base, None, &|_, _| 1.0);
             let p = &out["Nb93"][0].as_ref().unwrap().production;
             a.push(p[0] / 3.0);
             b.push(p[1]);
@@ -1460,7 +1532,7 @@ mod tests {
         let base = run.nominal(0).clone();
         for replica in 0..16 {
             let draw = run.draw(1, replica);
-            let (out, _) = run.perturb(0, &draw, &lists, &base, &|_, _| 1.0);
+            let (out, _) = run.perturb(0, &draw, &lists, &base, None, &|_, _| 1.0);
             let p = &out["Nb93"][0].as_ref().unwrap().production;
             assert_eq!(p, &vec![3.0, 1.0]);
         }
@@ -1479,8 +1551,17 @@ mod tests {
         let mut clipped_any = 0;
         for replica in 0..400 {
             let draw = run.draw(5, replica);
-            let (out, clipped) = run.perturb(0, &draw, &lists, &base, &|_, _| 1.25);
-            clipped_any += clipped;
+            let (out, clipped) = run.perturb(0, &draw, &lists, &base, None, &|_, _| 1.25);
+            if !clipped.is_empty() {
+                // Each stated product of the list is named, once per
+                // clipped draw: the ground states its (negligible) MF=40 too.
+                let key = |p: &str| ("Nb93".to_string(), "(n,2n)".to_string(), p.to_string());
+                assert_eq!(
+                    clipped,
+                    Clipped::from([(key("Nb92"), 1), (key("Nb92_m1"), 1)])
+                );
+                clipped_any += 1;
+            }
             let folded = out["Nb93"][0].as_ref().unwrap();
             assert!((folded.total - 5.0).abs() < 1e-12);
             let sum: f64 = folded.production.iter().sum();
@@ -1489,7 +1570,7 @@ mod tests {
                 "{sum} > {}",
                 folded.total
             );
-            if clipped == 0 {
+            if clipped.is_empty() {
                 // The ground's stated draw is negligible, so it is about
                 // three times its 1.0 multiplier: unmoved by the total's draw.
                 assert!((folded.production[0] / 3.0 - 1.0).abs() < 0.01);
@@ -1524,7 +1605,7 @@ mod tests {
                 ..Default::default()
             })],
         )]);
-        let (out, _) = run.perturb(0, &Vec::new(), &lists, &base, &|_, _| 2.0);
+        let (out, _) = run.perturb(0, &Vec::new(), &lists, &base, None, &|_, _| 2.0);
         let folded = out["Nb93"][0].as_ref().unwrap();
         assert_eq!(folded.production, vec![6.0, 2.0]);
         assert_eq!(folded.total, 8.0);

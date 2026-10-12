@@ -602,9 +602,12 @@ class DataUncertainty:
       themselves: each replica draws them from their covariance, rebuilds the
       resonance range's cross sections from the draw and Doppler broadens the
       change to the temperature in use, so the resonance range's uncertainty
-      is exact in the parameters rather than first order. A nuclide whose
-      parameters cannot be sampled keeps the first-order MF=32 rows of
-      ``covariance.arrow``, and the report says which and why;
+      is exact in the parameters rather than first order. On a
+      transport-coupled run the change is folded against the flux the
+      transport tallied on the nuclide's own energy grid through its
+      resonances, so a self-shielded resonance is weighted with its own flux
+      dip. A nuclide whose parameters cannot be sampled keeps the first-order
+      MF=32 rows of ``covariance.arrow``, and the report says which and why;
     - ``"flux_spectrum"``: the spectrum itself, from the per-bin
       ``flux_std_dev`` given on a ``Pulse``;
     - ``"half_life"``: every reachable nuclide's half-life, from the decay
@@ -613,12 +616,19 @@ class DataUncertainty:
       saturated activity (``lambda N = R``) is correctly insensitive to its
       own half-life rather than inheriting the density's spread;
     - ``"decay_branching"``: the decay branching ratios of every reachable
-      parent with exactly two modes and one stated sigma between them (both
-      state the same one, or one states it and the other is its complement),
-      whose smaller ratio is at least five sigmas from zero. One draw per
-      parent moves one mode up and the other down by the same amount, so the
-      pair's total is kept. Other multi-mode parents stay at their evaluated
-      ratios and the report names them by why;
+      parent with several modes and a stated sigma, drawn so the parent's
+      total is kept and every ratio stays between zero and it: each mode but
+      one from a logit-normal with the evaluated ratio as its mean and the
+      stated sigma as its standard deviation, the last their complement,
+      coupled so the modes carry the zero-sum covariance of largest entropy
+      that realises every stated sigma (for two or three modes the only one).
+      A small branch with a large relative sigma is drawn skewed, never below
+      zero. A largest sigma above the sum of the others' is drawn as that sum;
+      a single mode stating no sigma is the complement of the rest when it is
+      the largest or the only way to trade; a mode whose sigma no ratio with
+      its mean can have (``sigma**2 >= b * (T - b)``), and a mode stating none
+      otherwise, are held at their ratios and the rest share what is left.
+      The report names every parent short of its stated sigmas by why;
     - ``"statistical"``: the Monte Carlo uncertainty of transport-tallied
       reaction rates, from their per-history covariance, drawn independently
       for each material since their tallies are separate estimates. It
@@ -684,10 +694,10 @@ class DataUncertainty:
     Held at their nominal values, with uncertainties of their own that this
     does not propagate:
     
-    - the decay branching ratios ``"decay_branching"`` does not sample (three
-      or more modes, unequal sigmas, too wide to sample untruncated, or no
-      sigma), and the per-decay photon lines and decay energy of a drawn
-      parent, which follow its nominal branching;
+    - the decay branching ratios ``"decay_branching"`` does not sample (a
+      sigma wider than the ratio allows, or no sigma to draw), and the per-decay
+      photon lines and decay energy of a drawn parent, which follow its
+      nominal branching;
     - the isomeric split of a reaction whose evaluation states no MF=40
       covariance on any of its states, listed in
       ``no_isomer_branching_uncertainty``, and
@@ -781,6 +791,21 @@ class DataUncertainty:
             is too noisy to trust on fewer, and at most 1024: a run that stops
             there sets ``hit_cap`` in the info and lists every output, nuclide
             and step that missed under ``unconverged``. Must be between 0 and 1.
+        flux_response (str, optional): For ``Model.simulate_transmutation``
+            only, how the flux answers each replica's perturbed cross
+            sections. ``"replica_weights"`` (the default when ``None``): the
+            transport carries one likelihood-ratio weight per replica along
+            every history and tallies every reaction rate once per replica
+            under it, so each replica's rates come from the flux its own data
+            would give, self-shielding dips and all. The replica count is then
+            fixed before the transport: ``samples``, or the count a Gaussian
+            output needs to reach ``convergence`` (256 at 0.05), and every one
+            is solved. ``"held"``: one nominal transport whose tallied flux
+            every replica's cross sections are folded against; cheaper and
+            open to every transport configuration, but it overstates the
+            sigma of a self-shielded resonance, several-fold for a strong
+            one. ``Material.transmute`` and ``simulate_transport`` have no
+            choice to make, and raise if it is given.
     
     Examples:
         >>> results = iron.transmute(
@@ -808,8 +833,14 @@ class DataUncertainty:
         it, that an adaptive run stops on.
         """
     @property
+    def flux_response(self) -> builtins.str:
+        r"""
+        How a transport-coupled run takes the flux's response to each
+        replica's cross sections: ``"replica_weights"`` or ``"held"``.
+        """
+    @property
     def sources(self) -> builtins.list[builtins.str]: ...
-    def __new__(cls, seed: builtins.int = 1, samples: typing.Optional[builtins.int] = None, sources: typing.Optional[typing.Sequence[builtins.str]] = None, attribution: builtins.bool = False, convergence: typing.Optional[builtins.float] = None) -> DataUncertainty: ...
+    def __new__(cls, seed: builtins.int = 1, samples: typing.Optional[builtins.int] = None, sources: typing.Optional[typing.Sequence[builtins.str]] = None, attribution: builtins.bool = False, convergence: typing.Optional[builtins.float] = None, flux_response: typing.Optional[builtins.str] = None) -> DataUncertainty: ...
     @staticmethod
     def available_sources() -> builtins.list[builtins.str]:
         r"""
@@ -2750,6 +2781,18 @@ class Model:
               (the covariance of angular distributions), ``{mt: [(l, l1), ...]}``:
               the sorted pairs of Legendre orders a covariance block correlates.
               Reported so the data is visible; it is not sampled yet.
+            - ``resonance_parameters``: per nuclide whose data folder carries
+              its resonance parameters (MF=2 and MF=32,
+              ``resonance_parameters.arrow``), how a run takes its
+              resonance-range uncertainty, in the shape of
+              ``TransmutationResults.get_data_uncertainty_info``'s entry of the
+              same name: ``method`` is ``"parameters sampled"`` (each replica
+              draws them, rebuilds the cross sections and Doppler broadens the
+              change, which the replica weights then carry exactly, flux
+              response included) or ``"first-order rows"`` (the MF=32 rows of
+              ``covariance.arrow``, sampled with the cells), with ``reason``
+              why. A sampled nuclide's ``perturbed`` reactions are those its
+              MF=33 blocks reach, without the rows.
         
         Raises:
             RuntimeError: If a material's nuclear data cannot be loaded.
@@ -2937,7 +2980,14 @@ class Model:
                 carries one weight per cross-section replica (``samples``, 32
                 when not set), drawn from the evaluations' covariance with
                 ``seed``, so no extra particles are run and ``mean`` stays the
-                nominal result, bit for bit. Each ``TallyResult`` then carries
+                nominal result, bit for bit. Where a nuclide's data folder
+                carries its resonance parameters (MF=2 and MF=32), each
+                replica draws those instead of the first-order MF=32 rows,
+                rebuilds the resonance cross sections from the draw and Doppler
+                broadens the change, so the resonance range is exact in the
+                parameters and a replica's stronger resonance deepens its own
+                flux dip; ``data_uncertainty_coverage()["resonance_parameters"]``
+                says which nuclides and why not. Each ``TallyResult`` then carries
                 ``nuclear_data_standard_deviation``, ``replica_mean`` and
                 ``replica_standard_error``. Cross sections only: leave
                 ``sources`` unset or pass ``["cross_sections"]``, and
@@ -3054,12 +3104,39 @@ class Model:
                   tallies are separate estimates and are drawn independently,
                   while the nuclear-data sources below are drawn once per
                   replica and shared by every material;
-                - ``"cross_sections"``: the ENDF MF=33 covariance, folded against
-                  the spectrum the tally actually saw;
+                - ``"cross_sections"``: the ENDF MF=33 covariance and, where a
+                  nuclide's data folder carries them, its resonance parameters
+                  (MF=2 and MF=32) drawn per replica and rebuilt in place of the
+                  first-order MF=32 rows. How the flux answers each replica's
+                  cross sections is ``DataUncertainty``'s ``flux_response``.
+                  With ``"replica_weights"`` (the default) the transport carries
+                  one likelihood-ratio weight per replica along every history,
+                  exactly as ``simulate_transport(data_uncertainty=...)`` does,
+                  with the same draws, and tallies every reaction rate, isomeric
+                  partial and fission-yield weight once per replica under it:
+                  replica ``k``'s rates are those its own data would give,
+                  self-shielding and spectrum shifts included, so a stronger
+                  resonance deepens its own dip and a perturbed scatterer moves
+                  every rate. The replica count is fixed before the transport
+                  (``samples``, or 256 at the default ``convergence``), every
+                  replica is solved, and the info says whether the sigmas reached
+                  the target at that count. Transport configurations the weights
+                  do not carry (delta tracking, survival biasing, weight windows,
+                  photon transport, MPI) raise before anything runs. With
+                  ``"held"`` the transport runs once without weights and each
+                  replica's cross sections are folded against the flux it
+                  tallied, the resonance parameters against a flux tallied on
+                  each such nuclide's own energy grid: cheaper and open to every
+                  configuration, but the held flux overstates the sigma of a
+                  self-shielded resonance (W186 capture in a graphite sphere,
+                  C:W = 50: 1.4% held against 0.2% from replica weights and from
+                  perturbed reruns). ``get_data_uncertainty_info``'s
+                  ``flux_response`` and ``resonance_parameters`` say which was
+                  used;
                 - ``"half_life"``: the decay data's half-life sigmas;
                 - ``"decay_branching"``: the decay branching ratios of the
-                  two-mode parents whose sum rule fixes how the stated sigma is
-                  shared, as ``DataUncertainty`` describes;
+                  parents with a stated sigma, each drawn keeping its total, as
+                  ``DataUncertainty`` describes;
                 - ``"decay_energy"``: the decay data's mean decay energy sigmas,
                   which move decay heat only;
                 - ``"decay_photon_lines"``: the decay data's photon spectrum
@@ -3072,19 +3149,20 @@ class Model:
                 and the flux's error is the statistical one.
                 ``"isomer_branching"`` re-splits the tallied partials: the tally
                 scores each MF=40 state's production on its covariance
-                intervals at the energy of each track segment, and each replica
-                draws the state's production from those weights, as a spectrum
-                run does from its group fold. The transport runs
-                once, so every replica is solved in the flux it tallied: a
-                perturbed cross section does not change the flux or the
-                shielding the transport saw, and the report lists that held
-                response under ``not_perturbed`` as ``"flux response to
-                perturbed cross sections (one transport)"``. The tallied values
-                themselves are still drawn by ``"statistical"``. The sources are
-                independent, so ``sources=["statistical"]`` isolates the
-                transport's contribution and the default gives the total. Omit
-                it and nothing extra is tallied or solved: the inventories are
-                bit-identical either way.
+                intervals at the energy of each track segment (per replica with
+                replica weights), and each replica draws the state's production
+                from those weights, as a spectrum run does from its group fold.
+                With replica weights every replica's rates come from the same
+                histories as the nominal ones, so the differences between replicas are resolved
+                far more finely than the rates themselves, and ``"statistical"``
+                adds the nominal tally's error to each replica once; the sources
+                are independent, so ``sources=["statistical"]`` isolates the
+                transport's contribution and the default gives the total. The
+                decay-data and fission-yield sources do not move the transport
+                and are drawn per replica on the transmutation side, keyed on the
+                same replica index. Omit ``data_uncertainty`` and nothing extra
+                is tallied or solved: the inventories are bit-identical either
+                way, and with replica weights the nominal inventories are too.
         
         Returns:
             TransmutationResults object containing material compositions at each timestep.
@@ -3101,6 +3179,8 @@ class Model:
             ...     method="independent", schedule=schedule, total_particles=100_000,
             ...     data_uncertainty=yamc.DataUncertainty(seed=1))
             >>> results.get_nuclide_uncertainty(1, "Co60", 1)
+            >>> results.get_data_uncertainty_info(1)["flux_response"]
+            'replica_weights'
         """
     def to_vtkhdf(self, filename: builtins.str, **kwargs: typing.Any) -> None:
         r"""Write to a VTK-HDF file for ParaView. Requires h5py (pip install yamc[viz])."""
@@ -6138,16 +6218,19 @@ class TransmutationResults:
           the solver reads; they are held rather than drawn through a mapping
           their yields were not built with. Each is counted as a gap.
         - ``decay_branchings_perturbed``: with the ``"decay_branching"``
-          source, the reachable two-mode parents whose split was sampled. The
-          multi-mode parents held at their evaluated ratios, each a gap:
-          ``no_decay_branching_uncertainty`` (no mode states a sigma),
-          ``decay_branchings_three_or_more_modes`` (a sigma, but no stated
-          covariance to share it between three or more modes),
-          ``decay_branchings_unequal_sigmas`` (two modes stating different
-          sigmas) and ``decay_branchings_too_wide`` (the smaller ratio under
-          five sigmas). ``decay_branchings_floored`` /
-          ``decay_branchings_sampled`` count draws clamped to the pair's total
-          and draws made.
+          source, the reachable multi-mode parents whose split was sampled. Held
+          at their evaluated ratios, each a gap: ``no_decay_branching_uncertainty``
+          (no mode states a sigma, or one does beside two or more that do not)
+          and ``decay_branchings_too_wide`` (every mode that could move states
+          a sigma no ratio with its mean can have). Sampled but short of the
+          stated sigmas, each a gap too: ``decay_branchings_partly_held`` (one
+          or more modes held at their ratios, for such a sigma or for stating
+          none) and ``decay_branchings_sigma_adjusted`` (a mode drawn more than
+          0.1% from its stated sigma: the largest exceeds the sum of the
+          others', or the complement's needs a correlation non-negative ratios
+          cannot carry). ``decay_branchings_floored`` /
+          ``decay_branchings_sampled`` count draws whose complement was pulled
+          back above zero and draws made.
         - ``isomer_branchings_perturbed``: with the ``"isomer_branching"``
           source, the reachable reactions, as ``"Parent reaction"``, whose
           isomeric split was drawn from the MF=40 covariance of at least one of
@@ -6165,9 +6248,11 @@ class TransmutationResults:
           the relative sigma MF=40 states for the product's production, folded
           against the spectrum (the largest over the run's spectra).
           ``isomer_branchings_sampled`` counts the draws, one per drawn parent
-          per replica, and ``isomer_branchings_clipped`` the reactions whose
-          drawn isomer productions exceeded the drawn total and were scaled
-          back to it.
+          per replica. ``isomer_branchings_clipped`` gives, as
+          ``"Parent reaction Product"``, how many list draws (one per replica
+          per spectrum) scaled the product's drawn production back to the
+          drawn reaction total, the stated productions of its list having
+          come out above it; a product never clipped is absent.
         - ``statistical_rates``: with the ``"statistical"`` source on a
           transport run, how many tallied rates were sampled from their
           covariance; ``statistical_floored`` / ``statistical_sampled`` count
@@ -6175,7 +6260,8 @@ class TransmutationResults:
         - ``resonance_parameters``: per nuclide with resonance parameters
           (MF=2 and MF=32) and a rate in this run, how its resonance-range
           uncertainty was sampled. ``method`` is ``"parameters sampled"``
-          (drawn per replica and the cross sections rebuilt from them) or
+          (drawn per replica and the cross sections rebuilt from them, on a
+          transport run against the flux it tallied through the resonances) or
           ``"first-order rows"`` (the MF=32 rows of ``covariance.arrow``),
           ``reason`` why the parameters were not sampled (``None`` where they
           were), and ``ranges`` one sampler report per sampled range:

@@ -293,13 +293,15 @@ pub fn convert_neutron_xs(
     // urr.arrow is transport-only, but it costs nothing to carry when the
     // evaluation has it and a later transport conversion would want it.
     nuclide::write_urr(&data, &dir)?;
-    write_covariance_if_asked(covariance, material.as_ref(), &dir)?;
+    let unconverted = write_covariance_if_asked(covariance, material.as_ref(), &dir)?;
 
-    write_version(&dir, provenance)?;
+    write_version(&dir, provenance, &unconverted)?;
     Ok(dir)
 }
 
 /// Write `covariance.arrow` when it was asked for, and refuse when it cannot be.
+/// Returns the covariance sections on the tape that were not converted, for
+/// `version.json`.
 ///
 /// An ACE source has no `Material`, and MF=33 is not in an ACE table, so a
 /// caller who asked for covariance and would have got a directory without one
@@ -309,9 +311,9 @@ fn write_covariance_if_asked(
     covariance: bool,
     material: Option<&Material>,
     dir: &Path,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<Vec<serde_json::Value>, Box<dyn Error>> {
     if !covariance {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let Some(material) = material else {
         return Err(
@@ -325,14 +327,38 @@ fn write_covariance_if_asked(
     crate::nubar_covariance::write_nubar_covariance(material, dir)?;
     crate::spectrum_covariance::write_spectrum_covariance(material, dir)?;
     crate::resonance_parameters::write_resonance_parameters(material, dir)?;
-    Ok(())
+    Ok(unconverted_covariance(material))
+}
+
+/// The covariance sections on the tape that `endf` could not read, each with
+/// what it lacks and what is missing from the output for it. Recorded in
+/// `version.json` as `unconverted_covariance`, so a nuclide without
+/// `resonance_parameters.arrow` is not taken for an evaluation without MF=32.
+fn unconverted_covariance(material: &Material) -> Vec<serde_json::Value> {
+    material
+        .mf32_unsupported()
+        .map(|what| {
+            serde_json::json!({
+                "mf": 32,
+                "mt": 151,
+                "reason": format!("endf does not implement {what}"),
+                "missing": ["resonance_parameters.arrow", "the MF=32 rows of covariance.arrow"],
+            })
+        })
+        .into_iter()
+        .collect()
 }
 
 /// Write `version.json`.
 ///
 /// Last, and only once everything else is on disk: its presence is what a
-/// resume takes as proof the conversion finished.
-fn write_version(dir: &Path, provenance: &Provenance) -> Result<(), Box<dyn Error>> {
+/// resume takes as proof the conversion finished. `unconverted` lists the
+/// covariance sections the tape has and the output does not, if any.
+fn write_version(
+    dir: &Path,
+    provenance: &Provenance,
+    unconverted: &[serde_json::Value],
+) -> Result<(), Box<dyn Error>> {
     let mut marker = serde_json::json!({
         "format_version": 2,
         "library": provenance.library,
@@ -340,6 +366,9 @@ fn write_version(dir: &Path, provenance: &Provenance) -> Result<(), Box<dyn Erro
         "converter_version": concat!("yamc-convert ", env!("CARGO_PKG_VERSION")),
         "created_utc": provenance.created_utc,
     });
+    if !unconverted.is_empty() {
+        marker["unconverted_covariance"] = unconverted.into();
+    }
 
     // Where each (MT, temperature) record batch sits in reactions.arrow, so an
     // activation reader can range-request just the channels its chain names
@@ -421,9 +450,9 @@ pub fn convert_neutron_transport(
     if let Some(release) = &release {
         fission_nu::write_fission_photon(release, &dir)?;
     }
-    write_covariance_if_asked(covariance, material.as_ref(), &dir)?;
+    let unconverted = write_covariance_if_asked(covariance, material.as_ref(), &dir)?;
 
-    write_version(&dir, provenance)?;
+    write_version(&dir, provenance, &unconverted)?;
     Ok(dir)
 }
 
@@ -497,8 +526,84 @@ pub fn convert_photon(
         let dir = output_dir.join(format!("{}.arrow", data.name()));
         std::fs::create_dir_all(&dir)?;
         crate::photon::write_photon(&data, &dir)?;
-        write_version(&dir, provenance)?;
+        write_version(&dir, provenance, &[])?;
         written.push(dir);
     }
     Ok(written)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NA23: &[u8] = include_bytes!("../../endf/fixtures/n-011_Na_023_mf2_mf32.endf.xz");
+
+    /// Na23 as on the tape, or with its MF=32 range rewritten as single-level
+    /// Breit-Wigner (LRF=1), which `endf` does not read.
+    fn na23(unsupported: bool) -> Material {
+        let mut raw = Vec::new();
+        lzma_rs::xz_decompress(&mut &NA23[..], &mut raw).expect("fixture decompresses");
+        let text = String::from_utf8(raw).expect("ASCII");
+        let mut out = String::new();
+        let mut mf32_lines = 0;
+        for line in text.lines() {
+            if !unsupported || &line[70..75] != "32151" {
+                out += line;
+                out.push('\n');
+                continue;
+            }
+            mf32_lines += 1;
+            match mf32_lines {
+                // HEAD and the isotope's CONT, as they are.
+                1 | 2 => out += line,
+                // The range's CONT with LRF=1; nothing after it is read.
+                3 => out += &format!("{}{:>11}{}", &line[..33], 1, &line[44..]),
+                _ => continue,
+            }
+            out.push('\n');
+        }
+        Material::from_str(&out).expect("the material reads")
+    }
+
+    #[test]
+    fn an_unsupported_mf32_is_recorded_in_version_json() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let material = na23(true);
+        assert!(material.mf2().is_some());
+        let unconverted =
+            write_covariance_if_asked(true, Some(&material), tmp.path()).expect("converts");
+        assert!(!tmp.path().join("resonance_parameters.arrow").exists());
+        // Na23 has no MF=33, so MF=32 was the only source of rows.
+        assert!(!tmp.path().join("covariance.arrow").exists());
+
+        write_version(tmp.path(), &Provenance::default(), &unconverted).expect("writes");
+        let version: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("version.json")).expect("reads"),
+        )
+        .expect("JSON");
+        let entries = version["unconverted_covariance"]
+            .as_array()
+            .expect("the skipped MF=32 is recorded");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["mf"], 32);
+        assert_eq!(entries[0]["mt"], 151);
+        let reason = entries[0]["reason"].as_str().expect("a reason");
+        assert!(reason.contains("LRF=1"), "{reason}");
+    }
+
+    #[test]
+    fn a_readable_mf32_records_nothing() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let unconverted =
+            write_covariance_if_asked(true, Some(&na23(false)), tmp.path()).expect("converts");
+        assert!(unconverted.is_empty());
+        assert!(tmp.path().join("resonance_parameters.arrow").exists());
+
+        write_version(tmp.path(), &Provenance::default(), &unconverted).expect("writes");
+        let version: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("version.json")).expect("reads"),
+        )
+        .expect("JSON");
+        assert!(version.get("unconverted_covariance").is_none());
+    }
 }

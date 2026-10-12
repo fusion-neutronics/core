@@ -55,6 +55,25 @@ fn peak_cross_section(material: &Material, name: &str) -> f64 {
     peak.max(ELASTIC_SCALE)
 }
 
+/// How the transport took each of `material`'s nuclides' resolved resonance
+/// range: sampled per replica, or the first-order MF=32 rows and why.
+fn resonance_methods(
+    material: &Material,
+) -> std::collections::BTreeMap<String, yani_transmute::resonance_rates::ResonanceMethod> {
+    crate::xs_perturbation::resonance_sampling(material)
+        .into_iter()
+        .map(|(name, sampled)| {
+            let method = match sampled {
+                Ok(r) => r.method(),
+                Err(reason) => {
+                    yani_transmute::resonance_rates::ResonanceMethod::FirstOrder { reason }
+                }
+            };
+            (name, method)
+        })
+        .collect()
+}
+
 impl Model {
     /// Run coupled transport-transmutation calculation (tally-based).
     ///
@@ -85,7 +104,13 @@ impl Model {
     /// * `uncertainty` - Resample the single transport of independent mode
     ///   and re-solve, for every source [`yani_transmute::transport_replicas`]
     ///   applies. `None` is the default path, bit-identical to a build without
-    ///   it; with the coupled method it is an error.
+    ///   it; with the coupled method it is an error. With the cross-section
+    ///   source on and [`yani_transmute::uncertainty::FluxResponse::ReplicaWeights`]
+    ///   (the default), the transport carries a fixed number of replica
+    ///   weights ([`yani_transmute::uncertainty::transport_replicas_for`]) and
+    ///   tallies every rate per replica under them, so each replica's rates
+    ///   carry the flux's response to its cross sections; its nominal rates
+    ///   are bit-identical to a run without.
     ///
     /// Product cross sections are loaded for the material's whole reachable
     /// closure (`yani::reachable_nuclides`) and then narrowed to the products
@@ -136,6 +161,36 @@ impl Model {
             uncertainty.is_some_and(|u| u.wants(yani_transmute::uncertainty::Source::Statistical));
         let want_isomer = uncertainty
             .is_some_and(|u| u.wants(yani_transmute::uncertainty::Source::IsomerBranching));
+        let want_cross_sections = uncertainty
+            .is_some_and(|u| u.wants(yani_transmute::uncertainty::Source::CrossSections));
+        // With the cross sections perturbed, the single transport carries one
+        // likelihood-ratio weight per replica and tallies every rate per
+        // replica under it, so each replica's rates answer its own data
+        // (`FluxResponse::ReplicaWeights`), unless the request holds the flux
+        // at the nominal transport's instead.
+        let replica_weights = uncertainty
+            .filter(|u| {
+                want_cross_sections
+                    && u.flux_response == yani_transmute::uncertainty::FluxResponse::ReplicaWeights
+            })
+            .map(|u| crate::model::TransportDataUncertainty {
+                seed: u.seed,
+                replicas: yani_transmute::uncertainty::transport_replicas_for(u),
+            });
+        if let Some(data) = &replica_weights {
+            // Refused before anything runs, naming the held alternative,
+            // rather than after the scouting transport.
+            let mpi_size = crate::mpi_context::MpiContext::init().size().max(1) as usize;
+            self.validate_data_uncertainty(data, mpi_size, true)
+                .map_err(|e| {
+                    format!(
+                        "{e}. To propagate the cross-section uncertainty with the flux held \
+                         at the nominal transport's instead (cheaper and open to every \
+                         transport configuration, but it overstates a self-shielded \
+                         resonance's sigma), use DataUncertainty(flux_response=\"held\")"
+                    )
+                })?;
+        }
 
         // Expand the schedule into per-step timesteps / source rates. The
         // schedule guarantees at least one step, and equal lengths by
@@ -350,21 +405,35 @@ impl Model {
                 let mut loaded: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
 
+                // Use material's temperature to ensure consistency
+                let temp_filter = if !material.temperature().is_empty() {
+                    let mut temps = std::collections::HashSet::new();
+                    temps.insert(material.temperature().to_string());
+                    Some(temps)
+                } else {
+                    None
+                };
+                let scope = yamc_nuclide::LoadScope::activation(product_mts.clone())
+                    .with_temperatures(temp_filter);
+
+                // The loads below are one at a time; the downloads behind
+                // them go out together first.
+                yamc_nuclide::url_cache::prefetch(
+                    &source_paths
+                        .iter()
+                        .map(|(name, path)| yamc_nuclide::url_cache::DataRequest {
+                            source: path,
+                            name,
+                            kind: yamc_nuclide::url_cache::DataKind::Neutron,
+                            scope: &scope,
+                        })
+                        .collect::<Vec<_>>(),
+                );
+
                 for (nuclide_name, h5_path) in &source_paths {
                     let mut source_map = HashMap::new();
                     source_map.insert(nuclide_name.clone(), h5_path.clone());
 
-                    // Use material's temperature to ensure consistency
-                    let temp_filter = if !material.temperature().is_empty() {
-                        let mut temps = std::collections::HashSet::new();
-                        temps.insert(material.temperature().to_string());
-                        Some(temps)
-                    } else {
-                        None
-                    };
-
-                    let scope = yamc_nuclide::LoadScope::activation(product_mts.clone())
-                        .with_temperatures(temp_filter.clone());
                     match get_or_load_nuclide(nuclide_name, &source_map, &scope) {
                         Ok(nuclide) => {
                             material.nuclide_data.insert(nuclide_name.clone(), nuclide);
@@ -519,9 +588,27 @@ impl Model {
             };
             // Each MF=40 state's production on its covariance intervals, which
             // the isomer source re-splits the tallied partials with. Off
-            // without it.
-            Arc::new(if want_isomer {
+            // without it. Before the replicas, which carry it per replica.
+            let tallies = if want_isomer {
                 tallies.with_isomer_intervals(&chain, &branch)?
+            } else {
+                tallies
+            };
+            // Every replica's tally under the transport's replica weights,
+            // or with the flux held, the flux through each material's
+            // resonances, which the replicas fold their sampled resonance
+            // parameters against. Off without the cross-section source.
+            Arc::new(if let Some(data) = &replica_weights {
+                tallies.with_replicas(data.replicas, data.seed)
+            } else if want_cross_sections {
+                let mut grids = HashMap::new();
+                for (&mat_id, material) in &materials_for_init {
+                    let grid = yani_transmute::resonance_rates::resolved_flux_grid(material)?;
+                    if !grid.is_empty() {
+                        grids.insert(mat_id, grid);
+                    }
+                }
+                tallies.with_resolved_flux(grids)
             } else {
                 tallies
             })
@@ -589,8 +676,15 @@ impl Model {
 
             dep_tallies.reset();
 
+            // With replica weights the one transport carries them; the
+            // nominal tallies it scores are those of a run without, bit for
+            // bit.
+            let transport_settings = crate::model::TransportSettings {
+                data_uncertainty: replica_weights,
+                ..settings.clone()
+            };
             self.run_internal::<NoOpTracker>(
-                settings,
+                &transport_settings,
                 None,
                 Some(Arc::clone(&dep_tallies)),
                 false,
@@ -627,12 +721,17 @@ impl Model {
                             },
                             fy_weights: dep_tallies.get_fission_yield_weights(mat_id),
                             spectrum,
+                            resolved_spectrum: dep_tallies.resolved_flux_spectrum(mat_id, volume),
                             statistics,
                             branch: Arc::clone(&branch),
                             diagnostics: dep_tallies
                                 .get_branching_diagnostics(mat_id, volume, 1.0)
                                 .with_material(material),
                             isomer: dep_tallies.get_isomer_productions(mat_id, volume, 1.0),
+                            replicas: dep_tallies.replica_tallied(mat_id, volume).map(|mut t| {
+                                t.resonance_parameters = resonance_methods(material);
+                                t
+                            }),
                         },
                     );
                 }
@@ -1421,6 +1520,7 @@ mod tests {
     struct IsomerComparison {
         sigmas: Vec<(String, f64, f64)>,
         info: yani_transmute::uncertainty::Info,
+        replicas: Option<yani_transmute::ReplicaTallied>,
     }
 
     /// A sphere of `nuclide` (`radius` cm, `density` g/cc) under a 14.06 MeV
@@ -1428,7 +1528,9 @@ mod tests {
     /// with `sources` both ways: through `transport_replicas` and through
     /// `transmute_material` with the tally's flux as the spectrum. The draws
     /// are a function of the seed, the replica and the parent, so both paths
-    /// draw the same multipliers and differ only in the weights.
+    /// draw the same multipliers and differ only in the weights. With
+    /// `replicas`, the transport carries that many replica weights and the
+    /// transport path reads each replica's own tally.
     #[allow(clippy::too_many_arguments)]
     fn isomer_transport_against_spectrum(
         nuclide: &str,
@@ -1439,6 +1541,7 @@ mod tests {
         radius: f64,
         products: &[&str],
         sources: Vec<yani_transmute::uncertainty::Source>,
+        replicas: Option<usize>,
     ) -> IsomerComparison {
         use crate::geo::{BoundaryType, HalfspaceType, Region, Surface};
         use crate::geometry::cell::Cell;
@@ -1474,6 +1577,9 @@ mod tests {
             .unwrap();
         material.set_material_id(1);
         material.transmutable = true;
+        if replicas.is_some() {
+            material.ensure_covariance_loaded().unwrap();
+        }
         let volume = 4.0 / 3.0 * std::f64::consts::PI * radius.powi(3);
         material.volume = Some(volume);
 
@@ -1500,16 +1606,24 @@ mod tests {
         model.verbose = crate::model::Verbose::silent();
         let cells: HashMap<u32, Vec<usize>> = HashMap::from([(1u32, vec![0usize])]);
         let for_init: HashMap<u32, &Material> = HashMap::from([(1u32, &material)]);
-        let tallies = Arc::new(
+        const SEED: u64 = 11;
+        let tallies =
             TransmutationTallies::new(&cells, &for_init, &loaded.chain, &branch, &HashMap::new())
                 .unwrap()
                 .with_isomer_intervals(&loaded.chain, &branch)
-                .unwrap(),
-        );
+                .unwrap();
+        let tallies = Arc::new(match replicas {
+            Some(n) => tallies.with_replicas(n, SEED),
+            None => tallies,
+        });
         let settings = crate::model::TransportSettings {
             total_particles: Some(20_000),
             seed: 7,
             threads: Some(2),
+            data_uncertainty: replicas.map(|replicas| crate::model::TransportDataUncertainty {
+                seed: SEED,
+                replicas,
+            }),
             ..Default::default()
         };
         model
@@ -1528,14 +1642,16 @@ mod tests {
                 .get_branching_diagnostics(1, volume, 1.0)
                 .with_material(&material),
             isomer: tallies.get_isomer_productions(1, volume, 1.0),
+            resolved_spectrum: None,
+            replicas: tallies.replica_tallied(1, volume),
         };
         let mut initial = material.clone();
         initial.nuclides = material.get_atoms_per_barn_cm().unwrap();
         initial.density_units = DensityUnits::Sum;
         initial.density = None;
         let request = DataUncertainty {
-            seed: 11,
-            samples: Some(400),
+            seed: SEED,
+            samples: Some(replicas.unwrap_or(400)),
             sources,
             attribution: false,
             ..Default::default()
@@ -1582,7 +1698,11 @@ mod tests {
                 (p.to_string(), t, s)
             })
             .collect();
-        IsomerComparison { sigmas, info }
+        IsomerComparison {
+            sigmas,
+            info,
+            replicas: tallied.replicas,
+        }
     }
 
     /// The `isomer_branching` source on a transport run: an In115 sphere under
@@ -1616,6 +1736,7 @@ mod tests {
             3.0,
             &["In114_m1", "In115_m1"],
             vec![yani_transmute::uncertainty::Source::IsomerBranching],
+            None,
         );
         for kind in ["(n,2n)", "(n,n')"] {
             assert!(
@@ -1638,6 +1759,66 @@ mod tests {
         }
     }
 
+    /// With replica weights each replica's MF=40 interval productions are
+    /// scored under that replica's weights and cross sections, as its
+    /// partials are: on every replica a state's intervals sum to the
+    /// replica's own partial, so the weights `w_j / P` the draw folds with
+    /// are the replica's. Self-skips without the fixtures.
+    #[test]
+    fn in115_isomer_productions_follow_each_replica() {
+        use yani_transmute::uncertainty::Source as S;
+        let Some(in115) = yamc_test_cache::transport_nuclide("In115") else {
+            eprintln!("skipping -- In115 transport fixture absent");
+            return;
+        };
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let chain = manifest.join("tests/transmutation-endf-b8.1-sfr.arrow");
+        let branch =
+            manifest.join("../yani-transmute/tests/fixtures/endf-b8.1-branching-In115-Mo92");
+        if !chain.join("reactions").is_dir() || !branch.is_dir() {
+            eprintln!("skipping -- chain or branching fixture absent");
+            return;
+        }
+        let run = isomer_transport_against_spectrum(
+            "In115",
+            in115,
+            &chain,
+            &branch,
+            7.31,
+            3.0,
+            &["In114_m1", "In115_m1"],
+            vec![S::CrossSections, S::IsomerBranching],
+            Some(16),
+        );
+        let replicas = run.replicas.expect("replica tallies");
+        assert_eq!(replicas.isomer.len(), 16);
+        let mut sums = Vec::new();
+        for k in 0..16 {
+            for (kind, key, target) in [
+                ("(n,2n)", (16, 1), "In114_m1"),
+                ("(n,n')", (4, 1), "In115_m1"),
+            ] {
+                let w: f64 = replicas.isomer[k]
+                    .interval_sum("In115", key)
+                    .expect("tallied");
+                let partial = replicas.partials[k]["In115"][kind]
+                    .iter()
+                    .find(|(t, _)| t == target)
+                    .unwrap()
+                    .1;
+                assert!(
+                    (w - partial).abs() <= 1e-9 * partial,
+                    "replica {k} {target}: {w} vs {partial}"
+                );
+                sums.push(w);
+            }
+        }
+        assert!(run.info.sources.contains(&"isomer_branching".to_string()));
+        for (product, t, _) in &run.sigmas {
+            assert!(*t > 0.0, "{product}");
+        }
+    }
+
     /// The same comparison on JEFF-4.0's Nb93 `(n,2n)` and Ni58 `(n,p)`, read
     /// from a local release tree: `YAMC_DATA_DIR` names the directory holding
     /// `jeff-4.0-arrow` and `transmutation-jeff-4.0.arrow`. Ignored by default.
@@ -1657,11 +1838,14 @@ mod tests {
             ("Nb93", 8.57, ["Nb92", "Nb92_m1"]),
             ("Ni58", 8.9, ["Co58", "Co58_m1"]),
         ] {
-            for sources in [
-                vec![S::IsomerBranching],
-                vec![S::CrossSections, S::IsomerBranching],
+            for (sources, replicas) in [
+                (vec![S::IsomerBranching], None),
+                (vec![S::CrossSections, S::IsomerBranching], None),
+                (vec![S::CrossSections], None),
+                (vec![S::CrossSections, S::IsomerBranching], Some(128)),
+                (vec![S::CrossSections], Some(128)),
             ] {
-                eprintln!("{nuclide} {sources:?}");
+                eprintln!("{nuclide} {sources:?} replicas {replicas:?}");
                 let alone = sources == [S::IsomerBranching];
                 let path = neutron.join(format!("{nuclide}.arrow"));
                 let run = isomer_transport_against_spectrum(
@@ -1673,15 +1857,36 @@ mod tests {
                     3.0,
                     &products,
                     sources,
+                    replicas,
                 );
-                // With cross sections on, the spectrum path samples MF=32
-                // resonance parameters exactly where a transport run keeps
-                // the first-order rows, so the two MF=33 streams differ and
-                // the sigmas agree only to the sampling error.
+                // With cross sections on, the two paths draw MF=33 (and
+                // MF=32) differently, so the sigmas are printed, not compared.
                 for (product, t, s) in &run.sigmas {
                     if alone {
                         assert!((t / s - 1.0).abs() < 0.02, "{product}: {t} against {s}");
                     }
+                }
+                // Each replica's interval productions are its own: they sum
+                // to its partials, and they move from replica to replica.
+                if let Some(r) = &run.replicas {
+                    // The production-weighted change of the stated states'
+                    // productions from replica 0, largest over the replicas.
+                    let mut moved = 0.0f64;
+                    for (k, isomer) in r.isomer.iter().enumerate() {
+                        let (mut diff, mut base) = (0.0, 0.0);
+                        for (parent, key, w) in isomer.iter() {
+                            let a: f64 = w.iter().sum();
+                            let b = r.isomer[0].interval_sum(parent, key).unwrap_or(0.0);
+                            diff += (a - b).abs();
+                            base += b;
+                        }
+                        assert!(isomer.states() > 0, "replica {k}");
+                        moved = moved.max(diff / base);
+                    }
+                    eprintln!(
+                        "  largest change of the stated productions from replica 0: {moved:.4}"
+                    );
+                    assert!(moved > 0.0);
                 }
             }
         }

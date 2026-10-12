@@ -370,6 +370,18 @@ fn weight_reproduces_the_broadened_rate_for_a_group_flux() {
 }
 
 #[test]
+fn weight_reproduces_the_broadened_rate_for_a_tallied_flux() {
+    // A flux tallied on a resonance's grid: thousands of bins, most far
+    // narrower than a Doppler width, with independent noise in each, as a
+    // Monte Carlo tally gives. Tungsten at room temperature from 10 to 30 eV,
+    // where a Doppler width is about 0.1 eV and the bins are 2 meV.
+    let mut rng = Rng(18);
+    let (edges, density) = random_groups(&mut rng, 10.0, 30.0, 10_000);
+    let flux = Flux::Histogram { edges, density };
+    check_identity(&mut rng, 184.357, 293.6, &flux, (5.0, 40.0), None);
+}
+
+#[test]
 fn weight_reproduces_the_broadened_rate_at_low_energy() {
     // A light target, hot, where the second exponential and the 1/v
     // continuation below the first point both matter, under a 1/E flux.

@@ -13,7 +13,8 @@ use yani_transmute::nearest_correlation::CorrelationRepair;
 use yani_transmute::resonance_rates::ResonanceMethod;
 use yani_transmute::resonance_sampling::NotedParameter;
 use yani_transmute::uncertainty::{
-    check_convergence, DataUncertainty, Info, Source, Unconverged, DEFAULT_CONVERGENCE,
+    check_convergence, DataUncertainty, FluxResponse, Info, Source, Unconverged,
+    DEFAULT_CONVERGENCE,
 };
 
 /// Request nuclear-data uncertainty on a transmutation.
@@ -30,9 +31,12 @@ use yani_transmute::uncertainty::{
 ///   themselves: each replica draws them from their covariance, rebuilds the
 ///   resonance range's cross sections from the draw and Doppler broadens the
 ///   change to the temperature in use, so the resonance range's uncertainty
-///   is exact in the parameters rather than first order. A nuclide whose
-///   parameters cannot be sampled keeps the first-order MF=32 rows of
-///   ``covariance.arrow``, and the report says which and why;
+///   is exact in the parameters rather than first order. On a
+///   transport-coupled run the change is folded against the flux the
+///   transport tallied on the nuclide's own energy grid through its
+///   resonances, so a self-shielded resonance is weighted with its own flux
+///   dip. A nuclide whose parameters cannot be sampled keeps the first-order
+///   MF=32 rows of ``covariance.arrow``, and the report says which and why;
 /// - ``"flux_spectrum"``: the spectrum itself, from the per-bin
 ///   ``flux_std_dev`` given on a ``Pulse``;
 /// - ``"half_life"``: every reachable nuclide's half-life, from the decay
@@ -41,12 +45,19 @@ use yani_transmute::uncertainty::{
 ///   saturated activity (``lambda N = R``) is correctly insensitive to its
 ///   own half-life rather than inheriting the density's spread;
 /// - ``"decay_branching"``: the decay branching ratios of every reachable
-///   parent with exactly two modes and one stated sigma between them (both
-///   state the same one, or one states it and the other is its complement),
-///   whose smaller ratio is at least five sigmas from zero. One draw per
-///   parent moves one mode up and the other down by the same amount, so the
-///   pair's total is kept. Other multi-mode parents stay at their evaluated
-///   ratios and the report names them by why;
+///   parent with several modes and a stated sigma, drawn so the parent's
+///   total is kept and every ratio stays between zero and it: each mode but
+///   one from a logit-normal with the evaluated ratio as its mean and the
+///   stated sigma as its standard deviation, the last their complement,
+///   coupled so the modes carry the zero-sum covariance of largest entropy
+///   that realises every stated sigma (for two or three modes the only one).
+///   A small branch with a large relative sigma is drawn skewed, never below
+///   zero. A largest sigma above the sum of the others' is drawn as that sum;
+///   a single mode stating no sigma is the complement of the rest when it is
+///   the largest or the only way to trade; a mode whose sigma no ratio with
+///   its mean can have (``sigma**2 >= b * (T - b)``), and a mode stating none
+///   otherwise, are held at their ratios and the rest share what is left.
+///   The report names every parent short of its stated sigmas by why;
 /// - ``"statistical"``: the Monte Carlo uncertainty of transport-tallied
 ///   reaction rates, from their per-history covariance, drawn independently
 ///   for each material since their tallies are separate estimates. It
@@ -112,10 +123,10 @@ use yani_transmute::uncertainty::{
 /// Held at their nominal values, with uncertainties of their own that this
 /// does not propagate:
 ///
-/// - the decay branching ratios ``"decay_branching"`` does not sample (three
-///   or more modes, unequal sigmas, too wide to sample untruncated, or no
-///   sigma), and the per-decay photon lines and decay energy of a drawn
-///   parent, which follow its nominal branching;
+/// - the decay branching ratios ``"decay_branching"`` does not sample (a
+///   sigma wider than the ratio allows, or no sigma to draw), and the per-decay
+///   photon lines and decay energy of a drawn parent, which follow its
+///   nominal branching;
 /// - the isomeric split of a reaction whose evaluation states no MF=40
 ///   covariance on any of its states, listed in
 ///   ``no_isomer_branching_uncertainty``, and
@@ -209,6 +220,21 @@ use yani_transmute::uncertainty::{
 ///         is too noisy to trust on fewer, and at most 1024: a run that stops
 ///         there sets ``hit_cap`` in the info and lists every output, nuclide
 ///         and step that missed under ``unconverged``. Must be between 0 and 1.
+///     flux_response (str, optional): For ``Model.simulate_transmutation``
+///         only, how the flux answers each replica's perturbed cross
+///         sections. ``"replica_weights"`` (the default when ``None``): the
+///         transport carries one likelihood-ratio weight per replica along
+///         every history and tallies every reaction rate once per replica
+///         under it, so each replica's rates come from the flux its own data
+///         would give, self-shielding dips and all. The replica count is then
+///         fixed before the transport: ``samples``, or the count a Gaussian
+///         output needs to reach ``convergence`` (256 at 0.05), and every one
+///         is solved. ``"held"``: one nominal transport whose tallied flux
+///         every replica's cross sections are folded against; cheaper and
+///         open to every transport configuration, but it overstates the
+///         sigma of a self-shielded resonance, several-fold for a strong
+///         one. ``Material.transmute`` and ``simulate_transport`` have no
+///         choice to make, and raise if it is given.
 ///
 /// Examples:
 ///     >>> results = iron.transmute(
@@ -234,19 +260,38 @@ pub struct PyDataUncertainty {
     /// Whether `convergence` was given, so a caller that runs a fixed replica
     /// count (a transport run) can refuse it rather than ignore it.
     pub convergence_given: bool,
+    /// Whether `flux_response` was given, so a caller with no flux response
+    /// to choose (a spectrum run, a transport run) can refuse it rather than
+    /// ignore it.
+    pub flux_response_given: bool,
+}
+
+impl PyDataUncertainty {
+    /// The request for a run with no flux response to choose, `caller`
+    /// named in the refusal when `flux_response` was given.
+    pub fn without_flux_response(&self, caller: &str) -> PyResult<DataUncertainty> {
+        if self.flux_response_given {
+            return Err(PyValueError::new_err(format!(
+                "data_uncertainty: flux_response applies to Model.simulate_transmutation \
+                 only; {caller} has no flux response to choose, so remove it"
+            )));
+        }
+        Ok(self.inner.clone())
+    }
 }
 
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyDataUncertainty {
     #[new]
-    #[pyo3(signature = (seed = 1, samples = None, sources = None, attribution = false, convergence = None))]
+    #[pyo3(signature = (seed = 1, samples = None, sources = None, attribution = false, convergence = None, flux_response = None))]
     fn new(
         seed: u64,
         samples: Option<usize>,
         sources: Option<Vec<String>>,
         attribution: bool,
         convergence: Option<f64>,
+        flux_response: Option<String>,
     ) -> PyResult<Self> {
         if samples == Some(0) {
             return Err(PyValueError::new_err(
@@ -257,6 +302,11 @@ impl PyDataUncertainty {
         let convergence_given = convergence.is_some();
         let convergence = convergence.unwrap_or(DEFAULT_CONVERGENCE);
         check_convergence(convergence).map_err(PyValueError::new_err)?;
+        let flux_response_given = flux_response.is_some();
+        let flux_response = match flux_response {
+            Some(name) => FluxResponse::parse(&name).map_err(PyValueError::new_err)?,
+            None => FluxResponse::default(),
+        };
         let sources_given = sources.is_some();
         let sources = match sources {
             None => Source::IMPLEMENTED.to_vec(),
@@ -280,9 +330,11 @@ impl PyDataUncertainty {
                 sources,
                 attribution,
                 convergence,
+                flux_response,
             },
             sources_given,
             convergence_given,
+            flux_response_given,
         })
     }
 
@@ -321,6 +373,13 @@ impl PyDataUncertainty {
         self.inner.convergence
     }
 
+    /// How a transport-coupled run takes the flux's response to each
+    /// replica's cross sections: ``"replica_weights"`` or ``"held"``.
+    #[getter]
+    fn flux_response(&self) -> &'static str {
+        self.inner.flux_response.name()
+    }
+
     #[getter]
     fn sources(&self) -> Vec<String> {
         self.inner
@@ -336,10 +395,12 @@ impl PyDataUncertainty {
             None => "None".to_string(),
         };
         format!(
-            "DataUncertainty(seed={}, samples={samples}, sources={:?}, convergence={})",
+            "DataUncertainty(seed={}, samples={samples}, sources={:?}, convergence={}, \
+             flux_response={:?})",
             self.inner.seed,
             self.sources(),
             self.inner.convergence,
+            self.inner.flux_response.name(),
         )
     }
 }
@@ -384,6 +445,18 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
     d.set_item("converged", info.converged)?;
     d.set_item("convergence", info.convergence)?;
     d.set_item("hit_cap", info.hit_cap)?;
+    // How the flux answered each replica's cross sections, and how many
+    // replicas the transport carried when it tallied them itself.
+    d.set_item("flux_response", info.flux_response.name())?;
+    d.set_item(
+        "transport_replicas",
+        match info.flux_response {
+            yani_transmute::uncertainty::FluxResponseReport::ReplicaWeights { replicas } => {
+                Some(replicas)
+            }
+            _ => None,
+        },
+    )?;
     d.set_item("unconverged", unconverged_to_list(py, &info.unconverged)?)?;
     d.set_item(
         "perturbed",
@@ -619,15 +692,15 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
             "no_decay_branching_uncertainty",
             &info.no_decay_branching_uncertainty,
         ),
-        (
-            "decay_branchings_three_or_more_modes",
-            &info.decay_branchings_three_or_more_modes,
-        ),
-        (
-            "decay_branchings_unequal_sigmas",
-            &info.decay_branchings_unequal_sigmas,
-        ),
         ("decay_branchings_too_wide", &info.decay_branchings_too_wide),
+        (
+            "decay_branchings_partly_held",
+            &info.decay_branchings_partly_held,
+        ),
+        (
+            "decay_branchings_sigma_adjusted",
+            &info.decay_branchings_sigma_adjusted,
+        ),
     ] {
         d.set_item(key, set.iter().cloned().collect::<Vec<_>>())?;
     }
@@ -732,7 +805,11 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
     }
     d.set_item("isomer_production_sigma", production_sigma)?;
     d.set_item("isomer_branchings_sampled", info.isomer_branchings_sampled)?;
-    d.set_item("isomer_branchings_clipped", info.isomer_branchings_clipped)?;
+    let clipped = PyDict::new(py);
+    for ((parent, kind, product), n) in &info.isomer_branchings_clipped {
+        clipped.set_item(format!("{parent} {kind} {product}"), n)?;
+    }
+    d.set_item("isomer_branchings_clipped", clipped)?;
     d.set_item("statistical_rates", info.statistical_rates)?;
     d.set_item("statistical_floored", info.statistical_floored)?;
     d.set_item("statistical_sampled", info.statistical_sampled)?;
@@ -745,7 +822,8 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
 /// `Info::resonance_parameters` as a dict keyed by nuclide: each entry's
 /// `method`, the `reason` it fell back to the first-order rows (`None` where
 /// the parameters were sampled), and per sampled range its sampler report.
-fn resonance_parameters_dict<'py>(
+/// `yamc`'s transport coverage report gives its own the same shape.
+pub fn resonance_parameters_dict<'py>(
     py: Python<'py>,
     methods: &std::collections::BTreeMap<String, ResonanceMethod>,
 ) -> PyResult<Bound<'py, PyDict>> {

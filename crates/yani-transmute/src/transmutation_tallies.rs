@@ -34,6 +34,9 @@ use super::isomer_branching_uncertainty::{
 };
 use super::material_transmute::CoupledDiagnostics;
 use super::{mt_to_reaction_type, reaction_type_to_mt};
+
+mod replicas;
+pub use replicas::{ReplicaChanges, ReplicaTallied};
 use yamc_materials::material::Material;
 use yani::{
     fission_yield_interp_weights, BranchQuantity, BranchTable, ChainNuclide, FissionYieldWeights,
@@ -114,14 +117,15 @@ struct IntervalScore {
 }
 
 impl IntervalScore {
-    /// Score `production` (`p * TL`) of a segment at `energy`, on the
-    /// channel's curve `(curve_energy, curve_values)`. Off the grid it scores
-    /// nothing; the top edge belongs to the last interval.
+    /// Where a segment at `energy` on the channel's curve `curve` lands: its
+    /// slot in the material's [`IsomerTally`] and the share of the channel's
+    /// production that is this state's. `None` off the grid; the top edge
+    /// belongs to the last interval.
     #[inline]
-    fn score(&self, tally: &IsomerTally, energy: f64, production: f64, curve: &yani::BranchCurve) {
+    fn locate(&self, energy: f64, curve: &yani::BranchCurve) -> Option<(usize, f64)> {
         let e = &self.edges;
         if energy < e[0] || energy > e[e.len() - 1] {
-            return;
+            return None;
         }
         let j = (e.partition_point(|&x| x <= energy) - 1).min(e.len() - 2);
         let share = match &self.own {
@@ -135,8 +139,14 @@ impl IntervalScore {
                 }
             }
         };
-        if share > 0.0 {
-            atomic_add_f64(&tally.batch[self.offset + j], share * production);
+        (share > 0.0).then_some((self.offset + j, share))
+    }
+
+    /// Score `production` (`p * TL`) of a segment at `energy`.
+    #[inline]
+    fn score(&self, tally: &IsomerTally, energy: f64, production: f64, curve: &yani::BranchCurve) {
+        if let Some((slot, share)) = self.locate(energy, curve) {
+            atomic_add_f64(&tally.batch[slot], share * production);
         }
     }
 }
@@ -282,6 +292,59 @@ struct MaterialTransmutationData {
     /// The MF=40 interval productions, when asked for with
     /// [`TransmutationTallies::with_isomer_intervals`].
     isomer: Option<IsomerTally>,
+    /// The flux through the resonances, when asked for with
+    /// [`TransmutationTallies::with_resolved_flux`].
+    resolved: Option<ResolvedFlux>,
+}
+
+/// One material's flux on the energies of
+/// [`crate::resonance_rates::resolved_flux_grid`]: `sum(TL)` per bin, nothing
+/// scored outside the grid.
+struct ResolvedFlux {
+    grid: Vec<f64>,
+    /// Per bin, this chunk's `sum(TL)` (f64 as bits).
+    batch: Vec<AtomicU64>,
+    /// Per bin, the running sums across all CPU chunks.
+    sums: Mutex<Vec<f64>>,
+}
+
+impl ResolvedFlux {
+    fn new(grid: Vec<f64>) -> Self {
+        let n = grid.len() - 1;
+        ResolvedFlux {
+            grid,
+            batch: (0..n).map(|_| AtomicU64::new(0)).collect(),
+            sums: Mutex::new(vec![0.0; n]),
+        }
+    }
+
+    /// Score a segment of track length `tl` at `energy`, if it is on the
+    /// grid. The top edge belongs to the last bin.
+    #[inline]
+    fn score(&self, energy: f64, tl: f64) {
+        let g = &self.grid;
+        if energy < g[0] || energy > g[g.len() - 1] {
+            return;
+        }
+        let bin = (g.partition_point(|&e| e <= energy) - 1).min(self.batch.len() - 1);
+        atomic_add_f64(&self.batch[bin], tl);
+    }
+
+    fn accumulate(&self) {
+        let mut sums = self.sums.lock().unwrap_or_else(|p| p.into_inner());
+        for (s, b) in sums.iter_mut().zip(&self.batch) {
+            *s += f64::from_bits(b.load(Ordering::Relaxed));
+            b.store(0, Ordering::Relaxed);
+        }
+    }
+
+    fn reset(&self) {
+        let mut sums = self.sums.lock().unwrap_or_else(|p| p.into_inner());
+        for (s, b) in sums.iter_mut().zip(&self.batch) {
+            *s = 0.0;
+            b.store(0, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Thread-safe transmutation tally accumulator.
@@ -315,6 +378,10 @@ pub struct TransmutationTallies {
     /// The MF=40 covariance the interval productions are scored for, when
     /// asked for with [`TransmutationTallies::with_isomer_intervals`].
     isomer: Option<Arc<IsomerCovariance>>,
+    /// Per-replica sums under the transport's nuclear-data replica weights,
+    /// when asked for with [`TransmutationTallies::with_replicas`]. `None` on
+    /// the default path, which allocates nothing for them.
+    replicas: Option<replicas::ReplicaSums>,
 }
 
 /// Collect the `(n,n')` MF=10 partials of every chain parent for the moment
@@ -768,6 +835,7 @@ impl TransmutationTallies {
                     fy_batch: (0..n_fy_slots).map(|_| AtomicU64::new(0)).collect(),
                     fy_sums: Mutex::new(vec![0.0; n_fy_slots]),
                     isomer: None,
+                    resolved: None,
                 },
             );
         }
@@ -777,6 +845,7 @@ impl TransmutationTallies {
             union_grid,
             moment_curves,
             statistics: None,
+            replicas: None,
             isomer: None,
         })
     }
@@ -877,22 +946,39 @@ impl TransmutationTallies {
             return None;
         }
         let scale = source_rate / (total_particles as f64 * volume * 1.0e24);
-        let mut productions = HashMap::new();
         let sums = tally.sums.lock().unwrap_or_else(|p| p.into_inner());
+        let s0 = mat_data.moment_s0.lock().unwrap_or_else(|p| p.into_inner());
+        let s1 = mat_data.moment_s1.lock().unwrap_or_else(|p| p.into_inner());
+        Some(self.isomer_productions_of_sums(covariance, tally, &sums, &s0, &s1, scale))
+    }
+
+    /// The interval productions from one set of raw sums: `sums` the scored
+    /// states' slots, `s0` and `s1` the union-grid moments the `(n,n')`
+    /// states of moment-folded parents are folded from, `scale` the
+    /// partials' normalization. Shared by the nominal tally and each replica.
+    fn isomer_productions_of_sums(
+        &self,
+        covariance: &Arc<IsomerCovariance>,
+        tally: &IsomerTally,
+        sums: &[f64],
+        s0: &[f64],
+        s1: &[f64],
+        scale: f64,
+    ) -> IsomerIntervalProductions {
+        let mut productions = HashMap::new();
         for (parent, key, offset, cells) in &tally.slots {
             let w = sums[*offset..offset + cells].iter().map(|v| v * scale);
             productions.insert((parent.clone(), *key), w.collect());
         }
-        if !tally.moments.is_empty() {
-            let s0 = mat_data.moment_s0.lock().unwrap_or_else(|p| p.into_inner());
-            let s1 = mat_data.moment_s1.lock().unwrap_or_else(|p| p.into_inner());
+        if !tally.moments.is_empty() && !s1.is_empty() {
             // The union grid closed as `flux_spectrum` closes it.
             let mut boundaries = self.union_grid.clone();
-            let last = *boundaries.last()?;
-            boundaries.push(if last > 0.0 { last * 10.0 } else { 1.0 });
+            if let Some(&last) = boundaries.last() {
+                boundaries.push(if last > 0.0 { last * 10.0 } else { 1.0 });
+            }
             for (c, state) in &tally.moments {
                 let c = &self.moment_curves[*c];
-                let bins = fold_curve_by_bin(&c.energy, &c.values, &self.union_grid, &s0, &s1);
+                let bins = fold_curve_by_bin(&c.energy, &c.values, &self.union_grid, s0, s1);
                 let w = cell_weights(
                     &state.edges,
                     state.own.as_ref(),
@@ -906,10 +992,10 @@ impl TransmutationTallies {
                 );
             }
         }
-        Some(IsomerIntervalProductions {
+        IsomerIntervalProductions {
             covariance: Arc::clone(covariance),
             productions,
-        })
+        }
     }
 
     /// Also accumulate the per-history covariance of each material's tally
@@ -923,7 +1009,7 @@ impl TransmutationTallies {
     /// means are built from, so the means are bit-identical with it on or off.
     ///
     /// A run that scores this tally must call
-    /// [`prepare_history_workers`](Self::prepare_history_workers) before
+    /// [`prepare_workers`](Self::prepare_workers) before
     /// transport and [`finish_history`](Self::finish_history) after each
     /// source history.
     pub fn with_history_statistics(mut self) -> Self {
@@ -948,21 +1034,48 @@ impl TransmutationTallies {
         self
     }
 
+    /// Also tally each material's flux on its own energies in `grids` (eV,
+    /// ascending, at least two), by material id, so a transport-coupled
+    /// uncertainty run can sample resonance parameters against the flux the
+    /// transport saw through the resonances (see
+    /// [`crate::resonance_rates::resolved_flux_grid`] and
+    /// [`resolved_flux_spectrum`](Self::resolved_flux_spectrum)).
+    ///
+    /// Off unless asked for, and then one binary search and one atomic add per
+    /// track segment on the grid. It does not touch the sums the rates are
+    /// built from, so they are bit-identical with it on or off. A material
+    /// with no grid, or one of fewer than two energies, tallies none.
+    pub fn with_resolved_flux(mut self, grids: HashMap<u32, Vec<f64>>) -> Self {
+        for (id, grid) in grids {
+            if grid.len() < 2 {
+                continue;
+            }
+            if let Some(m) = self.materials.get_mut(&id) {
+                m.resolved = Some(ResolvedFlux::new(grid));
+            }
+        }
+        self
+    }
+
     /// Whether [`with_history_statistics`](Self::with_history_statistics) is on.
     pub fn has_history_statistics(&self) -> bool {
         self.statistics.is_some()
     }
 
-    /// Size the per-worker history scratch for a transport run on `n_workers`
-    /// rayon threads. Call single-threaded before transport. A no-op when
-    /// history statistics are off, and when repeated for no more workers than
-    /// the first call, so a tally reused across transmutation steps is fine;
-    /// more workers than the first call is an error.
-    pub fn prepare_history_workers(&self, n_workers: usize) -> Result<(), String> {
-        match &self.statistics {
-            Some(stats) => stats.prepare_workers(n_workers),
-            None => Ok(()),
+    /// Size the per-worker history scratch and replica sums for a transport
+    /// run on `n_workers` rayon threads. Call single-threaded before
+    /// transport. A no-op when history statistics and replicas are off, and
+    /// when repeated for no more workers than the first call, so a tally
+    /// reused across transmutation steps is fine; more workers than the first
+    /// call is an error.
+    pub fn prepare_workers(&self, n_workers: usize) -> Result<(), String> {
+        if let Some(stats) = &self.statistics {
+            stats.prepare_workers(n_workers)?;
         }
+        if let Some(replicas) = &self.replicas {
+            replicas.prepare_workers(n_workers)?;
+        }
+        Ok(())
     }
 
     /// Close the source history running on the calling worker thread, after
@@ -1222,6 +1335,40 @@ impl TransmutationTallies {
         })
     }
 
+    /// The flux [`with_resolved_flux`](Self::with_resolved_flux) tallied for
+    /// `material_id`, per source particle and per unit volume, at the
+    /// normalization of [`flux_spectrum`](Self::flux_spectrum) and the rates.
+    /// `None` when the material tallied none, nothing was scored on its grid,
+    /// or `volume` is not positive.
+    pub fn resolved_flux_spectrum(
+        &self,
+        material_id: u32,
+        volume: f64,
+    ) -> Option<crate::MultigroupSpectrum> {
+        let mat_data = self.materials.get(&material_id)?;
+        let resolved = mat_data.resolved.as_ref()?;
+        let total_particles = mat_data.total_particles.load(Ordering::Relaxed);
+        if total_particles == 0 || volume <= 0.0 {
+            return None;
+        }
+        let per_source = 1.0 / (total_particles as f64 * volume);
+        let masses: Vec<f64> = resolved
+            .sums
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .map(|v| v * per_source)
+            .collect();
+        if masses.iter().all(|v| *v <= 0.0) {
+            return None;
+        }
+        Some(crate::MultigroupSpectrum {
+            boundaries: resolved.grid.clone(),
+            masses,
+            flux_error: None,
+        })
+    }
+
     /// Score a track segment in a transmutable material.
     ///
     /// For each nuclide/MT pair tracked in this material, looks up σ(E)
@@ -1267,6 +1414,9 @@ impl TransmutationTallies {
             if let Some(h) = &mut history {
                 h.add_track_length(g, track_length);
             }
+        }
+        if let Some(resolved) = &mat_data.resolved {
+            resolved.score(energy, track_length);
         }
 
         // Score σ*TL for each nuclide/MT pair
@@ -1481,10 +1631,16 @@ impl TransmutationTallies {
             if let Some(tally) = &mat_data.isomer {
                 tally.accumulate();
             }
+            if let Some(resolved) = &mat_data.resolved {
+                resolved.accumulate();
+            }
 
             mat_data
                 .total_particles
                 .fetch_add(chunk_particles, Ordering::Relaxed);
+        }
+        if let Some(replicas) = &self.replicas {
+            replicas.accumulate();
         }
     }
 
@@ -1505,11 +1661,9 @@ impl TransmutationTallies {
         volume: f64,
         source_rate: f64,
     ) -> ReactionRates {
-        let mut rates: ReactionRates = HashMap::new();
-
         let mat_data = match self.materials.get(&material_id) {
             Some(d) => d,
-            None => return rates,
+            None => return HashMap::new(),
         };
 
         let total_particles = mat_data.total_particles.load(Ordering::Relaxed);
@@ -1519,7 +1673,7 @@ impl TransmutationTallies {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         if total_particles == 0 || volume <= 0.0 {
-            return rates;
+            return HashMap::new();
         }
 
         #[cfg(feature = "debug_transmutation")]
@@ -1528,47 +1682,13 @@ impl TransmutationTallies {
             material_id, volume, source_rate, total_particles
         );
 
-        let n_mts = mat_data.mt_numbers.len();
-        let inv_total = 1.0 / total_particles as f64;
-
-        for (nuc_idx, nuclide_name) in mat_data.nuclide_names.iter().enumerate() {
-            let mut nuclide_rates: HashMap<String, f64> = HashMap::new();
-
-            for (mt_idx, &mt) in mat_data.mt_numbers.iter().enumerate() {
-                let bin_idx = nuc_idx * n_mts + mt_idx;
-                let mean_sigma_tl = sum_means[bin_idx] * inv_total;
-
-                if mean_sigma_tl > 0.0 {
-                    // rate = (σ×TL / volume_b_cm) × source_rate
-                    // where σ×TL is in [b·cm] per source particle
-                    // volume_b_cm = volume × 1e24 [b-cm]
-                    // Result: [(b·cm) / (b·cm)] × [src/s] = [1/s] per atom
-                    let volume_b_cm = volume * 1.0e24;
-                    let rate = (mean_sigma_tl / volume_b_cm) * source_rate;
-
-                    #[cfg(feature = "debug_transmutation")]
-                    if let Some(rx_name) = mt_to_reaction_type(mt) {
-                        eprintln!(
-                            "[DEBUG transmutation]   {} MT={} {}: mean_sigma_tl={:.6e} b·cm, rate={:.6e} /s/atom",
-                            nuclide_name, mt, rx_name, mean_sigma_tl, rate
-                        );
-                    }
-
-                    if mt == MT_ANYTHING && !mat_data.drives_anything[nuc_idx] {
-                        continue;
-                    }
-                    if let Some(rx_name) = mt_to_reaction_type(mt) {
-                        nuclide_rates.insert(rx_name.to_string(), rate);
-                    }
-                }
-            }
-
-            if !nuclide_rates.is_empty() {
-                rates.insert(nuclide_name.clone(), nuclide_rates);
-            }
-        }
-
-        rates
+        rates_of_sums(
+            mat_data,
+            &sum_means,
+            1.0 / total_particles as f64,
+            volume,
+            source_rate,
+        )
     }
 
     /// Upper-bound per-atom reaction rates [1/s] for every chain nuclide this
@@ -1716,29 +1836,14 @@ impl TransmutationTallies {
     /// there is no fold to define, and the matrix builder only demands weights
     /// where the rate is non-zero.
     pub fn get_fission_yield_weights(&self, material_id: u32) -> FissionYieldWeights {
-        let mut out: FissionYieldWeights = HashMap::new();
-
         let Some(mat_data) = self.materials.get(&material_id) else {
-            return out;
+            return HashMap::new();
         };
         if mat_data.fy_batch.is_empty() {
-            return out;
+            return HashMap::new();
         }
         let sums = mat_data.fy_sums.lock().unwrap_or_else(|p| p.into_inner());
-
-        for (nuc_idx, name) in mat_data.nuclide_names.iter().enumerate() {
-            let Some(ch) = &mat_data.fy_channels[nuc_idx] else {
-                continue;
-            };
-            let slots = &sums[ch.offset..ch.offset + ch.energies.len()];
-            let total: f64 = slots.iter().sum();
-            if total <= 0.0 {
-                continue;
-            }
-            out.insert(name.clone(), slots.iter().map(|s| s / total).collect());
-        }
-
-        out
+        fission_yield_weights_of_sums(mat_data, &sums)
     }
 
     /// Reset all accumulators for a new transmutation step.
@@ -1804,9 +1909,15 @@ impl TransmutationTallies {
             if let Some(tally) = &mat_data.isomer {
                 tally.reset();
             }
+            if let Some(resolved) = &mat_data.resolved {
+                resolved.reset();
+            }
         }
         if let Some(stats) = &self.statistics {
             stats.reset();
+        }
+        if let Some(replicas) = &self.replicas {
+            replicas.reset();
         }
     }
 
@@ -1838,10 +1949,10 @@ impl TransmutationTallies {
 
         // Pack: per material, sum_means ++ [flux_sum_means] ++ moment_s0 ++
         // moment_s1 ++ yield_sums ++ fy_sums ++ diagnostic_sums ++ the MF=40
-        // interval productions when they are on, then the history
-        // statistics' raw sums when they are on. Those are sums of
-        // per-history products, so they add across ranks like everything
-        // else here.
+        // interval productions when they are on ++ the resolved flux when it
+        // is on, then the history statistics' raw sums when they are on.
+        // Those are sums of per-history products, so they add across ranks
+        // like everything else here.
         let mut packed: Vec<f64> = Vec::new();
         for id in &mat_ids {
             let mat_data = &self.materials[id];
@@ -1895,6 +2006,9 @@ impl TransmutationTallies {
             );
             if let Some(tally) = &mat_data.isomer {
                 packed.extend_from_slice(&tally.sums.lock().unwrap_or_else(|p| p.into_inner()));
+            }
+            if let Some(resolved) = &mat_data.resolved {
+                packed.extend_from_slice(&resolved.sums.lock().unwrap_or_else(|p| p.into_inner()));
             }
             if let Some(stats) = &self.statistics {
                 stats.pack(*id, &mut packed);
@@ -1964,6 +2078,12 @@ impl TransmutationTallies {
                 t.copy_from_slice(&packed[off..off + n]);
                 off += n;
             }
+            if let Some(resolved) = &mat_data.resolved {
+                let mut r = resolved.sums.lock().unwrap_or_else(|p| p.into_inner());
+                let n = r.len();
+                r.copy_from_slice(&packed[off..off + n]);
+                off += n;
+            }
             if let Some(stats) = &self.statistics {
                 off = stats.unpack(*id, &packed, off);
             }
@@ -2018,20 +2138,38 @@ impl TransmutationTallies {
         volume: f64,
         source_rate: f64,
     ) -> PartialRates {
-        let mut out: PartialRates = HashMap::new();
-
         let Some(mat_data) = self.materials.get(&material_id) else {
-            return out;
+            return HashMap::new();
         };
         let total_particles = mat_data.total_particles.load(Ordering::Relaxed);
         if total_particles == 0 || volume <= 0.0 {
-            return out;
+            return HashMap::new();
         }
         let scale = source_rate / (total_particles as f64 * volume * 1.0e24);
 
+        let s0 = mat_data.moment_s0.lock().unwrap_or_else(|p| p.into_inner());
+        let s1 = mat_data.moment_s1.lock().unwrap_or_else(|p| p.into_inner());
+        let ysums = mat_data
+            .yield_sums
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        self.partial_rates_of_sums(mat_data, &s0, &s1, &ysums, scale)
+    }
+
+    /// A material's partial rates from raw sums laid out like its
+    /// accumulators, times `scale`: the union-grid moments `s0` and `s1`
+    /// (unread when there are no moment curves) and the yield channels'
+    /// sums, the nominal ones or one replica's.
+    fn partial_rates_of_sums(
+        &self,
+        mat_data: &MaterialTransmutationData,
+        s0: &[f64],
+        s1: &[f64],
+        ysums: &[f64],
+        scale: f64,
+    ) -> PartialRates {
+        let mut out: PartialRates = HashMap::new();
         if !self.moment_curves.is_empty() {
-            let s0 = mat_data.moment_s0.lock().unwrap_or_else(|p| p.into_inner());
-            let s1 = mat_data.moment_s1.lock().unwrap_or_else(|p| p.into_inner());
             // Suffix sums of S0 make each curve's flat tail O(1).
             let mut suffix_s0 = vec![0.0; s0.len() + 1];
             for g in (0..s0.len()).rev() {
@@ -2045,8 +2183,8 @@ impl TransmutationTallies {
                     &c.energy,
                     &c.values,
                     &self.union_grid,
-                    &s0,
-                    &s1,
+                    s0,
+                    s1,
                     &suffix_s0,
                 );
                 out.entry(c.parent.clone())
@@ -2056,11 +2194,6 @@ impl TransmutationTallies {
                     .push((c.target.clone(), sum * scale));
             }
         }
-
-        let ysums = mat_data
-            .yield_sums
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
         for (ch, &sum) in mat_data.yield_channels.iter().zip(ysums.iter()) {
             out.entry(ch.parent.clone())
                 .or_default()
@@ -2068,7 +2201,6 @@ impl TransmutationTallies {
                 .or_default()
                 .push((ch.target.clone(), sum * scale));
         }
-
         out
     }
 
@@ -2158,6 +2290,70 @@ impl TransmutationTallies {
         }
         out
     }
+}
+
+/// A material's reaction rates from raw `sum(sigma * TL)` sums laid out like
+/// its accumulators, `rate = sum * inv_total / (volume * 1e24) * source_rate`
+/// per atom: the nominal sums or one replica's.
+fn rates_of_sums(
+    mat_data: &MaterialTransmutationData,
+    sums: &[f64],
+    inv_total: f64,
+    volume: f64,
+    source_rate: f64,
+) -> ReactionRates {
+    let mut rates: ReactionRates = HashMap::new();
+    let n_mts = mat_data.mt_numbers.len();
+    for (nuc_idx, nuclide_name) in mat_data.nuclide_names.iter().enumerate() {
+        let mut nuclide_rates: HashMap<String, f64> = HashMap::new();
+
+        for (mt_idx, &mt) in mat_data.mt_numbers.iter().enumerate() {
+            let bin_idx = nuc_idx * n_mts + mt_idx;
+            let mean_sigma_tl = sums[bin_idx] * inv_total;
+
+            if mean_sigma_tl > 0.0 {
+                // rate = (σ×TL / volume_b_cm) × source_rate
+                // where σ×TL is in [b·cm] per source particle
+                // volume_b_cm = volume × 1e24 [b-cm]
+                // Result: [(b·cm) / (b·cm)] × [src/s] = [1/s] per atom
+                let volume_b_cm = volume * 1.0e24;
+                let rate = (mean_sigma_tl / volume_b_cm) * source_rate;
+
+                if mt == MT_ANYTHING && !mat_data.drives_anything[nuc_idx] {
+                    continue;
+                }
+                if let Some(rx_name) = mt_to_reaction_type(mt) {
+                    nuclide_rates.insert(rx_name.to_string(), rate);
+                }
+            }
+        }
+
+        if !nuclide_rates.is_empty() {
+            rates.insert(nuclide_name.clone(), nuclide_rates);
+        }
+    }
+    rates
+}
+
+/// A material's fission-yield spectrum weights from its raw per-tabulated
+/// energy sums: the nominal sums or one replica's.
+fn fission_yield_weights_of_sums(
+    mat_data: &MaterialTransmutationData,
+    sums: &[f64],
+) -> FissionYieldWeights {
+    let mut out: FissionYieldWeights = HashMap::new();
+    for (nuc_idx, name) in mat_data.nuclide_names.iter().enumerate() {
+        let Some(ch) = &mat_data.fy_channels[nuc_idx] else {
+            continue;
+        };
+        let slots = &sums[ch.offset..ch.offset + ch.energies.len()];
+        let total: f64 = slots.iter().sum();
+        if total <= 0.0 {
+            continue;
+        }
+        out.insert(name.clone(), slots.iter().map(|s| s / total).collect());
+    }
+    out
 }
 
 /// Atomically add an f64 value to an AtomicU64 (stored as bits).
@@ -2288,6 +2484,7 @@ mod tests {
                 fy_batch: Vec::new(),
                 fy_sums: Mutex::new(Vec::new()),
                 isomer: None,
+                resolved: None,
             },
         );
         TransmutationTallies {
@@ -2296,6 +2493,7 @@ mod tests {
             moment_curves,
             statistics: None,
             isomer: None,
+            replicas: None,
         }
     }
 
@@ -2864,7 +3062,7 @@ mod tests {
 
     fn stats_tally(branch: &BranchTable, workers: usize) -> TransmutationTallies {
         let t = one_bin_tally_with_branch(branch).with_history_statistics();
-        t.prepare_history_workers(workers).unwrap();
+        t.prepare_workers(workers).unwrap();
         t
     }
 
@@ -3109,6 +3307,78 @@ mod tests {
         }
     }
 
+    /// The resolved flux bins each segment on its own grid, at the rates'
+    /// normalization, whatever the chunking; it leaves the rates and the
+    /// coarse spectrum as they are, adds across ranks, and `reset` clears it.
+    #[test]
+    fn resolved_flux_bins_segments_on_its_grid() {
+        let material = bare_material();
+        let grid = vec![1.0, 2.0, 4.0, 8.0];
+        // (energy, track length): one below the grid, one on each bin, one
+        // on the top edge (the last bin's) and one above.
+        let segments = [
+            (0.5, 1.0),
+            (1.5, 2.0),
+            (2.0, 3.0),
+            (5.0, 4.0),
+            (8.0, 5.0),
+            (9.0, 6.0),
+        ];
+        let expected = [2.0, 3.0, 9.0];
+        let run = |t: &TransmutationTallies, chunks: &[&[(f64, f64)]]| {
+            for chunk in chunks {
+                for &(e, tl) in *chunk {
+                    t.score(7, e, tl, &material);
+                }
+                t.accumulate_batch(5);
+            }
+        };
+        let plain = one_bin_tally();
+        run(&plain, &[&segments[..2], &segments[2..]]);
+        let t = one_bin_tally().with_resolved_flux(HashMap::from([(7, grid.clone())]));
+        run(&t, &[&segments[..2], &segments[2..]]);
+        let volume = 2.0;
+        let spectrum = t.resolved_flux_spectrum(7, volume).unwrap();
+        assert_eq!(spectrum.boundaries, grid);
+        for (m, e) in spectrum.masses.iter().zip(expected) {
+            assert!((m - e / (10.0 * volume)).abs() < 1e-15, "{m} vs {e}");
+        }
+        let (a, b) = (
+            t.flux_spectrum(7, volume).unwrap(),
+            plain.flux_spectrum(7, volume).unwrap(),
+        );
+        assert_eq!((a.boundaries, a.masses), (b.boundaries, b.masses));
+        assert_eq!(
+            t.get_reaction_rates(7, volume, 1.0),
+            plain.get_reaction_rates(7, volume, 1.0)
+        );
+        assert!(plain.resolved_flux_spectrum(7, volume).is_none());
+        assert!(t.resolved_flux_spectrum(7, 0.0).is_none());
+
+        // Two ranks of the same histories add up to one.
+        let rank0 = one_bin_tally().with_resolved_flux(HashMap::from([(7, grid.clone())]));
+        let rank1 = one_bin_tally().with_resolved_flux(HashMap::from([(7, grid.clone())]));
+        run(&rank0, &[&segments[..3]]);
+        run(&rank1, &[&segments[3..]]);
+        let ops = TwoRanks {
+            other: Mutex::new(Vec::new()),
+            record: true,
+        };
+        rank1.reduce_across_ranks(&ops);
+        let ops = TwoRanks {
+            other: ops.other,
+            record: false,
+        };
+        rank0.reduce_across_ranks(&ops);
+        let reduced = rank0.resolved_flux_spectrum(7, volume).unwrap();
+        for (m, e) in reduced.masses.iter().zip(expected) {
+            assert!((m - e / (5.0 * volume)).abs() < 1e-15, "{m} vs {e}");
+        }
+
+        t.reset();
+        assert!(t.resolved_flux_spectrum(7, volume).is_none());
+    }
+
     /// `reset` starts a new step from nothing, and a later run on more
     /// threads than the scratch was sized for is refused rather than
     /// scored into a slot that does not exist.
@@ -3130,9 +3400,9 @@ mod tests {
         assert_eq!(cleared.n_histories, 0);
         assert!(cleared.mean.iter().all(|m| *m == 0.0));
 
-        assert!(t.prepare_history_workers(2).is_ok());
-        assert!(t.prepare_history_workers(1).is_ok());
-        let err = t.prepare_history_workers(3).unwrap_err();
+        assert!(t.prepare_workers(2).is_ok());
+        assert!(t.prepare_workers(1).is_ok());
+        let err = t.prepare_workers(3).unwrap_err();
         assert!(err.contains("sized for 2"), "{err}");
     }
 
@@ -3372,7 +3642,7 @@ mod tests {
         let (chain, branch) = isomer_only_n2n(false);
         let (p_e, p) = (vec![1.0e7, 2.0e7], vec![1.0, 1.6]);
         let t = one_material_tally(&material, &chain, &branch).with_history_statistics();
-        t.prepare_history_workers(1).unwrap();
+        t.prepare_workers(1).unwrap();
 
         // Histories spread over 10 to 35 MeV: below the partial's last point,
         // above it, and above the total's own grid, where it is flat at zero.
@@ -3545,5 +3815,129 @@ mod tests {
         }
         let full = isomer_share(true, 2.0e7);
         assert!((full - 0.8).abs() < 1e-12, "full list: {full}");
+    }
+
+    /// A transport's replica changes that add `shift[k]` barns to every MT
+    /// of every nuclide, for checking the replica sums by hand.
+    struct ConstantShift(Vec<f64>);
+
+    impl ReplicaChanges for ConstantShift {
+        fn add_changes(&self, _: u32, _: usize, _: f64, out: &mut [f64]) -> bool {
+            let r = self.0.len();
+            for (i, o) in out.iter_mut().enumerate() {
+                *o += self.0[i % r];
+            }
+            true
+        }
+    }
+
+    /// Each replica's sums are the nominal ones with every track length
+    /// times the segment's replica factor and every cross section the
+    /// replica's: the rate, the list's production (whose tail above the
+    /// partial's last point is a share of the replica's total) and the flux
+    /// spectrum. The nominal sums are those of a tally without replicas, bit
+    /// for bit, and a replica whose factor is one and whose cross sections
+    /// are nominal reproduces them.
+    #[test]
+    fn replica_sums_follow_the_factors_and_the_replica_cross_sections() {
+        let (xs_e, xs) = (vec![1.0e7, 2.0e7, 3.0e7], vec![2.0, 2.0, 0.0]);
+        let material = indium_n2n(xs_e.clone(), xs.clone());
+        let (chain, branch) = isomer_only_n2n(false);
+        let (p_e, p) = (vec![1.0e7, 2.0e7], vec![1.0, 1.6]);
+        let plain = one_material_tally(&material, &chain, &branch);
+        let t = one_material_tally(&material, &chain, &branch).with_replicas(3, 9);
+        t.prepare_workers(1).unwrap();
+        assert_eq!(t.replicas(), Some(3));
+        assert_eq!(
+            t.layout(7).map(|(n, _)| n.to_vec()),
+            Some(vec!["In115".to_string()])
+        );
+
+        let factors = [1.0, 1.5, 0.5];
+        let shift = [0.0, 0.2, -0.1];
+        let changes = ConstantShift(shift.to_vec());
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let segments: Vec<(f64, f64)> = (0..2000)
+            .map(|_| (1.0e7 + 2.5e7 * next(), 0.1 + next()))
+            .collect();
+        for &(e, tl) in &segments {
+            plain.score(7, e, tl, &material);
+            t.score_with_replicas(7, e, tl, &material, &factors, &changes);
+        }
+        plain.accumulate_batch(segments.len());
+        t.accumulate_batch(segments.len());
+
+        let volume = 2.0;
+        let nominal = t.get_reaction_rates(7, volume, 1.0);
+        assert_eq!(nominal, plain.get_reaction_rates(7, volume, 1.0));
+        assert_eq!(
+            t.get_partial_rates(7, volume, 1.0),
+            plain.get_partial_rates(7, volume, 1.0)
+        );
+
+        let replicas = t.replica_tallied(7, volume).expect("replicas are on");
+        assert_eq!(replicas.replicas(), 3);
+        assert_eq!(replicas.seed, 9);
+        let scale = 1.0 / (segments.len() as f64 * volume * 1.0e24);
+        let sigma = |e: f64| curve_interp(&xs_e, &xs, e);
+        let rel = |a: f64, b: f64| (a - b).abs() / b.abs();
+        for k in 0..3 {
+            let (f, c) = (factors[k], shift[k]);
+            let rate: f64 = segments
+                .iter()
+                .filter(|(e, _)| sigma(*e) > 0.0)
+                .map(|&(e, tl)| tl * f * (sigma(e) + c).max(0.0))
+                .sum::<f64>()
+                * scale;
+            let got = replicas.rates[k]["In115"]["(n,2n)"];
+            assert!(rel(got, rate) < 1e-12, "replica {k}: rate {got} vs {rate}");
+
+            let production: f64 = segments
+                .iter()
+                .map(|&(e, tl)| {
+                    let p = if e <= 2.0e7 {
+                        curve_interp(&p_e, &p, e)
+                    } else if sigma(e) > 0.0 {
+                        0.8 * (sigma(e) + c).max(0.0)
+                    } else {
+                        0.0
+                    };
+                    tl * f * p
+                })
+                .sum::<f64>()
+                * scale;
+            let parts = &replicas.partials[k]["In115"]["(n,2n)"];
+            assert_eq!(parts[0].0, "In114_m1");
+            assert!(
+                rel(parts[0].1, production) < 1e-12,
+                "replica {k}: production {} vs {production}",
+                parts[0].1
+            );
+
+            let flux: f64 = replicas.spectra[k].masses.iter().sum();
+            let want: f64 = segments.iter().map(|&(_, tl)| tl * f).sum::<f64>()
+                / (segments.len() as f64 * volume);
+            assert!(
+                rel(flux, want) < 1e-12,
+                "replica {k}: flux {flux} vs {want}"
+            );
+        }
+        assert!(
+            rel(
+                replicas.rates[0]["In115"]["(n,2n)"],
+                nominal["In115"]["(n,2n)"]
+            ) < 1e-12,
+            "a replica at the nominal reads the nominal back"
+        );
+
+        // A reset clears the replicas with the nominal sums.
+        t.reset();
+        assert!(t.replica_tallied(7, volume).is_none());
     }
 }

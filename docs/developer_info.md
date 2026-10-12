@@ -546,10 +546,32 @@ newer release than the cache holds, the files the run needs are downloaded
 from the new release and the switch is logged once ("updated endf-b8.1 from
 2026-10-01 to 2026-11-15"). Older release folders are left in place.
 
-`reactions.arrow` is always downloaded whole on this path, since a byte-range
-fetch cannot be checked against a whole-file hash. The browser fetcher keeps
-its per-temperature ranges, which are registered unverified; it verifies every
-section it fetches whole.
+A load that reads only some MTs (activation) or some temperatures (transport
+at a material temperature) fetches `reactions.arrow`, and for temperatures
+`energy.arrow`, as the byte ranges of just those record batches, when they can
+be verified. The byte-range index in each nuclide's `version.json` gives every
+entry as `[offset, length, "<sha256>"]`, the schema message included, and
+`version.json` is itself verified against the manifest before its index is
+used. Each batch received is cut back out of the (merged) spans and checked
+against its hash; a mismatch is a hard error naming the nuclide, the file, the
+MT or temperature, and both hashes, and is not retried. The spliced copy is
+cached under `temperatures/` or `subset/` in the nuclide's folder with a record
+of what it holds, never under the section's own name, so it is not taken for
+the whole verified file. It is logged as `<what>: <keyword> release <release>,
+downloaded and verified <n> byte range(s) of <section>, <bytes> of its <total>
+bytes -> <folder>`.
+
+An index entry with no hash (a library indexed before hashes existed) cannot
+be verified, so a load that needs it downloads that section whole, verified
+against the manifest. So does a load that wants every temperature, or every
+MT. An origin that ignores the `Range` header sends the whole object, which is
+checked against the manifest and cached as the whole file. The hashes are
+written by the converter, and `index_reactions` adds them to an already
+converted tree (it rewrites only `version.json`), which the publishing scripts
+run before building the release manifest.
+
+The wasm32 browser fetcher (`yamc::wasm`) keeps its per-temperature ranges,
+which it registers unverified; it verifies every section it fetches whole.
 
 When the origin cannot be reached (DNS, connect, timeout, TLS, a 5xx), yamc
 does not fail if the data is already local: it uses the newest cached release
@@ -560,7 +582,7 @@ contact (`latest.json`) has a 3 s connect timeout, a 3 s request timeout and
 two attempts, so an offline machine waits at most about 6 s before the cache
 is used; data files have a 3 s connect timeout and a 30 s timeout on each read.
 
-Each file a run reads is logged as `<what>: <keyword> release <release>,
+Each file a run reads whole is logged as `<what>: <keyword> release <release>,
 downloaded and verified <n> file(s), <bytes> bytes -> <folder>` when it was
 downloaded, and as `<what>: <keyword> release <release>, from cache <folder>`
 when per-file load logging is on.

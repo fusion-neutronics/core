@@ -60,17 +60,22 @@ pub enum Source {
     /// insensitive to its own half-life (`N ~ R / lambda`, so `A ~ R`), and
     /// inflate its uncertainty.
     HalfLife,
-    /// Decay branching ratios, from the MT=457 sigma on each mode, for the
-    /// parents whose sum rule fixes the joint distribution: exactly two modes,
-    /// one sigma between them (both state the same one, or one states it and
-    /// the other is its complement), and the smaller ratio at least five
-    /// sigmas from zero. A replica draws one deviate per parent, moves one
-    /// mode by `sigma z` and the other by `-sigma z`, so the pair's total is
-    /// kept and the two are perfectly anticorrelated.
+    /// Decay branching ratios, from the MT=457 sigma on each mode. A replica
+    /// draws a parent's ratios keeping their total and every ratio in
+    /// `[0, T]`: each mode but one from a logit-normal with the evaluated
+    /// ratio as its mean and the stated sigma as its standard deviation, the
+    /// last their complement, coupled by a Gaussian copula so the modes carry
+    /// the zero-sum covariance of largest entropy that realises every stated
+    /// sigma (for two or three modes the only one). A largest sigma above the
+    /// sum of the others' is drawn as that sum. A single mode stating none is
+    /// the complement of the rest when it is the largest or the only way to
+    /// trade, and is held otherwise, as are two or more stating none and a
+    /// mode whose sigma no ratio with its mean can have
+    /// (`sigma^2 >= b (T - b)`); the rest share what is left.
     ///
-    /// Any other multi-mode parent stays at nominal and [`Info`] names it by
-    /// why. It moves the inventory only: a parent's own per-decay emission is
-    /// the decay scheme's.
+    /// [`Info`] names every parent short of its stated sigmas by why. It
+    /// moves the inventory only: a parent's own per-decay emission is the
+    /// decay scheme's.
     DecayBranching,
     /// The Monte Carlo statistical uncertainty of transport-tallied reaction
     /// rates, from their per-history covariance.
@@ -78,6 +83,16 @@ pub enum Source {
     /// Applies to `Model.simulate_transmutation`, whose rates come from
     /// transport; a spectrum run's rates are a deterministic collapse with no
     /// sampling error, so it has nothing to perturb there.
+    ///
+    /// With [`FluxResponse::ReplicaWeights`] every replica's rates are scored
+    /// by the same histories as the nominal ones, so they share the nominal
+    /// tally's Monte Carlo error, and the draw is added to each replica's
+    /// rates as a deviation from the nominal: the error enters once per
+    /// replica, independent of the cross-section draw. What correlated
+    /// sampling does not cancel is the noise in each replica's difference
+    /// from the nominal, which is far smaller than the rates' own error but
+    /// is in the cross-section spread whether or not this source is on: it
+    /// shrinks as one over the particle count, in variance.
     Statistical,
     /// Mean decay energies, from the decay data's sigma on each
     /// recoverable-heat component (beta, gamma, alpha), or on the total where
@@ -217,6 +232,11 @@ pub struct DataUncertainty {
     /// target much below 2.2% (the Gaussian figure at the cap) cannot be met.
     /// What is tracked is listed on [`Ensemble::unconverged`].
     pub convergence: f64,
+    /// How a transport-coupled run (`Model.simulate_transmutation`) takes the
+    /// flux's response to the perturbed cross sections. A spectrum run's flux
+    /// is the caller's, so it has nothing to choose and refuses anything but
+    /// the default.
+    pub flux_response: FluxResponse,
 }
 
 impl Default for DataUncertainty {
@@ -227,8 +247,117 @@ impl Default for DataUncertainty {
             sources: Source::IMPLEMENTED.to_vec(),
             attribution: false,
             convergence: DEFAULT_CONVERGENCE,
+            flux_response: FluxResponse::default(),
         }
     }
+}
+
+/// How a transport-coupled uncertainty run takes the flux's response to each
+/// replica's perturbed cross sections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FluxResponse {
+    /// The transport carries one likelihood-ratio weight per replica along
+    /// every history, and tallies every rate the transmutation reads once per
+    /// replica under it, so replica `k`'s rates are those transport would
+    /// tally under replica `k`'s data: a stronger resonance deepens its own
+    /// self-shielding dip, a perturbed scatterer moves the spectrum. The
+    /// likelihood ratios are exact, so replica `k`'s tally is an unbiased
+    /// estimate of what a rerun of the transport with replica `k`'s data
+    /// would tally, on the same histories as the nominal one.
+    ///
+    /// The replica count is fixed before the transport (see
+    /// [`transport_replicas_for`]), and the transport's cost grows with it
+    /// times the rates scored. The transport configurations the weights do
+    /// not carry (delta tracking, survival biasing, weight windows, photon
+    /// transport, MPI) are refused, naming [`FluxResponse::Held`].
+    #[default]
+    ReplicaWeights,
+    /// One nominal transport, its tallied flux held for every replica, and
+    /// each replica's cross sections folded against it. Cheaper (nothing per
+    /// replica in transport, and an adaptive replica count) and open to every
+    /// transport configuration, but where a resonance self-shields the held
+    /// flux overstates its sigma, several-fold for a strong one, since a
+    /// stronger resonance would deepen its own flux dip. The report lists the
+    /// held response under `not_perturbed`.
+    Held,
+}
+
+impl FluxResponse {
+    /// The name used in the API and in the report.
+    pub fn name(self) -> &'static str {
+        match self {
+            FluxResponse::ReplicaWeights => "replica_weights",
+            FluxResponse::Held => "held",
+        }
+    }
+
+    /// Parse a name, naming the choices when it is not one of them.
+    pub fn parse(name: &str) -> Result<Self, String> {
+        match name {
+            "replica_weights" => Ok(FluxResponse::ReplicaWeights),
+            "held" => Ok(FluxResponse::Held),
+            _ => Err(format!(
+                "flux_response must be \"replica_weights\" or \"held\", got {name:?}"
+            )),
+        }
+    }
+}
+
+/// How a run's flux answered each replica's perturbed cross sections, as
+/// [`Info::flux_response`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FluxResponseReport {
+    /// A spectrum run: the flux is the caller's, and nothing transports.
+    #[default]
+    Supplied,
+    /// A transport run whose tallied flux every replica was folded against
+    /// ([`FluxResponse::Held`]).
+    Held,
+    /// A transport run that tallied every replica under its own replica
+    /// weights ([`FluxResponse::ReplicaWeights`]), carrying `replicas`.
+    ReplicaWeights {
+        /// Replicas the transport carried.
+        replicas: usize,
+    },
+    /// A transport run with the cross-section source off: nothing perturbed
+    /// what the flux depends on, so there was no response to carry.
+    Unperturbed,
+}
+
+impl FluxResponseReport {
+    /// The name used in the report.
+    pub fn name(self) -> &'static str {
+        match self {
+            FluxResponseReport::Supplied => "supplied",
+            FluxResponseReport::Held => "held",
+            FluxResponseReport::ReplicaWeights { .. } => "replica_weights",
+            FluxResponseReport::Unperturbed => "unperturbed",
+        }
+    }
+}
+
+/// The replicas a transport with [`FluxResponse::ReplicaWeights`] carries:
+/// `request.samples` where it is set, else the count a Gaussian output needs
+/// to reach `request.convergence`, `1 / (2 t^2) + 1`, rounded up to a whole
+/// [`BLOCK`] and kept within [`MIN_SAMPLES`] and [`MAX_SAMPLES`]: 256 at the
+/// default 5%.
+///
+/// The count has to be fixed before the transport, since every history
+/// carries one weight per replica, so the adaptive rule cannot add replicas
+/// after it. The Gaussian count is what the rule itself would stop near on a
+/// well-behaved output; a heavier tail needs more, and the run then reports
+/// the sigmas that missed the target (`Info::unconverged`, with `hit_cap`
+/// set), for a rerun with `samples` raised.
+pub fn transport_replicas_for(request: &DataUncertainty) -> usize {
+    if let Some(n) = request.samples {
+        return n;
+    }
+    let t = request.convergence;
+    let gaussian = (1.0 / (2.0 * t * t) + 1.0).ceil() as usize;
+    gaussian
+        .div_ceil(BLOCK)
+        .saturating_mul(BLOCK)
+        .clamp(MIN_SAMPLES, MAX_SAMPLES)
 }
 
 impl DataUncertainty {
@@ -379,6 +508,11 @@ pub(crate) fn worst_first(unconverged: &mut [Unconverged]) {
 pub struct Info {
     /// Replicas actually run.
     pub samples: usize,
+    /// How the flux answered each replica's perturbed cross sections: the
+    /// caller's on a spectrum run, and on a transport run either tallied per
+    /// replica under replica weights, held at the nominal transport's, or not
+    /// perturbed at all.
+    pub flux_response: FluxResponseReport,
     /// Whether every tracked sigma reached the convergence target, so
     /// `unconverged` is empty. With a fixed sample count, whether it did at
     /// that count.
@@ -386,7 +520,9 @@ pub struct Info {
     /// The convergence target the run judged against, `SE(sigma) / sigma`.
     pub convergence: f64,
     /// Whether the run stopped on [`MAX_SAMPLES`] with some tracked sigma
-    /// still short of the target. Never set on a fixed sample count.
+    /// still short of the target, or with replica weights, on the replicas
+    /// its transport carried ([`transport_replicas_for`]). Never set on a
+    /// fixed sample count.
     pub hit_cap: bool,
     /// Every tracked sigma, by output and step, that did not reach the
     /// target, with the `SE(sigma) / sigma` it did reach, worst first.
@@ -650,8 +786,7 @@ pub struct Info {
     /// with each range's sampler report (the repairs it made and the widths
     /// it held), or the first-order MF=32 rows of `covariance.arrow`, with
     /// the reason the parameters were not sampled. See
-    /// [`crate::resonance_rates`]. Empty with the cross-section source off,
-    /// and on a transport run, which keeps the rows for every nuclide.
+    /// [`crate::resonance_rates`]. Empty with the cross-section source off.
     pub resonance_parameters: BTreeMap<String, crate::resonance_rates::ResonanceMethod>,
     /// Unstable nuclides the material can reach whose half-life was perturbed.
     pub half_lives_perturbed: BTreeSet<String>,
@@ -669,25 +804,35 @@ pub struct Info {
     /// Each is a lognormal matched to the evaluation's mean and sigma, so none
     /// can go non-positive and there is no floor to count.
     pub half_lives_sampled: usize,
-    /// Reachable parents whose decay branching was perturbed: two modes whose
-    /// sum rule fixes how the stated sigma is shared.
+    /// Reachable parents whose decay branching was perturbed: every moving
+    /// mode at its evaluated mean, within `[0, T]`, with every stated sigma
+    /// realised where the sum rule and non-negative ratios allow it.
     pub decay_branchings_perturbed: BTreeSet<String>,
-    /// Reachable parents with several decay modes and no stated sigma on any,
-    /// held at nominal. Not a claim that the split is exact.
+    /// Reachable parents with several decay modes held at nominal for want of
+    /// sigmas: none is stated, or one is beside modes stating none that
+    /// cannot take up its change. Not a claim that the split is exact.
     pub no_decay_branching_uncertainty: BTreeSet<String>,
-    /// Reachable parents with three or more modes and a stated sigma, held at
-    /// nominal: MT=457 gives no covariance between the modes, and with more
-    /// than one degree of freedom the sum rule does not supply it.
-    pub decay_branchings_three_or_more_modes: BTreeSet<String>,
-    /// Reachable two-mode parents whose modes state different sigmas, held at
-    /// nominal: a sum rule leaves room for one.
-    pub decay_branchings_unequal_sigmas: BTreeSet<String>,
-    /// Reachable two-mode parents whose smaller ratio is under five sigmas,
-    /// held at nominal: a Gaussian that wide would have to be truncated at
-    /// zero, which the evaluation does not describe.
+    /// Reachable parents held at nominal because every mode that could move
+    /// states a sigma no ratio in `[0, T]` with its mean can have,
+    /// `sigma^2 >= b (T - b)` (JENDL-5.0 has ratios near 1e-16 stating 0.04),
+    /// which describes no distribution.
     pub decay_branchings_too_wide: BTreeSet<String>,
-    /// Branching draws that fell outside `[0, T]` and were clamped, and draws
-    /// made, one per perturbed parent per replica.
+    /// Perturbed parents with one or more modes held at their ratios: a sigma
+    /// no ratio with its mean can have, or no sigma beside another mode
+    /// stating none or beside stated modes that trade between themselves. The
+    /// other modes share what those leave.
+    pub decay_branchings_partly_held: BTreeSet<String>,
+    /// Perturbed parents with a mode drawn more than 0.1% from its stated
+    /// sigma. Either the largest stated sigma exceeds the sum of the others',
+    /// which no split keeping the total can realise, and it was drawn as that
+    /// sum; or the modes drawn beside the complement cannot carry the
+    /// correlation its sigma needs while staying non-negative (two small
+    /// skewed modes cannot be strongly anticorrelated), and it was drawn at
+    /// the nearest sigma they allow.
+    pub decay_branchings_sigma_adjusted: BTreeSet<String>,
+    /// Branching draws whose complement fell below zero, the other modes
+    /// together exceeding the total, and were pulled back towards the nominal
+    /// ratios, and draws made, one per perturbed parent per replica.
     pub decay_branchings_floored: usize,
     pub decay_branchings_sampled: usize,
     /// Reachable unstable nuclides whose decay energy was perturbed.
@@ -765,11 +910,15 @@ pub struct Info {
     /// largest over the run's spectra: what the evaluation says before the
     /// split re-normalises it.
     pub isomer_production_sigma: BTreeMap<(String, String, String), f64>,
-    /// MF=40 draws made, one per drawn parent per replica, and the list draws
-    /// whose stated productions came out above the drawn reaction total and
-    /// were scaled back to it.
+    /// MF=40 draws made, one per drawn parent per replica.
     pub isomer_branchings_sampled: usize,
-    pub isomer_branchings_clipped: usize,
+    /// Per `(parent, reaction, product)`, how many list draws (one per
+    /// replica per spectrum) gave the product's stated production a value
+    /// that, with the list's other productions, came out above the drawn
+    /// reaction total, and scaled it back to it. Only a list whose ground
+    /// takes the rest (isomers listed alone, and every `(n,n')` list) can
+    /// clip; every stated product of a clipped list draw is counted.
+    pub isomer_branchings_clipped: BTreeMap<(String, String, String), usize>,
     /// Tallied rates sampled statistically, the totals and partials together;
     /// zero off the transport path or with the source off.
     pub statistical_rates: usize,
@@ -908,9 +1057,9 @@ impl Info {
             || !self.flux_rates_without_terms.is_empty()
             || !self.no_half_life_uncertainty.is_empty()
             || !self.no_decay_branching_uncertainty.is_empty()
-            || !self.decay_branchings_three_or_more_modes.is_empty()
-            || !self.decay_branchings_unequal_sigmas.is_empty()
             || !self.decay_branchings_too_wide.is_empty()
+            || !self.decay_branchings_partly_held.is_empty()
+            || !self.decay_branchings_sigma_adjusted.is_empty()
             || !self.no_decay_energy_uncertainty.is_empty()
             || !self.half_life_uncertainty_not_carried.is_empty()
             || !self.decay_energy_uncertainty_not_carried.is_empty()
@@ -1006,7 +1155,12 @@ pub struct Ensemble {
 ///   half-lives and the decay branchings, one deterministic solve per nuclide
 ///   (and per reaction) gives its sensitivity, and its variance is that
 ///   squared against its own stated uncertainty. It says which evaluation to
-///   look at, not the total, which is always the resampled one.
+///   look at, not the total, which is always the resampled one. On a
+///   transport run its cross-section terms fold against the nominal flux
+///   even when the replicas carried the flux's response
+///   ([`FluxResponse::ReplicaWeights`]), so for a self-shielded resonance
+///   they overstate the share, and the cross sections' `linearity` is then
+///   `None`.
 #[derive(Debug, Clone, Default)]
 pub struct Attribution {
     /// Source name -> `[step][nuclide]` variance, from that source alone.
@@ -1067,8 +1221,8 @@ pub struct Contributor {
     pub nuclide: String,
     /// The reaction, for one cross-section channel alone; `None` for the
     /// nuclide's whole evaluation (every channel with its correlations) or for
-    /// a half-life. A `decay_branching` contributor is a two-mode parent's
-    /// one degree of freedom, so `None` too.
+    /// a half-life. A `decay_branching` contributor is a parent's whole
+    /// split, every direction of it, so `None` too.
     pub reaction: Option<String>,
     /// `[step][nuclide]` variance it contributes, only where it is non-zero.
     pub variance: Vec<HashMap<String, f64>>,

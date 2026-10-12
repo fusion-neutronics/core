@@ -1188,16 +1188,19 @@ impl PyTransmutationResults {
     ///   the solver reads; they are held rather than drawn through a mapping
     ///   their yields were not built with. Each is counted as a gap.
     /// - ``decay_branchings_perturbed``: with the ``"decay_branching"``
-    ///   source, the reachable two-mode parents whose split was sampled. The
-    ///   multi-mode parents held at their evaluated ratios, each a gap:
-    ///   ``no_decay_branching_uncertainty`` (no mode states a sigma),
-    ///   ``decay_branchings_three_or_more_modes`` (a sigma, but no stated
-    ///   covariance to share it between three or more modes),
-    ///   ``decay_branchings_unequal_sigmas`` (two modes stating different
-    ///   sigmas) and ``decay_branchings_too_wide`` (the smaller ratio under
-    ///   five sigmas). ``decay_branchings_floored`` /
-    ///   ``decay_branchings_sampled`` count draws clamped to the pair's total
-    ///   and draws made.
+    ///   source, the reachable multi-mode parents whose split was sampled. Held
+    ///   at their evaluated ratios, each a gap: ``no_decay_branching_uncertainty``
+    ///   (no mode states a sigma, or one does beside two or more that do not)
+    ///   and ``decay_branchings_too_wide`` (every mode that could move states
+    ///   a sigma no ratio with its mean can have). Sampled but short of the
+    ///   stated sigmas, each a gap too: ``decay_branchings_partly_held`` (one
+    ///   or more modes held at their ratios, for such a sigma or for stating
+    ///   none) and ``decay_branchings_sigma_adjusted`` (a mode drawn more than
+    ///   0.1% from its stated sigma: the largest exceeds the sum of the
+    ///   others', or the complement's needs a correlation non-negative ratios
+    ///   cannot carry). ``decay_branchings_floored`` /
+    ///   ``decay_branchings_sampled`` count draws whose complement was pulled
+    ///   back above zero and draws made.
     /// - ``isomer_branchings_perturbed``: with the ``"isomer_branching"``
     ///   source, the reachable reactions, as ``"Parent reaction"``, whose
     ///   isomeric split was drawn from the MF=40 covariance of at least one of
@@ -1215,9 +1218,11 @@ impl PyTransmutationResults {
     ///   the relative sigma MF=40 states for the product's production, folded
     ///   against the spectrum (the largest over the run's spectra).
     ///   ``isomer_branchings_sampled`` counts the draws, one per drawn parent
-    ///   per replica, and ``isomer_branchings_clipped`` the reactions whose
-    ///   drawn isomer productions exceeded the drawn total and were scaled
-    ///   back to it.
+    ///   per replica. ``isomer_branchings_clipped`` gives, as
+    ///   ``"Parent reaction Product"``, how many list draws (one per replica
+    ///   per spectrum) scaled the product's drawn production back to the
+    ///   drawn reaction total, the stated productions of its list having
+    ///   come out above it; a product never clipped is absent.
     /// - ``statistical_rates``: with the ``"statistical"`` source on a
     ///   transport run, how many tallied rates were sampled from their
     ///   covariance; ``statistical_floored`` / ``statistical_sampled`` count
@@ -1225,7 +1230,8 @@ impl PyTransmutationResults {
     /// - ``resonance_parameters``: per nuclide with resonance parameters
     ///   (MF=2 and MF=32) and a rate in this run, how its resonance-range
     ///   uncertainty was sampled. ``method`` is ``"parameters sampled"``
-    ///   (drawn per replica and the cross sections rebuilt from them) or
+    ///   (drawn per replica and the cross sections rebuilt from them, on a
+    ///   transport run against the flux it tallied through the resonances) or
     ///   ``"first-order rows"`` (the MF=32 rows of ``covariance.arrow``),
     ///   ``reason`` why the parameters were not sampled (``None`` where they
     ///   were), and ``ranges`` one sampler report per sampled range:

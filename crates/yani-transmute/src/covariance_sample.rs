@@ -613,6 +613,7 @@ fn principal(matrix: &[f64], n: usize, kept: f64) -> (Vec<f64>, Vec<f64>, Vec<f6
 pub type RateShifts = BTreeMap<String, BTreeMap<String, f64>>;
 
 /// One replica's draw of every nuclide's field.
+#[derive(Default)]
 pub struct Draw {
     nuclides: BTreeMap<String, NuclideDraw>,
 }

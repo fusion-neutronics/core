@@ -41,6 +41,19 @@
 //! channel's change enters the flight and the band-valued scores times that
 //! factor. The collision factor needs no band: within a channel the band
 //! cancels from `σ'_mt / σ_mt`.
+//!
+//! A nuclide whose resonance parameters (MF=2 and MF=32) are sampled
+//! ([`crate::xs_perturbation::resonance_sampling`]) moves in its resonance
+//! ranges by each replica's own draw of them instead of the first-order MF=32
+//! rows, which are then left out of its field: per replica, the change the
+//! drawn parameters make to each reaction, rebuilt and Doppler broadened
+//! ([`yani_transmute::resonance_rates::TransportResonance`]), tabulated on
+//! the nuclide's grid across the ranges' reach. It enters the flight, the
+//! collision and the scores as any other change does, so the likelihood
+//! ratios carry it exactly: a replica's resonance that is stronger deepens
+//! its own flux dip, which a fold against the nominal flux cannot see. The
+//! draw is not linear in anything the modes span, so it adds nothing to the
+//! control variate's predictor and stays in what the replicas sample.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -53,10 +66,12 @@ use yamc_nuclide::urr::UrrBand;
 use yamc_tallies::score::Score;
 use yamc_tallies::tally::Tally;
 use yamc_tallies::welford::ReplicaModes;
-use yani_transmute::covariance_fold::{transport_fields, Read, TransportField};
+use yani_transmute::covariance_fold::{transport_fields_of, Read, TransportField};
 use yani_transmute::covariance_sample::{Modes, Sampler};
+use yani_transmute::resonance_rates::TransportResonance;
+use yani_transmute::{ReplicaChanges, TransmutationTallies};
 
-use crate::xs_perturbation::grid_terms;
+use crate::xs_perturbation::{grid_terms, resonance_sampling, sampled_names};
 
 /// The share of each nuclide's correlation its kept modes hold. Fewer modes
 /// cost less per event; what they miss leaves the estimate unbiased and only
@@ -181,6 +196,135 @@ fn add_terms(
     }
 }
 
+/// One reaction a nuclide's sampled resonance ranges move.
+struct ResonanceReaction {
+    /// Its lookup channel, for a probability-table band's factor.
+    channel: Option<Channel>,
+    /// Row-major `points × R`: each replica's change, barns, at each point of
+    /// the stretch.
+    change: Vec<f64>,
+    /// Its nominal cross section on the stretch, which a collision's factor
+    /// divides the change by.
+    nominal: Vec<f64>,
+}
+
+/// A nuclide's sampled resonance parameters, as the replicas read them: each
+/// replica's change to each reaction its ranges give, on the stretch of the
+/// nuclide's grid that their reach covers (and one point either side, so
+/// interpolation inside the reach never leaves it).
+struct ResonanceTables {
+    /// Grid index of the stretch's first point.
+    first: usize,
+    /// Points in the stretch.
+    len: usize,
+    /// By MT.
+    reactions: Vec<(i32, ResonanceReaction)>,
+    /// Per tally score MT, the reactions it sums with each one's weight: one
+    /// for a partial of the score, the count of the particle a production
+    /// score counts.
+    scores: HashMap<i32, Vec<(usize, f64)>>,
+}
+
+impl ResonanceTables {
+    /// Tabulate `replicas` draws of `resonance` under `seed` on `grid`, the
+    /// nuclide's grid at the run's temperature, whose partials are `held`.
+    fn new(
+        resonance: &TransportResonance,
+        grid: &[f64],
+        held: &BTreeMap<i32, Arc<Reaction>>,
+        score_mts: &BTreeSet<i32>,
+        replicas: usize,
+        seed: u64,
+    ) -> Result<Self, String> {
+        use rayon::prelude::*;
+        let n = grid.len();
+        let (lo, hi) = resonance.reach();
+        let first = grid.partition_point(|&e| e < lo).saturating_sub(1);
+        let last = (grid.partition_point(|&e| e <= hi) + 1).min(n);
+        let len = last.saturating_sub(first);
+        let at = &grid[first..first + len];
+        let draws: Vec<BTreeMap<i32, Vec<f64>>> = (0..replicas as u64)
+            .into_par_iter()
+            .map(|k| resonance.changes(seed, k, at))
+            .collect::<Result<_, _>>()?;
+        let mut reactions = Vec::new();
+        for mt in resonance.reactions() {
+            let Some(reaction) = held.get(&mt) else {
+                continue;
+            };
+            let mut change = vec![0.0; len * replicas];
+            for (k, d) in draws.iter().enumerate() {
+                for (i, v) in d[&mt].iter().enumerate() {
+                    change[i * replicas + k] = *v;
+                }
+            }
+            reactions.push((
+                mt,
+                ResonanceReaction {
+                    channel: channel_of(mt),
+                    change,
+                    nominal: on_grid(reaction, n)[first..first + len].to_vec(),
+                },
+            ));
+        }
+        let mut scores = HashMap::new();
+        for &x in score_mts {
+            let weights: Vec<(usize, f64)> = reactions
+                .iter()
+                .enumerate()
+                .filter_map(|(m, (mt, _))| {
+                    let w = if (203..=207).contains(&x) {
+                        let counts = endf::reaction::light_particles(*mt)?;
+                        counts[(x - 203) as usize] as f64
+                    } else if partials_of(x, held).contains(mt) {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    (w != 0.0).then_some((m, w))
+                })
+                .collect();
+            if !weights.is_empty() {
+                scores.insert(x, weights);
+            }
+        }
+        Ok(ResonanceTables {
+            first,
+            len,
+            reactions,
+            scores,
+        })
+    }
+
+    /// `(index, fraction)` on the stretch for the grid's `(index, fraction)`,
+    /// or `None` outside it.
+    fn local(&self, (i, f): (usize, f64)) -> Option<(usize, f64)> {
+        (i >= self.first && i + 1 < self.first + self.len).then(|| (i - self.first, f))
+    }
+
+    /// `out[k] += scale * Δσ_k` for reaction `m` at `at` on the stretch.
+    fn add(&self, m: usize, (i, f): (usize, f64), scale: f64, out: &mut [f64]) {
+        let r = out.len();
+        let change = &self.reactions[m].1.change;
+        let (a, b) = (
+            &change[i * r..(i + 1) * r],
+            &change[(i + 1) * r..(i + 2) * r],
+        );
+        for ((o, x), y) in out.iter_mut().zip(a).zip(b) {
+            *o += scale * (x + f * (y - x));
+        }
+    }
+
+    /// The band's factor on reaction `m`'s channel, one without a band or a
+    /// channel.
+    fn band_factor(&self, m: usize, g: Option<&[f64; 4]>) -> f64 {
+        match (g, self.reactions[m].1.channel) {
+            (Some(g), Some(c)) => g[c.index()],
+            _ => 1.0,
+        }
+    }
+}
+
 /// One nuclide of one material, as the replicas read it.
 struct ReplicaNuclide {
     /// Atoms per barn-cm.
@@ -202,6 +346,8 @@ struct ReplicaNuclide {
     /// The nuclide and its temperature index, where it has probability
     /// tables to draw a band from.
     urr: Option<(Arc<Nuclide>, usize)>,
+    /// Its sampled resonance parameters' changes, where they are sampled.
+    resonance: Option<ResonanceTables>,
 }
 
 /// The channels whose bands a tally's score of `mt` reads inside the
@@ -281,6 +427,16 @@ impl ReplicaNuclide {
 pub(crate) struct ReplicaMaterial {
     nuclides: Vec<ReplicaNuclide>,
     by_name: HashMap<String, usize>,
+    /// The nuclides a transmutation tally scores in this material that it
+    /// holds no density of, the products, as the replicas read them: their
+    /// cross sections move with the draw, and nothing they do moves the flux.
+    products: Vec<ReplicaNuclide>,
+    /// Per nuclide of the transmutation tally's layout for this material, in
+    /// its order, where its tables are: `(false, i)` for `nuclides[i]`,
+    /// `(true, i)` for `products[i]`, `None` for one with nothing to read.
+    transmutation: Vec<Option<(bool, usize)>>,
+    /// The transmutation tally's MTs for this material, in its order.
+    transmutation_mts: Vec<i32>,
 }
 
 /// The replica weights of one run: the draws, tabulated per material slot.
@@ -288,6 +444,8 @@ pub(crate) struct ReplicaContext {
     pub(crate) replicas: usize,
     /// By material slot (`Cell::material_idx`).
     materials: Vec<Option<ReplicaMaterial>>,
+    /// The slot whose tables a transmutation tally's material id reads.
+    transmutation_slots: HashMap<u32, usize>,
     /// The principal modes the control variate is built on, `None` where no
     /// nuclide has any.
     pub(crate) modes: Option<Arc<ReplicaModes>>,
@@ -396,6 +554,11 @@ fn on_grid(reaction: &Reaction, n: usize) -> Vec<f64> {
 /// The non-redundant partials a score of `mt` sums, among those the nuclide
 /// holds: `mt` itself when it is one, else its components under the ENDF sum
 /// rules, recursively.
+///
+/// A sum held without any of its components, as a transmutation product
+/// loaded at activation scope holds MT 103 without MT 600 to 649, is its own
+/// partial: it is what the score reads, and what the product's field reads it
+/// through ([`transport_fields_of`]).
 fn partials_of(mt: i32, held: &BTreeMap<i32, Arc<Reaction>>) -> BTreeSet<i32> {
     if held.get(&mt).is_some_and(|r| !r.redundant) {
         return BTreeSet::from([mt]);
@@ -405,6 +568,9 @@ fn partials_of(mt: i32, held: &BTreeMap<i32, Arc<Reaction>>) -> BTreeSet<i32> {
         for &c in rule {
             out.extend(partials_of(c, held));
         }
+    }
+    if out.is_empty() && held.contains_key(&mt) {
+        out.insert(mt);
     }
     out
 }
@@ -485,11 +651,13 @@ fn production_table(
 impl ReplicaContext {
     /// Tabulate `replicas` draws, seeded by `seed`, for every material in
     /// `materials` (indexed by slot), for the reaction-rate scores of
-    /// `tallies`. The materials' nuclear data must be loaded, with
-    /// covariance, at the run's temperature.
+    /// `tallies` and, with `transmutation`, for every nuclide and MT that
+    /// tally scores (see [`ReplicaChanges`]). The materials' nuclear data must
+    /// be loaded, with covariance, at the run's temperature.
     pub(crate) fn new(
         materials: &[Arc<Material>],
         tallies: &[Arc<Tally>],
+        transmutation: Option<&TransmutationTallies>,
         replicas: usize,
         seed: u64,
     ) -> Result<Self, String> {
@@ -504,19 +672,24 @@ impl ReplicaContext {
             .collect();
         let mut out = Vec::with_capacity(materials.len());
         let mut registry = ModeRegistry::default();
-        for material in materials {
-            out.push(Self::material(
-                material,
-                &score_mts,
-                replicas,
-                seed,
-                &mut registry,
-            )?);
+        let mut transmutation_slots = HashMap::new();
+        for (slot, material) in materials.iter().enumerate() {
+            let layout = transmutation
+                .zip(material.material_id)
+                .and_then(|(t, id)| t.layout(id));
+            let tables =
+                Self::material(material, &score_mts, layout, replicas, seed, &mut registry)?;
+            if let (Some(id), Some(_)) = (material.material_id, tables.as_ref().and(layout)) {
+                transmutation_slots.entry(id).or_insert(slot);
+            }
+            out.push(tables);
         }
         // With no covariance anywhere every replica is the nominal run and
         // every sigma would read zero, which looks like an answer. It is not
-        // one: the data says nothing about the uncertainty.
-        if out.iter().all(Option::is_none) {
+        // one: the data says nothing about the uncertainty. A transmutation
+        // reports that nuclide by nuclide instead, and has other sources to
+        // sample, so it runs on.
+        if transmutation.is_none() && out.iter().all(Option::is_none) {
             return Err(
                 "data_uncertainty: no nuclide in the model's materials carries covariance \
                  data, so every nuclear-data sigma would read zero. Use a library whose \
@@ -528,6 +701,7 @@ impl ReplicaContext {
         Ok(ReplicaContext {
             replicas,
             materials: out,
+            transmutation_slots,
             modes: registry.finish(),
         })
     }
@@ -545,14 +719,37 @@ impl ReplicaContext {
         state.into_boxed_slice()
     }
 
+    /// One material's tables, `layout` the nuclides and MTs a transmutation
+    /// tally scores in it, if any.
     fn material(
         material: &Material,
         score_mts: &BTreeSet<i32>,
+        layout: Option<(&[String], &[i32])>,
         replicas: usize,
         seed: u64,
         registry: &mut ModeRegistry,
     ) -> Result<Option<ReplicaMaterial>, String> {
-        let (fields, _) = transport_fields(material);
+        let sampling = resonance_sampling(material);
+        let mut score_mts = score_mts.clone();
+        let mut names: Vec<&String> = material.nuclides.keys().collect();
+        let mut product_names: Vec<&String> = Vec::new();
+        if let Some((tallied, mts)) = layout {
+            score_mts.extend(mts.iter().copied());
+            product_names = tallied
+                .iter()
+                .filter(|n| !material.nuclides.contains_key(*n))
+                .filter(|n| material.nuclide_data.contains_key(*n))
+                .collect();
+            names.extend(product_names.iter().copied());
+        }
+        let score_mts = &score_mts;
+        names.sort();
+        let (fields, _) = transport_fields_of(
+            material,
+            &names,
+            layout.map_or(&[][..], |(_, mts)| mts),
+            &sampled_names(&sampling),
+        );
         let cell_fields = fields
             .iter()
             .filter_map(|(n, t)| t.field.clone().map(|f| (n.clone(), f)))
@@ -592,6 +789,7 @@ impl ReplicaContext {
                     registry.register(name, modes, &relative, &absolute);
                 }
             }
+            let resonance = sampling.get(name).and_then(|r| r.as_ref().ok());
             let Some(tab) = Self::nuclide(
                 Arc::clone(nuclide),
                 material.temperature(),
@@ -601,15 +799,75 @@ impl ReplicaContext {
                 score_mts,
                 densities.get(name).copied().unwrap_or(0.0),
                 registry.by_name.get(name),
+                resonance.map(|r| (r, seed)),
+            )?
+            else {
+                continue;
+            };
+            any_covered |= !tab.sources.is_empty() || tab.resonance.is_some();
+            by_name.insert(name.clone(), nuclides.len());
+            nuclides.push(tab);
+        }
+
+        // The products: their own draw of their own fields, read for the
+        // transmutation tally alone. They carry no density, so they add no
+        // modes and nothing to a flight.
+        let mut products = Vec::new();
+        let mut product_by_name = HashMap::new();
+        for name in product_names {
+            let nuclide = &material.nuclide_data[name];
+            let transport = fields.get(name).filter(|t| t.field.is_some());
+            if transport.is_none() {
+                continue;
+            }
+            let relative: Vec<&[f64]> = draws
+                .iter()
+                .map(|d| d.relative(name).unwrap_or(&[]))
+                .collect();
+            let absolute: Vec<&[f64]> = draws
+                .iter()
+                .map(|d| d.absolute(name).unwrap_or(&[]))
+                .collect();
+            let Some(tab) = Self::nuclide(
+                Arc::clone(nuclide),
+                material.temperature(),
+                transport,
+                &relative,
+                &absolute,
+                score_mts,
+                0.0,
+                None,
+                None,
             )?
             else {
                 continue;
             };
             any_covered |= !tab.sources.is_empty();
-            by_name.insert(name.clone(), nuclides.len());
-            nuclides.push(tab);
+            product_by_name.insert(name.clone(), products.len());
+            products.push(tab);
         }
-        Ok(any_covered.then_some(ReplicaMaterial { nuclides, by_name }))
+        let (transmutation, transmutation_mts) = match layout {
+            Some((tallied, mts)) => (
+                tallied
+                    .iter()
+                    .map(|n| {
+                        by_name
+                            .get(n)
+                            .map(|&i| (false, i))
+                            .or_else(|| product_by_name.get(n).map(|&i| (true, i)))
+                    })
+                    .collect(),
+                mts.to_vec(),
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
+        Ok(any_covered.then_some(ReplicaMaterial {
+            nuclides,
+            by_name,
+            products,
+            transmutation,
+            transmutation_mts,
+        }))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -622,6 +880,7 @@ impl ReplicaContext {
         score_mts: &BTreeSet<i32>,
         density: f64,
         modes: Option<&RegisteredModes>,
+        resonance: Option<(&TransportResonance, u64)>,
     ) -> Result<Option<ReplicaNuclide>, String> {
         let t = temperature_index(&nuclide, temperature)?;
         let label = &nuclide.loaded_temperatures[t];
@@ -821,6 +1080,18 @@ impl ReplicaContext {
             .filter(|_| nuclide.urr_present)
             .map(|t| (Arc::clone(&nuclide), t));
 
+        let resonance = match resonance {
+            Some((r, seed)) => Some(ResonanceTables::new(
+                r,
+                &grid,
+                &held,
+                score_mts,
+                relative.len(),
+                seed,
+            )?),
+            None => None,
+        };
+
         Ok(Some(ReplicaNuclide {
             density,
             grid,
@@ -830,6 +1101,7 @@ impl ReplicaContext {
             fission,
             scores,
             urr,
+            resonance,
         }))
     }
 
@@ -874,6 +1146,16 @@ impl ReplicaContext {
                 }
                 let own = ReplicaNuclide::at(&s.own, at);
                 s.add_change(e, own, nuc.density * sum, out, grad);
+            }
+            if let Some(res) = &nuc.resonance {
+                if let Some(local) = res.local(at) {
+                    for m in 0..res.reactions.len() {
+                        let scale = nuc.density * res.band_factor(m, g.as_ref());
+                        if scale != 0.0 {
+                            res.add(m, local, scale, out);
+                        }
+                    }
+                }
             }
         }
     }
@@ -925,6 +1207,17 @@ impl ReplicaContext {
                     src.add_change(e, own, w, out, grad);
                 }
             }
+            if let Some((res, local)) = nuc.resonance.as_ref().and_then(|r| Some((r, r.local(at)?)))
+            {
+                for (m, (rmt, _)) in res.reactions.iter().enumerate() {
+                    if is_fission(*rmt) {
+                        res.add(m, local, 1.0 / total, out);
+                    }
+                }
+                for f in out.iter_mut() {
+                    *f = f.max(0.0);
+                }
+            }
             return;
         }
         if let Some(terms) = nuc.terms_of.get(&mt) {
@@ -944,6 +1237,23 @@ impl ReplicaContext {
                 let src = &nuc.sources[*s];
                 let own = ReplicaNuclide::at(&src.own, at);
                 src.add_change(e, own, scale, out, grad);
+            }
+        }
+        // A resonance reaction's factor is `1 + Δσ_k / σ` at the collision,
+        // the same inside a band, which cancels within its channel. A replica
+        // whose drawn cross section is zero where the nominal is not could not
+        // have made this collision, and its ratio goes to zero.
+        if let Some((res, local)) = nuc.resonance.as_ref().and_then(|r| Some((r, r.local(at)?))) {
+            if let Some(m) = res.reactions.iter().position(|(rmt, _)| *rmt == mt) {
+                let nominal = &res.reactions[m].1.nominal;
+                let (i, f) = local;
+                let sigma = nominal[i] + f * (nominal[i + 1] - nominal[i]);
+                if sigma > 0.0 {
+                    res.add(m, local, 1.0 / sigma, out);
+                    for f in out.iter_mut() {
+                        *f = f.max(0.0);
+                    }
+                }
             }
         }
     }
@@ -993,6 +1303,22 @@ impl ReplicaContext {
                     let sum = ReplicaNuclide::banded(src, at, &g, channels);
                     src.add_change(e, own, nuc.density * sum, &mut change, &mut change_grad);
                 }
+                // A band's channel moves by its smooth channel's change times
+                // the band's factor, the sampled resonance parameters' too.
+                if let Some((res, local)) =
+                    nuc.resonance.as_ref().and_then(|r| Some((r, r.local(at)?)))
+                {
+                    for m in 0..res.reactions.len() {
+                        let inside = res.reactions[m]
+                            .1
+                            .channel
+                            .is_some_and(|c| channels.contains(&c));
+                        if inside {
+                            let scale = nuc.density * res.band_factor(m, Some(&g));
+                            res.add(m, local, scale, &mut change);
+                        }
+                    }
+                }
                 continue;
             }
             let Some((by_source, nominal)) = nuc.scores.get(&x) else {
@@ -1010,6 +1336,15 @@ impl ReplicaContext {
                     &mut change_grad,
                 );
             }
+            if let Some((res, local, weights)) = nuc
+                .resonance
+                .as_ref()
+                .and_then(|r| Some((r, r.local(at)?, r.scores.get(&x)?)))
+            {
+                for &(m, w) in weights {
+                    res.add(m, local, nuc.density * w, &mut change);
+                }
+            }
         }
         if denominator > 0.0 {
             for (o, c) in out.iter_mut().zip(change) {
@@ -1019,6 +1354,64 @@ impl ReplicaContext {
                 *o = c / denominator;
             }
         }
+    }
+}
+
+impl ReplicaChanges for ReplicaContext {
+    /// Each replica's change to each MT the transmutation tally scores for
+    /// one of its nuclides, from the same tables (and so the same draw) the
+    /// flights, collisions and tally scores read: what the nuclide's covered
+    /// partials summing to the MT move by under its field, and what its
+    /// sampled resonance parameters move them by. The smooth cross sections,
+    /// as the transmutation tally scores them.
+    fn add_changes(&self, material_id: u32, nuclide: usize, energy: f64, out: &mut [f64]) -> bool {
+        let Some(m) = self
+            .transmutation_slots
+            .get(&material_id)
+            .and_then(|&slot| self.materials[slot].as_ref())
+        else {
+            return false;
+        };
+        let Some(&Some((product, i))) = m.transmutation.get(nuclide) else {
+            return false;
+        };
+        let nuc = if product {
+            &m.products[i]
+        } else {
+            &m.nuclides[i]
+        };
+        let Some(at) = nuc.locate(energy) else {
+            return false;
+        };
+        let r = self.replicas;
+        let local = nuc
+            .resonance
+            .as_ref()
+            .and_then(|res| Some((res, res.local(at)?)));
+        let mut moved = false;
+        for (k, x) in m.transmutation_mts.iter().enumerate() {
+            let out = &mut out[k * r..(k + 1) * r];
+            if let Some((by_source, _)) = nuc.scores.get(x) {
+                for (s, xs) in by_source {
+                    let w = ReplicaNuclide::at(xs, at);
+                    if w == 0.0 {
+                        continue;
+                    }
+                    let src = &nuc.sources[*s];
+                    let own = ReplicaNuclide::at(&src.own, at);
+                    src.add_change(energy, own, w, out, &mut []);
+                    moved = true;
+                }
+            }
+            if let Some(weights) = local.and_then(|(res, _)| res.scores.get(x)) {
+                let (res, at) = local.expect("checked above");
+                for &(m, w) in weights {
+                    res.add(m, at, w, out);
+                    moved = true;
+                }
+            }
+        }
+        moved
     }
 }
 
@@ -1105,6 +1498,18 @@ impl<'a> ReplicaSegment<'a> {
             .map(|(a, b)| a * b)
             .chain(self.slope.iter().zip(&grad).map(|(s, g)| s + g))
             .collect()
+    }
+
+    /// `r_k φ(ΔΣ_k d)` per replica: the particle's ratio integrated along
+    /// the segment, per unit length, which every track-length score of
+    /// replica `k` is the nominal one times.
+    pub(crate) fn track_factors(&self) -> &[f64] {
+        &self.factors
+    }
+
+    /// The draws the segment's factors are of.
+    pub(crate) fn context(&self) -> &'a ReplicaContext {
+        self.ctx
     }
 
     /// Carry the particle's ratios and derivatives to the segment's end.
@@ -1221,9 +1626,10 @@ mod nc_derived_tests {
             return;
         };
         let replicas = 8;
-        let ctx = ReplicaContext::new(&[Arc::new(m.clone())], &[], replicas, SEED)
+        let ctx = ReplicaContext::new(&[Arc::new(m.clone())], &[], None, replicas, SEED)
             .expect("replica context");
-        let (fields, _) = transport_fields(&m);
+        let (fields, _) =
+            yani_transmute::covariance_fold::transport_fields(&m, &Default::default());
         let cells = fields
             .iter()
             .filter_map(|(n, t)| t.field.clone().map(|f| (n.clone(), f)))
@@ -1246,6 +1652,7 @@ mod nc_derived_tests {
                 &fields["Pb208"],
                 draw.relative("Pb208").expect("relative"),
                 draw.absolute("Pb208").expect("absolute"),
+                None,
             )
             .expect("perturb");
             assert_eq!(floored, 0);
@@ -1286,9 +1693,10 @@ mod nc_derived_tests {
             return;
         };
         let replicas = 4096;
-        let ctx = ReplicaContext::new(&[Arc::new(m.clone())], &[], replicas, SEED)
+        let ctx = ReplicaContext::new(&[Arc::new(m.clone())], &[], None, replicas, SEED)
             .expect("replica context");
-        let (fields, _) = transport_fields(&m);
+        let (fields, _) =
+            yani_transmute::covariance_fold::transport_fields(&m, &Default::default());
         let t = &fields["Pb208"];
         let field = t.field.as_ref().expect("a field");
         let data = &m.nuclide_data["Pb208"];
