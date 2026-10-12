@@ -152,6 +152,39 @@ impl Config {
             .or_else(|| self.default_cross_section.clone())
     }
 
+    /// Why `nuclides` have no neutron cross-section source, saying how to give
+    /// them one.
+    ///
+    /// There is no default neutron library: unlike the photon data
+    /// (`url_cache::DEFAULT_PHOTON_LIBRARY`) and the transmutation chain
+    /// ([`DEFAULT_TRANSMUTATION_LIBRARY`]), which library the neutrons see is
+    /// the calculation's central choice, so it is made by the caller and a
+    /// calculation that needs it and finds none stops here.
+    pub fn missing_cross_sections(&self, nuclides: &[&str]) -> String {
+        let named = nuclides
+            .iter()
+            .map(|n| format!("'{n}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if self.default_cross_section.is_none() && self.cross_sections.is_empty() {
+            format!(
+                "no neutron cross-section library is configured, so there is no data for \
+                 {named}. Set one with `cross_section_data`, e.g. \
+                 `yamc.cross_section_data = \"endf-b8.1\"` (or `yani.`): a library keyword \
+                 ({}), a local release directory, or a {{nuclide: path}} dict. Or load \
+                 the material's data yourself with `Material.read_nuclear_data`.",
+                crate::url_cache::KEYWORDS.join(", "),
+            )
+        } else {
+            format!(
+                "no neutron cross sections for {named}: `cross_section_data` maps {} \
+                 nuclide(s) and names no library for the rest. Add them to the mapping, or \
+                 set a library keyword or local release directory as the default.",
+                self.cross_sections.len(),
+            )
+        }
+    }
+
     /// Set multiple cross section file paths at once, or set a global keyword/directory
     pub fn set_cross_sections<T>(&mut self, input: T)
     where
@@ -191,6 +224,28 @@ impl Config {
         self.transmutation_reactions = SubsectionSource::Default;
         self.transmutation_fission_yields = SubsectionSource::Default;
         self.transmutation_branch_ratios = None;
+    }
+}
+
+/// [`Config::missing_cross_sections`] for one nuclide, against the global
+/// configuration.
+///
+/// Called where a load finds no source, which can be inside code already
+/// holding [`CONFIG`]; it then answers without the configuration rather than
+/// waiting on the lock.
+pub fn missing_cross_section_message(nuclide: &str) -> String {
+    match CONFIG.try_lock() {
+        Ok(config) => config.missing_cross_sections(&[nuclide]),
+        // A panic elsewhere while holding the lock leaves the configuration
+        // as readable as it was; the poison says nothing about it.
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+            poisoned.into_inner().missing_cross_sections(&[nuclide])
+        }
+        Err(std::sync::TryLockError::WouldBlock) => format!(
+            "no neutron cross-section source for '{nuclide}'. Set one with \
+             `cross_section_data`, or load the material's data with \
+             `Material.read_nuclear_data`."
+        ),
     }
 }
 
@@ -313,5 +368,30 @@ mod subsection_source_tests {
         config.clear();
         assert!(!config.transmutation_reactions.is_off());
         assert!(!config.transmutation_fission_yields.is_off());
+    }
+}
+
+#[cfg(test)]
+mod missing_cross_section_tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_library_says_how_to_set_one() {
+        let empty = Config::new().missing_cross_sections(&["Fe56", "Fe57"]);
+        assert!(
+            empty.contains("no neutron cross-section library is configured"),
+            "{empty}"
+        );
+        assert!(empty.contains("cross_section_data"), "{empty}");
+        assert!(empty.contains("'Fe56', 'Fe57'"), "{empty}");
+        assert!(empty.contains("endf-b8.1"), "{empty}");
+
+        let mut mapped = Config::new();
+        mapped
+            .cross_sections
+            .insert("Li6".to_string(), "Li6.arrow".to_string());
+        let partial = mapped.missing_cross_sections(&["Fe56"]);
+        assert!(partial.contains("maps 1 nuclide(s)"), "{partial}");
+        assert!(partial.contains("'Fe56'"), "{partial}");
     }
 }

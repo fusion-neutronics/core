@@ -127,5 +127,15 @@ fn a_decay_only_schedule_is_allowed_against_any_chain() {
 
 #[test]
 fn a_chain_that_does_drive_the_material_still_runs() {
+    // Irradiating needs the composition's cross sections; with no library
+    // configured that is its own refusal (`no_cross_section_library.rs`).
+    let Some(path) = yamc_test_cache::nuclide("Fe56") else {
+        eprintln!("skipping: Fe56 fixture not fetched");
+        return;
+    };
+    yamc_nuclide::config::CONFIG
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .set_cross_section("Fe56", Some(&path));
     run(material("Fe56", 7.87), "Fe56", Some((0, 1.0e14))).expect("iron against an iron chain");
 }
