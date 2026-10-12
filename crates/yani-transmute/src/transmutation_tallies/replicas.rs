@@ -28,6 +28,9 @@
 //!   production evaluated against the replica's total;
 //! - every fission-yield interpolation weight, against the replica's fission
 //!   cross section;
+//! - with [`TransmutationTallies::with_isomer_intervals`], every MF=40 state's
+//!   production on each of its covariance intervals, the replica's production
+//!   of the state binned as the nominal one is;
 //! - the zeroth flux moment in each union-grid bin, and the first moment too
 //!   where the tally folds `(n,n')` partial curves from them.
 //!
@@ -94,6 +97,10 @@ pub struct ReplicaTallied {
     /// Per replica, the fission-yield spectrum weights, as
     /// [`TransmutationTallies::get_fission_yield_weights`] gives the nominal.
     pub fy_weights: Vec<FissionYieldWeights>,
+    /// Per replica, each MF=40 state's production on its covariance
+    /// intervals, as [`TransmutationTallies::get_isomer_productions`] gives
+    /// the nominal; empty when the tally did not score them.
+    pub isomer: Vec<crate::IsomerIntervalProductions>,
     /// Per replica, the flux on the union grid, as
     /// [`TransmutationTallies::flux_spectrum`] gives the nominal: what a fold
     /// of a quantity the transport does not perturb (an isomer production
@@ -120,6 +127,8 @@ struct Layout {
     rates: usize,
     yields: usize,
     fission: usize,
+    /// The MF=40 interval productions, one row per state interval.
+    isomer: usize,
     /// The zeroth union-grid moments, one row per bin.
     s0: usize,
     /// The first moments, or `None` when no curve is folded from them.
@@ -133,7 +142,8 @@ impl Layout {
         let rates = 1;
         let yields = rates + mat.nuclide_names.len() * mat.mt_numbers.len();
         let fission = yields + mat.yield_channels.len();
-        let s0 = fission + mat.fy_batch.len();
+        let isomer = fission + mat.fy_batch.len();
+        let s0 = isomer + mat.isomer.as_ref().map_or(0, |t| t.batch.len());
         let (s1, rows) = if first_moments {
             (Some(s0 + n_bins), s0 + 2 * n_bins)
         } else {
@@ -143,6 +153,7 @@ impl Layout {
             rates,
             yields,
             fission,
+            isomer,
             s0,
             s1,
             rows,
@@ -402,6 +413,14 @@ impl ReplicaSums {
                                 let p = values[c] * factor;
                                 if p > 0.0 {
                                     buf[(layout.yields + ch) * r + k] += weights[k] * p;
+                                    for iv in list.intervals.iter().filter(|iv| iv.curve == c) {
+                                        if let Some((at, share)) =
+                                            iv.locate(energy, &list.rule.curves[c])
+                                        {
+                                            buf[(layout.isomer + at) * r + k] +=
+                                                weights[k] * p * share;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -415,6 +434,17 @@ impl ReplicaSums {
                             let p = values[c] * factor;
                             if p > 0.0 {
                                 add_scaled(&mut buf[row(layout.yields + ch)], weights, p);
+                                for iv in list.intervals.iter().filter(|iv| iv.curve == c) {
+                                    if let Some((at, share)) =
+                                        iv.locate(energy, &list.rule.curves[c])
+                                    {
+                                        add_scaled(
+                                            &mut buf[row(layout.isomer + at)],
+                                            weights,
+                                            p * share,
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -444,6 +474,27 @@ impl ReplicaSums {
                 *hit = false;
             }
         }
+    }
+
+    /// Append the shared sums, slot by slot, for a reduction across ranks.
+    /// They are sums over each rank's histories of the same replicas' scores
+    /// (every rank draws the replicas from the same seed), so they add.
+    pub(crate) fn pack(&self, out: &mut Vec<f64>) {
+        for s in &self.sums {
+            out.extend_from_slice(&s.lock().unwrap_or_else(|p| p.into_inner()));
+        }
+    }
+
+    /// Read back what [`Self::pack`] wrote from `packed` at `off`; the offset
+    /// past it.
+    pub(crate) fn unpack(&self, packed: &[f64], mut off: usize) -> usize {
+        for s in &self.sums {
+            let mut s = s.lock().unwrap_or_else(|p| p.into_inner());
+            let n = s.len();
+            s.copy_from_slice(&packed[off..off + n]);
+            off += n;
+        }
+        off
     }
 
     pub(crate) fn reset(&self) {
@@ -582,6 +633,12 @@ impl TransmutationTallies {
             let fission = column(layout.fission, mat.fy_batch.len(), k);
             out.fy_weights
                 .push(fission_yield_weights_of_sums(mat, &fission));
+            if let (Some(covariance), Some(tally)) = (&self.isomer, &mat.isomer) {
+                let sums = column(layout.isomer, tally.batch.len(), k);
+                out.isomer.push(
+                    self.isomer_productions_of_sums(covariance, tally, &sums, &s0, &s1, scale),
+                );
+            }
             out.spectra.push(crate::MultigroupSpectrum {
                 boundaries: boundaries.clone(),
                 masses: s0.iter().map(|v| v * per_source).collect(),

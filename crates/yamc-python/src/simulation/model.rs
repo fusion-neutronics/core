@@ -1098,12 +1098,19 @@ impl PyModel {
     ///         ``replica_standard_error``. Cross sections only: leave
     ///         ``sources`` unset or pass ``["cross_sections"]``, and
     ///         ``attribution`` and ``convergence`` are not supported (the
-    ///         replica count is fixed). Not yet supported, and refused with the reason:
-    ///         ``compute='gpu'``, MPI, ``tracking_mode`` other than
-    ///         ``'surface'``, survival biasing, weight windows, photon
-    ///         transport, collision-estimator tallies, overlay tallies, mesh
-    ///         tallies and per-nuclide tally bins. ``model.data_uncertainty_coverage()``
-    ///         lists what the evaluations cover. Default ``None``.
+    ///         replica count is fixed). The weights are carried through every
+    ///         tracking mode (under delta tracking the majorant is raised to
+    ///         cover every replica's total and virtual collisions carry the
+    ///         replicas' rejection odds), survival biasing, weight windows and
+    ///         MPI. Photons inherit their neutron's weights times the change to
+    ///         the cross section of the reaction that made them, and keep them
+    ///         (photon data carries no covariance), so photon tallies and
+    ///         photon heating get the nuclear-data uncertainty of the neutron
+    ///         transport. Not yet supported, and refused with the reason:
+    ///         ``compute='gpu'``, collision-estimator tallies, overlay tallies,
+    ///         mesh tallies and per-nuclide tally bins.
+    ///         ``model.data_uncertainty_coverage()`` lists what the evaluations
+    ///         cover. Default ``None``.
     ///
     /// Returns:
     ///     ``SimulationResults`` containing finalized ``TallyResult``s for
@@ -1635,10 +1642,11 @@ impl PyModel {
     ///
     ///         ``"flux_spectrum"`` does not apply: there is no supplied spectrum,
     ///         and the flux's error is the statistical one.
-    ///         Nor does ``"isomer_branching"``: the isomeric split here is the
-    ///         tallied partials', scored at collisions with no energy to fold
-    ///         the MF=40 covariance over, so every split is held and the report
-    ///         says so under ``not_perturbed``.
+    ///         ``"isomer_branching"`` re-splits the tallied partials: the tally
+    ///         scores each MF=40 state's production on its covariance
+    ///         intervals at the energy of each track segment (per replica with
+    ///         replica weights), and each replica draws the state's production
+    ///         from those weights, as a spectrum run does from its group fold.
     ///         With replica weights every replica's rates come from the same
     ///         histories as the nominal ones, so the differences between replicas are resolved
     ///         far more finely than the rates themselves, and ``"statistical"``

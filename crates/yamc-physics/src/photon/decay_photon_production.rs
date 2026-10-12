@@ -43,6 +43,9 @@ pub struct DecayPhotonChannel {
     pub spectrum: DecayPhotonSpectrum,
     /// Constant yield = branching × photon_per_decay.
     pub yield_constant: f64,
+    /// The MT of the reaction that makes the emitter's parent, whose cross
+    /// section `xs` is.
+    pub mt: i32,
 }
 
 /// The energy spectrum of one D1S channel: one decay source of the emitter.
@@ -271,6 +274,7 @@ pub fn precompute_decay_photon_data(
                             target_id,
                             spectrum,
                             yield_constant,
+                            mt,
                         });
                     }
                 }
@@ -322,6 +326,7 @@ pub fn sample_decay_photons<R: rand::Rng>(
     micro_xs_total: f64,
     bank: &mut ParticleBank,
     rng: &mut R,
+    mut on_photon: impl FnMut(&mut Particle, i32),
 ) {
     if micro_xs_total <= 0.0 || decay_photon_data.channels.is_empty() {
         return;
@@ -371,6 +376,9 @@ pub fn sample_decay_photons<R: rand::Rng>(
     photon.weight = photon_wgt;
     photon.current_cell_index = particle.current_cell_index;
     photon.parent_nuclide = Some(selected.target_id);
+    // The caller's say on the photon, given the reaction that made its
+    // emitter.
+    on_photon(&mut photon, selected.mt);
 
     bank.bank_secondary(photon);
 
@@ -765,6 +773,7 @@ mod tests {
                 total_xs,
                 &mut bank,
                 &mut rng,
+                |_, _| {},
             );
             while let Some(p) = bank.pop_particle() {
                 total_photons += 1;
@@ -946,7 +955,16 @@ mod tests {
         let mut n = 0;
         for _ in 0..1000 {
             bank.clear();
-            sample_decay_photons(&neutron, temp, i_grid, f, total_xs, &mut bank, &mut rng);
+            sample_decay_photons(
+                &neutron,
+                temp,
+                i_grid,
+                f,
+                total_xs,
+                &mut bank,
+                &mut rng,
+                |_, _| {},
+            );
             while let Some(p) = bank.pop_particle() {
                 n += 1;
                 assert_eq!(p.particle_type, ParticleType::Photon);
@@ -1250,7 +1268,16 @@ mod tests {
             photon_prod: vec![],
             channels: vec![],
         };
-        sample_decay_photons(&neutron, &empty_data, 0, 0.0, 1.0, &mut bank, &mut rng);
+        sample_decay_photons(
+            &neutron,
+            &empty_data,
+            0,
+            0.0,
+            1.0,
+            &mut bank,
+            &mut rng,
+            |_, _| {},
+        );
         assert_eq!(bank.len(), 0, "No photons when no D1S data");
     }
 }

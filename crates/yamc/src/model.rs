@@ -1638,11 +1638,7 @@ impl Model {
         // Nuclear-data replica weights: refuse what they do not carry yet, and
         // load covariance before the tables are prepared from the same data.
         if let Some(data) = &settings.data_uncertainty {
-            self.validate_data_uncertainty(
-                data,
-                mpi_size.max(1) as usize,
-                transmutation_tallies.is_some(),
-            )?;
+            self.validate_data_uncertainty(data, transmutation_tallies.is_some())?;
             self.load_covariance_for_replicas()?;
         }
 
@@ -1961,7 +1957,13 @@ impl Model {
         // Pure Woodcock requires a majorant that bounds Σ_t along the entire
         // flight path (see `build_majorant`); the photon majorant covers the
         // photon channel when photons can appear.
-        let majorant = self.build_majorant();
+        // With replica weights the neutron majorant also bounds every
+        // replica's total, so delta tracking's virtual-collision factors stay
+        // positive (`ReplicaContext::majorant`).
+        let majorant = match (self.build_majorant(), replica_ctx.as_ref()) {
+            (Some(m), Some(r)) => Some(r.majorant(m)),
+            (m, _) => m,
+        };
         let photon_majorant = self.build_photon_majorant();
 
         // Per-cell mean chord lengths for the Woodcock hybrid dispatch
@@ -2867,6 +2869,13 @@ impl Model {
                             mpi_ctx.reduce_sum_f64(&mut c, 0);
                             c
                         });
+                        // So are the nuclear-data replicas' sums: every rank
+                        // draws the same replicas from the same seed, and the
+                        // sums of their scores over each rank's histories add.
+                        let mut summed_replicas = stats.replicas.clone().map(|mut r| {
+                            mpi_ctx.reduce_sum_f64(&mut r.sums, 0);
+                            r
+                        });
                         if let (Some(means), Some(m2s), Some(rank_n)) =
                             (means, m2s, rank_n.as_ref())
                         {
@@ -2883,8 +2892,6 @@ impl Model {
                                     agg: yamc_tallies::welford::AggMoments::ZERO,
                                     score_pdf: yamc_tallies::welford::ScorePdf::default(),
                                     comoment: None,
-                                    // A run with replica weights is refused
-                                    // under MPI before it starts.
                                     replicas: None,
                                 };
                                 match &mut folded {
@@ -2897,6 +2904,7 @@ impl Model {
                             if let Some(mut folded) = folded {
                                 // Raw products add across ranks.
                                 folded.comoment = summed_comoment.take();
+                                folded.replicas = summed_replicas.take();
                                 *stats = folded;
                             }
                         }
@@ -2904,6 +2912,9 @@ impl Model {
                         mpi_ctx.broadcast_f64(&mut stats.m2, 0);
                         if let Some(c) = stats.comoment.as_mut() {
                             mpi_ctx.broadcast_f64(c, 0);
+                        }
+                        if let Some(r) = stats.replicas.as_mut() {
+                            mpi_ctx.broadcast_f64(&mut r.sums, 0);
                         }
                         stats.n_histories = n_total[0];
                         stats.agg = yamc_tallies::welford::AggMoments::ZERO;

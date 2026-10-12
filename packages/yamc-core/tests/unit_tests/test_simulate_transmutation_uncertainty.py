@@ -103,6 +103,10 @@ def test_the_report_names_the_sources_that_applied():
     # a transport run, whose flux error is the statistical one.
     assert "statistical" in info["sources"]
     assert "flux_spectrum" not in info["sources"]
+    # The tally scores each MF=40 state per interval, so the isomeric split
+    # is drawn on a transport run too, not held wholesale.
+    assert "isomer_branching" in info["sources"]
+    assert not any("every split held" in s for s in info["not_perturbed"])
     assert info["statistical_rates"] > 0
     assert info["statistical_sampled"] == 16 * info["statistical_rates"]
     # The transport carried a replica weight per replica, so each replica's
@@ -230,29 +234,3 @@ def test_flux_response_is_refused_where_there_is_none_to_choose():
     schedule = yamc.PulseSchedule([yamc.Pulse(rate=1.0e14, duration=HOUR, source=source)])
     with pytest.raises(ValueError, match="flux_response applies to Model.simulate_transmutation"):
         material.transmute(schedule, data_uncertainty=yamc.DataUncertainty(flux_response="held"))
-
-
-def test_replica_weights_refuse_delta_tracking_and_name_the_held_flux():
-    material = yamc.Material(
-        composition={"Fe56": 1.0},
-        density=7.87,
-        transmutable=True,
-        volume=4188.79,
-        temperature=294,
-        id=MAT_ID,
-    )
-    material.read_nuclear_data({"Fe56": os.path.join(TESTS_DIR, "Fe56.arrow")})
-    sphere = yamc.Sphere(radius=10.0, boundary="vacuum")
-    cell = yamc.Cell(name="sphere", region=sphere.below, material=material)
-    source = yamc.NeutronSource(position=(0, 0, 0), energy=yamc.sources.Discrete([1.0e6], [1.0]))
-    model = yamc.Model(
-        geometry=yamc.Geometry([cell]), source=source, verbose=[], tracking_mode="woodcock"
-    )
-    schedule = yamc.PulseSchedule([yamc.Pulse(rate=1.0e14, duration=HOUR, source=source)])
-    with pytest.raises(RuntimeError, match='flux_response="held"'):
-        model.simulate_transmutation(
-            method="independent",
-            schedule=schedule,
-            total_particles=100,
-            data_uncertainty=yamc.DataUncertainty(samples=16),
-        )
