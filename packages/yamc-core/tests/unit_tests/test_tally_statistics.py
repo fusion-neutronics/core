@@ -71,6 +71,7 @@ def test_statistical_checks_verdict():
         c.variance_of_variance_ok,
         c.tail_slope_ok,
         c.mean_stable,
+        c.figure_of_merit_no_trend,
     ):
         assert value is None or isinstance(value, bool)
     assert isinstance(c.summary(), str)
@@ -86,6 +87,15 @@ def test_convergence_history():
     assert last.mean > 0.0
     assert last.relative_error >= 0.0
     assert last.figure_of_merit >= 0.0
+    assert all(b.elapsed_secs >= a.elapsed_secs for a, b in zip(hist, hist[1:]))
+
+
+def test_rate_checks_pass_for_well_behaved_tally():
+    # A healthy tally's relative error falls as 1/sqrt(N) and its variance of
+    # the variance as 1/N; the result is deterministic for a fixed seed.
+    c = _tbr_result().statistical_checks
+    assert c.relative_error_rate_ok is True
+    assert c.variance_of_variance_rate_ok is True
 
 
 def test_score_pdf_raw():

@@ -540,6 +540,11 @@ class ConvergencePoint:
     def figure_of_merit(self) -> builtins.float: ...
     @property
     def tail_slope(self) -> builtins.float: ...
+    @property
+    def elapsed_secs(self) -> builtins.float:
+        r"""
+        Transport wall-clock time elapsed at this snapshot, in seconds.
+        """
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
@@ -4584,6 +4589,22 @@ class StatisticalChecks:
     def variance_of_variance_decreasing(self) -> typing.Optional[builtins.bool]: ...
     @property
     def figure_of_merit_stable(self) -> typing.Optional[builtins.bool]: ...
+    @property
+    def relative_error_rate_ok(self) -> typing.Optional[builtins.bool]:
+        r"""
+        Relative error falling as ``1/sqrt(N)`` over the last half of the run.
+        """
+    @property
+    def variance_of_variance_rate_ok(self) -> typing.Optional[builtins.bool]:
+        r"""
+        Variance of the variance falling as ``1/N`` over the last half of the run.
+        """
+    @property
+    def figure_of_merit_no_trend(self) -> typing.Optional[builtins.bool]:
+        r"""
+        Figure of merit shows no systematic trend with ``N`` over the last half
+        of the run. ``None`` when that half spans under 0.1 s of wall time.
+        """
     def summary(self) -> builtins.str:
         r"""
         A plain-text pass / FAIL / n/a table.
