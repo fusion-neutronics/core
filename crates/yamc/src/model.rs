@@ -2644,6 +2644,7 @@ impl Model {
                             variance_of_variance: vov,
                             figure_of_merit: fom,
                             tail_slope: pdf.tail_slope(),
+                            elapsed_secs: elapsed,
                         });
                         // Live convergence line from the freshly-combined
                         // aggregate. Mesh tallies are skipped: their summed-
