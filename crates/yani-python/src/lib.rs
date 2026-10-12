@@ -117,6 +117,10 @@ pub fn register_classes(py: Python<'_>, m: &Bound<'_, PyModule>, package: &str) 
     m.add_function(wrap_pyfunction!(read::read_nuclide_from_arrow, m)?)?;
     m.add_function(wrap_pyfunction!(read::read_element_from_arrow, m)?)?;
     m.add_function(wrap_pyfunction!(config::cache_dir, m)?)?;
+    // The host's downloader on Pyodide, which has no sockets. Registered here
+    // so the yamc and yani wheels share the one hook.
+    #[cfg(target_os = "emscripten")]
+    m.add_function(wrap_pyfunction!(config::_set_data_fetcher, m)?)?;
     m.add_function(wrap_pyfunction!(config::get_cross_section_data, m)?)?;
     m.add_function(wrap_pyfunction!(config::set_cross_section_data, m)?)?;
     m.add_function(wrap_pyfunction!(config::lookup_cross_section_data, m)?)?;

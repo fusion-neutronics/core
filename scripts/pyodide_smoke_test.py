@@ -24,6 +24,9 @@ served here adds them to each `version.json` (what the converter's
 `index_reactions` pass does to a published tree) before the manifest is built,
 and the fetcher answers `Range` requests as the origin does: one range as the
 bytes alone, several as `multipart/byteranges`.
+
+`publish` and `origin` are shared with `pyodide_smoke_test_yani.py`, which
+serves the yani-core wheel the same release with the transmutation chain added.
 """
 
 import hashlib
@@ -90,19 +93,28 @@ def answer_range(body, header):
     return out + b"\r\n--" + boundary + b"--\r\n"
 
 
-def publish(fixtures):
+def publish(fixtures, nuclides=NUCLIDES, chain=None):
     """The release the fetcher serves: origin-relative path to bytes.
 
     Args:
         fixtures: The directory of fixture sections, laid out as
             `<library>-<name>.arrow/<section>`.
+        nuclides: The neutron nuclides the release carries.
+        chain: The transmutation chain fixture to publish as the release's
+            `transmutation/` subsections, a directory under `fixtures` laid
+            out as `<subsection>/<section>`, or None for no chain.
 
     Returns:
         Every object of the release, keyed by its path under the origin.
     """
     objects = {}
     files = []
-    for name in NUCLIDES:
+
+    def add(path, body):
+        objects[f"{KEYWORD}/{RELEASE}/{path}"] = body
+        files.append({"path": path, "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()})
+
+    for name in nuclides:
         folder = os.path.join(fixtures, f"{KEYWORD}-{name}.arrow")
         sections = {}
         for section in sorted(os.listdir(folder)):
@@ -117,11 +129,16 @@ def publish(fixtures):
         add_hashes(version, sections)
         sections["version.json"] = json.dumps(version, indent=2).encode()
         for section, body in sections.items():
-            path = f"neutron/{name}.arrow/{section}"
-            objects[f"{KEYWORD}/{RELEASE}/{path}"] = body
-            files.append(
-                {"path": path, "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
-            )
+            add(f"neutron/{name}.arrow/{section}", body)
+    if chain is not None:
+        root = os.path.join(fixtures, chain)
+        for subsection in sorted(os.listdir(root)):
+            folder = os.path.join(root, subsection)
+            if not os.path.isdir(folder):
+                continue
+            for section in sorted(os.listdir(folder)):
+                with open(os.path.join(folder, section), "rb") as f:
+                    add(f"transmutation/{subsection}.arrow/{section}", f.read())
     manifest = json.dumps(
         {"keyword": KEYWORD, "release": RELEASE, "format_version": 2, "files": files}
     ).encode()
@@ -138,6 +155,37 @@ def publish(fixtures):
     return objects
 
 
+def origin(objects):
+    """A data fetcher answering from `objects` as the origin would.
+
+    Args:
+        objects: The release, as `publish` returns it.
+
+    Returns:
+        `(fetch, requests, batches)`: the fetcher to install, the list of
+        `(url, range)` it has been asked for, and the size of each batch.
+    """
+    requests = []
+    batches = []
+
+    def fetch_one(url, range_header):
+        """Answer one GET from the published release, as the origin would."""
+        requests.append((url, range_header))
+        body = objects.get(url.removeprefix(ORIGIN)) if url.startswith(ORIGIN) else None
+        if body is None:
+            return 404, b""
+        if range_header is not None:
+            return 206, answer_range(body, range_header)
+        return 200, body
+
+    def fetch(batch):
+        """Answer a batch of GETs, one `(status, body)` per `(url, range)`."""
+        batches.append(len(batch))
+        return [fetch_one(url, range_header) for url, range_header in batch]
+
+    return fetch, requests, batches
+
+
 def main(fixtures):
     """Build a small model, run transport on fixture data, and check the result.
 
@@ -150,25 +198,7 @@ def main(fixtures):
     import yamc
     from yamc import _core
 
-    objects = publish(fixtures)
-    requests = []
-    batches = []
-
-    def fetch(batch):
-        """Answer a batch of GETs, one `(status, body)` per `(url, range)`."""
-        batches.append(len(batch))
-        return [fetch_one(url, range_header) for url, range_header in batch]
-
-    def fetch_one(url, range_header):
-        """Answer one GET from the published release, as the origin would."""
-        requests.append((url, range_header))
-        body = objects.get(url.removeprefix(ORIGIN)) if url.startswith(ORIGIN) else None
-        if body is None:
-            return 404, b""
-        if range_header is not None:
-            return 206, answer_range(body, range_header)
-        return 200, body
-
+    fetch, requests, batches = origin(publish(fixtures))
     _core._set_data_fetcher(fetch)
 
     yamc.cross_section_data = "endf-b8.1"

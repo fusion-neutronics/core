@@ -1,17 +1,19 @@
-# Builds yamc-core as a Pyodide (Emscripten) wheel and runs it inside Pyodide.
+# Builds yamc-core and yani-core as Pyodide (Emscripten) wheels and runs each
+# inside Pyodide.
 #
-# yamc-online (the browser page that runs yamc Python on Pyodide) vendors this
-# wheel. It used to vendor one built by hand from a local branch, so nothing
-# here noticed when a change stopped the emscripten build compiling, and the
-# page could not say which commit its wheel came from. The artifact uploaded
-# below is what it vendors now.
+# yamc-online and yani-online (the browser pages that run yamc and yani Python
+# on Pyodide) install these wheels from PyPI. yamc-online used to vendor one
+# built by hand from a local branch, so nothing here noticed when a change
+# stopped the emscripten build compiling, and the page could not say which
+# commit its wheel came from.
 #
-# Published to PyPI with the native wheels. PyPI's trusted publisher for
-# yamc-core is bound to ci-python.yml, so the upload has to come from a job in
-# that file: on a release (or a dispatch that publishes yamc-core) ci-python.yml
-# calls this workflow, and its `collect` job picks the artifact up by the
-# `wheels-*` name like any other yamc-core wheel. Pushes and pull requests run
-# this file on its own, to keep the build and the smoke test honest.
+# Published to PyPI with the native wheels. PyPI's trusted publishers are bound
+# to ci-python.yml, so the upload has to come from a job in that file: on a
+# release (or a dispatch that publishes) ci-python.yml calls this workflow for
+# the projects it publishes, and its `collect` job picks each artifact up by the
+# `wheels-*` name like any other wheel of that project. Pushes and pull
+# requests run this file on its own, for both projects, to keep the builds and
+# the smoke tests honest.
 name: Pyodide wheel
 
 on:
@@ -25,12 +27,24 @@ on:
     # filtered.
     paths-ignore: ['**/*.md', 'docs/**', 'mkdocs.yml', 'LICENSE*']
   workflow_dispatch:
-  # ci-python.yml, on a run that publishes yamc-core. Not a `release` trigger
-  # here as well, which would build the same wheel twice.
+  # ci-python.yml, on a run that publishes. Not a `release` trigger here as
+  # well, which would build the same wheels twice.
   workflow_call:
     inputs:
+      projects:
+        # Only what the run publishes: `collect` refuses a wheel of a project
+        # the run does not publish, so a yani-core-only release must not build
+        # yamc-core's.
+        description: 'The projects to build, as a JSON list: ["yamc-core"], ["yani-core"] or both'
+        type: string
+        required: true
       yamc_version:
         description: "Override yamc-core's version, as ci-python.yml's dispatch input of that name"
+        type: string
+        required: false
+        default: ""
+      yani_version:
+        description: "Override yani-core's version, as ci-python.yml's dispatch input of that name"
         type: string
         required: false
         default: ""
@@ -53,10 +67,11 @@ env:
   # unreachable, and a release has already been lost to a twelve-second one
   # (yani-core 0.11.0). Ten stretches the same ladder over about a minute.
   CARGO_NET_RETRY: 10
-  # The Pyodide release the wheel is built against. MUST match yamc-online's
-  # vendor/PYODIDE_VERSION: the wheel's platform tag and ABI are Pyodide's, and
-  # the page loads that exact Pyodide from the CDN. Bump both together. The
-  # Python below has to match this release's Python (3.14 for 314.x).
+  # The Pyodide release the wheels are built against. MUST match
+  # vendor/PYODIDE_VERSION in yamc-online and yani-online: the wheel's platform
+  # tag and ABI are Pyodide's, and each page loads that exact Pyodide from the
+  # CDN. Bump them together. The Python below has to match this release's
+  # Python (3.14 for 314.x).
   PYODIDE_VERSION: 314.0.7
   # pyodide-build drives the cross build. Pinned because each release supports
   # a range of xbuildenv versions (`pyodide xbuildenv search` lists them), and
@@ -65,21 +80,34 @@ env:
 
 jobs:
   pyodide_wheel:
-    name: Build and test the Pyodide wheel
+    name: Build and test the ${{ matrix.project }} Pyodide wheel
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      # One project's failure says nothing about the other's wheel.
+      fail-fast: false
+      matrix:
+        # Both on a push or a pull request, where there are no inputs.
+        project: ${{ fromJSON(inputs.projects || '["yamc-core", "yani-core"]') }}
+    env:
+      PROJECT: ${{ matrix.project }}
 
     steps:
       - uses: actions/checkout@v7
 
+      # Only a ci-python.yml dispatch that names one, so the Pyodide wheel goes
+      # out at the same number as the native wheels of that run.
       - name: Override yamc-core's version
-        # Only a ci-python.yml dispatch that names one, so the Pyodide wheel
-        # goes out at the same number as the native wheels of that run.
-        if: inputs.yamc_version != ''
+        if: matrix.project == 'yamc-core' && inputs.yamc_version != ''
         env:
           VERSION: ${{ inputs.yamc_version }}
         run: bash scripts/set-wheel-version.sh yamc-python "$VERSION"
+      - name: Override yani-core's version
+        if: matrix.project == 'yani-core' && inputs.yani_version != ''
+        env:
+          VERSION: ${{ inputs.yani_version }}
+        run: bash scripts/set-wheel-version.sh yani-python "$VERSION"
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -94,11 +122,12 @@ jobs:
           targets: wasm32-unknown-emscripten
 
       # Its own key: wasm32-unknown-emscripten shares no compiled artifacts
-      # with any other job.
+      # with any other job. One per project, since the two builds differ in
+      # features and would otherwise race to save the same key.
       - name: Cache the Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: pyodide
+          shared-key: pyodide-${{ matrix.project }}
           cache-on-failure: true
 
       - name: Install pyodide-build and the cross-build environment
@@ -116,16 +145,17 @@ jobs:
         with:
           tool: cargo-about@0.9.0
       - name: Generate THIRD-PARTY-LICENSES.html for the wheel
-        run: cargo about generate about.hbs --all-features --locked -o packages/yamc-core/THIRD-PARTY-LICENSES.html
+        run: cargo about generate about.hbs --all-features --locked -o "packages/$PROJECT/THIRD-PARTY-LICENSES.html"
 
-      # `--no-default-features` drops mesh, cad, gpu and download-tls. Pyodide
-      # has no sockets, so downloads go through the fetcher the host installs
-      # with `yamc._core._set_data_fetcher` (in yamc-online, a helper worker's
-      # concurrent fetch() calls, which the Python worker blocks on with
-      # Atomics.wait). The wasm viewer blobs the native wheels
+      # `--no-default-features` drops download-tls, and for yamc-core mesh,
+      # cad and gpu as well. Pyodide has no sockets, so downloads go through
+      # the fetcher the host installs with `_core._set_data_fetcher` (one hook,
+      # registered by yani-python for both wheels; in the pages, a helper
+      # worker's concurrent fetch() calls, which the Python worker blocks on
+      # with Atomics.wait). The wasm viewer blobs the native yamc-core wheels
       # ship under yamc/_wasm/ are not added: the page draws plots without them.
       - name: Build the wheel
-        working-directory: packages/yamc-core
+        working-directory: packages/${{ matrix.project }}
         env:
           MATURIN_PEP517_ARGS: --no-default-features
         run: pyodide build -o dist
@@ -134,7 +164,7 @@ jobs:
       # target-specific, which is why that file names this target separately.
       # This is the step that notices if the remaps stop reaching it.
       - name: The wheel must carry no builder paths
-        run: python3 scripts/check_binary_paths.py packages/yamc-core/dist/*.whl
+        run: python3 scripts/check_binary_paths.py packages/"$PROJECT"/dist/*.whl
 
       - name: Cache nuclear-data test fixtures
         uses: actions/cache@v6
@@ -146,24 +176,31 @@ jobs:
 
       # `pyodide venv` makes a virtualenv whose `python` is Pyodide running in
       # Node, so this imports the wheel as the browser does. Node has no
-      # synchronous XMLHttpRequest, so the smoke test installs a data fetcher
+      # synchronous XMLHttpRequest, so each smoke test installs a data fetcher
       # that serves the fixtures above as a published release (pointer,
-      # manifest, files), and runs a Li-6 transport through the same release
-      # resolution, verification, cache and transport code the page runs.
+      # manifest, files) and runs through the same release resolution,
+      # verification and cache code the pages run: a Li-6 transport for
+      # yamc-core, and for yani-core an iron irradiation read back as activity
+      # and decay heat, with the transmutation chain served as the release's
+      # subsections.
       - name: Smoke test the wheel inside Pyodide
         run: |
           set -euo pipefail
+          case "$PROJECT" in
+            yamc-core) smoke=scripts/pyodide_smoke_test.py ;;
+            yani-core) smoke=scripts/pyodide_smoke_test_yani.py ;;
+          esac
           pyodide venv .venv-pyodide
-          .venv-pyodide/bin/pip install packages/yamc-core/dist/*.whl
-          .venv-pyodide/bin/python scripts/pyodide_smoke_test.py ~/.cache/yamc
+          .venv-pyodide/bin/pip install packages/"$PROJECT"/dist/*.whl
+          .venv-pyodide/bin/python "$smoke" ~/.cache/yamc
 
       # `wheels-*`, so ci-python.yml's `collect` downloads it with the native
-      # wheels and sorts it into yamc-core's distributions by filename. No
+      # wheels and sorts it into its project's distributions by filename. No
       # GitHub release asset as well: PyPI carries the same file, and serves it
       # with the CORS headers a browser (micropip) needs, which release assets
       # do not.
       - uses: actions/upload-artifact@v7
         with:
-          name: wheels-pyodide-wasm32
-          path: packages/yamc-core/dist/*.whl
+          name: wheels-pyodide-${{ matrix.project }}
+          path: packages/${{ matrix.project }}/dist/*.whl
           if-no-files-found: error

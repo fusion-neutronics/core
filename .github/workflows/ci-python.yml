@@ -115,6 +115,9 @@ jobs:
       # compares these against the crate manifests rather than re-parsing.
       tagged_yamc_version: ${{ steps.plan.outputs.tagged_yamc_version }}
       tagged_yani_version: ${{ steps.plan.outputs.tagged_yani_version }}
+      # The projects whose Pyodide wheel this run publishes, as the JSON list
+      # ci-pyodide.yml's `projects` input takes. `[]` when it publishes none.
+      pyodide_projects: ${{ steps.plan.outputs.pyodide_projects }}
     steps:
       # No checkout: this reads the event, not the tree, which is what keeps it
       # a sub-minute job in front of everything else.
@@ -218,6 +221,10 @@ jobs:
               build_yamc=true; build_yani=true ;;
           esac
 
+          pyodide=()
+          if [ "$publish_yamc" = true ]; then pyodide+=('"yamc-core"'); fi
+          if [ "$publish_yani" = true ]; then pyodide+=('"yani-core"'); fi
+
           # tee, so the plan is readable in the log of the job that made it.
           {
             echo "build_yamc=$build_yamc"
@@ -226,6 +233,7 @@ jobs:
             echo "publish_yani=$publish_yani"
             echo "tagged_yamc_version=$tagged_yamc"
             echo "tagged_yani_version=$tagged_yani"
+            echo "pyodide_projects=[$(IFS=,; echo "${pyodide[*]-}")]"
           } | tee -a "$GITHUB_OUTPUT"
 
   # The wasm blobs the yamc-core wheel ships.
@@ -676,20 +684,25 @@ jobs:
           name: wheels-macos-aarch64
           path: packages/yamc-core/dist
 
-  # The Pyodide (Emscripten) wheel, which yamc-core publishes alongside the
-  # native ones: `micropip.install("yamc-core")` in a browser resolves it from
-  # PyPI. ci-pyodide.yml builds it and smoke-tests it inside Pyodide, and runs
-  # on its own for pushes and pull requests. It is called from here only when
-  # this run publishes yamc-core, because the trusted publisher is bound to this
-  # file and the upload has to come from `publish-yamc-core` below. Its
-  # artifact is `wheels-pyodide-wasm32`, so `collect` picks it up with the rest.
+  # The Pyodide (Emscripten) wheels, which yamc-core and yani-core publish
+  # alongside the native ones: `micropip.install("yani-core")` in a browser
+  # resolves one from PyPI. ci-pyodide.yml builds each and smoke-tests it
+  # inside Pyodide, and runs on its own for pushes and pull requests. It is
+  # called from here only for the projects this run publishes, because the
+  # trusted publishers are bound to this file and the uploads have to come
+  # from the publish jobs below. Its artifacts are `wheels-pyodide-<project>`,
+  # so `collect` picks them up with the rest.
   pyodide:
     name: Pyodide wheel
     needs: [plan]
-    if: needs.plan.outputs.publish_yamc == 'true'
+    if: >-
+      ${{ needs.plan.outputs.publish_yamc == 'true' ||
+          needs.plan.outputs.publish_yani == 'true' }}
     uses: ./.github/workflows/ci-pyodide.yml
     with:
+      projects: ${{ needs.plan.outputs.pyodide_projects }}
       yamc_version: ${{ inputs.yamc_version }}
+      yani_version: ${{ inputs.yani_version }}
     permissions:
       contents: read
 
@@ -1263,8 +1276,8 @@ jobs:
     # publish jobs. Nothing would go out, silently. So each need is named, and
     # a skip is accepted only where the plan says that project is not being
     # built. A test that skipped on a run that IS building yamc is still a
-    # stop. `pyodide` runs only when yamc-core is published, and is a stop
-    # whenever it does. `parity` is the same rule over both flags at once: it needs the two
+    # stop. `pyodide` runs whenever anything is published, which is whenever
+    # this job runs, and is a stop. `parity` is the same rule over both flags at once: it needs the two
     # wheels, so it runs, and gates, only when both are built.
     #
     # Hyphenated job ids go through needs['...'], since needs.test-mpi parses
@@ -1278,8 +1291,7 @@ jobs:
           (needs.plan.outputs.build_yamc != 'true' ||
            (needs.test.result == 'success' &&
             needs['test-mpi'].result == 'success')) &&
-          (needs.plan.outputs.publish_yamc != 'true' ||
-           needs.pyodide.result == 'success') &&
+          needs.pyodide.result == 'success' &&
           (needs.plan.outputs.build_yani != 'true' ||
            needs['yani-wheel'].result == 'success') &&
           (needs.plan.outputs.build_yamc != 'true' ||
@@ -1307,19 +1319,24 @@ jobs:
           # matching nothing makes `mv` fail: on a single-project release the
           # other project's wheels were never built, so an unconditional `mv`
           # breaks `collect` outright and publishes neither.
-          if [ "$BUILD_YAMC" = true ]; then
-            mv dist/yamc_core-* dist-yamc/
-            # Exactly one Pyodide wheel. Its job is a stop above, but nothing
-            # else would notice a run that built it and lost the artifact, and
-            # the release would then go out without it.
-            pyodide_wheels="$(ls dist-yamc | grep -c -- '-pyemscripten_' || true)"
-            if [ "$pyodide_wheels" != 1 ]; then
-              echo "::error::expected one yamc-core Pyodide wheel, found $pyodide_wheels." >&2
+          # Exactly one Pyodide wheel per project. Its job is a stop above, but
+          # nothing else would notice a run that built it and lost the
+          # artifact, and the release would then go out without it.
+          one_pyodide_wheel () {
+            local count
+            count="$(ls "$2" | grep -c -- '-pyemscripten_' || true)"
+            if [ "$count" != 1 ]; then
+              echo "::error::expected one $1 Pyodide wheel, found $count." >&2
               exit 1
             fi
+          }
+          if [ "$BUILD_YAMC" = true ]; then
+            mv dist/yamc_core-* dist-yamc/
+            one_pyodide_wheel yamc-core dist-yamc
           fi
           if [ "$BUILD_YANI" = true ]; then
             mv dist/yani_core-* dist-yani/
+            one_pyodide_wheel yani-core dist-yani
           fi
           ls -la dist-yamc/ dist-yani/
           # A wheel neither project claims means a new distribution was added
@@ -1420,8 +1437,8 @@ jobs:
   # this whole file has to avoid is a release that quietly publishes nothing at
   # all. So the plan is echoed, and each project the plan named is confirmed to
   # be resolvable on PyPI with every file `collect` handed its publish job: a
-  # version that exists is not a release that is complete, and yamc-core's
-  # Pyodide wheel is one file among four.
+  # version that exists is not a release that is complete, and each project's
+  # Pyodide wheel is one file among several.
   assert-published:
     name: Assert what went out
     needs: [plan, publish-yamc-core, publish-yani-core]

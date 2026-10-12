@@ -306,3 +306,40 @@ pub fn set_transmutation_branch_ratios(value: Option<&str>) -> PyResult<()> {
         .transmutation_branch_ratios = value.map(|s| s.to_string());
     Ok(())
 }
+
+/// Install the function every nuclear-data download goes through.
+///
+/// Emscripten (Pyodide) builds only: they have no sockets, so the host
+/// supplies the HTTP GETs. `fetcher(requests)` is called with a list of
+/// `(url, range)` tuples and must answer a list of `(status, body)` tuples, one
+/// per request and in the same order. `range` is `None` for a whole object,
+/// otherwise the `Range` header value to send (`"bytes=0-99,200-299"`), and a
+/// header naming several ranges is answered with the origin's
+/// `multipart/byteranges` body as it came. A status of 0 means the request did
+/// not complete, and is retried. The requests in one call are independent and
+/// should be in flight together: a load of many nuclides batches them for
+/// that. In a browser this blocks a Web Worker on `Atomics.wait` while a
+/// helper worker fetches.
+///
+/// Here rather than in either wheel's module so both register the same hook:
+/// it is `yamc._core._set_data_fetcher` and `yani._core._set_data_fetcher`,
+/// and either one installs the fetcher for the whole process.
+#[cfg(target_os = "emscripten")]
+#[pyfunction]
+pub fn _set_data_fetcher(fetcher: Py<PyAny>) {
+    yamc_nuclide::url_cache::set_host_fetcher(Box::new(move |requests| {
+        Python::attach(|py| -> PyResult<Vec<(u16, Vec<u8>)>> {
+            let replies = fetcher.call1(py, (requests.to_vec(),))?;
+            replies
+                .bind(py)
+                .try_iter()?
+                .map(|reply| {
+                    let (status, body): (u16, Bound<'_, pyo3::types::PyBytes>) =
+                        reply?.extract()?;
+                    Ok((status, body.as_bytes().to_vec()))
+                })
+                .collect()
+        })
+        .map_err(|e| format!("data fetcher failed: {e}"))
+    }));
+}
