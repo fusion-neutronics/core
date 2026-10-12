@@ -222,7 +222,7 @@ impl Model {
             let material_arc = &self.geometry.materials()[first_mat_idx as usize];
             if material_arc.nuclide_data.is_empty() {
                 let mut material = (**material_arc).clone();
-                let _ = material.ensure_nuclides_loaded();
+                material.ensure_nuclides_loaded()?;
                 let new_arc = Arc::new(material);
                 let slots: Vec<u32> = cell_indices
                     .iter()
