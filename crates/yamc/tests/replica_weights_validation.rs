@@ -10,6 +10,10 @@
 //! YAMC_VALIDATION_DATA=... cargo test --release -p yamc --test replica_weights_validation -- --ignored --nocapture
 //! ```
 //!
+//! A `held:` tally scores the flux times the material's nominal heating or
+//! damage-energy row: the response before its own cross sections moved,
+//! for the before-and-after table.
+//!
 //! `YAMC_VALIDATION_REPLICAS` (16), `YAMC_VALIDATION_PARTICLES` (100000, the
 //! replica-weight run) and `YAMC_VALIDATION_RERUN_PARTICLES` (200000, each
 //! rerun) size it, and `YAMC_VALIDATION_CASES` picks cases by comma-separated parts of their
@@ -46,6 +50,9 @@ use yamc_source::source::{
     ParticleSource, Source, SourceEnergyDistribution, SourceSpatialDistribution,
 };
 use yamc_tallies::filter::cell::CellFilter;
+use yamc_tallies::filter::energy_function::{
+    EnergyFunctionFilter, Interpolation as EnergyInterpolation,
+};
 use yamc_tallies::filter::particle_type::ParticleTypeFilter;
 use yamc_tallies::filter::Filter;
 use yamc_tallies::mesh::RegularRectangularMesh;
@@ -186,7 +193,71 @@ fn setups(photons: bool) -> Vec<Setup> {
             modes: vec![Mode::Analog, Mode::SurvivalBiasing, Mode::Woodcock],
         },
     ];
+    // Heating and damage energy move with the cross sections through each
+    // reaction's deposit. `held:` tallies score the flux times the
+    // material's nominal row instead, the response with its own cross
+    // sections held, which is what every heating sigma was before.
+    let deposits = vec!["heating-local", "damage-energy", "heating"];
+    let with_held = |cell: u32, scores: &[&'static str]| {
+        let mut out = vec![(cell, scores.to_vec(), ParticleType::Neutron)];
+        for s in scores {
+            let held: &'static str = match *s {
+                "heating-local" => "held:heating-local",
+                "damage-energy" => "held:damage-energy",
+                "heating" => "held:heating",
+                _ => continue,
+            };
+            out.push((cell, vec![held], ParticleType::Neutron));
+        }
+        out
+    };
+    out.push(Setup {
+        name: "iron sphere heating, R 8 cm",
+        shells: vec![(8.0, Some(material(1, &[("Fe56", 1.0)], 7.87, false)))],
+        tallies: with_held(1, &deposits),
+        modes: vec![Mode::Analog, Mode::Woodcock, Mode::SurvivalBiasing],
+    });
+    out.push(Setup {
+        name: "tungsten sphere heating, R 4 cm",
+        shells: vec![(4.0, Some(material(1, &[("W184", 1.0)], 19.3, false)))],
+        tallies: [
+            with_held(1, &deposits),
+            vec![(1, vec!["(n,gamma)"], ParticleType::Neutron)],
+        ]
+        .concat(),
+        modes: vec![Mode::Analog],
+    });
+    // A simple fusion blanket: a 14.1 MeV source in a void, a 2 cm iron
+    // first wall and 40 cm of lithium enriched to 60% Li6.
+    out.push(Setup {
+        name: "blanket: iron wall, lithium breeder",
+        shells: vec![
+            (10.0, None),
+            (12.0, Some(material(1, &[("Fe56", 1.0)], 7.87, false))),
+            (
+                52.0,
+                Some(material(2, &[("Li6", 0.6), ("Li7", 0.4)], 0.48, false)),
+            ),
+        ],
+        tallies: [
+            with_held(2, &["heating-local", "damage-energy"]),
+            with_held(3, &["heating-local"]),
+            vec![(3, vec!["(n,t)"], ParticleType::Neutron)],
+        ]
+        .concat(),
+        modes: vec![Mode::Analog],
+    });
     if photons {
+        out.push(Setup {
+            name: "iron sphere heating with photons, R 8 cm",
+            shells: vec![(8.0, Some(material(1, &[("Fe56", 1.0)], 7.87, true)))],
+            tallies: vec![
+                (1, vec!["heating"], ParticleType::Neutron),
+                (1, vec!["held:heating"], ParticleType::Neutron),
+                (1, vec!["heating"], ParticleType::Photon),
+            ],
+            modes: vec![Mode::Photons],
+        });
         out.push(Setup {
             name: "iron sphere with photons, R 8 cm",
             shells: vec![(8.0, Some(material(1, &[("Fe56", 1.0)], 7.87, true)))],
@@ -223,6 +294,36 @@ fn weight_windows(radius: f64) -> WeightWindowBounds {
         max_split: 10,
         weight_floor: 1e-38,
     }
+}
+
+/// The macroscopic stored row `mt` of `material`, `Σ_i N_i K_i(E)`, as an
+/// energy function on the union of its nuclides' grids: flux scored through
+/// it is the response with its own cross sections held at nominal.
+fn nominal_row(material: &Material, mt: i32) -> EnergyFunctionFilter {
+    let densities = material.get_atoms_per_barn_cm().expect("densities");
+    let mut grid: Vec<f64> = Vec::new();
+    for nuclide in material.nuclide_data.values() {
+        grid.extend(nuclide.energy.as_ref().expect("grid")["294"].as_slice());
+    }
+    grid.sort_by(f64::total_cmp);
+    grid.dedup();
+    let y = grid
+        .iter()
+        .map(|&e| {
+            material
+                .nuclide_data
+                .iter()
+                .map(|(name, nuclide)| {
+                    let k = nuclide.reactions[0]
+                        .get(&mt)
+                        .and_then(|r| r.cross_section_at(e))
+                        .unwrap_or(0.0);
+                    densities.get(name).copied().unwrap_or(0.0) * k
+                })
+                .sum()
+        })
+        .collect();
+    EnergyFunctionFilter::new(grid, y, EnergyInterpolation::Linear)
 }
 
 /// One run; per tally, per score, the nominal mean, its standard
@@ -273,6 +374,15 @@ fn run(
         materials.iter().map(|m| Arc::new(m.clone())).collect(),
     )
     .expect("geometry");
+    // The material of each cell, for a `held:` tally's nominal row.
+    let mut in_cell = HashMap::new();
+    let mut next = 0;
+    for (i, (_, m)) in setup.shells.iter().enumerate() {
+        if m.is_some() {
+            in_cell.insert(i as u32 + 1, &materials[next]);
+            next += 1;
+        }
+    }
     let tallies: Vec<Arc<Tally>> = setup
         .tallies
         .iter()
@@ -281,7 +391,18 @@ fn run(
             t.filters.push(Filter::Cell(CellFilter::from_id(*cell)));
             t.filters
                 .push(Filter::ParticleType(ParticleTypeFilter::new(*particle)));
-            t.scores = scores.iter().map(|s| s.parse().expect("score")).collect();
+            if let Some(held) = scores[0].strip_prefix("held:") {
+                assert_eq!(scores.len(), 1, "a held tally holds one score");
+                let mt = held
+                    .parse::<yamc_tallies::score::Score>()
+                    .expect("score")
+                    .to_i32();
+                t.filters
+                    .push(Filter::EnergyFunction(nominal_row(in_cell[cell], mt)));
+                t.scores = vec!["flux".parse().expect("score")];
+            } else {
+                t.scores = scores.iter().map(|s| s.parse().expect("score")).collect();
+            }
             t.estimator = Estimator::TrackLength;
             t.reset_accumulation();
             Arc::new(t)

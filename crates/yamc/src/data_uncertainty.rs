@@ -72,6 +72,16 @@ pub struct NuclideCoverage {
     /// with, directly or through another (see
     /// `yani_transmute::cross_material`). Empty where it is drawn on its own.
     pub drawn_with: Vec<String>,
+    /// Per heating or damage-energy row the nuclide carries (MT 301, 444,
+    /// 901), per energy band of [`yamc_nuclide::deposit::BANDS`] (`(lo, hi,
+    /// share)`, eV), the share of the row the per-reaction deposits do not
+    /// reproduce there, `∫ |K - Σ σ_mt h_mt| du / ∫ |K| du` over lethargy
+    /// ([`yamc_nuclide::deposit::unexplained_share`]); a band where the row
+    /// is zero is left out. A run moves the row by what its reactions
+    /// deposit; this share does not move. For a fissile nuclide it holds
+    /// fission's share: the published data does not carry the fragment and
+    /// beta energies HEATR splits fission heating by.
+    pub unexplained_deposit: BTreeMap<i32, Vec<(f64, f64, f64)>>,
 }
 
 /// What nuclear-data uncertainty a model's transport could carry.
@@ -109,10 +119,48 @@ const NOT_PERTURBED: [&str; 8] = [
     "fission multiplicity and spectrum (MF=31, MF=35)",
     "unresolved-resonance probability tables beyond the cross-section covariance",
     "photon production and photon interaction data",
-    "heating, KERMA and damage-energy responses, which move only through the flux",
+    "the part of heating (MT 301, 901) and damage energy (MT 444) no reaction's deposit \
+     reproduces, fission's share above all (unexplained_deposit, per nuclide)",
     "short-range (lb = 8) covariance, which averages away along a track",
     "the material composition and density",
 ];
+
+/// Per heating or damage-energy row `nuclide` carries at `temperature`, the
+/// share of it its reactions' deposits leave unexplained.
+fn unexplained_deposit(
+    nuclide: &Nuclide,
+    temperature: &str,
+) -> BTreeMap<i32, Vec<(f64, f64, f64)>> {
+    use yamc_nuclide::deposit::{deposits, unexplained_share, Response, BANDS};
+    let Some(t) = nuclide
+        .loaded_temperatures
+        .iter()
+        .position(|l| l == temperature)
+        .or_else(|| (nuclide.loaded_temperatures.len() == 1).then_some(0))
+    else {
+        return BTreeMap::new();
+    };
+    let partials: BTreeSet<i32> = nuclide.reactions[t]
+        .iter()
+        .filter(|(_, r)| !r.redundant)
+        .map(|(mt, _)| *mt)
+        .collect();
+    Response::ALL
+        .into_iter()
+        .filter(|response| nuclide.reactions[t].contains_key(&response.mt()))
+        .map(|response| {
+            let split = deposits(nuclide, t, response, &partials);
+            let bands = BANDS
+                .iter()
+                .filter_map(|&(lo, hi)| {
+                    let share = unexplained_share(nuclide, t, response, &split, (lo, hi))?;
+                    Some((lo, hi, share))
+                })
+                .collect();
+            (response.mt(), bands)
+        })
+        .collect()
+}
 
 /// The largest relative standard deviation the field gives partial `mt` of
 /// `nuclide` at any point of its energy grid, its own cells and the `terms`
@@ -288,6 +336,7 @@ impl Model {
                     .cloned()
                     .collect();
                 if let Some(nd) = material.nuclide_data.get(&name) {
+                    coverage.unexplained_deposit = unexplained_deposit(nd, material.temperature());
                     if let Some(blocks) = &nd.nubar_covariance {
                         let mts: BTreeSet<i32> = blocks.iter().map(|b| b.mt).collect();
                         coverage.nubar_covariance = mts.into_iter().collect();

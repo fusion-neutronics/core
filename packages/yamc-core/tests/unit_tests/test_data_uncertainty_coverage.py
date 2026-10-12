@@ -68,6 +68,12 @@ def test_iron_reports_what_it_covers_and_how():
             assert pairs == sorted(pairs) and all(len(p) == 2 for p in pairs)
     # MF=31 and MF=35 are reported per nuclide; iron is not fissionable, so it
     # has neither, and both are listed among the inputs not perturbed.
+    # Heating and damage energy are split into what each reaction deposits,
+    # and for iron the split reproduces the stored rows.
+    assert set(fe56["unexplained_deposit"]) == {301, 444, 901}
+    for bands in fe56["unexplained_deposit"].values():
+        assert [lo for lo, _, _ in bands][:4] == [0.0, 1.0, 1e3, 1e6]
+        assert all(0.0 <= share < 0.05 for _, _, share in bands)
     assert fe56["nubar_covariance"] == []
     assert fe56["spectrum_covariance"] is False
     assert any("MF=31" in item for item in coverage["not_perturbed"])
