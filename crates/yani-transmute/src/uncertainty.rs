@@ -737,10 +737,10 @@ pub struct Info {
     pub lognormal_not_carried: BTreeMap<String, crate::covariance_sample::LognormalLimit>,
     /// Per group of nuclides drawn jointly through cross-material
     /// covariance (their names joined by `+`), where the covariance stated
-    /// between them was not admissible beside their own and was adjusted to
-    /// be drawn: the floor chosen, the largest canonical correlation met
-    /// and how far the drawn covariance between them is from the stated
-    /// one. Each nuclide's own covariance is kept exactly. Counted as a gap.
+    /// between them was not admissible beside their own and the closest
+    /// admissible one was drawn: how far it is from the stated one, the
+    /// least any admissible draw could be, and the fit's convergence. Each
+    /// nuclide's own covariance is kept exactly. Counted as a gap.
     /// See [`crate::covariance_sample::JointAdjustment`].
     pub cross_material_adjusted: BTreeMap<String, crate::covariance_sample::JointAdjustment>,
     /// Per nuclide with MF=2 and MF=32 resonance parameters and a rate in

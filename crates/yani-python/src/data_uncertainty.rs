@@ -619,9 +619,12 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
     let adjusted = PyDict::new(py);
     for (group, a) in &info.cross_material_adjusted {
         let e = PyDict::new(py);
-        e.set_item("floor", a.floor)?;
-        e.set_item("largest_singular_value", a.largest_singular_value)?;
         e.set_item("relative_change", a.relative_change)?;
+        e.set_item("least_relative_change", a.least_relative_change)?;
+        e.set_item("largest_stated_correlation", a.largest_stated_correlation)?;
+        e.set_item("largest_correlation_change", a.largest_correlation_change)?;
+        e.set_item("iterations", a.iterations)?;
+        e.set_item("converged", a.converged)?;
         adjusted.set_item(group, e)?;
     }
     d.set_item("cross_material_adjusted", adjusted)?;
