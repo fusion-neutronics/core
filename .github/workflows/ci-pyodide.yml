@@ -6,8 +6,12 @@
 # page could not say which commit its wheel came from. The artifact uploaded
 # below is what it vendors now.
 #
-# Not published to PyPI. That is a separate decision; a release that names
-# yamc-core gets the wheel attached as a release asset, nothing more.
+# Published to PyPI with the native wheels. PyPI's trusted publisher for
+# yamc-core is bound to ci-python.yml, so the upload has to come from a job in
+# that file: on a release (or a dispatch that publishes yamc-core) ci-python.yml
+# calls this workflow, and its `collect` job picks the artifact up by the
+# `wheels-*` name like any other yamc-core wheel. Pushes and pull requests run
+# this file on its own, to keep the build and the smoke test honest.
 name: Pyodide wheel
 
 on:
@@ -20,15 +24,27 @@ on:
     # include_str! reads a Markdown file. Pushes to main and releases are not
     # filtered.
     paths-ignore: ['**/*.md', 'docs/**', 'mkdocs.yml', 'LICENSE*']
-  release:
-    types: [published]
   workflow_dispatch:
+  # ci-python.yml, on a run that publishes yamc-core. Not a `release` trigger
+  # here as well, which would build the same wheel twice.
+  workflow_call:
+    inputs:
+      yamc_version:
+        description: "Override yamc-core's version, as ci-python.yml's dispatch input of that name"
+        type: string
+        required: false
+        default: ""
 
 # A newer push to a pull request makes its older run moot, so that run is
-# cancelled. Only pull-request runs: a push to main, a release and a manual
-# dispatch always finish, so nothing that builds or publishes is cut short.
+# cancelled. Only pull-request runs: a push to main and a manual dispatch always
+# finish, as does a call from ci-python.yml, so nothing that builds or publishes
+# is cut short. Anything but a pull request groups by run id, so it never
+# queues behind (or is replaced by) another run. The group names this file
+# rather than reading `github.workflow`, which in a called workflow is the
+# caller's name: it would land in ci-python.yml's own group and wait on the run
+# that is waiting on it.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: pyodide-wheel-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -50,17 +66,20 @@ env:
 jobs:
   pyodide_wheel:
     name: Build and test the Pyodide wheel
-    # A release that does not name yamc-core has no use for a transport wheel.
-    # ci-python.yml's `plan` job owns the tag grammar and refuses a malformed
-    # tag; all this needs to know is whether yamc-core is one of its components.
-    if: github.event_name != 'release' || contains(github.event.release.tag_name, 'yamc-core-')
     runs-on: ubuntu-latest
     permissions:
-      # Only the release step needs it, and only for `gh release upload`.
-      contents: write
+      contents: read
 
     steps:
       - uses: actions/checkout@v7
+
+      - name: Override yamc-core's version
+        # Only a ci-python.yml dispatch that names one, so the Pyodide wheel
+        # goes out at the same number as the native wheels of that run.
+        if: inputs.yamc_version != ''
+        env:
+          VERSION: ${{ inputs.yamc_version }}
+        run: bash scripts/set-wheel-version.sh yamc-python "$VERSION"
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -138,35 +157,13 @@ jobs:
           .venv-pyodide/bin/pip install packages/yamc-core/dist/*.whl
           .venv-pyodide/bin/python scripts/pyodide_smoke_test.py ~/.cache/yamc
 
+      # `wheels-*`, so ci-python.yml's `collect` downloads it with the native
+      # wheels and sorts it into yamc-core's distributions by filename. No
+      # GitHub release asset as well: PyPI carries the same file, and serves it
+      # with the CORS headers a browser (micropip) needs, which release assets
+      # do not.
       - uses: actions/upload-artifact@v7
         with:
-          name: yamc-core-pyodide-wheel
+          name: wheels-pyodide-wasm32
           path: packages/yamc-core/dist/*.whl
           if-no-files-found: error
-
-      # Only the wheel at the version the tag names. ci-python.yml's
-      # verify-versions fails the release when the crate's version disagrees,
-      # and this refuses to attach a wheel under a tag it does not match.
-      - name: Attach the wheel to the release
-        if: github.event_name == 'release' && github.event.action == 'published'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
-        run: |
-          set -euo pipefail
-          version=""
-          IFS=',' read -ra PARTS <<< "$TAG"
-          for part in "${PARTS[@]}"; do
-            part="$(printf '%s' "$part" | tr -d '[:space:]')"
-            case "$part" in
-              yamc-core-*) version="${part#yamc-core-}"; version="${version#v}" ;;
-            esac
-          done
-          shopt -s nullglob
-          wheels=(packages/yamc-core/dist/yamc_core-"$version"-*.whl)
-          if [ -z "$version" ] || [ "${#wheels[@]}" -ne 1 ]; then
-            echo "::error::tag '$TAG' names yamc-core '$version', and the built wheel is:" >&2
-            ls packages/yamc-core/dist >&2
-            exit 1
-          fi
-          gh release upload "$TAG" "${wheels[0]}" --clobber
