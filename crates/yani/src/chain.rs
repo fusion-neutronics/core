@@ -954,12 +954,14 @@ fn ejectile_nuclides(kind: &str) -> Vec<&'static str> {
 /// depth limit, so the result is the transitive closure rather than a
 /// truncation.
 ///
-/// This is what a transmutation driver needs to decide whose cross sections to
-/// load: the transmutation stepper only follows a reaction edge whose parent has
-/// a loaded rate, and it walks a subset of these edges from a subset of these
-/// seeds, so loading exactly this set cannot change any result. A depth-limited
-/// walk can, which is why the depth argument lives on [`reduce_chain`] and not
-/// here.
+/// Loading cross sections for exactly this set cannot change any result: the
+/// transmutation stepper only follows a reaction edge whose parent has a
+/// loaded rate, and it walks a subset of these edges from a subset of these
+/// seeds. It is also far more than a solve needs, since from almost any seed it
+/// saturates on one large strongly connected component; the transmutation
+/// drivers load what a solve populates instead (`yani_transmute::screening`).
+/// A depth-limited walk can change a result, which is why the depth argument
+/// lives on [`reduce_chain`] and not here.
 pub fn reachable_nuclides(
     chain: &HashMap<String, ChainNuclide>,
     initial_nuclides: &[&str],
@@ -993,9 +995,7 @@ pub fn reachable_nuclides(
 ///   it covers.
 ///
 /// `reaction_rate(parent, kind)` gives that channel's per-atom rate in 1/s, i.e.
-/// the one-group cross section folded with the flux. Only parents already loaded
-/// can be asked, which is the point: deciding whether to load a nuclide needs
-/// its parents' cross sections, never its own.
+/// the one-group cross section folded with the flux.
 ///
 /// The chain is cyclic, so this relaxes to a fixpoint rather than sweeping once.
 /// Bounds rise monotonically and are capped, so it always terminates. The floor
@@ -1011,23 +1011,10 @@ pub fn reachable_nuclides(
 /// enough of them clears it, and zeroed edges hide that. See
 /// `many_sub_floor_parents_can_clear_the_floor_together`.
 ///
-/// The obvious repair, growing the loaded set in rounds and finishing with a
-/// verification sweep that rates the unloaded at a cross-section ceiling, is
-/// sound: if the sweep adds nothing then even at a rate no nuclide can exceed,
-/// nothing outside the set reaches the floor. It is also pointless. Measured on
-/// the ENDF/B-VIII.1 chain from Fe56 (`examples/bound_prune.rs`), the ceiling
-/// sweep terminates only once essentially the whole closure is loaded (1059 of
-/// 1060 nodes), and then returns exactly the set that rating the closure
-/// outright returns in one pass instead of thirteen. Growing the loaded set
-/// buys nothing because proving a node absent needs its parents' rates just as
-/// much as finding one present does.
-///
-/// So rate the closure. That costs the parents' cross sections, not a transport
-/// solve per round: a rate is a cross section folded against a flux spectrum,
-/// and `TransmutationTallies::bounding_reaction_rates` folds one for any
-/// nuclide whose data is loaded. The only parents left at zero are then the
-/// ones the run being pruned also rates at zero, which cannot react there
-/// either.
+/// So this cannot decide which cross sections to load without loading the
+/// whole closure first. The transmutation drivers decide that by solving
+/// instead (`yani_transmute::screening`), and this bound is used where every
+/// rate is already in hand.
 pub fn populated_nuclides<F>(
     chain: &HashMap<String, ChainNuclide>,
     branch: &BranchTable,

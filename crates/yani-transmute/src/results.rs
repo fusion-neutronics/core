@@ -121,6 +121,14 @@ pub struct TransmutationResults {
     /// Empty otherwise, and always for a transport-coupled solve, whose
     /// damage-energy tally is not converted here.
     pub displacement_damage: HashMap<u32, crate::damage::DisplacementDamage>,
+    /// Material ID -> which products had their cross sections loaded and
+    /// their neutron reactions solved, and which were left out below the
+    /// atom-fraction threshold (see [`crate::screening`]).
+    ///
+    /// Recorded by every solve that screens: a spectrum solve for every
+    /// material, and a transport-coupled solve for every transmutable
+    /// material it irradiates. Empty on results built by hand.
+    pub product_screening: HashMap<u32, crate::screening::ProductScreening>,
 }
 
 /// How much of a spectrum solve's collapse work was shared.
@@ -288,6 +296,7 @@ impl TransmutationResults {
             branching_report: HashMap::new(),
             data_releases: Default::default(),
             displacement_damage: HashMap::new(),
+            product_screening: HashMap::new(),
         }
     }
 

@@ -1084,9 +1084,23 @@ pub fn compute_multigroup_reaction_rates_shielded(
         group_boundaries,
         source_rate,
         shielding,
+        None,
     );
     (collapsed.rates, collapsed.fy_weights, collapsed.info)
 }
+
+/// Each nuclide's collapse against one spectrum, kept between collapses that
+/// differ only in which nuclides carry data.
+///
+/// A nuclide's collapse reads its own data, its own chain entry and lists, the
+/// spectrum, and the composition (for the shielding mixture and the
+/// would-shield indicator), so for one spectrum and one composition it is the
+/// same however many other nuclides are loaded. The product screening
+/// collapses once per round with a growing set, and this keeps each round to
+/// the nuclides it added. Only nuclides that collapsed to something are kept:
+/// one without data collapses to nothing at no cost, and may have data next
+/// round.
+pub(crate) type CollapseMemo = std::sync::Mutex<HashMap<String, NuclideCollapse>>;
 
 /// Everything one collapse produces.
 pub(crate) struct Collapsed {
@@ -1106,6 +1120,7 @@ pub(crate) struct Collapsed {
 /// As [`compute_multigroup_reaction_rates_shielded`], also folding each
 /// parent's branching lists in the same walk as its transport totals, and
 /// each parent's MT=5 rate.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn collapse_with_lists(
     material: &Material,
     chain: &HashMap<String, ChainNuclide>,
@@ -1114,6 +1129,7 @@ pub(crate) fn collapse_with_lists(
     group_boundaries: &[f64],
     source_rate: f64,
     shielding: Option<&Shielding>,
+    memo: Option<&CollapseMemo>,
 ) -> Collapsed {
     let mut rates: ReactionRates = HashMap::new();
     let mut fy_weights: FissionYieldWeights = HashMap::new();
@@ -1161,8 +1177,17 @@ pub(crate) fn collapse_with_lists(
         source_rate,
         shielding,
     );
+    let held = memo.map(|m| m.lock().unwrap_or_else(|p| p.into_inner()));
     let collapsed: Vec<Option<NuclideCollapse>> = {
         let one = |&(name, chain_nuclide): &(&String, &ChainNuclide)| {
+            // Only for a nuclide this material holds data for: the memo is
+            // what that data collapsed to, and a material without it
+            // collapses the nuclide to nothing.
+            if material.nuclide_data.contains_key(name.as_str()) {
+                if let Some(done) = held.as_ref().and_then(|h| h.get(name.as_str())) {
+                    return Some(done.clone());
+                }
+            }
             context.collapse_nuclide(name, chain_nuclide, lists.get(name.as_str()))
         };
         #[cfg(not(target_arch = "wasm32"))]
@@ -1175,6 +1200,16 @@ pub(crate) fn collapse_with_lists(
             entries.iter().map(one).collect()
         }
     };
+
+    if let Some(mut held) = held {
+        for ((name, _), collapsed) in entries.iter().zip(&collapsed) {
+            if let Some(c) = collapsed {
+                if !held.contains_key(name.as_str()) {
+                    held.insert((*name).clone(), c.clone());
+                }
+            }
+        }
+    }
 
     for ((name, _), collapsed) in entries.iter().zip(collapsed) {
         let Some(collapsed) = collapsed else { continue };
@@ -1224,7 +1259,8 @@ pub(crate) fn collapse_with_lists(
 /// Every `info.*` mutation the loop used to make in place is a field here, so
 /// the work is a pure function of its inputs and the merge is the only thing
 /// that touches shared state.
-struct NuclideCollapse {
+#[derive(Clone)]
+pub(crate) struct NuclideCollapse {
     /// Reaction kind -> one-group rate [1/s].
     rates: HashMap<String, f64>,
     /// The normalized fission-yield spectrum weights, when this spectrum drives

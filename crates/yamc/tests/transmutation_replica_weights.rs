@@ -163,6 +163,7 @@ fn transmute(
             Default::default(),
             &settings(),
             request,
+            yani_transmute::DEFAULT_PRODUCT_THRESHOLD,
         )
         .expect("transmute")
 }

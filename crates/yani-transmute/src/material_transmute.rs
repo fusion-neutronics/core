@@ -10,15 +10,16 @@ use crate::damage::DamageRequest;
 use crate::isomer_branching_uncertainty::{
     IsomerCovariance, IsomerIntervalProductions, IsomerRun, IsomerSpectrum,
 };
-use crate::multigroup::{collapse_with_lists, fold_list, scale_rates, Collapsed};
+use crate::multigroup::{collapse_with_lists, fold_list, scale_rates, CollapseMemo, Collapsed};
 use crate::results::TransmutationResults;
+use crate::screening::ProductScreening;
 use crate::self_shielding::{Shielding, ShieldingInfo};
 use crate::transmutation_tallies::{PartialRates, ReplicaTallied};
 use crate::uncertainty::{
     check_convergence, densities_of, DataUncertainty, Ensemble, Info, BLOCK, MAX_SAMPLES,
 };
 use crate::{reaction_type_to_mt, ForwardEulerStepper, TransmutationStepper};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use yamc_materials::material::{DensityUnits, Material};
 use yamc_nuclide::load_scope::LoadScope;
@@ -197,6 +198,7 @@ pub fn transmute_material_shielded(
             spectra: spectra.to_vec(),
             steps: steps.to_vec(),
             shielding: shielding.copied(),
+            product_threshold: crate::DEFAULT_PRODUCT_THRESHOLD,
         }],
         chain,
         branch,
@@ -219,6 +221,11 @@ pub struct TransmuteCase<'a> {
     pub steps: Vec<TransmuteStep>,
     /// Self-shielding for this material's collapse, `None` for dilute.
     pub shielding: Option<Shielding>,
+    /// The atom fraction, or share of a decay quantity, a product must reach
+    /// for its cross sections to be loaded and its neutron reactions solved
+    /// (see [`crate::screening`]); [`crate::DEFAULT_PRODUCT_THRESHOLD`] unless
+    /// the caller has a reason.
+    pub product_threshold: f64,
 }
 
 /// Transmute several materials over one timeline in one call.
@@ -299,22 +306,37 @@ pub fn transmute_materials(
             .map_err(|e| format!("material {} (position {c}): {e}", ids[c]))?;
     }
 
-    // Per material: the chain must drive something, the data is loaded into
-    // the caller's material, and the solve starts from its sum-mode copy.
+    // Per material: the chain must drive something, the products the schedule
+    // populates are screened and their data loaded into the caller's
+    // material, and the solve starts from its sum-mode copy holding the
+    // composition and those products only.
     let mut initial: Vec<Material> = Vec::with_capacity(cases.len());
+    let mut screenings: Vec<ProductScreening> = Vec::with_capacity(cases.len());
+    let mut case_memos: Vec<Vec<CollapseMemo>> = Vec::with_capacity(cases.len());
     for (c, case) in cases.iter_mut().enumerate() {
         check_chain_drives(case.material, &case.steps, &chain).map_err(|e| named(c, ids[c], e))?;
         check_cross_sections_found(case.material, &case.steps, &chain)
             .map_err(|e| named(c, ids[c], e))?;
-        preload_activation_data(
+        let (screening, memos) = screen_case(
             case.material,
+            &case.spectra,
+            &case.steps,
             &chain,
             branch,
+            parts,
             uncertainty,
             case.shielding.as_ref(),
+            case.product_threshold,
         )
         .map_err(|e| named(c, ids[c], e))?;
         let mut current = case.material.clone();
+        let loaded = screening.loaded();
+        let composition: HashSet<String> = current.nuclides.keys().cloned().collect();
+        current
+            .nuclide_data
+            .retain(|name, _| loaded.contains(name) || composition.contains(name));
+        screenings.push(screening);
+        case_memos.push(memos);
         if current.density_units != DensityUnits::Sum {
             current = current
                 .to_sum_mode()
@@ -359,15 +381,22 @@ pub fn transmute_materials(
         let shielding = case.shielding.as_ref();
         let mut to_shared = Vec::with_capacity(case.spectra.len());
         let mut info = ShieldingInfo::default();
-        for s in &case.spectra {
+        for (i, s) in case.spectra.iter().enumerate() {
             requested += 1;
             let key = CollapseKey::new(current, s, shielding);
             let g = match known.get(&key) {
                 Some(&g) => g,
                 None => {
-                    let (entry, entry_info, entry_report) =
-                        collapse_one(current, s, &chain, branch, &lists, shielding)
-                            .map_err(|e| named(c, ids[c], e))?;
+                    let (entry, entry_info, entry_report) = collapse_one(
+                        current,
+                        s,
+                        &chain,
+                        branch,
+                        &lists,
+                        shielding,
+                        case_memos[c].get(i),
+                    )
+                    .map_err(|e| named(c, ids[c], e))?;
                     per_spectrum.push(entry);
                     shared_info.push(entry_info);
                     shared_reports.push(Arc::new(entry_report));
@@ -481,6 +510,9 @@ pub fn transmute_materials(
             results.uncertainty.insert(id, ensemble);
             results.uncertainty_info.insert(id, info);
         }
+        results
+            .product_screening
+            .insert(id, std::mem::take(&mut screenings[c]));
         // Recorded whether or not shielding ran: "not shielded" and "shielded
         // and nothing moved" are different claims, and a dilute run that
         // should have been shielded is the case the report exists for.
@@ -808,6 +840,7 @@ fn collapse_one(
     branch: &BranchTable,
     lists: &Lists<'_>,
     shielding: Option<&Shielding>,
+    memo: Option<&CollapseMemo>,
 ) -> Result<(PerSpectrum, ShieldingInfo, BranchingReport), Box<dyn std::error::Error>> {
     // Where an evaluation ends the cross section is unknown, and the fold
     // treats it as zero. A sliver of flux there is a rounding matter; more
@@ -835,7 +868,9 @@ fn collapse_one(
         )
         .into());
     }
-    Ok(collapse_and_fold(material, s, chain, lists, shielding)?)
+    Ok(collapse_and_fold(
+        material, s, chain, lists, shielding, memo,
+    )?)
 }
 
 /// What one material's step solve produces.
@@ -974,8 +1009,12 @@ struct ReplicaOutcome {
     isomer_branchings_clipped: crate::isomer_branching_uncertainty::Clipped,
 }
 
-/// Load the cross sections a transport-free solve of this material needs, into
-/// the material itself.
+/// Load the cross sections of `nuclides` for a transport-free solve, into the
+/// material itself.
+///
+/// `nuclides` are normally what [`screen_activation_products`] decides the
+/// schedule needs; names with no neutron reactions in `chain` are skipped,
+/// since nothing would read their cross sections.
 ///
 /// Into the caller's own `Material` rather than a local clone, which is the
 /// point. The loaded `Arc<Nuclide>`s used to survive a
@@ -999,6 +1038,7 @@ pub fn preload_activation_data(
     branch: &BranchTable,
     uncertainty: Option<&DataUncertainty>,
     shielding: Option<&Shielding>,
+    nuclides: &BTreeSet<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Covariance rides on the same load rather than a second pass over the
     // same directories, and it is its own axis of the scope so the cache
@@ -1015,58 +1055,17 @@ pub fn preload_activation_data(
         None
     };
 
-    // Only nuclides this material can actually reach need cross sections.
-    // Walking the whole chain loads 556 of 3820 nuclides on ENDF/B-8.1
-    // whatever is being irradiated, which is where the multi-GB footprint
-    // came from.
-    //
-    // The closure is exact, not a truncation: the stepper follows a reaction
-    // edge only when its parent has a loaded rate
-    // (`transmutation_stepper.rs`, "Only follow reaction pathways with
-    // non-zero rates"), and it walks a subset of these edges from a subset
-    // of these seeds, so its visited set is a subset of this one at every
-    // step. Every reaction that fires without the filter still fires.
-    //
-    // Seeds are the composition UNION whatever is already loaded. The
-    // composition alone is not enough: `Material::transmute` is reached
-    // directly from Python without `ensure_nuclides_loaded`, so
-    // `nuclide_data` can be empty, and seeding from it would load nothing
-    // and silently return pure decay.
-    let seeds: Vec<String> = material
-        .nuclides
-        .keys()
-        .chain(material.nuclide_data.keys())
-        .cloned()
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-
-    if !seeds.is_empty() && !seeds.iter().any(|s| chain.contains_key(s)) {
-        return Err(format!(
-            "none of the material's nuclides ({}) appear in the transmutation chain; \
-             check the chain covers this composition (metastables are spelled e.g. \
-             Am241_m1, not Am241m)",
-            seeds.join(", ")
-        )
-        .into());
-    }
-
-    let seed_refs: Vec<&str> = seeds.iter().map(|s| s.as_str()).collect();
-    let reachable = yani::reachable_nuclides(chain, &seed_refs);
-
     // Collect (name, path) pairs while holding CONFIG lock, then drop it.
     // Skip nuclides whose chain entry has no neutron reactions: they are
     // decay-only sinks (e.g. fission products pulled in by yield edges)
-    // and don't need cross-section data -- loading them just triggers
-    // hundreds of wasted downloads.
+    // and don't need cross-section data.
     let to_load: Vec<(String, String)> = {
         let cfg = yamc_nuclide::config::CONFIG
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        chain
+        nuclides
             .iter()
-            .filter(|(name, cn)| !cn.reactions.is_empty() && reachable.contains(*name))
-            .map(|(name, _)| name)
+            .filter(|name| chain.get(*name).is_some_and(|cn| !cn.reactions.is_empty()))
             // Already loaded is normally enough, but an entry loaded
             // WITHOUT covariance cannot serve a request for it: skipping
             // here would leave the nuclide reported as having no
@@ -1080,10 +1079,7 @@ pub fn preload_activation_data(
     };
 
     // Nothing to load is the common case on every call after the first, so the
-    // MT set and the scope are not built for it. The reachability closure above
-    // cannot be skipped the same way: `Config::get_cross_section` falls back to
-    // the library keyword, so it resolves a path for every name in the chain
-    // and the candidate list is not empty without the closure to narrow it.
+    // MT set and the scope are not built for it.
     if !to_load.is_empty() {
         // This path runs no transport, so it needs the union energy grid and the
         // cross sections of the MTs the network names, and nothing else. On the TENDL-2025 conversion that is roughly a fifth of the
@@ -1111,9 +1107,9 @@ pub fn preload_activation_data(
         // bytes and the scope, and `scope` is one value for every item, so the
         // results do not depend on the order they are produced in -- nor does
         // the map they land in, which is keyed by name.
-        // A nuclide the material is MADE of is not optional. `to_load` is the
-        // reachable chain closure, most of which is daughters and
-        // grand-daughters: a library may legitimately not publish one of those,
+        // A nuclide the material is MADE of is not optional. Most of what a
+        // screening asks for is daughters and grand-daughters, and a library
+        // may legitimately not publish one of those,
         // and dropping it understates a second-generation inventory. Dropping a
         // nuclide from the composition is different in kind, because the foil
         // then cannot activate at all and the solve returns a decay curve for
@@ -1221,6 +1217,139 @@ pub fn preload_activation_data(
     }
 
     Ok(())
+}
+
+/// Decide which products this schedule needs cross sections for, and load
+/// them into `material`.
+///
+/// Solves the schedule with the composition's own cross sections, then loads
+/// every product with neutron reactions whose atom fraction, or share of the
+/// activity, decay heat or decay photon-line power, reached `threshold` at
+/// any state, solves again, and repeats until a solve populates nothing new
+/// above it (see [`crate::screening`] for what that bounds). Each round loads only its new products, with every download of the
+/// round going out together, so a run asks the library for the few dozen
+/// nuclides an irradiation populates rather than the hundreds its chain can
+/// reach.
+///
+/// The screening solves are the nominal solve itself, collapsed against
+/// `spectra` with `shielding`, so a product is judged on the rates it would
+/// really be driven by. The material's composition must have cross sections;
+/// a product the library lacks is reported in
+/// [`ProductScreening::unavailable`] and still decays.
+///
+/// A schedule that irradiates nothing reacts nothing, so it loads nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn screen_activation_products(
+    material: &mut Material,
+    spectra: &[MultigroupSpectrum],
+    steps: &[TransmuteStep],
+    chain: &Arc<HashMap<String, ChainNuclide>>,
+    branch: &BranchTable,
+    parts: yani::ChainParts,
+    uncertainty: Option<&DataUncertainty>,
+    shielding: Option<&Shielding>,
+    threshold: f64,
+) -> Result<ProductScreening, Box<dyn std::error::Error>> {
+    screen_case(
+        material,
+        spectra,
+        steps,
+        chain,
+        branch,
+        parts,
+        uncertainty,
+        shielding,
+        threshold,
+    )
+    .map(|(screening, _)| screening)
+}
+
+/// [`screen_activation_products`], also handing back each spectrum's
+/// per-nuclide collapses, which the final collapse of the same composition
+/// reuses rather than repeats.
+#[allow(clippy::too_many_arguments)]
+fn screen_case(
+    material: &mut Material,
+    spectra: &[MultigroupSpectrum],
+    steps: &[TransmuteStep],
+    chain: &Arc<HashMap<String, ChainNuclide>>,
+    branch: &BranchTable,
+    parts: yani::ChainParts,
+    uncertainty: Option<&DataUncertainty>,
+    shielding: Option<&Shielding>,
+    threshold: f64,
+) -> Result<(ProductScreening, Vec<CollapseMemo>), Box<dyn std::error::Error>> {
+    crate::screening::check_threshold(threshold)?;
+    let mut composition: Vec<String> = material.nuclides.keys().cloned().collect();
+    composition.sort();
+    if !composition.is_empty() && !composition.iter().any(|s| chain.contains_key(s)) {
+        return Err(format!(
+            "none of the material's nuclides ({}) appear in the transmutation chain; \
+             check the chain covers this composition (metastables are spelled e.g. \
+             Am241_m1, not Am241m)",
+            composition.join(", ")
+        )
+        .into());
+    }
+    if !steps.iter().any(|st| st.irradiation.is_some()) {
+        preload_activation_data(
+            material,
+            chain,
+            branch,
+            uncertainty,
+            shielding,
+            &BTreeSet::new(),
+        )?;
+        let screening = ProductScreening {
+            threshold,
+            ..Default::default()
+        };
+        return Ok((screening, Vec::new()));
+    }
+
+    let lists = build_lists(chain, branch)?;
+    let memos: Vec<CollapseMemo> = spectra.iter().map(|_| Default::default()).collect();
+    let held: HashSet<&String> = composition.iter().collect();
+    // The solve reads densities in sum mode, and converting needs only the
+    // composition, so it is done once.
+    let mut work = material.clone();
+    if work.density_units != DensityUnits::Sum {
+        work = work.to_sum_mode()?;
+    }
+    let screening =
+        crate::screening::screen_products(chain, &composition, threshold, |to_load, loaded| {
+            preload_activation_data(material, chain, branch, uncertainty, shielding, to_load)?;
+            let found: BTreeSet<String> = to_load
+                .iter()
+                .filter(|n| material.nuclide_data.contains_key(*n))
+                .cloned()
+                .collect();
+            // Only what the screening has loaded reacts, whatever else the
+            // material happens to hold from an earlier call, so the answer does
+            // not depend on what was run before.
+            work.nuclide_data = material
+                .nuclide_data
+                .iter()
+                .filter(|(name, _)| loaded.contains(*name) || held.contains(name))
+                .map(|(name, nd)| (name.clone(), Arc::clone(nd)))
+                .collect();
+            let per_spectrum: Vec<PerSpectrum> = spectra
+                .iter()
+                .zip(&memos)
+                .map(|(s, memo)| {
+                    collapse_one(&work, s, chain, branch, &lists, shielding, Some(memo))
+                        .map(|c| c.0)
+                })
+                .collect::<Result<_, _>>()?;
+            let outcome = solve_case(&work, steps, &per_spectrum, chain, parts, None)?;
+            let mut states = Vec::with_capacity(outcome.states.len() + 1);
+            states.push(work.get_atoms_per_barn_cm()?);
+            for state in &outcome.states {
+                states.push(state.get_atoms_per_barn_cm()?);
+            }
+            Ok((found, states))
+        })?;
+    Ok((screening, memos))
 }
 
 /// Read the resonance parameters of each loaded nuclide whose folder has
@@ -3675,6 +3804,7 @@ pub(crate) fn collapse_and_fold(
     chain: &Arc<HashMap<String, ChainNuclide>>,
     lists: &Lists<'_>,
     shielding: Option<&Shielding>,
+    memo: Option<&CollapseMemo>,
 ) -> Result<(PerSpectrum, ShieldingInfo, BranchingReport), String> {
     let Collapsed {
         mut rates,
@@ -3690,6 +3820,7 @@ pub(crate) fn collapse_and_fold(
         &spectrum.boundaries,
         1.0,
         shielding,
+        memo,
     );
     let mut folded: HashMap<String, Vec<Option<ListRates>>> = walked
         .into_iter()
@@ -4454,7 +4585,7 @@ mod tests {
     ) -> Result<Folded, String> {
         let lists = build_lists(chain, branch)?;
         let ((rates, _, folded), _, report) =
-            collapse_and_fold(material, spectrum, chain, &lists, None)?;
+            collapse_and_fold(material, spectrum, chain, &lists, None, None)?;
         Ok((rates, folded, report))
     }
 

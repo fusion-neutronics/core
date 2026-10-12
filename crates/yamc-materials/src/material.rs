@@ -744,8 +744,9 @@ impl Material {
     ///
     /// `Material::transmute` loads the cross sections it needs into the
     /// material and leaves them there, so a second call on the same material
-    /// does no Arrow decoding at all. On a chain like
-    /// ENDF/B-8.1 that is a few hundred nuclides, which is the right trade for
+    /// does no Arrow decoding at all. That is the composition and the products
+    /// the irradiation populates, from a few dozen nuclides to a couple of
+    /// hundred for a steel, which is the right trade for
     /// a material transmuted more than once and the wrong one for a sweep over
     /// thousands of DISTINCT compositions -- so the release is explicit rather
     /// than automatic.

@@ -15,9 +15,8 @@ use yani::{
 /// The atom density [atoms/barn-cm] below which a solved nuclide is dropped.
 ///
 /// One atom per cubic metre, near enough. This is the solver's own definition
-/// of "populated", so it is also what a driver deciding which nuclides are
-/// worth carrying should test a bound against
-/// (`yani::populated_nuclides`) rather than inventing a second
+/// of "populated", so it is also what a bound on which nuclides are populated
+/// (`yani::populated_nuclides`) is tested against, rather than a second
 /// threshold that could disagree with this one.
 pub const DENSITY_FLOOR: f64 = 1e-30;
 

@@ -324,6 +324,7 @@ fn a_thick_foil_splits_its_capture_alike_on_both_paths() {
             Default::default(),
             &settings(),
             None,
+            yani_transmute::DEFAULT_PRODUCT_THRESHOLD,
         )
         .expect("coupled transmute");
     let coupled = isomer_share(&coupled, 1);

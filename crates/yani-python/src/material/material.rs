@@ -1303,12 +1303,13 @@ impl PyMaterial {
     /// deplete; here you have already named the one you mean.
     ///
     /// The cross sections this needs are loaded **into the material** and kept,
-    /// so calling it again on the same material does no file reading at all --
-    /// on a steel against ENDF/B-8.1 that is 1.8 s of a 2.3 s call. The
-    /// composition is not modified. A sweep over thousands of *distinct*
-    /// compositions should call ``release_nuclear_data()`` on each material when
-    /// it is done with it, since otherwise every one of them holds a few hundred
-    /// nuclides' data for as long as it lives.
+    /// so calling it again on the same material does no file reading at all.
+    /// Only the composition's and those of the products the schedule populates
+    /// are loaded (see ``product_threshold``), not every nuclide the chain can
+    /// reach. The composition is not modified. A sweep over thousands of
+    /// *distinct* compositions should call ``release_nuclear_data()`` on each
+    /// material when it is done with it, since otherwise every one of them
+    /// holds its nuclides' data for as long as it lives.
     ///
     /// Returns:
     ///     TransmutationResults: The same object ``Model.simulate_transmutation``
@@ -1382,6 +1383,23 @@ impl PyMaterial {
     ///         neither source must be given here; it is never guessed. Needs
     ///         ``displacement_damage=True``.
     ///
+    ///     product_threshold (float): The atom fraction, or share of the
+    ///         activity, decay heat or decay photon power, a transmutation
+    ///         product must reach at some state of the schedule for its cross
+    ///         sections to be downloaded and its own neutron reactions solved.
+    ///         Default 1e-12. The schedule is solved with the composition's
+    ///         cross sections, every product crossing this is loaded, and the
+    ///         solve is repeated until nothing new crosses it, so a run fetches
+    ///         the few dozen nuclides an irradiation populates rather than the
+    ///         hundreds its chain can reach. A product below it is still
+    ///         produced, decays and is reported; only its reactions are
+    ///         dropped, which moves its own atom fraction and decay-quantity
+    ///         shares by less than the threshold and what it would have made
+    ///         by less than the summed peak fraction of the products left out.
+    ///         What was loaded and left out is in
+    ///         ``get_product_screening_info(id)``. 0 loads every product the
+    ///         solve populates, which is exact.
+    ///
     /// Raises:
     ///     ValueError: If an irradiation pulse lacks a NeutronSource, its energy
     ///         is not a Histogram, or on other invalid inputs.
@@ -1398,7 +1416,7 @@ impl PyMaterial {
     ///     >>> # reaction: the sum is sigma * phi * N and the ratio is f_m
     ///     >>> results.get_reaction_rates(iron.id or 0, 0)["W186"]["(n,2n)"]
     ///     [('W185', 1.1e-08), ('W185_m1', 4.6e-07)]
-    #[pyo3(signature = (schedule, data_uncertainty = None, self_shielding_chord = None, self_shielding_shape = None, displacement_damage = false, displacement_energies = None))]
+    #[pyo3(signature = (schedule, data_uncertainty = None, self_shielding_chord = None, self_shielding_shape = None, displacement_damage = false, displacement_energies = None, product_threshold = 1e-12))]
     #[allow(clippy::too_many_arguments)]
     fn transmute(
         &mut self,
@@ -1409,7 +1427,10 @@ impl PyMaterial {
         self_shielding_shape: Option<Bound<'_, PyAny>>,
         displacement_damage: bool,
         displacement_energies: Option<HashMap<String, f64>>,
+        product_threshold: f64,
     ) -> PyResult<crate::transmutation_results::PyTransmutationResults> {
+        yani_transmute::screening::check_threshold(product_threshold)
+            .map_err(PyValueError::new_err)?;
         let damage = damage_request(displacement_damage, displacement_energies)?;
         let sched = schedule
             .cast::<crate::distribution::PyPulseSchedule>()
@@ -1446,6 +1467,7 @@ impl PyMaterial {
                     spectra,
                     steps,
                     shielding,
+                    product_threshold,
                 }],
                 loaded.chain,
                 &loaded.branch,
@@ -1466,8 +1488,9 @@ impl PyMaterial {
     ///
     /// ``transmute()`` loads the cross sections it needs into the material and
     /// leaves them there, so calling it again on the same material does no file
-    /// reading at all. On an ENDF/B-8.1 chain that is a few hundred nuclides
-    /// held for as long as the material is.
+    /// reading at all. That is the composition and the products the
+    /// irradiation populates, a few dozen nuclides for a pure metal and up to a
+    /// couple of hundred for a steel, held for as long as the material is.
     ///
     /// That is the right trade for a material you transmute more than once, and
     /// the wrong one for a sweep over thousands of *distinct* compositions --

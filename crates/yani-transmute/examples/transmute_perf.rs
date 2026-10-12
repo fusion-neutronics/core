@@ -159,12 +159,16 @@ fn run(
     };
     let start = Instant::now();
     let mut loaded = material.clone().to_sum_mode().ok()?;
-    yani_transmute::preload_activation_data(
+    yani_transmute::screen_activation_products(
         &mut loaded,
+        &spectra,
+        &steps,
         chain,
         &Default::default(),
+        Default::default(),
         Some(&request),
         None,
+        yani_transmute::DEFAULT_PRODUCT_THRESHOLD,
     )
     .ok()?;
     let preload = start.elapsed();

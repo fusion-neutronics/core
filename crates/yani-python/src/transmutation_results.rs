@@ -1372,6 +1372,56 @@ impl PyTransmutationResults {
         Ok(Some(d))
     }
 
+    /// Which transmutation products had their cross sections loaded, and
+    /// which were left out below ``product_threshold``.
+    ///
+    /// A product is loaded once its atom fraction, or its share of the
+    /// activity, decay heat or decay photon power, reaches the threshold at
+    /// any state of the schedule; one left out is still produced, decays and
+    /// is reported, and only its own neutron reactions are dropped.
+    ///
+    /// Keys: ``threshold``; ``rounds``, the screening solves run;
+    /// ``closure``, how many nuclides with neutron reactions the chain
+    /// reaches from the composition, which is what loading without screening
+    /// fetched; ``loaded``, the sorted nuclides whose cross sections drive
+    /// the solve; ``unavailable``, products that crossed the threshold but
+    /// the library has no data for; ``below_threshold``, each product left
+    /// out mapped to its largest atom fraction over the schedule; and
+    /// ``dropped_fraction``, the sum of those, which bounds the share of the
+    /// material's atoms the left-out reactions could have moved before
+    /// multiplying by the share of them that react.
+    ///
+    /// ``None`` for a material not in the results, and for one a
+    /// transport-coupled solve did not irradiate.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    fn get_product_screening_info<'py>(
+        &self,
+        py: Python<'py>,
+        material_id: u32,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(info) = self.inner.product_screening.get(&material_id) else {
+            return Ok(None);
+        };
+        let d = PyDict::new(py);
+        d.set_item("threshold", info.threshold)?;
+        d.set_item("rounds", info.rounds)?;
+        d.set_item("closure", info.closure)?;
+        d.set_item("loaded", info.loaded().into_iter().collect::<Vec<_>>())?;
+        d.set_item(
+            "unavailable",
+            info.unavailable.iter().cloned().collect::<Vec<_>>(),
+        )?;
+        let below = PyDict::new(py);
+        for (name, fraction) in &info.below_threshold {
+            below.set_item(name, fraction)?;
+        }
+        d.set_item("below_threshold", below)?;
+        d.set_item("dropped_fraction", info.dropped_fraction())?;
+        Ok(Some(d))
+    }
+
     /// Get material composition at a specific timestep as a dict.
     ///
     /// Args:

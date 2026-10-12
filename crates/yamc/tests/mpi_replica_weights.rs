@@ -173,6 +173,7 @@ fn replica_results(dir: &Path, chain: &Arc<HashMap<String, yani::ChainNuclide>>)
             Default::default(),
             &settings(),
             Some(&request),
+            yani_transmute::DEFAULT_PRODUCT_THRESHOLD,
         )
         .expect("transmute");
     let nominal = results.get_nuclide_density(1, "W187", 1).expect("W187");

@@ -179,9 +179,11 @@ impl YaniSession {
     /// The nuclides a transmutation of the current material would need cross
     /// sections for, as a JSON array the host fetches.
     ///
-    /// This is the whole download budget, and it is knowable before any of it
-    /// is fetched -- which is what lets the UI show a byte count up front
-    /// rather than an open-ended spinner.
+    /// This is the chain's reachable closure, an upper bound on the download
+    /// that is knowable before any of it is fetched, which is what lets the UI
+    /// show a byte count up front rather than an open-ended spinner. The solve
+    /// itself reads only the products it populates above
+    /// `yani_transmute::DEFAULT_PRODUCT_THRESHOLD`, a small part of it.
     #[wasm_bindgen(js_name = requiredNuclides)]
     pub fn required_nuclides(&self) -> Result<String, String> {
         let loaded = self.chain()?;
