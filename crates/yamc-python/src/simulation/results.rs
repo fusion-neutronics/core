@@ -64,20 +64,41 @@ impl PyTallyResult {
     /// The score's first-order variance along the cross sections' principal
     /// modes, which carries no sampling error from the replicas, plus the
     /// nonlinear remainder the replicas estimate, each with the Monte Carlo
-    /// noise of the shared histories deconvolved. A bin where that noise
-    /// swamps the estimate reads zero and is flagged in
-    /// ``nuclear_data_variance_negative``; more particles would resolve it.
+    /// noise of the shared histories deconvolved
+    /// (``nuclear_data_replica_spread`` is before, ``nuclear_data_noise``
+    /// what was removed). A bin where that noise swamps the estimate reads
+    /// zero; it is flagged in ``nuclear_data_noise_dominated``, and more
+    /// particles would resolve it.
     #[getter]
     pub fn nuclear_data_standard_deviation(&self) -> Option<Vec<f64>> {
         self.inner.nuclear_data_standard_deviation()
     }
 
-    /// Per bin, whether the deconvolved nuclear-data variance came out
-    /// negative (the replicas' noise swamps their spread), when the run was
-    /// given ``data_uncertainty``; ``None`` otherwise.
+    /// Standard deviation of the replicas per bin as scored, before the
+    /// Monte Carlo noise is deconvolved, ``sqrt(sigma**2 + noise**2)``, when
+    /// the run was given ``data_uncertainty``; ``None`` otherwise.
     #[getter]
-    pub fn nuclear_data_variance_negative(&self) -> Option<Vec<bool>> {
-        self.inner.nuclear_data_variance_negative()
+    pub fn nuclear_data_replica_spread(&self) -> Option<Vec<f64>> {
+        self.inner.nuclear_data_replica_spread()
+    }
+
+    /// Standard deviation of the Monte Carlo noise deconvolved from the
+    /// replicas' spread per bin, when the run was given ``data_uncertainty``;
+    /// ``None`` otherwise. Each replica's shift from the nominal is scored on
+    /// the shared histories, which cancel most but not all of its noise; it
+    /// falls as ``1/sqrt(particles)``.
+    #[getter]
+    pub fn nuclear_data_noise(&self) -> Option<Vec<f64>> {
+        self.inner.nuclear_data_noise()
+    }
+
+    /// Per bin, whether the noise variance deconvolved exceeded a quarter of
+    /// the nuclear-data variance left (or that variance came out negative),
+    /// when the run was given ``data_uncertainty``; ``None`` otherwise. The
+    /// sigma is still the deconvolved one; more particles would sharpen it.
+    #[getter]
+    pub fn nuclear_data_noise_dominated(&self) -> Option<Vec<bool>> {
+        self.inner.nuclear_data_noise_dominated()
     }
 
     /// Average of the cross-section replicas' means per bin, when the run was

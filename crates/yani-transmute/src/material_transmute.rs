@@ -2465,6 +2465,17 @@ fn run_replicas(
         .or(replica_tallies.map(ReplicaTallied::replicas));
     let cap = target.unwrap_or(MAX_SAMPLES);
     let mut replica: u64 = 0;
+    // The even half of the transport's replica tallies, when it has one: each
+    // replica is then solved from it too, and the spread of the difference
+    // measures the Monte Carlo noise in the replicas' spread.
+    let even = replica_tallies.and_then(|t| {
+        let scale = t.noise_scale()?;
+        Some((t.even.as_deref()?, scale))
+    });
+    if let Some((_, scale)) = even {
+        ensemble.set_noise_scale(scale);
+    }
+    let even = even.map(|(e, _)| e);
 
     // One replica, start to finish, reading nothing that is not shared
     // read-only and writing nothing outside its own return value. That is what
@@ -2474,7 +2485,14 @@ fn run_replicas(
     // ASSIGNS `spectra_with_sigma` / `spectra_without_sigma`, which were
     // counted before the loop, so folding a replica's zeros in would erase
     // them. Only the two counters a replica actually produces come back.
-    let one_replica = |replica: u64| -> Result<ReplicaOutcome, String> {
+    //
+    // `tallies` is the transport's replica tallies to solve from: the full
+    // ones, or with replica weights a second time their even half, which
+    // differs only in the Monte Carlo noise of the replicas' shifts (see
+    // `ReplicaTallied::even`). Every other draw is keyed on `replica` alone,
+    // so it is the same in both.
+    type Outcome = Result<ReplicaOutcome, String>;
+    let one_replica = |replica: u64, tallies: Option<&ReplicaTallied>| -> Outcome {
         let mut flux_coverage = crate::flux_uncertainty::FluxCoverage::default();
         let mut rates_sampled = 0usize;
         let mut rates_floored = 0usize;
@@ -2498,7 +2516,7 @@ fn run_replicas(
         // re-folded into the branching the way the nominal was, so an
         // isomeric split moves with the rates it is made of.
         let mut statistical_floored = 0usize;
-        let drawn = match (replica_tallies, statistical) {
+        let drawn = match (tallies, statistical) {
             (Some(t), st) => {
                 // The transport's replica: its rates and partials, with the
                 // nominal tally's statistical error added on top when that
@@ -2519,7 +2537,7 @@ fn run_replicas(
                 // The MF=40 draw re-splits this replica's own partials with
                 // its own interval productions, folded before the fold below
                 // moves the totals.
-                let folds = replica_isomer.map(|(t, covariance)| {
+                let folds = replica_isomer.map(|(_, covariance)| {
                     let folds = coupled_list_rates(lists, &partials, &totals, None);
                     let curves = crate::isomer_branching_uncertainty::tallied_curves(
                         covariance,
@@ -2699,7 +2717,7 @@ fn run_replicas(
                 _ => refolded,
             };
             let rates = drawn_rates;
-            let weights = match replica_tallies {
+            let weights = match tallies {
                 Some(t) => &t.fy_weights[replica as usize],
                 None => weights,
             };
@@ -2752,20 +2770,38 @@ fn run_replicas(
         // in replica order however they finished. That is required, not
         // cosmetic: `Ensemble::push` is a Welford recurrence, and the index it
         // pushes at IS the replica index `inventories_at` exposes.
-        let outcomes: Vec<Result<ReplicaOutcome, String>> = {
+        //
+        // With the even half of the replica tallies, each replica is solved
+        // a second time from it, for the Monte Carlo noise of its shift.
+        type Solved = (Outcome, Option<Outcome>);
+        let both = |r: u64| -> Solved {
+            let half = || even.map(|e| one_replica(r, Some(e)));
             #[cfg(not(target_arch = "wasm32"))]
             {
-                use rayon::prelude::*;
-                block.par_iter().map(|&r| one_replica(r)).collect()
+                rayon::join(|| one_replica(r, replica_tallies), half)
             }
             #[cfg(target_arch = "wasm32")]
             {
-                block.iter().map(|&r| one_replica(r)).collect()
+                (one_replica(r, replica_tallies), half())
+            }
+        };
+        let outcomes: Vec<Solved> = {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                use rayon::prelude::*;
+                block.par_iter().map(|&r| both(r)).collect()
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                block.iter().map(|&r| both(r)).collect()
             }
         };
 
-        for outcome in outcomes {
+        for (outcome, half) in outcomes {
             let outcome = outcome?;
+            if let Some(half) = half {
+                ensemble.push_even(half?.densities);
+            }
             info.rates_sampled += outcome.rates_sampled;
             info.rates_floored += outcome.rates_floored;
             flux_coverage.bins_sampled += outcome.flux_bins_sampled;

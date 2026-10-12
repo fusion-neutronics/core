@@ -114,6 +114,21 @@ def test_the_report_names_the_sources_that_applied():
     assert info["flux_response"] == "replica_weights"
     assert info["transport_replicas"] == 16
     assert "tallied-rate statistics" not in info["not_perturbed"]
+    # Each replica was solved again from the even half of the histories, and
+    # the Monte Carlo noise that measures is out of every sigma.
+    assert info["noise_removed"] is True
+    for entry in info["noisy"]:
+        assert entry["noise"] ** 2 > 0.25 * entry["std_dev"] ** 2
+
+
+def test_the_monte_carlo_noise_is_removed_from_the_sigmas():
+    results = _run(data_uncertainty=yamc.DataUncertainty(seed=1, samples=16))
+    nuclides = results.get_material_nuclides(MAT_ID, 1)
+    for nuclide in nuclides:
+        sigma = results.get_nuclide_uncertainty(MAT_ID, nuclide, 1)
+        spread, noise = results.get_nuclide_uncertainty_noise(MAT_ID, nuclide, 1)
+        assert sigma**2 == pytest.approx(max(spread**2 - noise**2, 0.0), rel=1e-9, abs=1e-300)
+    assert results.get_nuclide_uncertainty_noise(MAT_ID, next(iter(nuclides)), 0) == (0.0, 0.0)
 
 
 def test_the_report_holds_no_flux_response_with_cross_sections_off():

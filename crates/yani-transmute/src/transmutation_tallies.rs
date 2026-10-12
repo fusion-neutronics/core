@@ -3746,4 +3746,60 @@ mod tests {
         t.reset();
         assert!(t.replica_tallied(7, volume).is_none());
     }
+
+    /// Histories marked with their global index are kept in two halves by
+    /// parity. The full replica tally is the same as without the marks, and
+    /// the even half is the even histories' alone, normalized by their count;
+    /// unmarked histories form no halves.
+    #[test]
+    fn replica_sums_keep_even_and_odd_histories_apart() {
+        let (xs_e, xs) = (vec![1.0e7, 2.0e7, 3.0e7], vec![2.0, 2.0, 0.0]);
+        let material = indium_n2n(xs_e.clone(), xs.clone());
+        let (chain, branch) = isomer_only_n2n(false);
+        let factors = [1.0, 1.5, 0.5];
+        let changes = ConstantShift(vec![0.0, 0.2, -0.1]);
+        // Seven histories of one segment each, the even ones at 1.5e7 eV
+        // and the odd ones at 2.5e7 eV, so the halves differ.
+        let histories: Vec<(f64, f64)> = (0..7)
+            .map(|h| {
+                if h % 2 == 0 {
+                    (1.5e7, 1.0)
+                } else {
+                    (2.5e7, 2.0)
+                }
+            })
+            .collect();
+        let run = |mark: bool| {
+            let t = one_material_tally(&material, &chain, &branch).with_replicas(3, 9);
+            t.prepare_workers(1).unwrap();
+            for (h, &(e, tl)) in histories.iter().enumerate() {
+                if mark {
+                    t.begin_history(h as u64);
+                }
+                t.score_with_replicas(7, e, tl, &material, &factors, &changes);
+            }
+            t.accumulate_batch(histories.len());
+            t.replica_tallied(7, 1.0).expect("replicas are on")
+        };
+        let marked = run(true);
+        let unmarked = run(false);
+        assert_eq!(marked.halves, [4, 3]);
+        assert_eq!(marked.noise_scale(), Some(4.0 / 3.0));
+        assert!(unmarked.even.is_none() && unmarked.noise_scale().is_none());
+        let even = marked.even.as_ref().expect("both halves populated");
+        let sigma = |e: f64| curve_interp(&xs_e, &xs, e);
+        for (k, factor) in factors.iter().enumerate() {
+            let full = marked.rates[k]["In115"]["(n,2n)"];
+            let plain = unmarked.rates[k]["In115"]["(n,2n)"];
+            assert!((full - plain).abs() <= 1e-12 * plain.abs(), "replica {k}");
+            // The even histories alone: four segments at 1.5e7 eV of unit
+            // length, per even history.
+            let want = factor * (sigma(1.5e7) + changes.0[k]) / 1.0e24;
+            let got = even.rates[k]["In115"]["(n,2n)"];
+            assert!(
+                (got - want).abs() <= 1e-12 * want,
+                "replica {k}: {got} vs {want}"
+            );
+        }
+    }
 }

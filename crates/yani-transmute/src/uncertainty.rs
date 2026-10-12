@@ -428,6 +428,32 @@ pub(crate) fn misses(values: &[f64], convergence: f64) -> Option<Option<f64>> {
     }
 }
 
+/// [`misses`] on the sigma with the Monte Carlo noise removed (see
+/// [`spread_and_noise`]), judged by [`noise_removed_standard_error`]. A
+/// sigma the noise swamps has no standard error and reads as unestimated.
+pub(crate) fn misses_noise_removed(
+    values: &[f64],
+    even: &[f64],
+    scale: f64,
+    convergence: f64,
+) -> Option<Option<f64>> {
+    let n = values.len() as f64;
+    if n < 2.0 {
+        return None;
+    }
+    let mean = values.iter().sum::<f64>() / n;
+    let (spread, noise) = spread_and_noise(values, even, scale);
+    if spread <= 0.0 || spread.sqrt() <= NEGLIGIBLE * mean.abs() {
+        return None;
+    }
+    let sigma = (spread - noise).max(0.0).sqrt();
+    match noise_removed_standard_error(values, even, scale) {
+        Some(se) if sigma > 0.0 && se / sigma < convergence => None,
+        Some(se) if sigma > 0.0 => Some(Some(se / sigma)),
+        _ => Some(None),
+    }
+}
+
 /// Sort the misses worst first, an unestimated one ahead of every number.
 pub(crate) fn worst_first(unconverged: &mut [Unconverged]) {
     unconverged.sort_by(|a, b| {
@@ -468,6 +494,20 @@ pub struct Info {
     /// Every tracked sigma, by output and step, that did not reach the
     /// target, with the `SE(sigma) / sigma` it did reach, worst first.
     pub unconverged: Vec<Unconverged>,
+    /// Whether the Monte Carlo noise in the replicas' spread was measured
+    /// and removed from every sigma reported: with transport replica weights,
+    /// each replica solved a second time from the even half of the
+    /// transport's histories (see [`Ensemble::noise_scale`]). The shift each
+    /// replica's tally makes from the nominal is resolved only to the
+    /// transport's history count, and its noise adds to the replicas' spread;
+    /// a sigma here is the spread with that removed.
+    pub noise_removed: bool,
+    /// Every tracked sigma whose removed Monte Carlo noise variance exceeded
+    /// [`NOISE_FLAG_FRACTION`] of the nuclear-data variance left, with the
+    /// replica spread, the noise and the sigma reported, the largest share
+    /// first. The sigma is still the noise-removed one; more transport
+    /// histories would sharpen it.
+    pub noisy: Vec<NoisyOutput>,
     /// Nuclides whose cross sections were perturbed.
     pub perturbed: BTreeSet<String>,
     /// Nuclides with rates but no usable covariance, so no stated uncertainty.
@@ -989,6 +1029,8 @@ impl Info {
         self.convergence = request.convergence;
         self.unconverged = ensemble.unconverged(request.convergence);
         self.converged = self.unconverged.is_empty();
+        self.noise_removed = ensemble.noise_scale().is_some();
+        self.noisy = ensemble.noisy();
         self.hit_cap = request.samples.is_none() && !self.converged;
     }
 
@@ -1091,6 +1133,20 @@ pub struct Ensemble {
     /// `[replica][step]`: the activity, decay heat and decay photon line rate
     /// per cm^3 the stopping rule tracks, for the replicas evaluated so far.
     tracked: Vec<Vec<[f64; 3]>>,
+    /// `[replica][step][nuclide]`: each replica solved again from the even
+    /// half of the transport's histories, when its replica tallies carried
+    /// one (`ReplicaTallied::even`); empty otherwise.
+    even: Vec<Vec<HashMap<String, f64>>>,
+    /// `[replica][step]`: [`Self::tracked`] on the even-half inventories.
+    tracked_even: Vec<Vec<[f64; 3]>>,
+    /// The even half's histories over the odd half's, when [`Self::even`] is
+    /// kept: what turns the spread of the even-half differences into the
+    /// noise variance (see [`spread_and_noise`]).
+    noise_scale: Option<f64>,
+    /// `[step][nuclide]`: the Monte Carlo noise variance in each density's
+    /// replica spread, filled by [`Self::fold_absences`] when
+    /// [`Self::even`] is kept.
+    noise: Vec<HashMap<String, f64>>,
     /// Where the uncertainty comes from, when it was asked for.
     pub attribution: Option<Attribution>,
     /// The seed decay energies are drawn from, per replica and nuclide, when
@@ -1199,6 +1255,10 @@ impl Ensemble {
             samples: Vec::new(),
             half_lives: Vec::new(),
             tracked: Vec::new(),
+            even: Vec::new(),
+            tracked_even: Vec::new(),
+            noise_scale: None,
+            noise: Vec::new(),
             attribution: None,
             decay_energy_seed: None,
             decay_photon_seed: None,
@@ -1232,6 +1292,26 @@ impl Ensemble {
         self.samples.push(per_step);
     }
 
+    /// Keep, for the replica pushed next (or last), its inventories solved from
+    /// the even half of the transport's histories.
+    pub(crate) fn push_even(&mut self, per_step: Vec<HashMap<String, f64>>) {
+        self.even.push(per_step);
+    }
+
+    /// Set the even half's histories over the odd half's, for
+    /// [`Self::push_even`]'s inventories.
+    pub(crate) fn set_noise_scale(&mut self, scale: f64) {
+        self.noise_scale = Some(scale);
+    }
+
+    /// The even half's histories over the odd half's, when the Monte Carlo
+    /// noise of the replicas is measured: every replica was then solved a
+    /// second time from the even half of the transport's histories.
+    pub fn noise_scale(&self) -> Option<f64> {
+        self.noise_scale
+            .filter(|_| !self.samples.is_empty() && self.even.len() == self.samples.len())
+    }
+
     /// A nuclide absent from a replica is a zero in that replica, not a gap.
     ///
     /// The stepper drops anything at or below its density floor, so a nuclide
@@ -1248,26 +1328,122 @@ impl Ensemble {
                 }
             }
         }
+        self.noise.clear();
+        let Some(scale) = self.noise_scale() else {
+            return;
+        };
+        let mut values = Vec::with_capacity(self.samples.len());
+        let mut even = Vec::with_capacity(self.samples.len());
+        for step in 0..self.moments.len() {
+            let mut noise = HashMap::new();
+            let names: Vec<String> = self.moments[step].keys().cloned().collect();
+            for name in names {
+                values.clear();
+                even.clear();
+                values.extend(self.samples.iter().map(|r| density(r, step, &name)));
+                even.extend(self.even.iter().map(|r| density(r, step, &name)));
+                let (_, n) = spread_and_noise(&values, &even, scale);
+                noise.insert(name, n);
+            }
+            self.noise.push(noise);
+        }
+    }
+
+    /// The Monte Carlo noise variance in a nuclide's replica spread at
+    /// `step`, zero when it is not measured.
+    fn noise_variance(&self, step: usize, nuclide: &str) -> f64 {
+        self.noise
+            .get(step)
+            .and_then(|m| m.get(nuclide))
+            .copied()
+            .unwrap_or(0.0)
     }
 
     pub fn replicas(&self) -> usize {
         self.samples.len()
     }
 
-    /// Standard deviation of every nuclide's density at `step`.
+    /// Standard deviation of every nuclide's density at `step`, with the
+    /// Monte Carlo noise of the replicas removed where it was measured
+    /// ([`Self::noise_scale`]): `sqrt(spread^2 - noise^2)`, zero where the
+    /// noise is the larger.
     pub fn std_dev_at(&self, step: usize) -> HashMap<String, f64> {
         self.moments
             .get(step)
-            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.std_dev())).collect())
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| (k.clone(), self.removed(step, k, v)))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
-    /// One nuclide's standard deviation across every step.
+    fn removed(&self, step: usize, nuclide: &str, m: &Moments) -> f64 {
+        let s = m.std_dev();
+        (s * s - self.noise_variance(step, nuclide)).max(0.0).sqrt()
+    }
+
+    /// One nuclide's standard deviation across every step, as
+    /// [`Self::std_dev_at`] gives it.
     pub fn std_dev_evolution(&self, nuclide: &str) -> Vec<f64> {
+        self.moments
+            .iter()
+            .enumerate()
+            .map(|(step, m)| {
+                m.get(nuclide)
+                    .map_or(0.0, |v| self.removed(step, nuclide, v))
+            })
+            .collect()
+    }
+
+    /// One nuclide's replica spread across every step, the standard deviation
+    /// of the replicas before any noise is removed.
+    pub fn replica_spread_evolution(&self, nuclide: &str) -> Vec<f64> {
         self.moments
             .iter()
             .map(|m| m.get(nuclide).map_or(0.0, Moments::std_dev))
             .collect()
+    }
+
+    /// One nuclide's Monte Carlo noise across every step, as the standard
+    /// deviation removed from its replica spread; zeros when it was not
+    /// measured.
+    pub fn noise_evolution(&self, nuclide: &str) -> Vec<f64> {
+        (0..self.moments.len())
+            .map(|step| self.noise_variance(step, nuclide).max(0.0).sqrt())
+            .collect()
+    }
+
+    /// The standard error of a nuclide's [`Self::std_dev_at`] at `step`:
+    /// [`std_dev_standard_error`] of its replicas, or with the noise removed
+    /// [`noise_removed_standard_error`].
+    pub fn std_dev_standard_error_at(&self, step: usize, nuclide: &str) -> Option<f64> {
+        let values = self.samples_at(step, nuclide);
+        match self.noise_scale() {
+            Some(scale) => {
+                noise_removed_standard_error(&values, &self.even_samples_at(step, nuclide), scale)
+            }
+            None => std_dev_standard_error(&values),
+        }
+    }
+
+    /// One nuclide's density in every replica at `step`, solved from the even
+    /// half of the transport's histories; empty when that was not done.
+    pub fn even_samples_at(&self, step: usize, nuclide: &str) -> Vec<f64> {
+        self.even
+            .iter()
+            .map(|r| density(r, step, nuclide))
+            .collect()
+    }
+
+    /// Every replica's full inventory at `step` solved from the even half of
+    /// the transport's histories, in replica order; empty when that was not
+    /// done (see [`Self::noise_scale`]).
+    pub fn even_inventories_at(&self, step: usize) -> Vec<&HashMap<String, f64>> {
+        if self.noise_scale().is_none() {
+            return Vec::new();
+        }
+        self.even.iter().filter_map(|r| r.get(step)).collect()
     }
 
     /// One nuclide's density in every replica at `step`, for a derived quantity
@@ -1275,12 +1451,7 @@ impl Ensemble {
     pub fn samples_at(&self, step: usize, nuclide: &str) -> Vec<f64> {
         self.samples
             .iter()
-            .map(|r| {
-                r.get(step)
-                    .and_then(|s| s.get(nuclide))
-                    .copied()
-                    .unwrap_or(0.0)
-            })
+            .map(|r| density(r, step, nuclide))
             .collect()
     }
 
@@ -1309,10 +1480,9 @@ impl Ensemble {
     /// Once per replica, so a run that judges after every block pays for each
     /// replica's totals once.
     pub(crate) fn track_derived(&mut self, chain: &HashMap<String, yani::ChainNuclide>) {
-        let from = self.tracked.len();
-        let evaluate = |k: usize| -> Vec<[f64; 3]> {
+        let evaluate = |inventories: &[Vec<HashMap<String, f64>>], k: usize| -> Vec<[f64; 3]> {
             let half_lives = &self.half_lives[k];
-            self.samples[k]
+            inventories[k]
                 .iter()
                 .map(|inventory| {
                     crate::derived::tracked_totals(
@@ -1325,21 +1495,27 @@ impl Ensemble {
                 })
                 .collect()
         };
-        let fresh: Vec<Vec<[f64; 3]>> = {
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                use rayon::prelude::*;
-                (from..self.samples.len())
-                    .into_par_iter()
-                    .map(evaluate)
-                    .collect()
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                (from..self.samples.len()).map(evaluate).collect()
-            }
-        };
-        self.tracked.extend(fresh);
+        let fresh =
+            |inventories: &[Vec<HashMap<String, f64>>], from: usize| -> Vec<Vec<[f64; 3]>> {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    use rayon::prelude::*;
+                    (from..inventories.len())
+                        .into_par_iter()
+                        .map(|k| evaluate(inventories, k))
+                        .collect()
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    (from..inventories.len())
+                        .map(|k| evaluate(inventories, k))
+                        .collect()
+                }
+            };
+        let tracked = fresh(&self.samples, self.tracked.len());
+        let tracked_even = fresh(&self.even, self.tracked_even.len());
+        self.tracked.extend(tracked);
+        self.tracked_even.extend(tracked_even);
     }
 
     /// Whether an adaptive run may stop: at least [`MIN_SAMPLES`] replicas,
@@ -1357,27 +1533,18 @@ impl Ensemble {
         self.unconverged(convergence).is_empty()
     }
 
-    /// Every tracked sigma that misses `convergence`, worst first.
+    /// Call `visit` with every tracked output at every step, its value in
+    /// each replica and, when the noise is measured, in each replica solved
+    /// from the even half.
     ///
     /// Tracked, at every schedule step: the density of each nuclide within
     /// [`SIGNIFICANCE`] of that step's largest, and the total activity, decay
     /// heat and decay photon line rate evaluated so far by
-    /// [`Self::track_derived`]. Every step, not only the last, since a cooling
-    /// step is often the one read, and an output noisy at one step only keeps
-    /// the run going. The judgement is `SE(sigma) / sigma` from
-    /// [`std_dev_standard_error`], so a heavy-tailed output needs more
-    /// replicas than a Gaussian one. An output with no spread, or a sigma
-    /// under [`NEGLIGIBLE`] of its mean, has nothing worth converging and is
-    /// not tracked.
-    ///
-    /// Not tracked: the photon spectrum line by line and the contact dose,
-    /// whose dose quantity and build-up factor are chosen when it is read and
-    /// whose attenuation data a run does not load. Their emitters' densities
-    /// and the summed line rate are tracked, and every estimate reports its
-    /// own standard error.
-    pub fn unconverged(&self, convergence: f64) -> Vec<Unconverged> {
-        let mut out = Vec::new();
+    /// [`Self::track_derived`].
+    fn visit_tracked(&self, mut visit: impl FnMut(Output, usize, &[f64], Option<&[f64]>)) {
+        let noise = self.noise_scale().is_some();
         let mut values = Vec::with_capacity(self.samples.len());
+        let mut even = Vec::with_capacity(self.even.len());
         for (step, slot) in self.moments.iter().enumerate() {
             // The running mean is over the replicas a nuclide appeared in;
             // scaled to all of them, an absence reads as the zero it is.
@@ -1392,23 +1559,22 @@ impl Ensemble {
                     continue;
                 }
                 values.clear();
-                values.extend(self.samples.iter().map(|r| {
-                    r.get(step)
-                        .and_then(|s| s.get(name))
-                        .copied()
-                        .unwrap_or(0.0)
-                }));
-                if let Some(reached) = misses(&values, convergence) {
-                    out.push(Unconverged {
-                        output: Output::Density(name.clone()),
-                        step: step + 1,
-                        relative_standard_error: reached,
-                    });
+                values.extend(self.samples.iter().map(|r| density(r, step, name)));
+                even.clear();
+                if noise {
+                    even.extend(self.even.iter().map(|r| density(r, step, name)));
                 }
+                visit(
+                    Output::Density(name.clone()),
+                    step + 1,
+                    &values,
+                    noise.then_some(&even[..]),
+                );
             }
             if self.tracked.is_empty() {
                 continue;
             }
+            let derived_noise = noise && self.tracked_even.len() == self.tracked.len();
             for (q, output) in [Output::Activity, Output::DecayHeat, Output::DecayPhotonRate]
                 .into_iter()
                 .enumerate()
@@ -1419,18 +1585,117 @@ impl Ensemble {
                         .iter()
                         .filter_map(|r| r.get(step).map(|t| t[q])),
                 );
-                if let Some(reached) = misses(&values, convergence) {
-                    out.push(Unconverged {
-                        output,
-                        step: step + 1,
-                        relative_standard_error: reached,
-                    });
+                even.clear();
+                if derived_noise {
+                    even.extend(
+                        self.tracked_even
+                            .iter()
+                            .filter_map(|r| r.get(step).map(|t| t[q])),
+                    );
                 }
+                visit(
+                    output,
+                    step + 1,
+                    &values,
+                    derived_noise.then_some(&even[..]),
+                );
             }
         }
+    }
+
+    /// Every tracked sigma that misses `convergence`, worst first.
+    ///
+    /// Tracked, at every schedule step: the density of each nuclide within
+    /// [`SIGNIFICANCE`] of that step's largest, and the total activity, decay
+    /// heat and decay photon line rate evaluated so far by
+    /// [`Self::track_derived`]. Every step, not only the last, since a cooling
+    /// step is often the one read, and an output noisy at one step only keeps
+    /// the run going. The judgement is `SE(sigma) / sigma` from
+    /// [`std_dev_standard_error`], so a heavy-tailed output needs more
+    /// replicas than a Gaussian one, and with the Monte Carlo noise removed
+    /// from [`noise_removed_standard_error`] on the sigma reported. An output
+    /// with no spread, or a sigma under [`NEGLIGIBLE`] of its mean, has
+    /// nothing worth converging and is not tracked.
+    ///
+    /// Not tracked: the photon spectrum line by line and the contact dose,
+    /// whose dose quantity and build-up factor are chosen when it is read and
+    /// whose attenuation data a run does not load. Their emitters' densities
+    /// and the summed line rate are tracked, and every estimate reports its
+    /// own standard error.
+    pub fn unconverged(&self, convergence: f64) -> Vec<Unconverged> {
+        let mut out = Vec::new();
+        let scale = self.noise_scale().unwrap_or(0.0);
+        self.visit_tracked(|output, step, values, even| {
+            let reached = match even {
+                Some(even) => misses_noise_removed(values, even, scale, convergence),
+                None => misses(values, convergence),
+            };
+            if let Some(reached) = reached {
+                out.push(Unconverged {
+                    output,
+                    step,
+                    relative_standard_error: reached,
+                });
+            }
+        });
         worst_first(&mut out);
         out
     }
+
+    /// Every tracked output whose removed Monte Carlo noise variance exceeds
+    /// [`NOISE_FLAG_FRACTION`] of the nuclear-data variance left, the largest
+    /// share first; empty when the noise was not measured. An output with a
+    /// spread under [`NEGLIGIBLE`] of its mean is not judged.
+    pub fn noisy(&self) -> Vec<NoisyOutput> {
+        let Some(scale) = self.noise_scale() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        self.visit_tracked(|output, step, values, even| {
+            let Some(even) = even else {
+                return;
+            };
+            let (spread, noise) = spread_and_noise(values, even, scale);
+            let mean = values.iter().sum::<f64>() / values.len().max(1) as f64;
+            if spread <= 0.0 || spread.sqrt() <= NEGLIGIBLE * mean.abs() {
+                return;
+            }
+            let left = spread - noise;
+            if noise > NOISE_FLAG_FRACTION * left.max(0.0) {
+                out.push(NoisyOutput {
+                    output,
+                    step,
+                    replica_spread: spread.sqrt(),
+                    noise: noise.max(0.0).sqrt(),
+                    std_dev: left.max(0.0).sqrt(),
+                });
+            }
+        });
+        let share = |n: &NoisyOutput| {
+            if n.std_dev > 0.0 {
+                (n.noise / n.std_dev).powi(2)
+            } else {
+                f64::INFINITY
+            }
+        };
+        out.sort_by(|a, b| {
+            share(b)
+                .total_cmp(&share(a))
+                .then_with(|| a.step.cmp(&b.step))
+                .then_with(|| a.output.cmp(&b.output))
+        });
+        out
+    }
+}
+
+/// A nuclide's density in one replica's per-step inventories, zero where it
+/// is absent.
+fn density(replica: &[HashMap<String, f64>], step: usize, nuclide: &str) -> f64 {
+    replica
+        .get(step)
+        .and_then(|s| s.get(nuclide))
+        .copied()
+        .unwrap_or(0.0)
 }
 
 /// The per-step nuclide densities of one replica.
@@ -2031,6 +2296,95 @@ pub fn std_dev_standard_error(values: &[f64]) -> Option<f64> {
     Some(standard_error_from_sums(nf, m2, m4))
 }
 
+/// The share of the nuclear-data variance the Monte Carlo noise removed from
+/// a replica spread may reach before the output is flagged
+/// ([`NoisyOutput`]): past it, the noise is a large part of what the
+/// replicas measured, and more histories would sharpen the sigma more than
+/// more replicas would.
+pub const NOISE_FLAG_FRACTION: f64 = 0.25;
+
+/// The replica spread of `values` and the Monte Carlo noise in it, as
+/// variances `(spread, noise)`, from `even`, the same replicas solved from
+/// the even half of the transport's histories, and `scale`, the even half's
+/// histories over the odd half's.
+///
+/// Replica `k`'s output from the full tally is `y_k = s_k + e_k`, with `s_k`
+/// what transport under its data would give and `e_k` the Monte Carlo noise
+/// of its shift from the nominal. From the even half it is `s_k + a_k`, and
+/// with `b_k` the odd half's noise, `e_k = (n_e a_k + n_o b_k) / n`. The two
+/// halves' noise is independent, so `d_k = y^e_k - y_k = n_o (a_k - b_k) /
+/// n` carries none of `s_k` (every data draw, the nominal's statistical
+/// error included, is the same in both solves) and its variance over the
+/// replicas is `n_o / n_e` times that of `e_k`. So `scale * S^2(d)` is
+/// unbiased for the noise in `S^2(y)`, and `S^2(y) - scale * S^2(d)` for the
+/// spread with it removed, to first order in the noise wherever the solve is
+/// nonlinear in the rates.
+pub(crate) fn spread_and_noise(values: &[f64], even: &[f64], scale: f64) -> (f64, f64) {
+    let n = values.len();
+    if n < 2 || even.len() != n {
+        return (0.0, 0.0);
+    }
+    let nf = n as f64;
+    let mean = values.iter().sum::<f64>() / nf;
+    let d_mean = even.iter().zip(values).map(|(e, v)| e - v).sum::<f64>() / nf;
+    let spread = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (nf - 1.0);
+    let noise = even
+        .iter()
+        .zip(values)
+        .map(|(e, v)| (e - v - d_mean).powi(2))
+        .sum::<f64>()
+        / (nf - 1.0);
+    (spread, scale * noise)
+}
+
+/// The standard error of the noise-removed standard deviation
+/// `sqrt(S^2(y) - scale S^2(d))` (see [`spread_and_noise`]), or `None` below
+/// four values or where the removed variance is not positive.
+///
+/// The estimate is a mean over replicas of `z_k = n/(n-1) [(y_k - ȳ)^2 -
+/// scale (d_k - d̄)^2]`, so its variance is `S^2(z) / n`, and `SE(sigma) =
+/// SE(V) / (2 sigma)` to first order. Without noise it reduces to the
+/// fourth-moment form [`std_dev_standard_error`] takes.
+pub fn noise_removed_standard_error(values: &[f64], even: &[f64], scale: f64) -> Option<f64> {
+    let n = values.len();
+    if n < 4 || even.len() != n {
+        return None;
+    }
+    let nf = n as f64;
+    let mean = values.iter().sum::<f64>() / nf;
+    let d_mean = even.iter().zip(values).map(|(e, v)| e - v).sum::<f64>() / nf;
+    let z: Vec<f64> = values
+        .iter()
+        .zip(even)
+        .map(|(v, e)| nf / (nf - 1.0) * ((v - mean).powi(2) - scale * (e - v - d_mean).powi(2)))
+        .collect();
+    let v = z.iter().sum::<f64>() / nf;
+    if v <= 0.0 {
+        return None;
+    }
+    let var_z = z.iter().map(|x| (x - v).powi(2)).sum::<f64>() / (nf - 1.0);
+    Some((var_z / nf).sqrt() / (2.0 * v.sqrt()))
+}
+
+/// One tracked output whose replica spread carried Monte Carlo noise of more
+/// than [`NOISE_FLAG_FRACTION`] of the nuclear-data variance left once it was
+/// removed. The sigma reported is the noise-removed one; more source
+/// histories in the transport would make it sharper.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NoisyOutput {
+    /// What it is the sigma of.
+    pub output: Output,
+    /// The step, indexed like `TransmutationResults::get_material`.
+    pub step: usize,
+    /// The replicas' standard deviation, noise and all.
+    pub replica_spread: f64,
+    /// The standard deviation of the Monte Carlo noise removed from it.
+    pub noise: f64,
+    /// The standard deviation reported, `sqrt(spread^2 - noise^2)`, zero
+    /// where the noise is the larger.
+    pub std_dev: f64,
+}
+
 /// [`std_dev_standard_error`] from the count and the sums of the squared and
 /// fourth-power deviations from the mean.
 fn standard_error_from_sums(n: f64, m2: f64, m4: f64) -> f64 {
@@ -2093,6 +2447,94 @@ impl SpreadAccumulator {
 
 #[cfg(test)]
 mod tests {
+
+    /// Replicas with a data spread, a draw shared by both solves (the
+    /// statistical one, say) and Monte Carlo noise from two unequal halves:
+    /// the even half's solve measures the noise alone, so what is left is
+    /// the data spread and the shared draw, and nothing of the noise.
+    #[test]
+    fn the_even_half_removes_the_noise_and_keeps_every_draw() {
+        let r = 40_000;
+        let (n_e, n_o) = (3.0_f64, 1.0_f64);
+        let n = n_e + n_o;
+        // Per-history variance 2, so the full tally's noise variance is 0.5.
+        let v = 2.0_f64;
+        let mut state = yamc_rng::expand_seed(11);
+        let z = crate::covariance_sample::standard_normals(&mut state, 4 * r);
+        let (mut full, mut even) = (Vec::with_capacity(r), Vec::with_capacity(r));
+        for k in 0..r {
+            let data = z[4 * k];
+            let shared = 0.3 * z[4 * k + 1];
+            let a = (v / n_e).sqrt() * z[4 * k + 2];
+            let b = (v / n_o).sqrt() * z[4 * k + 3];
+            let noise = (n_e * a + n_o * b) / n;
+            full.push(5.0 + data + shared + noise);
+            even.push(5.0 + data + shared + a);
+        }
+        let (spread, noise) = spread_and_noise(&full, &even, n_e / n_o);
+        assert!((noise - 0.5).abs() < 0.03, "noise {noise}");
+        assert!(
+            (spread - noise - 1.09).abs() < 0.04,
+            "left {}",
+            spread - noise
+        );
+        let se = noise_removed_standard_error(&full, &even, n_e / n_o).unwrap();
+        assert!(se > 0.0 && se < 0.02, "standard error {se}");
+
+        // The ensemble reports the same, per nuclide.
+        let mut e = Ensemble::new(1);
+        for (f, h) in full.iter().zip(&even).take(2000) {
+            e.push(vec![HashMap::from([("X".to_string(), *f)])]);
+            e.push_even(vec![HashMap::from([("X".to_string(), *h)])]);
+        }
+        e.set_noise_scale(n_e / n_o);
+        e.fold_absences();
+        assert_eq!(e.noise_scale(), Some(3.0));
+        let values: Vec<f64> = full.iter().take(2000).copied().collect();
+        let halves: Vec<f64> = even.iter().take(2000).copied().collect();
+        let (spread, noise) = spread_and_noise(&values, &halves, 3.0);
+        let sigma = e.std_dev_at(0)["X"];
+        assert!((sigma - (spread - noise).sqrt()).abs() < 1e-12);
+        assert!((e.replica_spread_evolution("X")[0] - spread.sqrt()).abs() < 1e-12);
+        assert!((e.noise_evolution("X")[0] - noise.sqrt()).abs() < 1e-12);
+        assert_eq!(
+            e.std_dev_standard_error_at(0, "X"),
+            noise_removed_standard_error(&values, &halves, 3.0)
+        );
+        // Without the even half nothing is removed.
+        let mut plain = Ensemble::new(1);
+        for f in &values {
+            plain.push(vec![HashMap::from([("X".to_string(), *f)])]);
+        }
+        plain.fold_absences();
+        assert_eq!(plain.noise_scale(), None);
+        assert!((plain.std_dev_at(0)["X"] - spread.sqrt()).abs() < 1e-12);
+        assert_eq!(plain.noise_evolution("X"), vec![0.0]);
+    }
+
+    /// A tracked output whose noise is more than a quarter of the variance
+    /// left is reported, with its parts.
+    #[test]
+    fn a_noisy_output_is_reported() {
+        let mut e = Ensemble::new(1);
+        for k in 0..64 {
+            let x = k as f64;
+            // Data spread 1 per unit of `x`; the even half moves every other
+            // replica by 30, a noise variance far above it.
+            let data = 100.0 + (x % 8.0);
+            let even = data + if k % 2 == 0 { 30.0 } else { -30.0 };
+            e.push(vec![HashMap::from([("X".to_string(), data)])]);
+            e.push_even(vec![HashMap::from([("X".to_string(), even)])]);
+        }
+        e.set_noise_scale(1.0);
+        e.fold_absences();
+        let noisy = e.noisy();
+        assert_eq!(noisy.len(), 1);
+        assert_eq!(noisy[0].output, Output::Density("X".to_string()));
+        assert_eq!(noisy[0].step, 1);
+        assert!(noisy[0].noise > noisy[0].replica_spread);
+        assert_eq!(noisy[0].std_dev, 0.0);
+    }
 
     #[test]
     fn a_standard_error_needs_four_values_and_is_zero_without_spread() {

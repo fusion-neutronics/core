@@ -41,7 +41,9 @@ pub struct Estimate {
     /// agree to within the sampling error, and a gap between them says the
     /// perturbation is biased rather than merely wide.
     pub mean: Option<f64>,
-    /// The ensemble's sample standard deviation, or `None` below two replicas.
+    /// The ensemble's sample standard deviation, or `None` below two replicas,
+    /// with the Monte Carlo noise of the transport's replica tallies removed
+    /// where it was measured (see [`Self::noise`]).
     ///
     /// The lower end of the range [`Self::std_dev_correlated`] closes: where
     /// the `decay_photon_lines` source is drawn, every correlation the decay
@@ -64,8 +66,24 @@ pub struct Estimate {
     pub std_dev_correlated: Option<f64>,
     /// The standard error of `std_dev`, how far another ensemble of the same
     /// size could put it, or `None` below four replicas. It allows for a heavy
-    /// tail (see [`crate::uncertainty::std_dev_standard_error`]).
+    /// tail (see [`crate::uncertainty::std_dev_standard_error`]), and with the
+    /// noise removed for its sampling too
+    /// ([`crate::uncertainty::noise_removed_standard_error`]); `None` as well
+    /// where the noise swamps the spread.
     pub std_dev_standard_error: Option<f64>,
+    /// The replicas' standard deviation as they were solved, noise and all,
+    /// or `None` below two replicas. Equal to `std_dev` where no noise was
+    /// measured.
+    pub replica_spread: Option<f64>,
+    /// The standard deviation of the Monte Carlo noise removed from
+    /// `replica_spread`, so `std_dev^2 = replica_spread^2 - noise^2` (floored
+    /// at zero), or `None` where it was not measured: without transport
+    /// replica weights, or below two replicas. With replica weights, each
+    /// replica's tallied shift from the nominal is resolved only to the
+    /// transport's history count; the spread of the same replicas solved from
+    /// the even half of the histories measures that noise
+    /// ([`crate::uncertainty::Info::noise_removed`]).
+    pub noise: Option<f64>,
     /// How many replicas the ensemble held.
     pub replicas: usize,
 }
@@ -85,6 +103,18 @@ impl Estimate {
     pub fn relative_std_dev_correlated(&self) -> Option<f64> {
         let sigma = self.std_dev_correlated?;
         (self.nominal != 0.0).then(|| sigma / self.nominal.abs())
+    }
+
+    /// Whether the noise removed exceeded
+    /// [`crate::uncertainty::NOISE_FLAG_FRACTION`] of the variance left: the
+    /// sigma is then mostly what more transport histories would sharpen.
+    pub fn noise_dominated(&self) -> bool {
+        match (self.noise, self.std_dev) {
+            (Some(noise), Some(sigma)) => {
+                noise * noise > crate::uncertainty::NOISE_FLAG_FRACTION * sigma * sigma
+            }
+            _ => false,
+        }
     }
 }
 
@@ -137,17 +167,64 @@ fn spread(values: &[f64]) -> (Option<f64>, Option<f64>) {
     (Some(moments.mean), Some(moments.std_dev()))
 }
 
+/// The same replicas evaluated from the even half of the transport's
+/// histories, for the Monte Carlo noise in their spread.
+#[derive(Clone, Copy)]
+pub(crate) struct Even<'a> {
+    /// One value per replica, as `values`.
+    pub(crate) values: &'a [f64],
+    /// As `correlated`, where that end differs.
+    pub(crate) correlated: Option<&'a [f64]>,
+    /// The even half's histories over the odd half's.
+    pub(crate) scale: f64,
+}
+
 /// Assemble one [`Estimate`] from a nominal value and one value per replica,
 /// and the same replicas evaluated with the photon intensities fully
-/// correlated, where that end differs.
-pub(crate) fn estimate(nominal: f64, values: &[f64], correlated: Option<&[f64]>) -> Estimate {
-    let (mean, std_dev) = spread(values);
+/// correlated, where that end differs. With `even`, the Monte Carlo noise is
+/// removed from both ends (see [`crate::uncertainty::spread_and_noise`]).
+pub(crate) fn estimate(
+    nominal: f64,
+    values: &[f64],
+    correlated: Option<&[f64]>,
+    even: Option<Even<'_>>,
+) -> Estimate {
+    let (mean, raw) = spread(values);
+    let raw_correlated = correlated.map_or(raw, |c| spread(c).1);
+    let Some(even) = even.filter(|e| e.values.len() == values.len() && raw.is_some()) else {
+        return Estimate {
+            nominal,
+            mean,
+            std_dev: raw,
+            std_dev_correlated: raw_correlated,
+            std_dev_standard_error: crate::uncertainty::std_dev_standard_error(values),
+            replica_spread: raw,
+            noise: None,
+            replicas: values.len(),
+        };
+    };
+    let scale = even.scale;
+    let removed = |values: &[f64], even: &[f64]| {
+        let (spread, noise) = crate::uncertainty::spread_and_noise(values, even, scale);
+        ((spread - noise).max(0.0).sqrt(), noise.max(0.0).sqrt())
+    };
+    let (std_dev, noise) = removed(values, even.values);
+    let std_dev_correlated = match (correlated, even.correlated) {
+        (Some(c), Some(e)) => removed(c, e).0,
+        _ => std_dev,
+    };
     Estimate {
         nominal,
         mean,
-        std_dev,
-        std_dev_correlated: correlated.map_or(std_dev, |c| spread(c).1),
-        std_dev_standard_error: crate::uncertainty::std_dev_standard_error(values),
+        std_dev: Some(std_dev),
+        std_dev_correlated: Some(std_dev_correlated),
+        std_dev_standard_error: crate::uncertainty::noise_removed_standard_error(
+            values,
+            even.values,
+            scale,
+        ),
+        replica_spread: raw,
+        noise: Some(noise),
         replicas: values.len(),
     }
 }
@@ -168,11 +245,11 @@ pub(crate) fn estimate(nominal: f64, values: &[f64], correlated: Option<&[f64]>)
 ///
 /// `correlated` is the same replicas with the photon intensities fully
 /// correlated, where that end differs.
-fn estimate_by_nuclide(
-    nominal: &HashMap<String, f64>,
-    per_replica: &[HashMap<String, f64>],
-    correlated: Option<&[HashMap<String, f64>]>,
-) -> HashMap<String, Estimate> {
+fn estimate_by_nuclide(folded: &Evaluated) -> HashMap<String, Estimate> {
+    let nominal = &folded.nominal;
+    let per_replica = &folded.independent;
+    let correlated = folded.correlated.as_deref();
+    let even = folded.even.as_ref();
     let names: HashSet<&String> = nominal
         .keys()
         .chain(per_replica.iter().flat_map(|r| r.keys()))
@@ -191,9 +268,17 @@ fn estimate_by_nuclide(
             let values = column(per_replica, name);
             let correlated = correlated.map(|c| column(c, name));
             let nominal = nominal.get(name).copied().unwrap_or(0.0);
+            let even_values = even.map(|e| column(&e.independent, name));
+            let even_correlated =
+                even.and_then(|e| e.correlated.as_deref().map(|c| column(c, name)));
+            let even = even.zip(even_values.as_deref()).map(|(e, values)| Even {
+                values,
+                correlated: even_correlated.as_deref(),
+                scale: e.scale,
+            });
             (
                 name.clone(),
-                estimate(nominal, &values, correlated.as_deref()),
+                estimate(nominal, &values, correlated.as_deref(), even),
             )
         })
         .collect()
@@ -209,15 +294,35 @@ fn estimate_by_nuclide(
 /// `correlated` is the same replicas with the photon intensities fully
 /// correlated, where that end differs. A line's energy spread is reported for
 /// the independent end only: its energy is drawn from the same deviate at both.
-fn estimate_lines(
-    nominal: &[TracedLine],
-    per_replica: &[Vec<TracedLine>],
-    correlated: Option<&[Vec<TracedLine>]>,
-) -> Vec<LineEstimate> {
+fn estimate_lines(folded: &Folded<Vec<TracedLine>>) -> Vec<LineEstimate> {
+    let nominal = &folded.nominal;
+    let per_replica = &folded.independent;
+    let correlated = folded.correlated.as_deref();
     let mut energies: BTreeSet<u64> = nominal.iter().map(|l| l.energy.to_bits()).collect();
     for lines in per_replica.iter().chain(correlated.into_iter().flatten()) {
         energies.extend(lines.iter().map(|l| l.energy.to_bits()));
     }
+    // The even half's rates of each line, for the noise: a line it alone
+    // emits is a zero in the full replicas, and is not reported.
+    let even = folded.even.as_ref().map(|e| {
+        let rates = |replicas: &[Vec<TracedLine>]| -> Vec<HashMap<u64, f64>> {
+            replicas
+                .iter()
+                .map(|lines| lines.iter().map(|l| (l.energy.to_bits(), l.rate)).collect())
+                .collect()
+        };
+        (
+            rates(&e.independent),
+            e.correlated.as_deref().map(rates),
+            e.scale,
+        )
+    });
+    let column = |replicas: &[HashMap<u64, f64>], bits: u64| -> Vec<f64> {
+        replicas
+            .iter()
+            .map(|r| r.get(&bits).copied().unwrap_or(0.0))
+            .collect()
+    };
     let index = |replicas: &[Vec<TracedLine>]| -> Vec<HashMap<u64, f64>> {
         replicas
             .iter()
@@ -253,11 +358,11 @@ fn estimate_lines(
                 }
             }
             let energy = f64::from_bits(bits);
-            let correlated: Option<Vec<f64>> = correlated.as_ref().map(|c| {
-                c.iter()
-                    .map(|r| r.get(&bits).copied().unwrap_or(0.0))
-                    .collect()
-            });
+            let correlated: Option<Vec<f64>> = correlated.as_ref().map(|c| column(c, bits));
+            let even_values = even.as_ref().map(|(e, _, _)| column(e, bits));
+            let even_correlated = even
+                .as_ref()
+                .and_then(|(_, c, _)| c.as_ref().map(|c| column(c, bits)));
             LineEstimate {
                 energy,
                 emitting: drawn.len(),
@@ -265,8 +370,17 @@ fn estimate_lines(
                     nominal.get(&bits).copied().unwrap_or(0.0),
                     &rates,
                     correlated.as_deref(),
+                    even.as_ref()
+                        .zip(even_values.as_deref())
+                        .map(|((_, _, scale), values)| Even {
+                            values,
+                            correlated: even_correlated.as_deref(),
+                            scale: *scale,
+                        }),
                 ),
-                energy_estimate: estimate(energy, &drawn, None),
+                // Over the emitting replicas only, which need not be the
+                // same in the even half: its energy spread keeps its noise.
+                energy_estimate: estimate(energy, &drawn, None, None),
             }
         })
         .collect()
@@ -396,6 +510,18 @@ struct Folded<T> {
     /// drawn fully correlated. `None` when that end is the independent one:
     /// the source is off, or the quantity reads no photon intensity.
     correlated: Option<Vec<T>>,
+    /// The same, on each replica solved from the even half of the
+    /// transport's histories, when the ensemble measured the Monte Carlo
+    /// noise.
+    even: Option<EvenFolded<T>>,
+}
+
+/// [`Folded`]'s replicas on the even-half inventories.
+struct EvenFolded<T> {
+    independent: Vec<T>,
+    correlated: Option<Vec<T>>,
+    /// The even half's histories over the odd half's.
+    scale: f64,
 }
 
 /// One quantity's per-nuclide breakdown, folded over the ensemble.
@@ -551,26 +677,46 @@ impl TransmutationResults {
             );
             evaluate(inventory, volume, &chain_k)
         };
-        let independent = inventories
-            .iter()
-            .enumerate()
-            .map(|(k, inventory)| one(k, inventory, PhotonCorrelation::Independent))
-            .collect::<Result<Vec<_>, _>>()?;
-        let correlated = if reads_photons && decay_photon_seed.is_some() {
-            Some(
-                inventories
-                    .iter()
-                    .enumerate()
-                    .map(|(k, inventory)| one(k, inventory, PhotonCorrelation::Correlated))
-                    .collect::<Result<Vec<_>, _>>()?,
-            )
-        } else {
-            None
+        let both_ends = |inventories: &[&HashMap<String, f64>]| -> Result<_, String> {
+            let independent = inventories
+                .iter()
+                .enumerate()
+                .map(|(k, inventory)| one(k, inventory, PhotonCorrelation::Independent))
+                .collect::<Result<Vec<_>, _>>()?;
+            let correlated = if reads_photons && decay_photon_seed.is_some() {
+                Some(
+                    inventories
+                        .iter()
+                        .enumerate()
+                        .map(|(k, inventory)| one(k, inventory, PhotonCorrelation::Correlated))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
+            } else {
+                None
+            };
+            Ok((independent, correlated))
+        };
+        let (independent, correlated) = both_ends(&inventories)?;
+        // The even-half inventories, each evaluated with its replica's own
+        // draws, so the difference from the full one is the noise alone. At
+        // step 0 both are the initial composition, and there is no noise.
+        let even = match ensemble.noise_scale() {
+            Some(scale) if step > 0 => {
+                let even = ensemble.even_inventories_at(step - 1);
+                let (independent, correlated) = both_ends(&even)?;
+                Some(EvenFolded {
+                    independent,
+                    correlated,
+                    scale,
+                })
+            }
+            _ => None,
         };
         Ok(Some(Folded {
             nominal,
             independent,
             correlated,
+            even,
         }))
     }
 
@@ -611,10 +757,22 @@ impl TransmutationResults {
             replicas.iter().map(yani_decay::total).collect()
         };
         let correlated = folded.correlated.as_deref().map(totals);
+        let even = folded.even.as_ref().map(|e| {
+            (
+                totals(&e.independent),
+                e.correlated.as_deref().map(totals),
+                e.scale,
+            )
+        });
         Ok(Some(estimate(
             yani_decay::total(&folded.nominal),
             &totals(&folded.independent),
             correlated.as_deref(),
+            even.as_ref().map(|(values, correlated, scale)| Even {
+                values,
+                correlated: correlated.as_deref(),
+                scale: *scale,
+            }),
         )))
     }
 
@@ -667,7 +825,7 @@ impl TransmutationResults {
     ) -> Result<Option<HashMap<String, Estimate>>, String> {
         Ok(self
             .derived(material_id, step, chain, Quantity::Activity)?
-            .map(|f| estimate_by_nuclide(&f.nominal, &f.independent, f.correlated.as_deref())))
+            .map(|f| estimate_by_nuclide(&f)))
     }
 
     /// Decay heat at `step` broken down by nuclide [W], each with its spread.
@@ -681,7 +839,7 @@ impl TransmutationResults {
     ) -> Result<Option<HashMap<String, Estimate>>, String> {
         Ok(self
             .derived(material_id, step, chain, Quantity::DecayHeat)?
-            .map(|f| estimate_by_nuclide(&f.nominal, &f.independent, f.correlated.as_deref())))
+            .map(|f| estimate_by_nuclide(&f)))
     }
 
     /// The decay-photon spectrum at `step`, each line with the ensemble's
@@ -715,7 +873,7 @@ impl TransmutationResults {
                     Ok(traced_photon_lines(densities, volume, chain, drawn))
                 },
             )?
-            .map(|f| estimate_lines(&f.nominal, &f.independent, f.correlated.as_deref())))
+            .map(|f| estimate_lines(&f)))
     }
 
     /// Contact dose rate at `step` [Gy/h or Sv/h], with the ensemble's spread.
@@ -778,7 +936,7 @@ impl TransmutationResults {
                 chain,
                 Quantity::ContactDose { quantity, build_up },
             )?
-            .map(|f| estimate_by_nuclide(&f.nominal, &f.independent, f.correlated.as_deref())))
+            .map(|f| estimate_by_nuclide(&f)))
     }
 }
 

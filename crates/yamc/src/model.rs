@@ -2356,6 +2356,12 @@ impl Model {
                                 // global index so the captured set is the same
                                 // regardless of chunking/thread scheduling.
                                 tracker.start_history(batch, global_particle_index as usize);
+                                // The transmutation tally's per-replica sums
+                                // keep even and odd histories apart, for the
+                                // Monte Carlo noise; a no-op without replicas.
+                                if let Some(dep_tallies) = transport_ctx.transmutation_tallies {
+                                    dep_tallies.begin_history(global_particle_index);
+                                }
 
                                 // Get unique particle ID for tracking
                                 let source_particle_id = global_particle_id

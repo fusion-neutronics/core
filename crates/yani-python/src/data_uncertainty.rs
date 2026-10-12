@@ -418,6 +418,19 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
         },
     )?;
     d.set_item("unconverged", unconverged_to_list(py, &info.unconverged)?)?;
+    d.set_item("noise_removed", info.noise_removed)?;
+    let noisy = PyList::empty(py);
+    for n in &info.noisy {
+        let e = PyDict::new(py);
+        e.set_item("output", n.output.name())?;
+        e.set_item("nuclide", n.output.nuclide())?;
+        e.set_item("step", n.step)?;
+        e.set_item("replica_spread", n.replica_spread)?;
+        e.set_item("noise", n.noise)?;
+        e.set_item("std_dev", n.std_dev)?;
+        noisy.append(e)?;
+    }
+    d.set_item("noisy", noisy)?;
     d.set_item(
         "perturbed",
         info.perturbed.iter().cloned().collect::<Vec<_>>(),

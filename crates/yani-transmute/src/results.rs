@@ -814,7 +814,9 @@ impl TransmutationResults {
         )
     }
 
-    /// The nuclear-data standard deviation on a nuclide's density at `step`.
+    /// The nuclear-data standard deviation on a nuclide's density at `step`,
+    /// with the Monte Carlo noise of the transport's replica tallies removed
+    /// where it was measured (see [`Self::get_nuclide_uncertainty_noise`]).
     ///
     /// `None` when uncertainty was not asked for. Indexed exactly like
     /// [`Self::get_nuclide_density`], so step 0 is the initial composition and
@@ -853,7 +855,30 @@ impl TransmutationResults {
         if step == 0 {
             return Some(0.0);
         }
-        crate::uncertainty::std_dev_standard_error(&ensemble.samples_at(step - 1, nuclide))
+        ensemble.std_dev_standard_error_at(step - 1, nuclide)
+    }
+
+    /// The parts of [`Self::get_nuclide_uncertainty`]: the replicas' spread
+    /// as they were solved, and the Monte Carlo noise removed from it, both
+    /// standard deviations, with `sigma^2 = spread^2 - noise^2` floored at
+    /// zero. The noise is zero where it was not measured (see
+    /// [`crate::uncertainty::Info::noise_removed`]). `None` when uncertainty
+    /// was not asked for; zeros at step 0.
+    pub fn get_nuclide_uncertainty_noise(
+        &self,
+        material_id: u32,
+        nuclide: &str,
+        step: usize,
+    ) -> Option<(f64, f64)> {
+        let ensemble = self.uncertainty.get(&material_id)?;
+        if step == 0 {
+            return Some((0.0, 0.0));
+        }
+        let at = |v: Vec<f64>| v.get(step - 1).copied().unwrap_or(0.0);
+        Some((
+            at(ensemble.replica_spread_evolution(nuclide)),
+            at(ensemble.noise_evolution(nuclide)),
+        ))
     }
 
     /// The standard deviation of a nuclide's density at every step.

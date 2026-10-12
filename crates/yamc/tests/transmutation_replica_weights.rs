@@ -250,3 +250,58 @@ fn each_replica_is_the_transports_replica() {
         "the replicas move capture, by up to {moved:e}"
     );
 }
+
+/// The Monte Carlo noise in the replicas' shifts is measured from the even
+/// half of the histories and removed from every sigma: the reported sigma is
+/// the replicas' spread less that noise in quadrature, for a density and for
+/// a derived quantity alike, and the report says so.
+#[test]
+fn the_replicas_monte_carlo_noise_is_removed() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let (Some(dir), Some(chain)) = (w186(tmp.path()), chain()) else {
+        eprintln!("skipping: W186 or chain fixture not fetched");
+        return;
+    };
+    let results = transmute(&dir, &chain, Some(&request()));
+    let info = &results.uncertainty_info[&1];
+    assert!(info.noise_removed);
+    assert_eq!(results.uncertainty[&1].noise_scale(), Some(1.0));
+
+    let nominal = results.get_nuclide_density(1, "W187", 1).expect("W187");
+    let sigma = results
+        .get_nuclide_uncertainty(1, "W187", 1)
+        .expect("sigma");
+    let (spread, noise) = results
+        .get_nuclide_uncertainty_noise(1, "W187", 1)
+        .expect("noise");
+    let x = shifts(&results);
+    let mean = x.iter().sum::<f64>() / x.len() as f64;
+    let raw = (x.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (x.len() - 1) as f64).sqrt();
+    assert!((spread / nominal - raw).abs() < 1e-9 * raw.max(1e-12));
+    assert!(noise > 0.0, "{PARTICLES} histories leave some noise");
+    let left = (spread * spread - noise * noise).max(0.0).sqrt();
+    assert!((sigma - left).abs() <= 1e-12 * spread);
+    eprintln!(
+        "W187: spread {:.4e}, noise {:.4e}, sigma {:.4e} (relative)",
+        spread / nominal,
+        noise / nominal,
+        sigma / nominal
+    );
+
+    let activity = results
+        .activity_uncertainty(1, 1, &chain)
+        .expect("activity")
+        .expect("uncertainty was asked for");
+    let (Some(s), Some(raw), Some(n)) = (activity.std_dev, activity.replica_spread, activity.noise)
+    else {
+        panic!("activity carries its spread and noise: {activity:?}");
+    };
+    assert!((s * s - (raw * raw - n * n).max(0.0)).abs() <= 1e-9 * raw * raw);
+    // At step 0 every replica is the initial composition, so nothing is
+    // removed.
+    let initial = results
+        .activity_uncertainty(1, 0, &chain)
+        .expect("activity")
+        .expect("uncertainty was asked for");
+    assert_eq!(initial.noise, None);
+}

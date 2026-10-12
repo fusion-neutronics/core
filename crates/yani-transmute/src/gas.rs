@@ -180,18 +180,37 @@ impl TransmutationResults {
             self.uncertainty_inventories(material_id, step)
                 .unwrap_or_default()
         };
-        let per_replica: Vec<BTreeMap<String, f64>> = inventories
-            .into_iter()
-            .map(|inventory| gas_appm(inventory, &initial, total, produced))
-            .collect();
+        let appm = |inventories: Vec<&HashMap<String, f64>>| -> Vec<BTreeMap<String, f64>> {
+            inventories
+                .into_iter()
+                .map(|inventory| gas_appm(inventory, &initial, total, produced))
+                .collect()
+        };
+        let per_replica = appm(inventories);
+        // The same replicas solved from the even half of the transport's
+        // histories, for the Monte Carlo noise; none at step 0.
+        let even = match ensemble.noise_scale() {
+            Some(scale) if step > 0 => Some((appm(ensemble.even_inventories_at(step - 1)), scale)),
+            _ => None,
+        };
         let mut values = Vec::with_capacity(per_replica.len());
+        let mut even_values = Vec::with_capacity(per_replica.len());
         Ok(Some(
             gas_appm(&nominal, &initial, total, produced)
                 .into_iter()
                 .map(|(key, nominal)| {
                     values.clear();
                     values.extend(per_replica.iter().map(|r| r[&key]));
-                    (key, estimate(nominal, &values, None))
+                    even_values.clear();
+                    if let Some((e, _)) = &even {
+                        even_values.extend(e.iter().map(|r| r[&key]));
+                    }
+                    let even = even.as_ref().map(|(_, scale)| crate::derived::Even {
+                        values: &even_values,
+                        correlated: None,
+                        scale: *scale,
+                    });
+                    (key, estimate(nominal, &values, None, even))
                 })
                 .collect(),
         ))
@@ -394,9 +413,9 @@ mod tests {
         let he4: Vec<f64> = replicas.iter().map(|r| r.1 / total * 1e6).collect();
         assert_eq!(
             got["H1"],
-            estimate((3.0e-6 - 1.0e-6) / total * 1e6, &h1, None)
+            estimate((3.0e-6 - 1.0e-6) / total * 1e6, &h1, None, None)
         );
-        assert_eq!(got["He4"], estimate(2.0e-6 / total * 1e6, &he4, None));
+        assert_eq!(got["He4"], estimate(2.0e-6 / total * 1e6, &he4, None, None));
         assert_eq!(got["H1"].replicas, 4);
         assert!(got["H1"].std_dev.unwrap() > 0.0);
         assert!(got["H1"].std_dev_standard_error.is_some());
