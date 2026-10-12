@@ -12,9 +12,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use yamc_materials::Material;
 use yamc_nuclide::nuclide::Nuclide;
 use yani_transmute::covariance_fold::{transport_fields, DerivedTerm, Read, TransportField};
 use yani_transmute::covariance_sample::{FieldRepair, Sampler};
+use yani_transmute::cross_material::CrossMaterial;
 use yani_transmute::resonance_rates::ResonanceMethod;
 
 use crate::model::Model;
@@ -65,6 +67,11 @@ pub struct NuclideCoverage {
     /// Whether the evaluation carries MF=35, the covariance of the fission
     /// spectrum. Reported, not sampled, as for `nubar_covariance`.
     pub spectrum_covariance: bool,
+    /// The other nuclides of the model this one is drawn jointly with,
+    /// ascending: those a cross-material covariance block correlates it
+    /// with, directly or through another (see
+    /// `yani_transmute::cross_material`). Empty where it is drawn on its own.
+    pub drawn_with: Vec<String>,
 }
 
 /// What nuclear-data uncertainty a model's transport could carry.
@@ -193,12 +200,15 @@ impl Model {
     /// a transport run would load it, and factorizes each nuclide's field,
     /// which reports any repair and leaves the factorization cached for a
     /// later run. A nuclide in several materials is reported from the first
-    /// one it appears in.
+    /// one it appears in. Nuclides a cross-material block links are
+    /// factorized together, as a run draws them, and name each other in
+    /// [`NuclideCoverage::drawn_with`].
     pub fn data_uncertainty_coverage(&mut self) -> Result<DataUncertaintyCoverage, String> {
         let mut report = DataUncertaintyCoverage {
             not_perturbed: NOT_PERTURBED.iter().map(|s| s.to_string()).collect(),
             ..Default::default()
         };
+        let mut loaded: Vec<Arc<Material>> = Vec::new();
         for material_arc in self.geometry.materials_mut().iter_mut() {
             let mut material = (**material_arc).clone();
             material
@@ -231,9 +241,15 @@ impl Model {
             }
             let material = Arc::new(material);
             *material_arc = Arc::clone(&material);
-
-            let sampling = resonance_sampling(&material);
-            for (name, sampled) in &sampling {
+            loaded.push(material);
+        }
+        // Read from every material at once, as a run reads it.
+        let samplings: Vec<_> = loaded.iter().map(|m| resonance_sampling(m)).collect();
+        let sampled: BTreeSet<String> = samplings.iter().flat_map(sampled_names).collect();
+        let cross = CrossMaterial::new(&loaded.iter().map(|m| m.as_ref()).collect::<Vec<_>>());
+        let partners = cross.transport_fields(&sampled);
+        for (material, sampling) in loaded.iter().zip(&samplings) {
+            for (name, sampled) in sampling {
                 report
                     .resonance_parameters
                     .entry(name.clone())
@@ -244,14 +260,15 @@ impl Model {
                         },
                     });
             }
-            let (fields, without_data) = transport_fields(&material, &sampled_names(&sampling));
+            let (fields, without_data) = transport_fields(material, &sampled_names(sampling));
             report.without_data.extend(without_data);
             let cell_fields: BTreeMap<String, _> = fields
                 .iter()
                 .filter(|(name, _)| !report.nuclides.contains_key(*name))
                 .filter_map(|(name, t)| t.field.clone().map(|f| (name.clone(), f)))
                 .collect();
-            let repairs = Sampler::new(&cell_fields, &[]).field_repairs();
+            let sampler = Sampler::coupled(&cell_fields, &[], &cross, &partners);
+            let repairs = sampler.field_repairs();
 
             for (name, transport) in fields {
                 if report.nuclides.contains_key(&name) {
@@ -263,6 +280,13 @@ impl Model {
                     coverage.short_range_blocks = field.short.len();
                 }
                 coverage.repair = repairs.get(&name).copied();
+                coverage.drawn_with = sampler
+                    .drawn_with(&name)
+                    .into_iter()
+                    .flatten()
+                    .filter(|m| **m != name)
+                    .cloned()
+                    .collect();
                 if let Some(nd) = material.nuclide_data.get(&name) {
                     if let Some(blocks) = &nd.nubar_covariance {
                         let mts: BTreeSet<i32> = blocks.iter().map(|b| b.mt).collect();

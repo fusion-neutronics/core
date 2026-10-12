@@ -5,6 +5,7 @@ use crate::branching_rule::{
 };
 use crate::covariance_fold::{cell_fields, fold_rate_covariance, reachable_mts, FoldSpectrum};
 use crate::covariance_sample::Sampler;
+use crate::cross_material::CrossMaterial;
 use crate::damage::DamageRequest;
 use crate::isomer_branching_uncertainty::{
     IsomerCovariance, IsomerIntervalProductions, IsomerRun, IsomerSpectrum,
@@ -389,6 +390,15 @@ pub fn transmute_materials(
         case_shared.push(to_shared);
     }
 
+    // The cross-material covariance links nuclides across every material of
+    // the run, so it is read once, from all of them, and each material's
+    // replicas draw the same groups.
+    let cross = if uncertainty.is_some_and(|r| r.wants(crate::uncertainty::Source::CrossSections)) {
+        CrossMaterial::new(&initial.iter().collect::<Vec<_>>())
+    } else {
+        CrossMaterial::default()
+    };
+
     // The step solves are independent, one per material.
     // The nominal steps index the shared collapses. The replicas fold and
     // factorize every spectrum they are handed and count its coverage, so
@@ -404,6 +414,7 @@ pub fn transmute_materials(
             request,
             shielding: cases[c].shielding.as_ref(),
             lists: &lists,
+            cross: &cross,
             isomer: isomer.as_ref(),
         });
         solve_case(
@@ -817,6 +828,8 @@ struct Replicas<'a> {
     /// The branching lists the nominal fold applied, which a flux replica
     /// re-folds under its own perturbation.
     lists: &'a Lists<'a>,
+    /// The run's cross-material covariance, over every material.
+    cross: &'a CrossMaterial,
     /// The MF=40 covariance placed on `lists`, when the isomer source is on.
     isomer: Option<&'a IsomerCovariance>,
 }
@@ -880,6 +893,7 @@ fn solve_case(
             r.isomer,
             None,
             None,
+            r.cross,
         )?),
         None => None,
     };
@@ -1385,9 +1399,14 @@ struct TransportIsomer<'a> {
 /// distinct ids draw their tallies' errors independently, while the
 /// nuclear-data draws are shared across them.
 ///
+/// `cross` is the run's cross-material covariance, from
+/// [`transport_cross_material`] over every material the run resamples, so
+/// the nuclides it links are drawn jointly and alike in each.
+///
 /// `source_rates` scale the per-source-particle rates per step, which is how
 /// independent mode scales them. The coupled method re-runs transport per step
 /// and is not covered: its step-to-step noise propagation is out of scope.
+#[allow(clippy::too_many_arguments)]
 pub fn transport_replicas(
     initial: &Material,
     tallied: &TransportTallied,
@@ -1396,6 +1415,7 @@ pub fn transport_replicas(
     chain: &Arc<HashMap<String, ChainNuclide>>,
     parts: yani::ChainParts,
     request: &DataUncertainty,
+    cross: &CrossMaterial,
 ) -> Result<(Ensemble, Info), Box<dyn std::error::Error>> {
     let mut initial = initial.clone();
     if request.wants(crate::uncertainty::Source::CrossSections) {
@@ -1486,7 +1506,35 @@ pub fn transport_replicas(
         // is what keeps `flux_spectrum` out of it.
         Some(statistics.as_ref().unwrap_or(&no_statistics)),
         transport_isomer.as_ref(),
+        cross,
     )
+}
+
+/// The cross-material covariance a set of [`transport_replicas`] runs shares,
+/// one per material of `materials`.
+///
+/// Each material's covariance, and the reactions its derivations name, are
+/// loaded into a copy as `transport_replicas` loads them, and the blocks
+/// linking two nuclides of the run are read off them all
+/// ([`CrossMaterial::new`]), so each material's replicas draw the nuclides
+/// they link jointly and alike. Empty when `request` leaves cross sections
+/// out.
+pub fn transport_cross_material(
+    materials: &[&Material],
+    chain: &HashMap<String, ChainNuclide>,
+    request: &DataUncertainty,
+) -> Result<CrossMaterial, Box<dyn std::error::Error>> {
+    if !request.wants(crate::uncertainty::Source::CrossSections) {
+        return Ok(CrossMaterial::default());
+    }
+    let mut loaded = Vec::with_capacity(materials.len());
+    for material in materials {
+        let mut m = (*material).clone();
+        m.ensure_covariance_loaded()?;
+        ensure_derivations_loaded(&mut m, chain)?;
+        loaded.push(m);
+    }
+    Ok(CrossMaterial::new(&loaded.iter().collect::<Vec<_>>()))
 }
 
 /// What the half-life source needs for a run: the nuclides to perturb and
@@ -1678,6 +1726,7 @@ fn run_replicas(
     isomer: Option<&IsomerCovariance>,
     statistical: Option<&TransportStatistics<'_>>,
     transport_isomer: Option<&TransportIsomer<'_>>,
+    cross: &CrossMaterial,
 ) -> Result<(Ensemble, Info), Box<dyn std::error::Error>> {
     check_convergence(request.convergence)?;
     // The two paths each have one source the other lacks. A transport run has
@@ -1759,32 +1808,9 @@ fn run_replicas(
         HashSet::new()
     };
 
-    // One sampler per spectrum whether or not cross sections are on, so the
-    // index stays the spectrum's own. Switched off, each is built from an empty
-    // covariance map and perturbs nothing, which is cheaper than folding and
-    // keeps every other source indexable by the same `idx`.
-    let mut folds = Vec::with_capacity(per_spectrum.len());
-    for (idx, (rates, _, folded_chain)) in per_spectrum.iter().enumerate() {
-        let folded = if cross_sections {
-            let spectrum = &spectra[idx];
-            let (folded, spectrum_coverage) = fold_rate_covariance(
-                initial,
-                folded_chain,
-                rates,
-                &spectrum.masses,
-                &spectrum.boundaries,
-                shielding,
-            );
-            merge_coverage(&mut coverage, spectrum_coverage);
-            folded
-        } else {
-            std::collections::BTreeMap::new()
-        };
-        folds.push(folded);
-    }
     // One evaluation is one uncertainty, so a replica draws each nuclide's
     // cross sections once, as a field over its covariance cells, and every
-    // spectrum's rates are read off that one draw. The fold above stays the
+    // spectrum's rates are read off that one draw. The fold below stays the
     // statement of what the evaluation says per spectrum, and the sampler's
     // own rate covariance under each spectrum is checked against it in the
     // sigma report.
@@ -1798,18 +1824,53 @@ fn run_replicas(
             group_boundaries: &s.boundaries,
         })
         .collect();
-    let fields = if cross_sections {
-        cell_fields(
-            initial,
-            chain,
-            &fold_spectra,
-            shielding,
-            &std::collections::BTreeSet::new(),
+    let (fields, partners) = if cross_sections {
+        (
+            cell_fields(
+                initial,
+                chain,
+                &fold_spectra,
+                shielding,
+                &std::collections::BTreeSet::new(),
+            ),
+            cross.activation_fields(chain, &std::collections::BTreeSet::new()),
         )
     } else {
-        std::collections::BTreeMap::new()
+        Default::default()
     };
-    let sampler = Sampler::new(&fields, &folds);
+    // The cross-material blocks a draw applies, by the fields on both sides.
+    let applied = {
+        let mut all: std::collections::BTreeMap<String, &crate::covariance_fold::CellField> =
+            partners.iter().map(|(n, f)| (n.clone(), f)).collect();
+        all.extend(fields.iter().map(|(n, f)| (n.clone(), f)));
+        cross.applied(&all)
+    };
+
+    // One fold per spectrum whether or not cross sections are on, so the
+    // index stays the spectrum's own. Switched off, each is an empty
+    // covariance map and perturbs nothing, which is cheaper than folding and
+    // keeps every other source indexable by the same `idx`.
+    let mut folds = Vec::with_capacity(per_spectrum.len());
+    for (idx, (rates, _, folded_chain)) in per_spectrum.iter().enumerate() {
+        let folded = if cross_sections {
+            let spectrum = &spectra[idx];
+            let (folded, spectrum_coverage) = fold_rate_covariance(
+                initial,
+                folded_chain,
+                rates,
+                &spectrum.masses,
+                &spectrum.boundaries,
+                shielding,
+                &applied,
+            );
+            merge_coverage(&mut coverage, spectrum_coverage);
+            folded
+        } else {
+            std::collections::BTreeMap::new()
+        };
+        folds.push(folded);
+    }
+    let sampler = Sampler::coupled(&fields, &folds, cross, &partners);
     for (idx, (rates, _, _)) in per_spectrum.iter().enumerate() {
         sigmas.add(idx, &sampler, rates, fluence[idx], &densities, &populated);
     }
@@ -1877,7 +1938,12 @@ fn run_replicas(
             shielding,
             &sampled,
         ));
-        Sampler::new(&draw_fields, &folds)
+        Sampler::coupled(
+            &draw_fields,
+            &folds,
+            cross,
+            &cross.activation_fields(chain, &sampled),
+        )
     });
     let draw_sampler = mf33_sampler.as_ref().unwrap_or(&sampler);
 
@@ -2141,6 +2207,7 @@ fn run_replicas(
         && crate::multigroup::within_group_weight() == crate::multigroup::Weighting::FlatInEnergy;
     let mut info = Info::from_fold(&coverage, &sigmas, collapsed_flat)?;
     info.lognormal_not_carried = sampler.lognormal_limits();
+    info.cross_material_adjusted = draw_sampler.joint_adjustments();
     (info.covariance_source, info.covariance_warnings) =
         crate::covariance_provenance::provenance(&info.perturbed, |name| {
             let Some(nd) = initial.nuclide_data.get(name) else {
@@ -2784,6 +2851,7 @@ fn run_replicas(
                     isomer,
                     statistical_in,
                     transport_isomer,
+                    cross,
                 )?;
                 by_source.insert(source.name().to_string(), variances_of(&sub, steps.len()));
                 // Judged on the source's own replicas, which the other
@@ -5804,6 +5872,7 @@ mod tests {
             &chain,
             Default::default(),
             &request,
+            &Default::default(),
         )
         .unwrap();
 

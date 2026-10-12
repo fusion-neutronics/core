@@ -150,7 +150,9 @@ fn the_field_reproduces_the_fold_under_every_spectrum() {
         let folds: Vec<_> = spectra
             .iter()
             .zip(&rates)
-            .map(|((g, f), r)| fold_rate_covariance(&m, &chain, r, f, g, None).0)
+            .map(|((g, f), r)| {
+                fold_rate_covariance(&m, &chain, r, f, g, None, &Default::default()).0
+            })
             .collect();
         let fold_spectra: Vec<FoldSpectrum> = spectra
             .iter()
@@ -237,7 +239,9 @@ fn every_spectrum_reads_one_draw_of_the_cross_sections() {
         let folds: Vec<_> = fluxes
             .iter()
             .zip(&rates)
-            .map(|(f, r)| fold_rate_covariance(&m, &chain, r, f, &groups, None).0)
+            .map(|(f, r)| {
+                fold_rate_covariance(&m, &chain, r, f, &groups, None, &Default::default()).0
+            })
             .collect();
         let fold_spectra: Vec<FoldSpectrum> = fluxes
             .iter()
@@ -371,7 +375,16 @@ fn w186_n3n_is_sampled_at_its_evaluated_sigma() {
     let flux = fusion(&groups);
     let m = material("W186", &dir);
     let rates = compute_multigroup_reaction_rates(&m, &chain, &flux, &groups, 1.0).0;
-    let fold = fold_rate_covariance(&m, &chain, &rates, &flux, &groups, None).0;
+    let fold = fold_rate_covariance(
+        &m,
+        &chain,
+        &rates,
+        &flux,
+        &groups,
+        None,
+        &Default::default(),
+    )
+    .0;
     let spectrum = FoldSpectrum {
         chain: &chain,
         rates: &rates,

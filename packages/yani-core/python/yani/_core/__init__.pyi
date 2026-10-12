@@ -351,23 +351,34 @@ class DataUncertainty:
       partner, a partner that is not an MF=10 production, NC, absolute and
       short-range layouts, a state the branching rule folds no curve for),
       counted in ``isomer_branching_blocks_not_used``;
-    - covariance correlating two evaluations (MAT1 naming another material),
-      covariance with a quantity that is not a cross section (XMF1 not 0 or
-      3), covariance derived from other sections by an NC block that cannot
-      be derived (LTY 1-4, or an LTY=0 block counted in ``skipped_nc``), the
-      covariance of a lumped reaction (MT=851-870) with several components
-      that no derivation names, listed in ``lumped_covariance_not_assignable``,
-      and the resonance-parameter covariance (MF=32) of a range neither
-      sampled nor in ``covariance.arrow``: a library converted before the
-      converter wrote either, or a resonance range whose formalism ``endf``
-      does not reconstruct. What is sampled is each reaction's explicit MF=33
-      blocks, the resonance parameters where the folder carries them and
-      otherwise the resonance-range blocks the converter derives from MF=32
-      and writes beside them, the blocks of a lumped reaction
-      whose one component it is, and for a reaction an LTY=0 NC block states
-      as a sum of others (ENDF/B-VIII.1 O16 (n,p) as MT 600 to 603, U235 MT 4
-      as MT 51 plus the lumped MT 851), the covariance derived from the named
-      reactions' own blocks and the cross blocks between them;
+    - covariance correlating an evaluation with one the run does not hold
+      (MAT1 naming a material not in the run, counted in
+      ``skipped_cross_material``), covariance with a quantity that is not a
+      cross section (XMF1 not 0 or 3), covariance derived from other sections
+      by an NC block that cannot be derived (LTY 1-4, or an LTY=0 block
+      counted in ``skipped_nc``), the covariance of a lumped reaction
+      (MT=851-870) stated in barns, listed in
+      ``lumped_covariance_not_assignable``, and the resonance-parameter
+      covariance (MF=32) of a range neither sampled nor in
+      ``covariance.arrow``: a library converted before the converter wrote
+      either, or a resonance range whose formalism ``endf`` does not
+      reconstruct. No library yani reads states an XMF1 other than 0 or 3,
+      an NC block with LTY 1-4, or a lump in barns. What is sampled is each
+      reaction's explicit MF=33 blocks, the resonance parameters where the
+      folder carries them and otherwise the resonance-range blocks the
+      converter derives from MF=32 and writes beside them, the blocks of a
+      lumped reaction for each of its components (one component is the lump;
+      several each take the lump's relative perturbation, moving together),
+      for a level sum with no covariance of its own its levels' (W186
+      ``(n,p)`` as the lumped MT 855 of MT 600 and 649), and for a reaction
+      an LTY=0 NC block states as a sum of others (ENDF/B-VIII.1 O16 (n,p) as
+      MT 600 to 603, U235 MT 4 as MT 51 plus the lumped MT 851), the
+      covariance derived from the named reactions' own blocks and the cross
+      blocks between them. A block correlating two evaluations the run both
+      holds (the neutron standards: ENDF/B-VIII.1 U235 fission with U238
+      fission and capture, Pu239 fission, Au197 capture and Li6 (n,t)) is
+      applied, counted in ``applied_cross_material``: the two nuclides are
+      drawn jointly, one draw per replica shared by every material;
     - the self-shielding correction, when ``self_shielding_chord`` or
       ``self_shielding_shape`` is given: the shielded flux is built once from
       the nominal cross sections and reused by every replica, sampled
@@ -3161,14 +3172,18 @@ class TransmutationResults:
           folded as the component's. A lump an LTY=0 block names is folded
           through that derivation, with its cross section the sum of its
           components': ENDF/B-VIII.1 and TENDL-2017 U235 and U238 MT 4 is MT 51
-          plus MT 851. Any other lump is listed here and not folded, since
-          giving the sum's covariance to a component would be an assumption:
-          ENDF/B-VIII.1, FENDL-3.2d and JEFF-4.0 W180 to W186 give ``(n,2n)``
-          only as MT 852, the sum of MT 16 and 41, listed as ``"(n,2n)"`` and
-          ``"(n,2np)"`` when the chain carries both, and W186 MT 854 as
-          ``"(n,np)"`` and ``"MT91"``. Listed where the fold reaches a
-          component, or the reaction holding one as a level (MT 103 for MT 600
-          to 649, and so on). Counted in ``has_gaps``.
+          plus MT 851. A component with no covariance of its own takes the
+          lump's relative perturbation, so the components of one lump move
+          together and their sum moves as the lump's covariance states, as
+          NJOY's ERRORR leaves a lump and SANDY applies it: ENDF/B-VIII.1,
+          FENDL-3.2d and JEFF-4.0 W180 to W186 give ``(n,2n)`` only as MT 852,
+          the sum of MT 16 and 41. A level sum with no covariance of its own is
+          derived from its levels, each reading its own blocks or its lump's,
+          so W186 ``(n,p)`` reads MT 855, the sum of MT 600 and 649. Listed
+          here is only a lump with a block that is not relative, absolute or
+          short-range, which states the sum's spread in barns and nothing of how
+          it splits, where the fold reaches a component; no library yani reads
+          has one. Counted in ``has_gaps``.
         - ``unsupported_layouts``: covariance blocks that were present but not
           consumed, counted once per spectrum, so a run over several spectra
           counts the same block once for each.
@@ -3176,18 +3191,24 @@ class TransmutationResults:
           other reactions) that could not be derived. An LTY=0 block is
           derived from the NI covariances of the reactions it names, cross
           blocks included, over its own energy range: ENDF/B-VIII.1 O16
-          ``(n,p)`` is stated only that way. Left here are LTY 1 to 4, a block
-          in a cross-reaction subsection, one whose list of reactions is empty
-          or does not match its coefficients, one whose own energy range is
-          empty, one naming a reaction with no cross section, and one met
-          only circularly.
+          ``(n,p)`` is stated only that way. Left here are LTY 1 to 4 (a
+          covariance from a measurement's ratio to another evaluation's
+          standard, which no library yani reads states), a block in a
+          cross-reaction subsection, one whose list of reactions is empty or
+          does not match its coefficients, one whose own energy range is empty,
+          one naming a reaction with no cross section, and one met only
+          circularly.
         - ``skipped_cross_material``: per nuclide, blocks on a reaction the
           fold reaches (a channel, or one a channel is derived from) that
-          correlate it with another evaluation, not consumed. A block naming
-          the nuclide's own MAT is its own evaluation and is folded. The
-          partner is not checked, so a block is counted whether or not the
-          evaluation it names is in the run. ``skipped_other_file``: the same
-          for blocks whose partner is not a cross section.
+          correlate it with another evaluation, not applied: the evaluation
+          they name is not in the run (or carries no covariance, so its MAT is
+          not known), or one of the two reactions has no relative covariance to
+          correlate. A block naming the nuclide's own MAT is its own evaluation
+          and is folded. ``applied_cross_material``: the same count for the
+          blocks applied, whose two nuclides are drawn jointly, one draw per
+          replica shared by every material of the run. ``skipped_other_file``:
+          blocks whose partner is not a cross section, which no library yani
+          reads states.
         - ``mirrored_disagree``: keyed ``"Nuclide (n,a) (n,b)"``, where a pair
           stored in both orientations has copies that are not each other's
           transpose, the largest difference relative to the largest entry.
@@ -3276,6 +3297,18 @@ class TransmutationResults:
           the same for a stated flux covariance, keyed by spectrum index,
           whose ``log_space_repair`` is always ``None``: a flux covariance's
           log-space negative eigenvalues are clipped.
+        - ``cross_material_adjusted``: keyed by a group of nuclides drawn jointly
+          through cross-material covariance, their names joined by ``+``
+          (``"U235+U238"``), where the covariance stated between their interval
+          averages is not admissible beside each one's own and was adjusted to be
+          drawn, each own covariance kept exactly: ``floor`` (the share of a
+          member's largest correlation eigenvalue below which its directions are
+          not joined, the one that kept the drawn covariance closest to the
+          stated), ``largest_singular_value`` (the largest canonical correlation
+          met, clipped to one) and ``relative_change`` (``||X' - X|| / ||X||`` of
+          the drawn against the stated log-space covariance between the
+          averages). ENDF/B-VIII.1 U235 and U238 fission read about 0.32.
+          Counted in ``has_gaps``.
         - ``rates_sampled``: cross-section rate draws made, each read off one
           draw of the nuclide's cross sections. ``rates_floored`` counts those
           that came out negative and were floored at zero, which only a channel

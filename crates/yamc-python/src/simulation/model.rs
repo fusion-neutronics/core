@@ -474,7 +474,11 @@ impl PyModel {
     ///       evaluation carries MF=31 covariance for) and
     ///       ``spectrum_covariance`` (whether it carries MF=35, the covariance
     ///       of the fission spectrum). Both are reported so the data is
-    ///       visible; neither is sampled yet.
+    ///       visible; neither is sampled yet. ``drawn_with`` is the sorted
+    ///       names of the other nuclides of the model it is drawn jointly
+    ///       with, those a cross-material covariance block correlates it with
+    ///       (the neutron standards, such as ENDF/B-VIII.1 U235 fission with
+    ///       U238 fission), empty where it is drawn on its own.
     ///     - ``without_data``: sorted names of nuclides whose data carries no
     ///       covariance at all.
     ///     - ``not_perturbed``: inputs no transport uncertainty run perturbs
@@ -533,6 +537,7 @@ impl PyModel {
             entry.set_item("warnings", &c.warnings)?;
             entry.set_item("nubar_covariance", &c.nubar_covariance)?;
             entry.set_item("spectrum_covariance", c.spectrum_covariance)?;
+            entry.set_item("drawn_with", &c.drawn_with)?;
             match &c.repair {
                 Some(r) => {
                     let repair = PyDict::new(py);
