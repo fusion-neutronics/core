@@ -201,6 +201,7 @@ fn transport_samples_the_parameters_as_the_spectrum_run_does() {
             &chain,
             Default::default(),
             &request(),
+            &Default::default(),
         )
         .expect("transport replicas");
         (ensemble, info)

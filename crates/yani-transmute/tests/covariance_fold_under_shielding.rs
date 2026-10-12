@@ -172,6 +172,7 @@ fn the_shielded_partials_sum_to_the_shielded_rate() {
         &masses(),
         &GROUPS,
         Some(&shielding),
+        &Default::default(),
     );
     for (_, kind) in CHANNELS {
         let got = variance(&folded, kind);
@@ -201,8 +202,15 @@ fn the_shielded_partials_sum_to_the_shielded_rate() {
         factor < 0.98,
         "capture must shield for this to discriminate: {factor}"
     );
-    let (unshielded_fold, stale) =
-        fold_rate_covariance(&m, &chain(), &shielded, &masses(), &GROUPS, None);
+    let (unshielded_fold, stale) = fold_rate_covariance(
+        &m,
+        &chain(),
+        &shielded,
+        &masses(),
+        &GROUPS,
+        None,
+        &Default::default(),
+    );
     let got = variance(&unshielded_fold, "(n,gamma)");
     let expected = V / (factor * factor);
     assert!(
@@ -236,6 +244,7 @@ fn the_shielded_sigma_is_the_closed_form_value() {
         &masses(),
         &GROUPS,
         Some(&shielding),
+        &Default::default(),
     );
 
     let terms = per_group_reaction_rates(&m, &chain(), &masses(), &GROUPS, Some(&shielding));
@@ -251,7 +260,15 @@ fn the_shielded_sigma_is_the_closed_form_value() {
 
     // And it is not the dilute answer, which weights the groups differently.
     let dilute = rates(&m, None);
-    let (dilute_fold, _) = fold_rate_covariance(&m, &chain(), &dilute, &masses(), &GROUPS, None);
+    let (dilute_fold, _) = fold_rate_covariance(
+        &m,
+        &chain(),
+        &dilute,
+        &masses(),
+        &GROUPS,
+        None,
+        &Default::default(),
+    );
     let d = variance(&dilute_fold, "(n,gamma)");
     assert!(
         (got / d - 1.0).abs() > 1.0e-3,
@@ -282,6 +299,7 @@ fn the_covered_share_is_of_the_shielded_rate() {
         &masses(),
         &GROUPS,
         Some(&shielding),
+        &Default::default(),
     );
     let key = ("Fe56".to_string(), "(n,gamma)".to_string());
     let got = coverage.rate_fraction_covered[&key];
@@ -392,6 +410,7 @@ fn the_shielded_partials_sum_to_the_rate_in_a_mixture() {
         &masses(),
         &GROUPS,
         Some(&shielding),
+        &Default::default(),
     );
     for (_, kind) in CHANNELS {
         let got = variance(&folded, kind);
@@ -421,7 +440,15 @@ fn the_evaluations_covariance_folds_consistently_under_shielding() {
     let shielding = Shielding::new(CHORD_CM).expect("a positive chord");
     let shielded = rates(&m, Some(&shielding));
 
-    let (_, stale) = fold_rate_covariance(&m, &chain(), &shielded, &masses(), &GROUPS, None);
+    let (_, stale) = fold_rate_covariance(
+        &m,
+        &chain(),
+        &shielded,
+        &masses(),
+        &GROUPS,
+        None,
+        &Default::default(),
+    );
     assert!(
         !stale.partials_above_rate.is_empty(),
         "dilute partials must sit above a shielded rate for this to discriminate"
@@ -434,6 +461,7 @@ fn the_evaluations_covariance_folds_consistently_under_shielding() {
         &masses(),
         &GROUPS,
         Some(&shielding),
+        &Default::default(),
     );
     assert!(folded.contains_key("Fe56"));
     assert!(

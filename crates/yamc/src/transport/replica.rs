@@ -99,8 +99,9 @@ use yamc_nuclide::urr::UrrBand;
 use yamc_tallies::score::Score;
 use yamc_tallies::tally::Tally;
 use yamc_tallies::welford::ReplicaModes;
-use yani_transmute::covariance_fold::{transport_fields_of, Read, TransportField};
+use yani_transmute::covariance_fold::{transport_fields_of, CellField, Read, TransportField};
 use yani_transmute::covariance_sample::{Modes, Sampler};
+use yani_transmute::cross_material::CrossMaterial;
 use yani_transmute::resonance_rates::TransportResonance;
 use yani_transmute::{ReplicaChanges, TransmutationTallies};
 
@@ -773,13 +774,33 @@ impl ReplicaContext {
             .collect();
         let mut out = Vec::with_capacity(materials.len());
         let mut registry = ModeRegistry::default();
+        // The cross-material covariance links nuclides across the materials,
+        // so it is read from all of them, and each material draws the same
+        // groups (see `yani_transmute::cross_material`).
+        let cross = CrossMaterial::new(&materials.iter().map(|m| m.as_ref()).collect::<Vec<_>>());
+        // Each partner is fielded as its own material fields it: from its
+        // tape blocks alone where the transport samples its resonance
+        // parameters.
+        let sampled: BTreeSet<String> = materials
+            .iter()
+            .flat_map(|m| sampled_names(&resonance_sampling(m)))
+            .collect();
+        let partners = cross.transport_fields(&sampled);
         let mut transmutation_slots = HashMap::new();
         for (slot, material) in materials.iter().enumerate() {
             let layout = transmutation
                 .zip(material.material_id)
                 .and_then(|(t, id)| t.layout(id));
-            let tables =
-                Self::material(material, &score_mts, layout, replicas, seed, &mut registry)?;
+            let tables = Self::material(
+                material,
+                &score_mts,
+                layout,
+                replicas,
+                seed,
+                &mut registry,
+                &cross,
+                &partners,
+            )?;
             if let (Some(id), Some(_)) = (material.material_id, tables.as_ref().and(layout)) {
                 transmutation_slots.entry(id).or_insert(slot);
             }
@@ -821,7 +842,9 @@ impl ReplicaContext {
     }
 
     /// One material's tables, `layout` the nuclides and MTs a transmutation
-    /// tally scores in it, if any.
+    /// tally scores in it, if any, and `cross` the run's cross-material
+    /// covariance with `partners` the fields of the nuclides it links.
+    #[allow(clippy::too_many_arguments)]
     fn material(
         material: &Material,
         score_mts: &BTreeSet<i32>,
@@ -829,6 +852,8 @@ impl ReplicaContext {
         replicas: usize,
         seed: u64,
         registry: &mut ModeRegistry,
+        cross: &CrossMaterial,
+        partners: &BTreeMap<String, CellField>,
     ) -> Result<Option<ReplicaMaterial>, String> {
         let sampling = resonance_sampling(material);
         let mut score_mts = score_mts.clone();
@@ -855,7 +880,7 @@ impl ReplicaContext {
             .iter()
             .filter_map(|(n, t)| t.field.clone().map(|f| (n.clone(), f)))
             .collect();
-        let sampler = Sampler::new(&cell_fields, &[]);
+        let sampler = Sampler::coupled(&cell_fields, &[], cross, partners);
         let draws: Vec<_> = (0..replicas as u64)
             .map(|k| sampler.draw(seed, k))
             .collect();
