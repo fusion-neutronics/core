@@ -104,7 +104,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
-use endf::doppler::{broaden, broadened_weight, BroadenedWeight, Flux};
+use endf::doppler::{broaden_many, broadened_weight, BroadenedWeight, Flux};
 use endf::mf::mf2::ResonanceRange;
 use endf::resonance::{cross_sections_on, CrossSections, RangeReconstruction, REACTIONS};
 use endf::resonance_covariance::{reconstruction_at, reconstruction_grid, RangeCovariance};
@@ -901,22 +901,31 @@ impl TransportResonance {
             energy.push(rgrid[0]);
             energy.extend_from_slice(&rgrid);
             energy.push(rgrid[rgrid.len() - 1]);
-            let mut sigma = vec![0.0; energy.len()];
+            // Every reaction's change, broadened together: the kernel is the
+            // grid's, so it is evaluated once for all of them.
+            let mut mts = Vec::new();
+            let mut sigmas: Vec<Vec<f64>> = Vec::new();
             for (slot, mt) in r.slot_mts.iter().enumerate() {
                 let Some(mt) = *mt else { continue };
+                let mut sigma = vec![0.0; energy.len()];
                 for (i, (a, b)) in drawn.iter().zip(&nominal).enumerate() {
                     sigma[i + 1] = r.abundance * (a.slots()[slot] - b.slots()[slot]);
                 }
                 if sigma.iter().all(|v| *v == 0.0) {
                     continue;
                 }
-                let below = broaden(&energy, &sigma, p.awr, self.temperature, &at[..split])
-                    .map_err(fail)?;
-                let above = broaden(&energy, &sigma, p.awr, 0.0, &at[split..]).map_err(fail)?;
-                let target = out.get_mut(&mt).expect("every slot MT is a reaction");
+                mts.push(mt);
+                sigmas.push(sigma);
+            }
+            let columns: Vec<&[f64]> = sigmas.iter().map(Vec::as_slice).collect();
+            let below = broaden_many(&energy, &columns, p.awr, self.temperature, &at[..split])
+                .map_err(fail)?;
+            let above = broaden_many(&energy, &columns, p.awr, 0.0, &at[split..]).map_err(fail)?;
+            for ((mt, below), above) in mts.iter().zip(&below).zip(&above) {
+                let target = out.get_mut(mt).expect("every slot MT is a reaction");
                 for (o, v) in target[first..last]
                     .iter_mut()
-                    .zip(below.iter().chain(&above))
+                    .zip(below.iter().chain(above))
                 {
                     *o += v;
                 }

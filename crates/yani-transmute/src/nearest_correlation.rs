@@ -24,7 +24,11 @@
 //! exactly as stated and makes each Newton step's eigendecomposition the size
 //! of one block rather than of the whole matrix.
 
-use crate::covariance_sample::{coupled_blocks, eigen, eigenvalues, REPAIR_TOLERANCE};
+use crate::covariance_sample::{
+    clear_upper_state, coupled_blocks, eigenvalues, leading_eigen, REPAIR_TOLERANCE,
+};
+
+use faer::{Accum, Mat, MatRef, Par};
 
 /// The nearest-correlation iteration stops when the PSD iterate's diagonal
 /// is within this of one, as `||diag(X) - 1||_2 <= tolerance * sqrt(m)` on a
@@ -267,7 +271,11 @@ impl Spectrum {
         for i in 0..m {
             z[i * m + i] += y[i];
         }
-        let (values, vectors) = eigen(&z, m);
+        // The eigenvalues are needed to round-off of the largest, not each to
+        // its own relative accuracy, so no block goes to Jacobi however wide
+        // the shifted diagonal: Jacobi is O(m³) per sweep, and on O16's
+        // 1566-cell block it ran for minutes per step.
+        let (values, vectors) = leading_eigen(&z, m);
         let theta = 0.5
             * values
                 .iter()
@@ -299,27 +307,38 @@ impl Spectrum {
             .collect()
     }
 
-    /// `(A + diag(y))_+`, row-major.
+    /// `(A + diag(y))_+`, row-major: `P_+ Λ_+ P_+ᵀ` as one matrix product.
     fn positive_part(&self) -> Vec<f64> {
         let m = self.m;
+        let kept: Vec<usize> = (0..m).filter(|&k| self.values[k] > 0.0).collect();
+        let p = self.vectors();
+        let left = Mat::<f64>::from_fn(m, kept.len(), |i, c| p[(i, kept[c])]);
+        let right =
+            Mat::<f64>::from_fn(m, kept.len(), |i, c| p[(i, kept[c])] * self.values[kept[c]]);
+        let mut x = Mat::<f64>::zeros(m, m);
+        faer::linalg::matmul::matmul(
+            x.as_mut(),
+            Accum::Replace,
+            left.as_ref(),
+            right.transpose(),
+            1.0,
+            Par::Seq,
+        );
+        clear_upper_state();
+        // Symmetric to the bit, from the lower triangle.
         let mut out = vec![0.0; m * m];
-        let columns: Vec<(f64, Vec<f64>)> = (0..m)
-            .filter(|&k| self.values[k] > 0.0)
-            .map(|k| {
-                let v = (0..m).map(|i| self.vectors[i * m + k]).collect();
-                (self.values[k], v)
-            })
-            .collect();
         for i in 0..m {
-            let row = &mut out[i * m..(i + 1) * m];
-            for (lambda, v) in &columns {
-                let scale = lambda * v[i];
-                for (o, vj) in row.iter_mut().zip(v) {
-                    *o += scale * vj;
-                }
+            for j in 0..=i {
+                out[i * m + j] = x[(i, j)];
+                out[j * m + i] = x[(i, j)];
             }
         }
         out
+    }
+
+    /// `P`, the eigenvectors by column, as a view of the row-major store.
+    fn vectors(&self) -> MatRef<'_, f64> {
+        MatRef::from_row_major_slice(&self.vectors, self.m, self.m)
     }
 
     /// The Newton step: conjugate gradients on `(V + εI) d = rhs`, `V` the
@@ -380,12 +399,12 @@ impl Spectrum {
 /// P^T) = h` for orthogonal `P`.
 struct Hessian<'a> {
     spectrum: &'a Spectrum,
-    set: Vec<usize>,
     complement: bool,
-    /// `Ω'_ij` for `j` the `c`-th member of `S`, at `[c * m + i]`, doubled
-    /// where `i` is outside `S`: its mirror in `M`'s rows in `S` is not
-    /// stored.
-    weights: Vec<f64>,
+    /// `P_S`, the eigenvectors in `S`, `m × |S|`.
+    set_vectors: Mat<f64>,
+    /// `Ω'_ij` for `j` the `c`-th member of `S`, at `(i, c)`, doubled where
+    /// `i` is outside `S`: its mirror in `M`'s rows in `S` is not stored.
+    weights: Mat<f64>,
     /// The diagonal of `V + εI`, the preconditioner.
     diagonal: Vec<f64>,
 }
@@ -403,82 +422,128 @@ impl<'a> Hessian<'a> {
         for &k in &set {
             in_set[k] = true;
         }
-        let mut weights = vec![0.0; set.len() * m];
-        for (c, &j) in set.iter().enumerate() {
-            for i in 0..m {
-                let (li, lj) = (values[i], values[j]);
-                let w = match (li > 0.0, lj > 0.0) {
-                    (true, true) => 1.0,
-                    (false, false) => 0.0,
-                    (true, false) => li / (li - lj),
-                    (false, true) => lj / (lj - li),
-                };
-                let w = if complement { 1.0 - w } else { w };
-                weights[c * m + i] = if in_set[i] { w } else { 2.0 * w };
+        let weights = Mat::<f64>::from_fn(m, set.len(), |i, c| {
+            let j = set[c];
+            let (li, lj) = (values[i], values[j]);
+            let w = match (li > 0.0, lj > 0.0) {
+                (true, true) => 1.0,
+                (false, false) => 0.0,
+                (true, false) => li / (li - lj),
+                (false, true) => lj / (lj - li),
+            };
+            let w = if complement { 1.0 - w } else { w };
+            if in_set[i] {
+                w
+            } else {
+                2.0 * w
             }
-        }
-        // `V_rr = Σ_ij Ω_ij P_ri^2 P_rj^2`, by the same split.
-        let diagonal = indexed(m, |r| {
-            let row = &spectrum.vectors[r * m..(r + 1) * m];
-            let part: f64 = set
-                .iter()
+        });
+        let p = spectrum.vectors();
+        let set_vectors = Mat::<f64>::from_fn(m, set.len(), |r, c| p[(r, set[c])]);
+        // `V_rr = Σ_ij Ω_ij P_ri^2 P_rj^2`, by the same split: `Σ_c P_r,j_c^2
+        // T_rc` with `T = (P ∘ P) Ω'`.
+        let squares = Mat::<f64>::from_fn(m, m, |r, i| p[(r, i)] * p[(r, i)]);
+        let diagonal = row_chunks(m, |rows| {
+            let mut t = Mat::<f64>::zeros(rows.len(), set.len());
+            faer::linalg::matmul::matmul(
+                t.as_mut(),
+                Accum::Replace,
+                squares.get(rows.clone(), ..),
+                weights.as_ref(),
+                1.0,
+                Par::Seq,
+            );
+            clear_upper_state();
+            rows.clone()
                 .enumerate()
-                .map(|(c, &j)| {
-                    let w = &weights[c * m..(c + 1) * m];
-                    row[j] * row[j] * row.iter().zip(w).map(|(p, w)| p * p * w).sum::<f64>()
+                .map(|(k, r)| {
+                    let part: f64 = (0..set.len())
+                        .map(|c| set_vectors[(r, c)] * set_vectors[(r, c)] * t[(k, c)])
+                        .sum();
+                    let v = if complement { 1.0 - part } else { part };
+                    v.max(0.0) + NEWTON_REGULARIZATION
                 })
-                .sum();
-            let v = if complement { 1.0 - part } else { part };
-            v.max(0.0) + NEWTON_REGULARIZATION
+                .collect()
         });
         Self {
             spectrum,
-            set,
             complement,
+            set_vectors,
             weights,
             diagonal,
         }
     }
 
     /// `(V + εI) h`.
+    ///
+    /// `M_S = Pᵀ diag(h) P_S`, then `Q = P (Ω' ∘ M_S)`, and `V h`'s part
+    /// over `S` is `Σ_c Q_rc (P_S)_rc`: two matrix products of `m × m` by
+    /// `m × |S|`, each taken over fixed chunks of its rows in parallel, so
+    /// every entry is summed the same way on any thread count, and so `|S|`
+    /// as small as one still splits.
     fn times(&self, h: &[f64]) -> Vec<f64> {
         let m = self.spectrum.m;
-        let vectors = &self.spectrum.vectors;
-        let s = self.set.len();
-        // `Ω' ∘ M` over the columns in `S`, stored by column.
-        let mt: Vec<Vec<f64>> = indexed(s, |c| {
-            let j = self.set[c];
-            let mut column = vec![0.0; m];
-            for r in 0..m {
-                let row = &vectors[r * m..(r + 1) * m];
-                let scale = h[r] * row[j];
-                if scale == 0.0 {
-                    continue;
-                }
-                for (out, p) in column.iter_mut().zip(row) {
-                    *out += scale * p;
+        let s = self.set_vectors.ncols();
+        let p = self.spectrum.vectors();
+        let scaled = Mat::<f64>::from_fn(m, s, |r, c| h[r] * self.set_vectors[(r, c)]);
+        let mut g = Mat::<f64>::zeros(m, s);
+        let chunks = indexed(m.div_ceil(ROW_CHUNK), |k| {
+            let rows = k * ROW_CHUNK..((k + 1) * ROW_CHUNK).min(m);
+            let mut part = Mat::<f64>::zeros(rows.len(), s);
+            faer::linalg::matmul::matmul(
+                part.as_mut(),
+                Accum::Replace,
+                p.get(.., rows.clone()).transpose(),
+                scaled.as_ref(),
+                1.0,
+                Par::Seq,
+            );
+            clear_upper_state();
+            for c in 0..s {
+                for (i, r) in rows.clone().enumerate() {
+                    part[(i, c)] *= self.weights[(r, c)];
                 }
             }
-            for (out, w) in column.iter_mut().zip(&self.weights[c * m..(c + 1) * m]) {
-                *out *= w;
-            }
-            column
+            part
         });
-        indexed(m, |r| {
-            let row = &vectors[r * m..(r + 1) * m];
-            let part: f64 = self
-                .set
-                .iter()
-                .zip(&mt)
-                .map(|(&j, column)| {
-                    let k: f64 = row.iter().zip(column).map(|(p, g)| p * g).sum();
-                    k * row[j]
+        for (k, part) in chunks.iter().enumerate() {
+            g.get_mut(k * ROW_CHUNK..k * ROW_CHUNK + part.nrows(), ..)
+                .copy_from(part);
+        }
+        row_chunks(m, |rows| {
+            let mut q = Mat::<f64>::zeros(rows.len(), s);
+            faer::linalg::matmul::matmul(
+                q.as_mut(),
+                Accum::Replace,
+                p.get(rows.clone(), ..),
+                g.as_ref(),
+                1.0,
+                Par::Seq,
+            );
+            clear_upper_state();
+            rows.clone()
+                .enumerate()
+                .map(|(k, r)| {
+                    let part: f64 = (0..s).map(|c| q[(k, c)] * self.set_vectors[(r, c)]).sum();
+                    let vh = if self.complement { h[r] - part } else { part };
+                    vh + NEWTON_REGULARIZATION * h[r]
                 })
-                .sum();
-            let vh = if self.complement { h[r] - part } else { part };
-            vh + NEWTON_REGULARIZATION * h[r]
+                .collect()
         })
     }
+}
+
+/// Rows per chunk of [`row_chunks`]: a fixed size, so how the work is split,
+/// and so how every sum over it rounds, depends on the matrix alone.
+const ROW_CHUNK: usize = 128;
+
+/// `f` over `0..m` in consecutive ranges of [`ROW_CHUNK`] rows, in parallel
+/// off wasm32, each range giving one value per row, concatenated in order.
+fn row_chunks(m: usize, f: impl Fn(std::ops::Range<usize>) -> Vec<f64> + Sync + Send) -> Vec<f64> {
+    indexed(m.div_ceil(ROW_CHUNK), |k| {
+        f(k * ROW_CHUNK..((k + 1) * ROW_CHUNK).min(m))
+    })
+    .concat()
 }
 
 /// `f(0), ..., f(n - 1)`, in parallel off wasm32. Each entry is computed on
@@ -509,6 +574,7 @@ pub(crate) mod tests {
     /// Higham's alternating projections with Dykstra's correction, plain
     /// and run long: the reference the Newton method has to agree with.
     pub(crate) fn dykstra(a: &[f64], m: usize) -> Vec<f64> {
+        use crate::covariance_sample::eigen;
         let mut y = a.to_vec();
         let mut correction = vec![0.0; m * m];
         for _ in 0..20_000 {
