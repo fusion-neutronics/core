@@ -84,8 +84,7 @@ pub enum Source {
     /// transport; a spectrum run's rates are a deterministic collapse with no
     /// sampling error, so it has nothing to perturb there.
     ///
-    /// With [`FluxResponse::ReplicaWeights`] every replica's rates are scored
-    /// by the same histories as the nominal ones, so they share the nominal
+    /// Every replica's rates are scored by the same histories as the nominal ones, so they share the nominal
     /// tally's Monte Carlo error, and the draw is added to each replica's
     /// rates as a deviation from the nominal: the error enters once per
     /// replica, independent of the cross-section draw. What correlated
@@ -232,11 +231,6 @@ pub struct DataUncertainty {
     /// target much below 2.2% (the Gaussian figure at the cap) cannot be met.
     /// What is tracked is listed on [`Ensemble::unconverged`].
     pub convergence: f64,
-    /// How a transport-coupled run (`Model.simulate_transmutation`) takes the
-    /// flux's response to the perturbed cross sections. A spectrum run's flux
-    /// is the caller's, so it has nothing to choose and refuses anything but
-    /// the default.
-    pub flux_response: FluxResponse,
 }
 
 impl Default for DataUncertainty {
@@ -247,58 +241,6 @@ impl Default for DataUncertainty {
             sources: Source::IMPLEMENTED.to_vec(),
             attribution: false,
             convergence: DEFAULT_CONVERGENCE,
-            flux_response: FluxResponse::default(),
-        }
-    }
-}
-
-/// How a transport-coupled uncertainty run takes the flux's response to each
-/// replica's perturbed cross sections.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FluxResponse {
-    /// The transport carries one likelihood-ratio weight per replica along
-    /// every history, and tallies every rate the transmutation reads once per
-    /// replica under it, so replica `k`'s rates are those transport would
-    /// tally under replica `k`'s data: a stronger resonance deepens its own
-    /// self-shielding dip, a perturbed scatterer moves the spectrum. The
-    /// likelihood ratios are exact, so replica `k`'s tally is an unbiased
-    /// estimate of what a rerun of the transport with replica `k`'s data
-    /// would tally, on the same histories as the nominal one.
-    ///
-    /// The replica count is fixed before the transport (see
-    /// [`transport_replicas_for`]), and the transport's cost grows with it
-    /// times the rates scored. The transport configurations the weights do
-    /// not carry (delta tracking, survival biasing, weight windows, photon
-    /// transport, MPI) are refused, naming [`FluxResponse::Held`].
-    #[default]
-    ReplicaWeights,
-    /// One nominal transport, its tallied flux held for every replica, and
-    /// each replica's cross sections folded against it. Cheaper (nothing per
-    /// replica in transport, and an adaptive replica count) and open to every
-    /// transport configuration, but where a resonance self-shields the held
-    /// flux overstates its sigma, several-fold for a strong one, since a
-    /// stronger resonance would deepen its own flux dip. The report lists the
-    /// held response under `not_perturbed`.
-    Held,
-}
-
-impl FluxResponse {
-    /// The name used in the API and in the report.
-    pub fn name(self) -> &'static str {
-        match self {
-            FluxResponse::ReplicaWeights => "replica_weights",
-            FluxResponse::Held => "held",
-        }
-    }
-
-    /// Parse a name, naming the choices when it is not one of them.
-    pub fn parse(name: &str) -> Result<Self, String> {
-        match name {
-            "replica_weights" => Ok(FluxResponse::ReplicaWeights),
-            "held" => Ok(FluxResponse::Held),
-            _ => Err(format!(
-                "flux_response must be \"replica_weights\" or \"held\", got {name:?}"
-            )),
         }
     }
 }
@@ -310,11 +252,11 @@ pub enum FluxResponseReport {
     /// A spectrum run: the flux is the caller's, and nothing transports.
     #[default]
     Supplied,
-    /// A transport run whose tallied flux every replica was folded against
-    /// ([`FluxResponse::Held`]).
-    Held,
     /// A transport run that tallied every replica under its own replica
-    /// weights ([`FluxResponse::ReplicaWeights`]), carrying `replicas`.
+    /// weights, carrying `replicas`: one transport, each history carrying one
+    /// likelihood-ratio weight per replica, so replica `k`'s rates are an
+    /// unbiased estimate of what a transport with replica `k`'s data would
+    /// tally, flux response and all.
     ReplicaWeights {
         /// Replicas the transport carried.
         replicas: usize,
@@ -329,14 +271,13 @@ impl FluxResponseReport {
     pub fn name(self) -> &'static str {
         match self {
             FluxResponseReport::Supplied => "supplied",
-            FluxResponseReport::Held => "held",
             FluxResponseReport::ReplicaWeights { .. } => "replica_weights",
             FluxResponseReport::Unperturbed => "unperturbed",
         }
     }
 }
 
-/// The replicas a transport with [`FluxResponse::ReplicaWeights`] carries:
+/// The replicas a transport-coupled run's transport carries:
 /// `request.samples` where it is set, else the count a Gaussian output needs
 /// to reach `request.convergence`, `1 / (2 t^2) + 1`, rounded up to a whole
 /// [`BLOCK`] and kept within [`MIN_SAMPLES`] and [`MAX_SAMPLES`]: 256 at the
@@ -510,7 +451,7 @@ pub struct Info {
     pub samples: usize,
     /// How the flux answered each replica's perturbed cross sections: the
     /// caller's on a spectrum run, and on a transport run either tallied per
-    /// replica under replica weights, held at the nominal transport's, or not
+    /// replica under replica weights or, with the cross sections off, not
     /// perturbed at all.
     pub flux_response: FluxResponseReport,
     /// Whether every tracked sigma reached the convergence target, so
@@ -1181,10 +1122,9 @@ pub struct Ensemble {
 ///   squared against its own stated uncertainty. It says which evaluation to
 ///   look at, not the total, which is always the resampled one. On a
 ///   transport run its cross-section terms fold against the nominal flux
-///   even when the replicas carried the flux's response
-///   ([`FluxResponse::ReplicaWeights`]), so for a self-shielded resonance
-///   they overstate the share, and the cross sections' `linearity` is then
-///   `None`.
+///   while the replicas carry the flux's response, so for a self-shielded
+///   resonance they overstate the share, and the cross sections' `linearity`
+///   is then `None`.
 #[derive(Debug, Clone, Default)]
 pub struct Attribution {
     /// Source name -> `[step][nuclide]` variance, from that source alone.

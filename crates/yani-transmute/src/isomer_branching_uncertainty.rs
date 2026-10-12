@@ -92,15 +92,16 @@
 //! parent the material does not carry are folded from the union-grid flux
 //! moments bin by bin, a bin a covariance edge cuts split by energy width.
 //!
-//! Where the transport carried replica weights (the cross-section source on,
-//! `FluxResponse::ReplicaWeights`), the tally keeps these interval
+//! Where the transport carried replica weights (the cross-section source on),
+//! the tally keeps these interval
 //! productions per replica too, scored under replica `k`'s weight and cross
 //! sections as its partials are, and replica `k` folds its draw with its own
 //! `w_j / P` on the lists folded from its own partials. An MF=40 draw moves no
 //! transport cross section, so it has no flux response of its own; what the
 //! replica weights carry is the response of the weights to the cross-section
-//! draw of the same replica. With the flux held, the weights are the nominal
-//! transport's, which holds that response, second order in the split.
+//! draw of the same replica. Without the cross-section source the weights
+//! are the nominal transport's, which is exact there: no replica moves the
+//! flux.
 //!
 //! # Sampling
 //!

@@ -90,33 +90,16 @@
 //!
 //! # Transport
 //!
-//! A transport-coupled run has no spectrum but the tally's, and the 50 bins a
-//! decade the MF=33 fold reads are far too coarse to weight a resonance with:
-//! the flux dips inside a self-shielded resonance by orders of magnitude over
-//! a width hundreds of times narrower than a bin. So the transport tallies a
-//! second flux, on the energies of [`resolved_flux_grid`]: each sampled
-//! nuclide's own transport grid over the reach of its ranges, which traces
-//! every broadened resonance as finely as the cross section the rates were
-//! scored with. The weight is built from that histogram ([`WeightSpectrum`]
-//! with `resolved` set), so the fold sees the self-shielded flux the
-//! transport saw, dips and all, and the shift is relative to the tallied
-//! rate. What is held is the same as for every cross-section source of a
-//! transport-coupled run: the flux is the nominal transport's, so a perturbed
-//! resonance does not reshape its own dip. Where a resonance is
-//! self-shielded that overstates the rate's sigma, since a stronger
-//! resonance deepens its own dip and captures little more: on a 30 cm
-//! graphite sphere with one W186 atom in 51 under a 14 MeV source, W186
-//! capture moves by 1.4% (rms over 32 replicas) under the fixed flux and by
-//! 0.18% in reruns of the same draws, while the first-order rows folded
-//! against the coarse spectrum give 1.9%. The replica weights of a transport
-//! that applies the draws itself ([`TransportResonance`]) carry the flux
-//! response. Without the resolved tally every nuclide keeps the first-order
-//! rows, with the reason.
-//!
-//! A transport that applies the draws itself ([`TransportResonance`]) reads
-//! the same parameters, replica for replica, and gets each replica's change
-//! to the cross sections at its own temperature on its own energy grid,
-//! broadened.
+//! A transport-coupled run does not fold here. Its transport applies each
+//! replica's draw itself ([`TransportResonance`]): per replica, the change the
+//! drawn parameters make to each reaction, broadened to the temperature in
+//! use, on the transport's own energy grid. The transport's replica weights
+//! carry that change through every flight, collision and tallied rate, so a
+//! stronger resonance deepens its own flux dip, which no fold against a fixed
+//! flux can see (on a 30 cm graphite sphere with one W186 atom in 51 under a
+//! 14 MeV source, W186 capture moves by 0.18% in reruns of the same draws,
+//! against 1.4% for a fold of the same draws against the nominal flux). It
+//! reads the same parameters as a spectrum run, replica for replica.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -406,11 +389,6 @@ pub(crate) struct WeightSpectrum<'a> {
     pub rates: &'a ReactionRates,
     pub masses: &'a [f64],
     pub boundaries: &'a [f64],
-    /// Whether the bins resolve the flux through the resonances, as a
-    /// transport tally on [`resolved_flux_grid`] does: the density is then
-    /// flat in each bin, and no collapse shape or within-group weight is put
-    /// on it.
-    pub resolved: bool,
 }
 
 impl ResonanceRun {
@@ -435,8 +413,7 @@ impl ResonanceRun {
         let shapes: Vec<Option<CollapseShapes>> = spectra
             .iter()
             .map(|s| {
-                let valid =
-                    !s.resolved && !s.masses.is_empty() && s.boundaries.len() == s.masses.len() + 1;
+                let valid = !s.masses.is_empty() && s.boundaries.len() == s.masses.len() + 1;
                 valid
                     .then(|| CollapseShapes::new(material, s.masses, s.boundaries, shielding))
                     .flatten()
@@ -491,32 +468,6 @@ impl ResonanceRun {
             seed,
             n_spectra: spectra.len(),
             nuclides,
-            methods,
-            computed: Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// No nuclide sampled: every nuclide of `material` with resonance
-    /// parameters and a rate in `rates` keeps the first-order rows, for
-    /// `reason`.
-    pub(crate) fn held(material: &Material, rates: &ReactionRates, reason: &str) -> Self {
-        let methods = material
-            .nuclide_data
-            .iter()
-            .filter(|(name, nd)| nd.resonance_parameters.is_some() && rates.contains_key(*name))
-            .map(|(name, _)| {
-                (
-                    name.clone(),
-                    ResonanceMethod::FirstOrder {
-                        reason: reason.to_string(),
-                    },
-                )
-            })
-            .collect();
-        ResonanceRun {
-            seed: 0,
-            n_spectra: 1,
-            nuclides: Vec::new(),
             methods,
             computed: Mutex::new(HashMap::new()),
         }
@@ -733,8 +684,7 @@ fn doppler_reach(lo: f64, hi: f64, awr: f64, temperature: f64) -> (f64, f64) {
 }
 
 /// The collapse's flux density over the groups whose broadening reaches the
-/// nuclide's ranges ([`doppler_reach`]). A resolved spectrum's is its
-/// histogram.
+/// nuclide's ranges ([`doppler_reach`]).
 fn flux_density(
     s: &WeightSpectrum<'_>,
     shape: Option<&FluxShape>,
@@ -758,20 +708,6 @@ fn flux_density(
             lo.max(1e-11).min(b[1] * 0.5)
         }
     };
-    if s.resolved {
-        let edges: Vec<f64> = groups
-            .iter()
-            .map(|&g| floor(b[g]))
-            .chain(std::iter::once(b[groups[groups.len() - 1] + 1]))
-            .collect();
-        return Ok(Flux::Histogram {
-            density: groups
-                .iter()
-                .map(|&g| s.masses[g] / (b[g + 1] - floor(b[g])))
-                .collect(),
-            edges,
-        });
-    }
     match shape {
         None => {
             let edges: Vec<f64> = groups
@@ -841,51 +777,6 @@ fn kelvin(material: &Material, nd: &yamc_nuclide::Nuclide) -> Result<(String, f6
     let kelvin = yamc_nuclide::temperature::label_to_kelvin(&label)
         .ok_or_else(|| format!("its temperature label {label:?} is not a number of kelvin"))?;
     Ok((label, kelvin))
-}
-
-/// The energies, eV, a transport tally resolves `material`'s flux on so a
-/// transport-coupled run can sample resonance parameters (see the module
-/// documentation): for every nuclide whose parameters can be sampled, the
-/// points of its own transport grid at the material's temperature that lie
-/// within the Doppler reach of its sampled ranges, and that reach's ends.
-/// Ascending and without repeats; empty where no nuclide's can be sampled.
-///
-/// Reads `resonance_parameters.arrow` for each nuclide whose folder has one,
-/// on a copy, so `material` itself is left as it is. Preparing a nuclide here
-/// is the preparation the run's replicas reuse.
-pub fn resolved_flux_grid(material: &Material) -> Result<Vec<f64>, Box<dyn std::error::Error>> {
-    let mut copy = material.clone();
-    crate::material_transmute::ensure_resonance_parameters_loaded(&mut copy)?;
-    let mut points = Vec::new();
-    let mut names: Vec<&String> = copy.nuclide_data.keys().collect();
-    names.sort();
-    for name in names {
-        let nd = &copy.nuclide_data[name];
-        let Some(data) = nd.resonance_parameters.as_ref() else {
-            continue;
-        };
-        let Ok((label, temperature)) = kelvin(&copy, nd) else {
-            continue;
-        };
-        let Ok(prepared) = prepared(name, data) else {
-            continue;
-        };
-        let Some(grid) = nd.energy.as_ref().and_then(|m| m.get(&label)) else {
-            continue;
-        };
-        let grid = grid.as_slice();
-        let Some(&first) = grid.first() else {
-            continue;
-        };
-        let (lo, hi) = doppler_reach(prepared.span.0, prepared.span.1, prepared.awr, temperature);
-        let lo = lo.max(first);
-        points.push(lo);
-        points.push(hi);
-        points.extend(grid.iter().copied().filter(|&e| e > lo && e < hi));
-    }
-    points.sort_by(f64::total_cmp);
-    points.dedup();
-    Ok(points)
 }
 
 /// A nuclide's resonance parameters prepared for a transport that applies

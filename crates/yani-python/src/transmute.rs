@@ -153,9 +153,7 @@ pub fn transmute(
     // Everything the solve needs is owned or borrowed from the guards, which
     // outlive it, so the GIL can be released for the length of the solve as
     // `Material.transmute` does.
-    let uncertainty = data_uncertainty
-        .map(|u| u.without_flux_response("transmute"))
-        .transpose()?;
+    let uncertainty = data_uncertainty.map(|u| u.inner);
     let mut refs: Vec<&mut yamc_materials::material::Material> =
         guards.iter_mut().map(|g| &mut g.internal).collect();
     let results = py.detach(move || {

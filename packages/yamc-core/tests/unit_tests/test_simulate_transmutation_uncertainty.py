@@ -110,31 +110,20 @@ def test_the_report_names_the_sources_that_applied():
     assert info["statistical_rates"] > 0
     assert info["statistical_sampled"] == 16 * info["statistical_rates"]
     # The transport carried a replica weight per replica, so each replica's
-    # rates answer its own cross sections and no flux response is held.
+    # rates answer its own cross sections.
     assert info["flux_response"] == "replica_weights"
     assert info["transport_replicas"] == 16
-    assert "flux response to perturbed cross sections (one transport)" not in info["not_perturbed"]
     assert "tallied-rate statistics" not in info["not_perturbed"]
-
-
-def test_the_report_names_the_flux_response_held():
-    held = yamc.DataUncertainty(seed=1, samples=16, flux_response="held")
-    info = _run(data_uncertainty=held).get_data_uncertainty_info(MAT_ID)
-    # One transport feeds every replica, so how the flux would answer a
-    # perturbed cross section is held, while the tallied values are drawn.
-    assert info["flux_response"] == "held"
-    assert info["transport_replicas"] is None
-    assert "flux response to perturbed cross sections (one transport)" in info["not_perturbed"]
 
 
 def test_the_report_holds_no_flux_response_with_cross_sections_off():
     results = _run(data_uncertainty=STATISTICAL)
     info = results.get_data_uncertainty_info(MAT_ID)
     # Nothing perturbs a cross section, so there is no response of the flux to
-    # hold; the unperturbed cross sections are named instead.
+    # carry; the unperturbed cross sections are named instead.
     assert "activation cross section (MF=33)" in info["not_perturbed"]
-    assert "flux response to perturbed cross sections (one transport)" not in info["not_perturbed"]
     assert info["flux_response"] == "unperturbed"
+    assert info["transport_replicas"] is None
 
 
 def test_the_report_names_the_tallied_rates_held_with_statistical_off():
@@ -165,72 +154,16 @@ def test_the_coupled_method_is_refused():
         _run(method="coupled", data_uncertainty=STATISTICAL)
 
 
-CROSS_SECTIONS = yamc.DataUncertainty(
-    seed=1, samples=64, sources=["cross_sections"], flux_response="held"
-)
+def test_the_cross_section_report_reads_the_tallied_spectrum_at_its_normalization():
+    """The sigma report folds the evaluation against the tallied flux.
 
-
-def _relative_fe57_sigma(results):
-    return results.get_nuclide_uncertainty(MAT_ID, "Fe57", 1) / results.get_nuclide_density(
-        MAT_ID, "Fe57", 1
-    )
-
-
-def test_the_cross_section_sigma_matches_a_supplied_spectrum():
-    """The held fold against the tallied flux gives what the same flux gives supplied.
-
-    The sphere's flux is thermal, so ``Material.transmute`` under a thermal
-    histogram folds the same Fe56 (n,gamma) covariance. The fold divides
-    partial rates taken from the spectrum by the tallied rates, so a spectrum
-    on another normalization shows up here as a sigma off by orders of
-    magnitude, a sigma that moves with the particle count, and every channel
-    listed in ``partials_above_rate``.
+    The fold divides partial rates taken from the tally's spectrum by the
+    tallied rates, so a spectrum on another normalization shows up as every
+    channel listed in ``partials_above_rate``.
     """
-    # The fetched fixtures carry no covariance section, so this only runs where
-    # the cache holds one from the start; otherwise another test could add it
-    # between the two halves and the comparison would be against nothing.
     if not os.path.exists(os.path.join(TESTS_DIR, "Fe56.arrow", "covariance.arrow")):
         pytest.skip("the Fe56 fixture carries no covariance section")
-    sigmas = []
-    for particles in (2000, 8000):
-        results = _run(particles=particles, data_uncertainty=CROSS_SECTIONS)
-        info = results.get_data_uncertainty_info(MAT_ID)
-        # `has_gaps` is not asserted: it also reports repairs and coverage of
-        # the fixture's covariance, which vary with the data version.
-        assert info["partials_above_rate"] == {}
-        sigmas.append(_relative_fe57_sigma(results))
-    assert sigmas[0] == pytest.approx(sigmas[1], rel=0.01)
-
-    material = yamc.Material(
-        composition={"Fe56": 1.0}, density=7.87, volume=4188.79, temperature=294, id=MAT_ID
-    )
-    material.read_nuclear_data({"Fe56": os.path.join(TESTS_DIR, "Fe56.arrow")})
-    thermal = yamc.NeutronSource(
-        position=(0, 0, 0), energy=yamc.sources.Histogram([1.0e-3, 1.0], [1.0])
-    )
-    schedule = yamc.PulseSchedule([
-        yamc.Pulse(rate=1.0e14, duration=HOUR, source=thermal),
-        yamc.Cooldown(duration=HOUR),
-    ])
-    spectrum_request = yamc.DataUncertainty(seed=1, samples=64, sources=["cross_sections"])
-    supplied = material.transmute(schedule, data_uncertainty=spectrum_request)
-    assert sigmas[0] == pytest.approx(_relative_fe57_sigma(supplied), rel=0.05)
-
-
-def test_flux_response_is_checked_and_reported():
-    assert yamc.DataUncertainty().flux_response == "replica_weights"
-    assert yamc.DataUncertainty(flux_response="held").flux_response == "held"
-    assert 'flux_response="held"' in repr(yamc.DataUncertainty(flux_response="held"))
-    with pytest.raises(ValueError, match="replica_weights"):
-        yamc.DataUncertainty(flux_response="transport")
-
-
-def test_flux_response_is_refused_where_there_is_none_to_choose():
-    material = yamc.Material(composition={"Fe56": 1.0}, density=7.87, volume=1.0, temperature=294)
-    material.read_nuclear_data({"Fe56": os.path.join(TESTS_DIR, "Fe56.arrow")})
-    source = yamc.NeutronSource(
-        position=(0, 0, 0), energy=yamc.sources.Histogram([1.0e-3, 1.0], [1.0])
-    )
-    schedule = yamc.PulseSchedule([yamc.Pulse(rate=1.0e14, duration=HOUR, source=source)])
-    with pytest.raises(ValueError, match="flux_response applies to Model.simulate_transmutation"):
-        material.transmute(schedule, data_uncertainty=yamc.DataUncertainty(flux_response="held"))
+    request = yamc.DataUncertainty(seed=1, samples=16, sources=["cross_sections"])
+    info = _run(particles=2000, data_uncertainty=request).get_data_uncertainty_info(MAT_ID)
+    assert info["partials_above_rate"] == {}
+    assert info["flux_response"] == "replica_weights"

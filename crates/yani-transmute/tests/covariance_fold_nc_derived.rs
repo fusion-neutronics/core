@@ -594,6 +594,15 @@ fn a_transport_run_reads_the_reactions_a_channel_is_derived_from() {
 
     let (bounds, flux) = groups(1.39e7, 1.41e7);
     let rates = compute_multigroup_reaction_rates_shielded(&m, &chain, &flux, &bounds, 1.0, None).0;
+    // The transport's replicas, here the nominal tally repeated: the
+    // coverage report reads the evaluation, not the replicas' rates.
+    let replicas = yani_transmute::ReplicaTallied {
+        seed: 1,
+        rates: vec![rates.clone(); 8],
+        partials: vec![HashMap::new(); 8],
+        fy_weights: vec![HashMap::new(); 8],
+        ..Default::default()
+    };
     let tallied = yani_transmute::TransportTallied {
         rates,
         partials: HashMap::new(),
@@ -603,12 +612,11 @@ fn a_transport_run_reads_the_reactions_a_channel_is_derived_from() {
             masses: vec![0.0, 1.0, 0.0],
             flux_error: None,
         },
-        resolved_spectrum: None,
         statistics: None,
         branch: std::sync::Arc::new(yani::BranchTable::default()),
         diagnostics: yani_transmute::CoupledDiagnostics::default(),
         isomer: None,
-        replicas: None,
+        replicas: Some(replicas),
     };
     let request = yani_transmute::uncertainty::DataUncertainty {
         sources: vec![yani_transmute::uncertainty::Source::CrossSections],

@@ -292,59 +292,6 @@ struct MaterialTransmutationData {
     /// The MF=40 interval productions, when asked for with
     /// [`TransmutationTallies::with_isomer_intervals`].
     isomer: Option<IsomerTally>,
-    /// The flux through the resonances, when asked for with
-    /// [`TransmutationTallies::with_resolved_flux`].
-    resolved: Option<ResolvedFlux>,
-}
-
-/// One material's flux on the energies of
-/// [`crate::resonance_rates::resolved_flux_grid`]: `sum(TL)` per bin, nothing
-/// scored outside the grid.
-struct ResolvedFlux {
-    grid: Vec<f64>,
-    /// Per bin, this chunk's `sum(TL)` (f64 as bits).
-    batch: Vec<AtomicU64>,
-    /// Per bin, the running sums across all CPU chunks.
-    sums: Mutex<Vec<f64>>,
-}
-
-impl ResolvedFlux {
-    fn new(grid: Vec<f64>) -> Self {
-        let n = grid.len() - 1;
-        ResolvedFlux {
-            grid,
-            batch: (0..n).map(|_| AtomicU64::new(0)).collect(),
-            sums: Mutex::new(vec![0.0; n]),
-        }
-    }
-
-    /// Score a segment of track length `tl` at `energy`, if it is on the
-    /// grid. The top edge belongs to the last bin.
-    #[inline]
-    fn score(&self, energy: f64, tl: f64) {
-        let g = &self.grid;
-        if energy < g[0] || energy > g[g.len() - 1] {
-            return;
-        }
-        let bin = (g.partition_point(|&e| e <= energy) - 1).min(self.batch.len() - 1);
-        atomic_add_f64(&self.batch[bin], tl);
-    }
-
-    fn accumulate(&self) {
-        let mut sums = self.sums.lock().unwrap_or_else(|p| p.into_inner());
-        for (s, b) in sums.iter_mut().zip(&self.batch) {
-            *s += f64::from_bits(b.load(Ordering::Relaxed));
-            b.store(0, Ordering::Relaxed);
-        }
-    }
-
-    fn reset(&self) {
-        let mut sums = self.sums.lock().unwrap_or_else(|p| p.into_inner());
-        for (s, b) in sums.iter_mut().zip(&self.batch) {
-            *s = 0.0;
-            b.store(0, Ordering::Relaxed);
-        }
-    }
 }
 
 /// Thread-safe transmutation tally accumulator.
@@ -835,7 +782,6 @@ impl TransmutationTallies {
                     fy_batch: (0..n_fy_slots).map(|_| AtomicU64::new(0)).collect(),
                     fy_sums: Mutex::new(vec![0.0; n_fy_slots]),
                     isomer: None,
-                    resolved: None,
                 },
             );
         }
@@ -1031,29 +977,6 @@ impl TransmutationTallies {
             &self.union_grid,
             &materials,
         ));
-        self
-    }
-
-    /// Also tally each material's flux on its own energies in `grids` (eV,
-    /// ascending, at least two), by material id, so a transport-coupled
-    /// uncertainty run can sample resonance parameters against the flux the
-    /// transport saw through the resonances (see
-    /// [`crate::resonance_rates::resolved_flux_grid`] and
-    /// [`resolved_flux_spectrum`](Self::resolved_flux_spectrum)).
-    ///
-    /// Off unless asked for, and then one binary search and one atomic add per
-    /// track segment on the grid. It does not touch the sums the rates are
-    /// built from, so they are bit-identical with it on or off. A material
-    /// with no grid, or one of fewer than two energies, tallies none.
-    pub fn with_resolved_flux(mut self, grids: HashMap<u32, Vec<f64>>) -> Self {
-        for (id, grid) in grids {
-            if grid.len() < 2 {
-                continue;
-            }
-            if let Some(m) = self.materials.get_mut(&id) {
-                m.resolved = Some(ResolvedFlux::new(grid));
-            }
-        }
         self
     }
 
@@ -1335,40 +1258,6 @@ impl TransmutationTallies {
         })
     }
 
-    /// The flux [`with_resolved_flux`](Self::with_resolved_flux) tallied for
-    /// `material_id`, per source particle and per unit volume, at the
-    /// normalization of [`flux_spectrum`](Self::flux_spectrum) and the rates.
-    /// `None` when the material tallied none, nothing was scored on its grid,
-    /// or `volume` is not positive.
-    pub fn resolved_flux_spectrum(
-        &self,
-        material_id: u32,
-        volume: f64,
-    ) -> Option<crate::MultigroupSpectrum> {
-        let mat_data = self.materials.get(&material_id)?;
-        let resolved = mat_data.resolved.as_ref()?;
-        let total_particles = mat_data.total_particles.load(Ordering::Relaxed);
-        if total_particles == 0 || volume <= 0.0 {
-            return None;
-        }
-        let per_source = 1.0 / (total_particles as f64 * volume);
-        let masses: Vec<f64> = resolved
-            .sums
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .iter()
-            .map(|v| v * per_source)
-            .collect();
-        if masses.iter().all(|v| *v <= 0.0) {
-            return None;
-        }
-        Some(crate::MultigroupSpectrum {
-            boundaries: resolved.grid.clone(),
-            masses,
-            flux_error: None,
-        })
-    }
-
     /// Score a track segment in a transmutable material.
     ///
     /// For each nuclide/MT pair tracked in this material, looks up σ(E)
@@ -1414,9 +1303,6 @@ impl TransmutationTallies {
             if let Some(h) = &mut history {
                 h.add_track_length(g, track_length);
             }
-        }
-        if let Some(resolved) = &mat_data.resolved {
-            resolved.score(energy, track_length);
         }
 
         // Score σ*TL for each nuclide/MT pair
@@ -1630,9 +1516,6 @@ impl TransmutationTallies {
 
             if let Some(tally) = &mat_data.isomer {
                 tally.accumulate();
-            }
-            if let Some(resolved) = &mat_data.resolved {
-                resolved.accumulate();
             }
 
             mat_data
@@ -1909,9 +1792,6 @@ impl TransmutationTallies {
             if let Some(tally) = &mat_data.isomer {
                 tally.reset();
             }
-            if let Some(resolved) = &mat_data.resolved {
-                resolved.reset();
-            }
         }
         if let Some(stats) = &self.statistics {
             stats.reset();
@@ -1949,8 +1829,8 @@ impl TransmutationTallies {
 
         // Pack: per material, sum_means ++ [flux_sum_means] ++ moment_s0 ++
         // moment_s1 ++ yield_sums ++ fy_sums ++ diagnostic_sums ++ the MF=40
-        // interval productions when they are on ++ the resolved flux when it
-        // is on, then the history statistics' raw sums when they are on.
+        // interval productions when they are on, then the history
+        // statistics' raw sums when they are on.
         // Those are sums of per-history products, so they add across ranks
         // like everything else here.
         let mut packed: Vec<f64> = Vec::new();
@@ -2006,9 +1886,6 @@ impl TransmutationTallies {
             );
             if let Some(tally) = &mat_data.isomer {
                 packed.extend_from_slice(&tally.sums.lock().unwrap_or_else(|p| p.into_inner()));
-            }
-            if let Some(resolved) = &mat_data.resolved {
-                packed.extend_from_slice(&resolved.sums.lock().unwrap_or_else(|p| p.into_inner()));
             }
             if let Some(stats) = &self.statistics {
                 stats.pack(*id, &mut packed);
@@ -2081,12 +1958,6 @@ impl TransmutationTallies {
                 let mut t = tally.sums.lock().unwrap_or_else(|p| p.into_inner());
                 let n = t.len();
                 t.copy_from_slice(&packed[off..off + n]);
-                off += n;
-            }
-            if let Some(resolved) = &mat_data.resolved {
-                let mut r = resolved.sums.lock().unwrap_or_else(|p| p.into_inner());
-                let n = r.len();
-                r.copy_from_slice(&packed[off..off + n]);
                 off += n;
             }
             if let Some(stats) = &self.statistics {
@@ -2492,7 +2363,6 @@ mod tests {
                 fy_batch: Vec::new(),
                 fy_sums: Mutex::new(Vec::new()),
                 isomer: None,
-                resolved: None,
             },
         );
         TransmutationTallies {
@@ -3313,78 +3183,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// The resolved flux bins each segment on its own grid, at the rates'
-    /// normalization, whatever the chunking; it leaves the rates and the
-    /// coarse spectrum as they are, adds across ranks, and `reset` clears it.
-    #[test]
-    fn resolved_flux_bins_segments_on_its_grid() {
-        let material = bare_material();
-        let grid = vec![1.0, 2.0, 4.0, 8.0];
-        // (energy, track length): one below the grid, one on each bin, one
-        // on the top edge (the last bin's) and one above.
-        let segments = [
-            (0.5, 1.0),
-            (1.5, 2.0),
-            (2.0, 3.0),
-            (5.0, 4.0),
-            (8.0, 5.0),
-            (9.0, 6.0),
-        ];
-        let expected = [2.0, 3.0, 9.0];
-        let run = |t: &TransmutationTallies, chunks: &[&[(f64, f64)]]| {
-            for chunk in chunks {
-                for &(e, tl) in *chunk {
-                    t.score(7, e, tl, &material);
-                }
-                t.accumulate_batch(5);
-            }
-        };
-        let plain = one_bin_tally();
-        run(&plain, &[&segments[..2], &segments[2..]]);
-        let t = one_bin_tally().with_resolved_flux(HashMap::from([(7, grid.clone())]));
-        run(&t, &[&segments[..2], &segments[2..]]);
-        let volume = 2.0;
-        let spectrum = t.resolved_flux_spectrum(7, volume).unwrap();
-        assert_eq!(spectrum.boundaries, grid);
-        for (m, e) in spectrum.masses.iter().zip(expected) {
-            assert!((m - e / (10.0 * volume)).abs() < 1e-15, "{m} vs {e}");
-        }
-        let (a, b) = (
-            t.flux_spectrum(7, volume).unwrap(),
-            plain.flux_spectrum(7, volume).unwrap(),
-        );
-        assert_eq!((a.boundaries, a.masses), (b.boundaries, b.masses));
-        assert_eq!(
-            t.get_reaction_rates(7, volume, 1.0),
-            plain.get_reaction_rates(7, volume, 1.0)
-        );
-        assert!(plain.resolved_flux_spectrum(7, volume).is_none());
-        assert!(t.resolved_flux_spectrum(7, 0.0).is_none());
-
-        // Two ranks of the same histories add up to one.
-        let rank0 = one_bin_tally().with_resolved_flux(HashMap::from([(7, grid.clone())]));
-        let rank1 = one_bin_tally().with_resolved_flux(HashMap::from([(7, grid.clone())]));
-        run(&rank0, &[&segments[..3]]);
-        run(&rank1, &[&segments[3..]]);
-        let ops = TwoRanks {
-            other: Mutex::new(Vec::new()),
-            record: true,
-        };
-        rank1.reduce_across_ranks(&ops);
-        let ops = TwoRanks {
-            other: ops.other,
-            record: false,
-        };
-        rank0.reduce_across_ranks(&ops);
-        let reduced = rank0.resolved_flux_spectrum(7, volume).unwrap();
-        for (m, e) in reduced.masses.iter().zip(expected) {
-            assert!((m - e / (5.0 * volume)).abs() < 1e-15, "{m} vs {e}");
-        }
-
-        t.reset();
-        assert!(t.resolved_flux_spectrum(7, volume).is_none());
     }
 
     /// `reset` starts a new step from nothing, and a later run on more
