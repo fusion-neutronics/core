@@ -26,6 +26,7 @@ pub mod flux_uncertainty;
 mod gas;
 mod history_statistics;
 mod isomer_branching_uncertainty;
+mod joint_fit;
 mod material_transmute;
 pub mod multigroup;
 pub mod nearest_correlation;

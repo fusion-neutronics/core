@@ -548,7 +548,7 @@ fn row_chunks(m: usize, f: impl Fn(std::ops::Range<usize>) -> Vec<f64> + Sync + 
 
 /// `f(0), ..., f(n - 1)`, in parallel off wasm32. Each entry is computed on
 /// its own in a fixed order, so the result is the same on any thread count.
-fn indexed<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync + Send) -> Vec<T> {
+pub(crate) fn indexed<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync + Send) -> Vec<T> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         use rayon::prelude::*;

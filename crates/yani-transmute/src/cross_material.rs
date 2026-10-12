@@ -84,7 +84,7 @@ pub struct JointGroup {
     pub averages: Vec<Vec<IntervalAverage>>,
     /// Per pair of members `(a, b)`, `a < b` by index into `members`, the
     /// stated relative covariance of `a`'s average `p` with `b`'s average
-    /// `q`, as `(p, q, value)` with the zeros left out.
+    /// `q`, as `(p, q, value)`, stated zeros included.
     pub links: PairEntries,
 }
 
@@ -341,9 +341,6 @@ impl CrossMaterial {
             for i in 0..link.block.n_rows() {
                 for j in 0..link.block.n_cols() {
                     let v = link.block.get(i, j);
-                    if v == 0.0 {
-                        continue;
-                    }
                     let p = average(&link.row, a, link.mt, er[i], er[i + 1]);
                     let q = average(&link.col, b, link.mt1, ec[j], ec[j + 1]);
                     if let (Some(p), Some(q)) = (p, q) {
@@ -356,7 +353,9 @@ impl CrossMaterial {
                 .or_default()
                 .extend(list);
         }
-        entries.retain(|_, list| !list.is_empty());
+        // A stated zero is kept, as the fit holds it ([`crate::joint_fit`]),
+        // but blocks of zeros alone link nothing.
+        entries.retain(|_, list| list.iter().any(|e| e.2 != 0.0));
 
         // Connected components over the nuclides the entries join.
         let mut parent: BTreeMap<&String, &String> = BTreeMap::new();
@@ -689,9 +688,10 @@ mod tests {
     }
 
     /// A stated covariance past a correlation of one beside the two
-    /// evaluations' own is clipped to one along the offending direction:
-    /// each nuclide keeps its own covariance exactly, the two are drawn
-    /// fully correlated there, and the adjustment is reported.
+    /// evaluations' own is drawn at the closest admissible one, a
+    /// correlation of one (to the fit's tolerance): each nuclide keeps its
+    /// own covariance exactly, the two are drawn fully correlated, and the
+    /// adjustment is reported.
     #[test]
     fn an_inadmissible_link_is_clipped_and_reported() {
         let one = [1.0e-5, 2.0e7];
@@ -716,28 +716,35 @@ mod tests {
         let f = fields(&m);
         let s = Sampler::coupled(&f, &[], &cross, &cross.transport_fields(&BTreeSet::new()));
         let drawn = s.sampled_cross_covariance("U235", "U238").unwrap();
-        assert!((drawn[0] - 0.01).abs() < 1e-12, "{drawn:?}");
+        assert!((drawn[0] - 0.01).abs() < 1e-8, "{drawn:?}");
         for n in ["U235", "U238"] {
             assert_eq!(s.sampled_covariance(n).unwrap().0, [0.01]);
         }
         let adjusted = s.joint_adjustments();
         let j = adjusted["U235+U238"];
         let want = 1.02_f64.ln() / 1.01_f64.ln();
-        assert!((j.largest_singular_value - want).abs() < 1e-9, "{j:?}");
+        assert!((j.largest_stated_correlation - want).abs() < 1e-9, "{j:?}");
         assert!(j.relative_change > 0.4, "{j:?}");
-        // The draws carry it: the two multipliers move together.
+        assert!(
+            (j.relative_change - j.least_relative_change).abs() < 1e-6,
+            "{j:?}"
+        );
+        assert!(j.largest_correlation_change < 1e-6 && j.converged, "{j:?}");
+        // The draws carry it: the two multipliers, each of sigma 0.1, move
+        // together.
         for r in 0..20 {
             let d = s.deviates(5, r);
-            assert!((d["U235"][0] - d["U238"][0]).abs() < 1e-12);
+            let (x, y) = (d["U235"][0], d["U238"][0]);
+            assert!((x - y).abs() < 1e-4, "{x} {y}");
         }
     }
 
-    /// Clipping acts along the offending direction alone: of two
-    /// uncorrelated cells per nuclide, the first pair stated past a
-    /// correlation of one is drawn at one, and the second pair, stated
-    /// within it, is drawn as stated.
+    /// The fit moves only what it must: of two uncorrelated cells per
+    /// nuclide, the first pair stated past a correlation of one is drawn at
+    /// one, and the second pair, stated within it, is drawn as stated, as
+    /// are the stated zeros between them.
     #[test]
-    fn clipping_leaves_an_admissible_direction_as_stated() {
+    fn the_fit_leaves_an_admissible_direction_as_stated() {
         let diagonal = |mat: i32| {
             let ni = NiSubsection {
                 lb: 1,
@@ -765,18 +772,14 @@ mod tests {
             &cross.transport_fields(&BTreeSet::new()),
         );
         let drawn = s.sampled_cross_covariance("U235", "U238").unwrap();
-        assert!((drawn[0] - 0.01).abs() < 1e-12, "{drawn:?}");
-        assert!(
-            drawn[1].abs() < 1e-12 && drawn[2].abs() < 1e-12,
-            "{drawn:?}"
-        );
-        assert!((drawn[3] - 0.005).abs() < 1e-12, "{drawn:?}");
+        assert!((drawn[0] - 0.01).abs() < 1e-8, "{drawn:?}");
+        assert!(drawn[1].abs() < 1e-8 && drawn[2].abs() < 1e-8, "{drawn:?}");
+        assert!((drawn[3] - 0.005).abs() < 1e-8, "{drawn:?}");
     }
 
-    /// Three evaluations, U235 linked to U238 and to Pu239, are one group,
-    /// joined one after another: every stated pair is carried at its
-    /// interval averages, and the pair no block states, U238 with Pu239,
-    /// covaries only through U235.
+    /// Three evaluations, U235 linked to U238 and to Pu239, are one group:
+    /// every stated pair is carried at its interval averages, and the pair
+    /// no block states, U238 with Pu239, covaries only through U235.
     #[test]
     fn a_group_of_three_carries_every_stated_pair() {
         const PU239: i32 = 9437;

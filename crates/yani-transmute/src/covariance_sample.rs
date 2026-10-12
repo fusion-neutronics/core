@@ -621,20 +621,26 @@ fn principal(matrix: &[f64], n: usize, kept: f64) -> (Vec<f64>, Vec<f64>, Vec<f6
 /// members (see [`JointDraw`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct JointAdjustment {
-    /// The share of a member's largest correlation eigenvalue below which
-    /// its directions were left out of its join to the members before it,
-    /// each member's chosen as the one that kept its drawn covariance with
-    /// them closest to the stated: the largest of those.
-    pub floor: f64,
-    /// The largest canonical correlation between a member and those before
-    /// it, at that floor, before it was clipped to one: how far past a
-    /// correlation of one the stated covariance went along its worst
-    /// direction.
-    pub largest_singular_value: f64,
     /// `||X' - X||_F / ||X||_F` over every pair of members, `X` the stated
     /// log-space covariance between their interval averages and `X'` the
     /// one drawn.
     pub relative_change: f64,
+    /// The same with every stated entry only clipped to a correlation of one
+    /// beside the members' own variances: a lower bound on
+    /// `relative_change` that no admissible draw can go below.
+    pub least_relative_change: f64,
+    /// The largest stated `|X_pq| / (σ_p σ_q)`, `σ` the averages' own
+    /// log-space standard deviations: past one where a stated entry alone is
+    /// inadmissible.
+    pub largest_stated_correlation: f64,
+    /// The largest change of a correlation between two members' averages,
+    /// drawn against stated, the stated one clipped to one first.
+    pub largest_correlation_change: f64,
+    /// L-BFGS iterations of the fit ([`crate::joint_fit`]), and whether it
+    /// converged rather than stopping at its cap (the draw is admissible
+    /// either way).
+    pub iterations: usize,
+    pub converged: bool,
 }
 
 /// One group's joint draw: the relative cells of evaluations a
@@ -654,21 +660,27 @@ pub struct JointAdjustment {
 /// covariance is admissible beside the members' own.
 ///
 /// Where it is not, as ENDF/B-VIII.1 states U235 fission correlated with
-/// U238 fission at near one while their own covariances correlate the fast
-/// groups less, the members are joined one at a time, in name order, and
-/// each one's whitened covariance with those before it has its singular
-/// values above one clipped to one: the least change along each direction
-/// that keeps every member's own covariance and leaves the joint positive
-/// semidefinite. Weak directions of a member's own correlation amplify any
-/// mismatch, so the members are joined only along directions holding a
-/// share of their largest correlation eigenvalue above a floor, chosen for
-/// each member from [`JOINT_FLOORS`] as the one that leaves its drawn
-/// covariance with the members before it closest to the stated one; the
-/// other directions are drawn at their own variance, uncorrelated with the
-/// other members. A repair of the joint
-/// matrix as a whole would instead move each member's own correlations, and
-/// with them the sigmas the evaluations state. What was done is in
+/// U238 and Pu239 fission past what their own covariances allow, the draw
+/// is the admissible joint covariance closest to the stated one: every
+/// member's own block held exactly, and the correlations between members'
+/// averages as near the stated ones (each first clipped to one) as a
+/// positive semidefinite whole allows, in the Frobenius norm over the
+/// stated entries ([`crate::joint_fit`]). A repair of the joint matrix as a
+/// whole would instead move each member's own correlations, and with them
+/// the sigmas the evaluations state. What was done is in
 /// [`JointAdjustment`].
+///
+/// Correlation units weigh every stated entry alike: in covariance units
+/// the fit converges far slower (the entries' variances span orders) and
+/// keeps barely more (ENDF/B-VIII.1's group 0.586 relative change against
+/// 0.602, JEFF-4.0's 0.60 against 0.61). Clipping each stated correlation
+/// to one first matters: an entry stated at a correlation of 13, as
+/// ENDF/B-VIII.1 states U235's resonance-range fission with U238's at
+/// 30 MeV, can only be drawn at one, and fitting it as stated pulls every
+/// correlation near it further (largest change from the clipped value 1.44
+/// unclipped, 1.27 clipped). Members no block joins are completed by
+/// maximum entropy where the stated covariance is drawn as it is (see
+/// `complete`).
 struct JointDraw {
     members: Vec<String>,
     whitenings: Vec<Whitening>,
@@ -693,10 +705,6 @@ type JointDraws = std::sync::Mutex<HashMap<(u64, u64), std::sync::Arc<Vec<f64>>>
 
 /// Keeps a group's stream clear of every per-nuclide stream.
 const JOINT_STREAM: u32 = 0x10_1E7D;
-
-/// The floors [`JointDraw`] chooses among: shares of a member's largest
-/// correlation eigenvalue below which its directions are not joined.
-const JOINT_FLOORS: [f64; 8] = [1.0e-6, 1.0e-4, 1.0e-3, 3.0e-3, 1.0e-2, 3.0e-2, 0.1, 0.3];
 
 impl JointDraw {
     /// One replica's joined coordinates, then every member's remainder
@@ -970,11 +978,10 @@ impl Whitening {
 /// one grid, linked to U238, and its whole range, linked to Pu239), and
 /// reading the covariance between a link's averages and another member as
 /// zero wherever this link does not state it would contradict the link that
-/// does. `Σ_SS⁺` is taken in correlation coordinates on directions holding
-/// more than `floor` of the largest eigenvalue (see [`JOINT_FLOORS`]), so
-/// `K`'s singular values are the canonical correlations of the two sets of
-/// averages along those directions.
-fn whiten(a: &Whitening, b: &Whitening, links: &[(usize, usize, f64)], floor: f64) -> Vec<f64> {
+/// does. `Σ_SS⁺` is taken in correlation coordinates, on directions above
+/// round-off of the largest eigenvalue, so `K`'s singular values are the
+/// canonical correlations of the two sets of averages.
+fn whiten(a: &Whitening, b: &Whitening, links: &[(usize, usize, f64)]) -> Vec<f64> {
     let s: Vec<usize> = links
         .iter()
         .map(|x| x.0)
@@ -1011,9 +1018,7 @@ fn whiten(a: &Whitening, b: &Whitening, links: &[(usize, usize, f64)], floor: f6
         }
         let (lambda, v) = eigen(&corr, m);
         let top = lambda.iter().cloned().fold(0.0, f64::max);
-        let kept: Vec<usize> = (0..m)
-            .filter(|&j| lambda[j] > floor.max(1.0e-12) * top)
-            .collect();
+        let kept: Vec<usize> = (0..m).filter(|&j| lambda[j] > 1.0e-12 * top).collect();
         let k = kept.len();
         let mut wm = vec![0.0; k * m];
         for (c, &j) in kept.iter().enumerate() {
@@ -1152,169 +1157,56 @@ fn joint_draw(
     built
 }
 
-/// One member joined to those before it at one floor: its rows of the
-/// joined coordinates' covariance and factor, and what the clipping met.
-struct Step {
-    /// `K'`, `r_c × prev`: its covariance with the members before it.
-    k: Vec<f64>,
-    /// Its factor row over the members before it, `r_c × prev`, and its own
-    /// block `H`, `r_c × r_c`.
-    f: Vec<f64>,
-    h: Vec<f64>,
-    largest: f64,
+/// How far below zero the smallest eigenvalue of the joined coordinates'
+/// covariance, built straight from the stated blocks, may be for the stated
+/// covariance to be drawn as it is: round-off on a matrix of unit diagonal.
+const JOINT_ADMISSIBLE: f64 = 1.0e-10;
+
+/// How closely the joined coordinates' covariance built straight from the
+/// stated blocks must reproduce them, `||X' - X||_F / ||X||_F`, for the
+/// stated covariance to be drawn as it is.
+const JOINT_REPRODUCED: f64 = 1.0e-9;
+
+/// The stated covariance of each pair of `group`'s members' averages in log
+/// space, summed over the links that state it.
+fn stated_log(group: &JointGroup) -> PairEntries {
+    let mut stated = PairEntries::new();
+    for (&pair, list) in &group.links {
+        let mut sum: BTreeMap<(usize, usize), f64> = BTreeMap::new();
+        for &(p, q, v) in list {
+            *sum.entry((p, q)).or_insert(0.0) += v;
+        }
+        let log = sum
+            .into_iter()
+            .map(|((p, q), v)| (p, q, if v > -1.0 { v.ln_1p() } else { 0.0 }))
+            .collect();
+        stated.insert(pair, log);
+    }
+    stated
 }
 
-/// Join member `c` to the `prev` coordinates before it, whose covariance
-/// and factor are the leading `prev × prev` blocks of `w` and `f` (row
-/// stride `total`), at `floor` (see [`JointDraw`]).
-///
-/// The member is `u_c = G' w + H z_c`, with `w` the members before it
-/// whitened and `z_c` normals: `G = K Q D^-1/2` from their covariance
-/// `Q D Qᵀ` and the stated one with them `K`, `G'` that with its singular
-/// values above one clipped to one, and `H = (I - G'G'ᵀ)^1/2`, so
-/// `Cov(u_c) = I` exactly. With one member before, `Q D Qᵀ` is the identity
-/// and no decomposition larger than this member's coordinates is needed.
-#[allow(clippy::too_many_arguments)]
-fn step(
-    whitenings: &[Whitening],
-    offsets: &[(usize, usize)],
-    stated: &PairEntries,
-    c: usize,
-    w: &[f64],
-    f: &[f64],
-    total: usize,
-    eig: Option<&(Vec<f64>, Vec<f64>, Vec<usize>)>,
-    floor: f64,
-) -> Option<Step> {
-    let (oc, rc) = offsets[c];
-    let prev = oc;
-    let mut k = vec![0.0; rc * prev];
-    for b in 0..c {
-        let (ob, rb) = offsets[b];
-        if let Some(log) = stated.get(&(b, c)) {
-            // `r_b × r_c`.
-            let kb = whiten(&whitenings[b], &whitenings[c], log, floor);
-            for i in 0..rc {
-                for j in 0..rb {
-                    k[i * prev + ob + j] = kb[j * rc + i];
-                }
-            }
-        }
-    }
-    if rc == 0 || k.iter().all(|v| *v == 0.0) {
-        return None;
-    }
-    let (d, q, kept) = match eig {
-        Some((d, q, kept)) => (d.as_slice(), q.as_slice(), kept.as_slice()),
-        None => (&[][..], &[][..], &[][..]),
-    };
-    let nk = if eig.is_some() { kept.len() } else { prev };
-    // `G = K Q D^-1/2`, `r_c × nk`.
-    let mut g = vec![0.0; rc * nk];
-    if eig.is_none() {
-        g.copy_from_slice(&k);
-    } else {
-        for i in 0..rc {
-            for p in 0..prev {
-                let x = k[i * prev + p];
-                if x == 0.0 {
-                    continue;
-                }
-                for (c2, &j) in kept.iter().enumerate() {
-                    g[i * nk + c2] += x * q[p * prev + j];
-                }
-            }
-            for (c2, &j) in kept.iter().enumerate() {
-                g[i * nk + c2] /= d[j].sqrt();
-            }
-        }
-    }
-    // `G Gᵀ = U S² Uᵀ`.
-    let mut ggt = vec![0.0; rc * rc];
-    for a in 0..rc {
-        for b in a..rc {
-            let s: f64 = g[a * nk..(a + 1) * nk]
-                .iter()
-                .zip(&g[b * nk..(b + 1) * nk])
-                .map(|(x, y)| x * y)
-                .sum();
-            ggt[a * rc + b] = s;
-            ggt[b * rc + a] = s;
-        }
-    }
-    let (s2, u) = eigen(&ggt, rc);
-    let largest = s2.iter().cloned().fold(0.0, f64::max).max(0.0).sqrt();
-    // `G' = G + U (diag(min(1, 1/s)) - I) Uᵀ G`.
-    for t in (0..rc).filter(|&t| s2[t] > 1.0) {
-        let scale = 1.0 / s2[t].sqrt() - 1.0;
-        let mut row = vec![0.0; nk];
-        for a in 0..rc {
-            let ua = u[a * rc + t];
-            for (r, x) in row.iter_mut().zip(&g[a * nk..(a + 1) * nk]) {
-                *r += ua * x;
-            }
-        }
-        for a in 0..rc {
-            let ua = u[a * rc + t] * scale;
-            for (x, r) in g[a * nk..(a + 1) * nk].iter_mut().zip(&row) {
-                *x += ua * r;
-            }
-        }
-    }
-    // `H = U diag((1 - min(s², 1))^1/2) Uᵀ`.
-    let mut h = vec![0.0; rc * rc];
-    for t in 0..rc {
-        let left = (1.0 - s2[t].clamp(0.0, 1.0)).sqrt();
-        for a in 0..rc {
-            let ua = u[a * rc + t] * left;
-            for b in 0..rc {
-                h[a * rc + b] += ua * u[b * rc + t];
-            }
-        }
-    }
-    // `M = G' D^-1/2 Qᵀ`: `K' = M Cov(u_prev)`, factor row `M F_prev`.
-    let mut mm = vec![0.0; rc * prev];
-    if eig.is_none() {
-        mm.copy_from_slice(&g);
-    } else {
-        for i in 0..rc {
-            for (c2, &j) in kept.iter().enumerate() {
-                let x = g[i * nk + c2] / d[j].sqrt();
-                if x == 0.0 {
-                    continue;
-                }
-                for p in 0..prev {
-                    mm[i * prev + p] += x * q[p * prev + j];
-                }
-            }
-        }
-    }
-    let (mut kk, mut ff) = (vec![0.0; rc * prev], vec![0.0; rc * prev]);
-    for i in 0..rc {
-        let mi = &mm[i * prev..(i + 1) * prev];
-        for p in 0..prev {
-            let (mut kw, mut kf) = (0.0, 0.0);
-            for (t, x) in mi.iter().enumerate() {
-                if *x != 0.0 {
-                    kw += x * w[t * total + p];
-                    kf += x * f[t * total + p];
-                }
-            }
-            kk[i * prev + p] = kw;
-            ff[i * prev + p] = kf;
-        }
-    }
-    Some(Step {
-        k: kk,
-        f: ff,
-        h,
-        largest,
-    })
+/// Each member's averages' log-space standard deviations, the row norms of
+/// [`Whitening::averages_factor`].
+fn average_sigmas(whitenings: &[Whitening]) -> Vec<Vec<f64>> {
+    whitenings
+        .iter()
+        .map(|w| {
+            (0..w.q)
+                .map(|i| {
+                    w.averages_factor[i * w.rq..(i + 1) * w.rq]
+                        .iter()
+                        .map(|x| x * x)
+                        .sum::<f64>()
+                        .sqrt()
+                })
+                .collect()
+        })
+        .collect()
 }
 
-/// Join the members one at a time in name order, each at the floor of
-/// [`JOINT_FLOORS`] that leaves its drawn covariance with the members before
-/// it closest to the stated one (see [`JointDraw`]).
+/// The joint draw of `group`: the stated covariance where it is admissible
+/// beside the members' own, and otherwise the admissible one closest to it
+/// ([`crate::joint_fit`]); see [`JointDraw`].
 fn build_joint(group: &JointGroup, cores: &[std::sync::Arc<Factorized>]) -> JointDraw {
     let whitenings: Vec<Whitening> = cores
         .iter()
@@ -1331,152 +1223,296 @@ fn build_joint(group: &JointGroup, cores: &[std::sync::Arc<Factorized>]) -> Join
         remainders.push(extra);
         extra += w.rt;
     }
-    // The stated covariance between members' averages in log space, summed
-    // over the links that state it.
-    let mut stated = PairEntries::new();
-    for (&pair, list) in &group.links {
-        let mut sum: BTreeMap<(usize, usize), f64> = BTreeMap::new();
-        for &(p, q, v) in list {
-            *sum.entry((p, q)).or_insert(0.0) += v;
-        }
-        let log = sum
-            .into_iter()
-            .map(|((p, q), v)| (p, q, if v > -1.0 { v.ln_1p() } else { 0.0 }))
-            .collect();
-        stated.insert(pair, log);
-    }
-    // Member `c`'s drawn covariance with member `b` before it, from its
-    // `K'` rows, against the stated: `(Σ (x - v)², Σ v²)`.
-    let distance = |b: usize, c: usize, kc: &[f64]| -> (f64, f64) {
-        let Some(log) = stated.get(&(b, c)) else {
-            return (0.0, 0.0);
-        };
-        let ((ob, rb), (oc, rc)) = (offsets[b], offsets[c]);
-        let prev = oc;
-        // `K'_bc`, `r_b × r_c`.
-        let mut kb = vec![0.0; rb * rc];
-        for i in 0..rc {
-            for j in 0..rb {
-                kb[j * rc + i] = kc[i * prev + ob + j];
+    let stated = stated_log(group);
+    let sigmas = average_sigmas(&whitenings);
+
+    // `K_ab` between every pair of members' joined coordinates, from `w`.
+    let blocks = |w: &[f64]| -> BTreeMap<(usize, usize), Vec<f64>> {
+        let mut out = BTreeMap::new();
+        for a in 0..m {
+            for b in (a + 1)..m {
+                let ((oa, ra), (ob, rb)) = (offsets[a], offsets[b]);
+                let mut k = vec![0.0; ra * rb];
+                for i in 0..ra {
+                    k[i * rb..(i + 1) * rb]
+                        .copy_from_slice(&w[(oa + i) * total + ob..(oa + i) * total + ob + rb]);
+                }
+                if k.iter().any(|v| *v != 0.0) {
+                    out.insert((a, b), k);
+                }
             }
         }
-        let (wb, wc) = (&whitenings[b], &whitenings[c]);
-        let x = sandwich(
-            &wb.averages_factor,
-            wb.q,
-            rb,
-            &kb,
-            &wc.averages_factor,
-            wc.q,
-            rc,
-        );
-        log.iter().fold((0.0, 0.0), |(d, n), &(p, q, v)| {
-            let e = x[p * wc.q + q] - v;
-            (d + e * e, n + v * v)
-        })
+        out
+    };
+    // What the drawn `K`s give the stated entries, against them.
+    let compare = |whitened: &BTreeMap<(usize, usize), Vec<f64>>| -> Comparison {
+        let mut c = Comparison::default();
+        for (&(a, b), log) in &stated {
+            let (wa, wb) = (&whitenings[a], &whitenings[b]);
+            let x = match whitened.get(&(a, b)) {
+                Some(k) => sandwich(
+                    &wa.averages_factor,
+                    wa.q,
+                    wa.rq,
+                    k,
+                    &wb.averages_factor,
+                    wb.q,
+                    wb.rq,
+                ),
+                None => vec![0.0; wa.q * wb.q],
+            };
+            for &(p, q, v) in log {
+                let drawn = x[p * wb.q + q];
+                let bound = sigmas[a][p] * sigmas[b][q];
+                c.change += (drawn - v) * (drawn - v);
+                c.norm += v * v;
+                let clipped = v.clamp(-bound, bound);
+                c.least += (clipped - v) * (clipped - v);
+                if bound > 0.0 {
+                    c.largest_stated = c.largest_stated.max((v / bound).abs());
+                    c.largest_change = c.largest_change.max(((drawn - clipped) / bound).abs());
+                }
+            }
+        }
+        c
     };
 
+    // The stated covariance as it is, where the members' own allow it.
     let mut w = vec![0.0; total * total];
-    let mut f = vec![0.0; total * total];
-    let (mut largest, mut floor_used, mut change, mut norm): (f64, f64, f64, f64) =
-        (0.0, 0.0, 0.0, 0.0);
-    for c in 0..m {
-        let (oc, rc) = offsets[c];
-        for i in 0..rc {
-            w[(oc + i) * total + oc + i] = 1.0;
-        }
-        let prev = oc;
-        let eig = (c > 1).then(|| {
-            let mut wp = vec![0.0; prev * prev];
-            for i in 0..prev {
-                wp[i * prev..(i + 1) * prev].copy_from_slice(&w[i * total..i * total + prev]);
-            }
-            let (d, q) = eigen(&wp, prev);
-            let top = d.iter().cloned().fold(0.0, f64::max);
-            let kept: Vec<usize> = (0..prev).filter(|&j| d[j] > 1.0e-12 * top).collect();
-            (d, q, kept)
-        });
-        let mut best: Option<(f64, f64, f64, Step)> = None;
-        for floor in JOINT_FLOORS {
-            let Some(s) = step(
-                &whitenings,
-                &offsets,
-                &stated,
-                c,
-                &w,
-                &f,
-                total,
-                eig.as_ref(),
-                floor,
-            ) else {
-                continue;
-            };
-            let (d, n) = (0..c).fold((0.0, 0.0), |(d, n), b| {
-                let (db, nb) = distance(b, c, &s.k);
-                (d + db, n + nb)
-            });
-            if best.as_ref().is_none_or(|(_, bd, _, _)| d < *bd) {
-                best = Some((floor, d, n, s));
-            }
-        }
-        match best {
-            Some((floor, d, n, s)) => {
-                largest = largest.max(s.largest);
-                floor_used = floor_used.max(floor);
-                change += d;
-                norm += n;
-                for i in 0..rc {
-                    for p in 0..prev {
-                        let kw = s.k[i * prev + p];
-                        w[(oc + i) * total + p] = kw;
-                        w[p * total + oc + i] = kw;
-                        f[(oc + i) * total + p] = s.f[i * prev + p];
-                    }
-                    f[(oc + i) * total + oc..(oc + i) * total + oc + rc]
-                        .copy_from_slice(&s.h[i * rc..(i + 1) * rc]);
-                }
-            }
-            None => {
-                for i in 0..rc {
-                    f[(oc + i) * total + oc + i] = 1.0;
-                }
+    for i in 0..total {
+        w[i * total + i] = 1.0;
+    }
+    for (&(a, b), log) in &stated {
+        let ((oa, ra), (ob, rb)) = (offsets[a], offsets[b]);
+        let k = whiten(&whitenings[a], &whitenings[b], log);
+        for i in 0..ra {
+            for j in 0..rb {
+                w[(oa + i) * total + ob + j] = k[i * rb + j];
+                w[(ob + j) * total + oa + i] = k[i * rb + j];
             }
         }
     }
-    let relative_change = if norm > 0.0 {
-        (change / norm).sqrt()
+    let smallest = eigenvalues(&w, total)
+        .into_iter()
+        .fold(f64::INFINITY, f64::min);
+    let adjustment = if total == 0
+        || (smallest >= -JOINT_ADMISSIBLE && compare(&blocks(&w)).relative() <= JOINT_REPRODUCED)
+    {
+        None
     } else {
-        0.0
+        // Otherwise the closest admissible one, in correlation units, each
+        // stated correlation clipped to one first.
+        let members: Vec<crate::joint_fit::Member> = whitenings
+            .iter()
+            .zip(&sigmas)
+            .map(|(w, sd)| {
+                let mut factor = w.averages_factor.clone();
+                for (i, s) in sd.iter().enumerate() {
+                    for x in &mut factor[i * w.rq..(i + 1) * w.rq] {
+                        *x = if *s > 0.0 { *x / s } else { 0.0 };
+                    }
+                }
+                crate::joint_fit::Member {
+                    q: w.q,
+                    r: w.rq,
+                    factor,
+                }
+            })
+            .collect();
+        let pairs: Vec<crate::joint_fit::Pair> = stated
+            .iter()
+            .map(|(&(a, b), log)| crate::joint_fit::Pair {
+                a,
+                b,
+                entries: log
+                    .iter()
+                    .filter_map(|&(p, q, v)| {
+                        let bound = sigmas[a][p] * sigmas[b][q];
+                        (bound > 0.0).then(|| (p, q, (v / bound).clamp(-1.0, 1.0)))
+                    })
+                    .collect(),
+            })
+            .collect();
+        let fit = crate::joint_fit::best_fit(&members, &pairs);
+        w = gram(&fit.z, total);
+        let c = compare(&blocks(&w));
+        Some(JointAdjustment {
+            relative_change: c.relative(),
+            least_relative_change: if c.norm > 0.0 {
+                (c.least / c.norm).sqrt()
+            } else {
+                0.0
+            },
+            largest_stated_correlation: c.largest_stated,
+            largest_correlation_change: c.largest_change,
+            iterations: fit.iterations,
+            converged: fit.converged,
+        })
     };
-    let mut whitened = BTreeMap::new();
-    for a in 0..m {
-        for b in (a + 1)..m {
-            let ((oa, ra), (ob, rb)) = (offsets[a], offsets[b]);
-            let mut k = vec![0.0; ra * rb];
-            for i in 0..ra {
-                k[i * rb..(i + 1) * rb]
-                    .copy_from_slice(&w[(oa + i) * total + ob..(oa + i) * total + ob + rb]);
-            }
-            if k.iter().any(|v| *v != 0.0) {
-                whitened.insert((a, b), k);
-            }
+    if adjustment.is_none() {
+        let unlinked: Vec<(usize, usize)> = (0..m)
+            .flat_map(|a| ((a + 1)..m).map(move |b| (a, b)))
+            .filter(|pair| !stated.contains_key(pair))
+            .collect();
+        complete(&mut w, &offsets, &unlinked);
+    }
+    let (lambda, vectors) = eigen(&w, total);
+    let mut factor = vec![0.0; total * total];
+    for j in 0..total {
+        let root = lambda[j].max(0.0).sqrt();
+        for i in 0..total {
+            factor[i * total + j] = vectors[i * total + j] * root;
         }
     }
-    let adjustment =
-        (largest > 1.0 + 1.0e-9 || relative_change > 1.0e-6).then_some(JointAdjustment {
-            floor: floor_used,
-            largest_singular_value: largest,
-            relative_change,
-        });
+    let whitened = blocks(&w);
     JointDraw {
         members: group.members.clone(),
         whitenings,
         offsets,
         remainders,
-        factor: f,
+        factor,
         whitened,
         adjustment,
         draws: std::sync::Mutex::new(HashMap::new()),
+    }
+}
+
+/// `Z Zᵀ` of a row-major `n × n` `Z`, symmetric to the bit.
+fn gram(z: &[f64], n: usize) -> Vec<f64> {
+    let zr = faer::MatRef::from_row_major_slice(z, n, n);
+    let mut x = faer::Mat::<f64>::zeros(n, n);
+    faer::linalg::matmul::matmul(
+        x.as_mut(),
+        faer::Accum::Replace,
+        zr,
+        zr.transpose(),
+        1.0,
+        faer::Par::Seq,
+    );
+    clear_upper_state();
+    let mut out = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..=i {
+            out[i * n + j] = x[(i, j)];
+            out[j * n + i] = x[(i, j)];
+        }
+    }
+    out
+}
+
+/// Sweeps of [`complete`] allowed, and the largest change of an entry below
+/// which it stops.
+const COMPLETION_SWEEPS: usize = 50;
+const COMPLETION_TOLERANCE: f64 = 1.0e-10;
+
+/// Fill the blocks of an admissible `w` between members no link joins,
+/// `unlinked`, with the maximum-entropy completion of the rest: each such
+/// pair conditionally independent given every other member,
+/// `K_ab = W_aS W_SS⁺ W_Sb`, block by block until none moves. Each step is
+/// the maximum-determinant choice of its block with the others held, so `w`
+/// stays positive semidefinite and every stated block exactly as it was. So
+/// two members linked only through a third (U235 fission stated with
+/// U238's and with Pu239's, the two not with each other) covary through it,
+/// rather than being read as independent, which would itself be a statement
+/// no block makes.
+///
+/// Only the stated covariance drawn as it is is completed this way. A
+/// fitted one ([`crate::joint_fit`]) is mostly singular, where the sweeps
+/// crawl (ENDF/B-VIII.1's group still moves by 3e-4 after fifty), and its
+/// unlinked blocks are already what the fit leaves them: independent at the
+/// start, then correlated through the partners each member is aligned with.
+fn complete(w: &mut [f64], offsets: &[(usize, usize)], unlinked: &[(usize, usize)]) {
+    let total = offsets.last().map_or(0, |(o, n)| o + n);
+    let unlinked: Vec<(usize, usize)> = unlinked
+        .iter()
+        .copied()
+        .filter(|&(a, b)| offsets[a].1 > 0 && offsets[b].1 > 0)
+        .collect();
+    if unlinked.is_empty() {
+        return;
+    }
+    for _ in 0..COMPLETION_SWEEPS {
+        let mut largest: f64 = 0.0;
+        for &(a, b) in &unlinked {
+            let ((oa, ra), (ob, rb)) = (offsets[a], offsets[b]);
+            let rest: Vec<usize> = (0..total)
+                .filter(|&i| !(oa..oa + ra).contains(&i) && !(ob..ob + rb).contains(&i))
+                .collect();
+            let s = rest.len();
+            let mut k = vec![0.0; ra * rb];
+            if s > 0 {
+                let mut wss = vec![0.0; s * s];
+                for (i, &p) in rest.iter().enumerate() {
+                    for (j, &q) in rest.iter().enumerate() {
+                        wss[i * s + j] = w[p * total + q];
+                    }
+                }
+                // `W_SS⁺ = V Λ⁺ Vᵀ`, so `K = (W_aS V Λ^-1/2)(W_bS V Λ^-1/2)ᵀ`.
+                let (lambda, v) = eigen(&wss, s);
+                let top = lambda.iter().cloned().fold(0.0, f64::max);
+                let kept: Vec<usize> = (0..s).filter(|&j| lambda[j] > 1.0e-12 * top).collect();
+                let project = |o: usize, r: usize| -> Vec<f64> {
+                    let mut out = vec![0.0; r * kept.len()];
+                    for i in 0..r {
+                        let row = &w[(o + i) * total..(o + i + 1) * total];
+                        for (c, &j) in kept.iter().enumerate() {
+                            let x: f64 = rest
+                                .iter()
+                                .enumerate()
+                                .map(|(t, &p)| row[p] * v[t * s + j])
+                                .sum();
+                            out[i * kept.len() + c] = x / lambda[j].sqrt();
+                        }
+                    }
+                    out
+                };
+                let (pa, pb) = (project(oa, ra), project(ob, rb));
+                let n = kept.len();
+                for i in 0..ra {
+                    for j in 0..rb {
+                        k[i * rb + j] = pa[i * n..(i + 1) * n]
+                            .iter()
+                            .zip(&pb[j * n..(j + 1) * n])
+                            .map(|(x, y)| x * y)
+                            .sum();
+                    }
+                }
+            }
+            for i in 0..ra {
+                for j in 0..rb {
+                    let x = k[i * rb + j];
+                    largest = largest.max((w[(oa + i) * total + ob + j] - x).abs());
+                    w[(oa + i) * total + ob + j] = x;
+                    w[(ob + j) * total + oa + i] = x;
+                }
+            }
+        }
+        if largest <= COMPLETION_TOLERANCE {
+            break;
+        }
+    }
+}
+
+/// A joint draw's covariance between members' averages against the stated
+/// one (see [`JointAdjustment`]).
+#[derive(Default)]
+struct Comparison {
+    /// `Σ (x' - x)²` and `Σ x²` over the stated entries.
+    change: f64,
+    norm: f64,
+    /// `Σ (clip(x) - x)²`, each entry clipped to a correlation of one.
+    least: f64,
+    largest_stated: f64,
+    largest_change: f64,
+}
+
+impl Comparison {
+    fn relative(&self) -> f64 {
+        if self.norm > 0.0 {
+            (self.change / self.norm).sqrt()
+        } else {
+            0.0
+        }
     }
 }
 

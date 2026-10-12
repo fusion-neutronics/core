@@ -6226,14 +6226,19 @@ class TransmutationResults:
         - ``cross_material_adjusted``: keyed by a group of nuclides drawn jointly
           through cross-material covariance, their names joined by ``+``
           (``"U235+U238"``), where the covariance stated between their interval
-          averages is not admissible beside each one's own and was adjusted to be
-          drawn, each own covariance kept exactly: ``floor`` (the share of a
-          member's largest correlation eigenvalue below which its directions are
-          not joined, the one that kept the drawn covariance closest to the
-          stated), ``largest_singular_value`` (the largest canonical correlation
-          met, clipped to one) and ``relative_change`` (``||X' - X|| / ||X||`` of
-          the drawn against the stated log-space covariance between the
-          averages). ENDF/B-VIII.1 U235 and U238 fission read about 0.32.
+          averages is not admissible beside each one's own and the closest
+          admissible one was drawn instead, each own covariance kept exactly
+          and the correlations between the averages fitted to the stated ones
+          (each clipped to one first) in the Frobenius norm:
+          ``relative_change`` (``||X' - X|| / ||X||`` of the drawn against the
+          stated log-space covariance between the averages),
+          ``least_relative_change`` (the same with each stated entry only
+          clipped to a correlation of one: no admissible draw goes below it),
+          ``largest_stated_correlation`` (past one where an entry alone is
+          inadmissible), ``largest_correlation_change`` (the largest move of a
+          correlation from its stated value clipped to one), ``iterations``
+          and ``converged`` (the fit's; its result is admissible either way).
+          ENDF/B-VIII.1 U235 and U238 fission read about 0.31.
           Counted in ``has_gaps``.
         - ``rates_sampled``: cross-section rate draws made, each read off one
           draw of the nuclide's cross sections. ``rates_floored`` counts those
