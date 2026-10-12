@@ -1621,9 +1621,14 @@ impl PyModel {
     ///           DY the evaluation states on each.
     ///
     ///         ``"flux_spectrum"`` does not apply: there is no supplied spectrum,
-    ///         and the flux's error is the statistical one. With replica weights
-    ///         every replica's rates come from the same histories as the
-    ///         nominal ones, so the differences between replicas are resolved
+    ///         and the flux's error is the statistical one.
+    ///         ``"isomer_branching"`` re-splits the tallied partials: the tally
+    ///         scores each MF=40 state's production on its covariance
+    ///         intervals at the energy of each track segment (per replica with
+    ///         replica weights), and each replica draws the state's production
+    ///         from those weights, as a spectrum run does from its group fold.
+    ///         With replica weights every replica's rates come from the same
+    ///         histories as the nominal ones, so the differences between replicas are resolved
     ///         far more finely than the rates themselves, and ``"statistical"``
     ///         adds the nominal tally's error to each replica once; the sources
     ///         are independent, so ``sources=["statistical"]`` isolates the

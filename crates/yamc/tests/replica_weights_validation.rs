@@ -111,6 +111,10 @@ fn material(id: u32, composition: &[(&str, f64)], density: f64, photons: bool) -
         m.init_photon_data(&elements).expect("photon data");
     }
     m.ensure_covariance_loaded().expect("covariance");
+    // What the run loads too, so a rerun draws the resonance parameters the
+    // replicas sample rather than the first-order MF=32 rows.
+    m.ensure_resonance_parameters_loaded()
+        .expect("resonance parameters");
     m
 }
 

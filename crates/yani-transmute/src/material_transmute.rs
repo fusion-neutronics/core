@@ -6,6 +6,9 @@ use crate::branching_rule::{
 use crate::covariance_fold::{cell_fields, fold_rate_covariance, reachable_mts, FoldSpectrum};
 use crate::covariance_sample::Sampler;
 use crate::damage::DamageRequest;
+use crate::isomer_branching_uncertainty::{
+    IsomerCovariance, IsomerIntervalProductions, IsomerRun, IsomerSpectrum,
+};
 use crate::multigroup::{collapse_with_lists, fold_list, scale_rates, Collapsed};
 use crate::results::TransmutationResults;
 use crate::self_shielding::{Shielding, ShieldingInfo};
@@ -331,6 +334,14 @@ pub fn transmute_materials(
     // The report is merged across a material's spectra rather than assigned,
     // so a schedule naming two spectra reports both spectra's nuclides.
     let lists = build_lists(&chain, branch)?;
+    // The MF=40 blocks, read and placed on the lists once for every material,
+    // and only when the isomer source can use them.
+    let isomer = match uncertainty {
+        Some(u) if u.wants(crate::uncertainty::Source::IsomerBranching) => {
+            Some(IsomerCovariance::from_table(branch, &lists)?)
+        }
+        _ => None,
+    };
     let mut shared_spectra: Vec<MultigroupSpectrum> = Vec::new();
     let mut per_spectrum: Vec<PerSpectrum> = Vec::new();
     let mut shared_info: Vec<ShieldingInfo> = Vec::new();
@@ -393,6 +404,7 @@ pub fn transmute_materials(
             request,
             shielding: cases[c].shielding.as_ref(),
             lists: &lists,
+            isomer: isomer.as_ref(),
         });
         solve_case(
             &initial[c],
@@ -805,6 +817,8 @@ struct Replicas<'a> {
     /// The branching lists the nominal fold applied, which a flux replica
     /// re-folds under its own perturbation.
     lists: &'a Lists<'a>,
+    /// The MF=40 covariance placed on `lists`, when the isomer source is on.
+    isomer: Option<&'a IsomerCovariance>,
 }
 
 /// One material's timeline, stepped from `initial` with steps whose spectrum
@@ -863,6 +877,8 @@ fn solve_case(
             r.request,
             r.shielding,
             r.lists,
+            r.isomer,
+            None,
             None,
         )?),
         None => None,
@@ -900,6 +916,10 @@ struct ReplicaOutcome {
     decay_branchings_floored: usize,
     /// Statistically drawn rates that came out negative and were floored.
     statistical_floored: usize,
+    /// MF=40 parents drawn, and the stated productions scaled back to the
+    /// drawn total.
+    isomer_branchings_sampled: usize,
+    isomer_branchings_clipped: crate::isomer_branching_uncertainty::Clipped,
 }
 
 /// Load the cross sections a transport-free solve of this material needs, into
@@ -1321,6 +1341,21 @@ pub struct TransportTallied {
     /// response and all. Required when the cross-section source is on; `None`
     /// otherwise.
     pub replicas: Option<ReplicaTallied>,
+    /// Each MF=40 state's production on its covariance intervals, at the
+    /// partials' normalization, when the tally scored them
+    /// (`TransmutationTallies::with_isomer_intervals`). Without it the
+    /// `isomer_branching` source holds every split.
+    pub isomer: Option<IsomerIntervalProductions>,
+}
+
+/// A transport run's inputs to the MF=40 draw: what the nominal tally scored
+/// per interval and every list folded from its partials, in the chain's
+/// [`Lists`] order. They decide which parents are drawn and what the report
+/// states; with replica weights each replica then folds its draw with its own
+/// interval productions and partials ([`ReplicaTallied::isomer`]).
+struct TransportIsomer<'a> {
+    productions: &'a IsomerIntervalProductions,
+    nominal: HashMap<String, Vec<Option<ListRates>>>,
 }
 
 /// Uncertainty on an independent-mode transport transmutation, by resampling and re-solving exactly as [`transmute_material`]
@@ -1340,6 +1375,11 @@ pub struct TransportTallied {
 /// transport (half-lives, decay branchings, fission yields, decay energies and
 /// photon lines) are drawn here per replica, keyed on the same replica index,
 /// so a replica is one draw of every source.
+///
+/// `isomer_branching` reads each MF=40 state's tallied production on its
+/// covariance intervals, [`TransportTallied::isomer`] (replica `k`'s from
+/// [`TransportTallied::replicas`] where the transport carried them), and holds
+/// every split without them.
 ///
 /// The statistical draw is keyed on `initial.material_id`, so materials with
 /// distinct ids draw their tallies' errors independently, while the
@@ -1380,6 +1420,27 @@ pub fn transport_replicas(
         .0
     };
     let per_spectrum: Vec<PerSpectrum> = vec![(rates, tallied.fy_weights.clone(), folded)];
+    // The MF=40 draw, where the tally scored the intervals: every list of
+    // the chain, in the order the covariance was placed on, folded from the
+    // tallied partials and the totals before the fold, exactly as the coupled
+    // fold above folds them.
+    let isomer = tallied
+        .isomer
+        .as_ref()
+        .filter(|_| request.wants(crate::uncertainty::Source::IsomerBranching));
+    let lists = match isomer {
+        Some(_) => build_lists(chain, &tallied.branch)?,
+        None => HashMap::new(),
+    };
+    let transport_isomer = isomer.map(|productions| TransportIsomer {
+        productions,
+        nominal: coupled_list_rates(
+            &lists,
+            &tallied.partials,
+            &tallied.rates,
+            Some(&tallied.diagnostics),
+        ),
+    });
     let steps: Vec<TransmuteStep> = timesteps
         .iter()
         .zip(source_rates)
@@ -1418,11 +1479,13 @@ pub fn transport_replicas(
         &ForwardEulerStepper,
         request,
         None,
-        // No supplied flux, so nothing for a flux replica to re-fold.
-        &HashMap::new(),
+        // No supplied flux, so only the MF=40 draw re-folds these.
+        &lists,
+        isomer.map(|p| &*p.covariance),
         // Always the transport path, even with no statistics to sample: that
         // is what keeps `flux_spectrum` out of it.
         Some(statistics.as_ref().unwrap_or(&no_statistics)),
+        transport_isomer.as_ref(),
     )
 }
 
@@ -1612,7 +1675,9 @@ fn run_replicas(
     request: &DataUncertainty,
     shielding: Option<&Shielding>,
     lists: &Lists<'_>,
+    isomer: Option<&IsomerCovariance>,
     statistical: Option<&TransportStatistics<'_>>,
+    transport_isomer: Option<&TransportIsomer<'_>>,
 ) -> Result<(Ensemble, Info), Box<dyn std::error::Error>> {
     check_convergence(request.convergence)?;
     // The two paths each have one source the other lacks. A transport run has
@@ -1624,6 +1689,7 @@ fn run_replicas(
     let applies = |s: crate::uncertainty::Source| match s {
         crate::uncertainty::Source::Statistical => transport,
         crate::uncertainty::Source::FluxSpectrum => !transport,
+        crate::uncertainty::Source::IsomerBranching => !transport || transport_isomer.is_some(),
         _ => true,
     };
     let want_statistical = transport && request.wants(crate::uncertainty::Source::Statistical);
@@ -1843,6 +1909,7 @@ fn run_replicas(
                     &spectrum.masses,
                     &spectrum.boundaries,
                     shielding,
+                    &|_| true,
                 );
                 flux_coverage.rates_without_terms.extend(
                     crate::flux_uncertainty::rates_without_terms(
@@ -1867,6 +1934,77 @@ fn run_replicas(
         }
     }
 
+    // The isomeric split's MF=40 draw. On the spectrum path each spectrum's
+    // list folds, with the per-group terms of the parents whose MF=40 it
+    // draws, are read once into the weights a replica's draw is folded with;
+    // on a transport run the tally scored each state's production on its
+    // intervals beside the partials, which are those weights. Where no parent
+    // the material reaches states anything its lists make, there is nothing
+    // to draw, and the replicas take exactly the path they took without this
+    // source.
+    let want_isomer = request.wants(crate::uncertainty::Source::IsomerBranching)
+        && (!transport || transport_isomer.is_some());
+    let (isomer_run, isomer_report, isomer_reachable) = if want_isomer {
+        let none = IsomerCovariance::default();
+        let covariance = isomer.unwrap_or(&none);
+        let seeds: Vec<&str> = initial
+            .nuclides
+            .keys()
+            .chain(initial.nuclide_data.keys())
+            .map(|s| s.as_str())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let mut reachable = yani::reachable_nuclides(chain, &seeds);
+        for (_, _, folded_chain) in per_spectrum {
+            reachable.extend(yani::reachable_nuclides(folded_chain, &seeds));
+        }
+        let reachable: std::collections::BTreeSet<String> = reachable.into_iter().collect();
+        let keep = |p: &str| covariance.has(p) && reachable.contains(p);
+        let terms: Vec<crate::flux_uncertainty::PerGroupLists> = match transport_isomer {
+            Some(_) => Vec::new(),
+            None => spectra
+                .iter()
+                .map(|s| {
+                    crate::multigroup::per_group_list_rates(
+                        initial,
+                        chain,
+                        lists,
+                        &s.masses,
+                        &s.boundaries,
+                        shielding,
+                        &keep,
+                    )
+                })
+                .collect(),
+        };
+        let views: Vec<IsomerSpectrum> = match transport_isomer {
+            Some(t) => vec![IsomerSpectrum::Tallied {
+                nominal: &t.nominal,
+                productions: t.productions,
+            }],
+            None => terms
+                .iter()
+                .zip(spectra)
+                .map(|(t, s)| IsomerSpectrum::Groups {
+                    lists: t,
+                    boundaries: &s.boundaries,
+                })
+                .collect(),
+        };
+        let (run, report) = IsomerRun::new(covariance, lists, &views, &reachable);
+        (run, Some(report), reachable)
+    } else {
+        (None, None, Default::default())
+    };
+    // A transport replica's own interval productions, when the transport
+    // carried replica weights: the weights `w_j / P` then answer that
+    // replica's flux, as its partials do.
+    let replica_isomer = replica_tallies
+        .filter(|t| !t.isomer.is_empty())
+        .zip(isomer)
+        .filter(|_| isomer_run.is_some());
+
     // The sources that edit the chain rather than the rates work on copies
     // pruned once to what the material can reach, so each replica copies only
     // the part of the chain its solve walks.
@@ -1880,7 +2018,9 @@ fn run_replicas(
         .iter()
         .flatten()
         .any(|terms| !terms.lists.is_empty());
-    let chains = (edits_chain || refolds).then(|| replica_chains(initial, chain, per_spectrum));
+    // So does an MF=40 replica, which re-folds every list from its draw.
+    let chains = (edits_chain || refolds || isomer_run.is_some())
+        .then(|| replica_chains(initial, chain, per_spectrum));
 
     // Half-lives: sampled per replica from the evaluation's stated sigma, and
     // substituted into every chain the replica is solved with, the base one
@@ -2068,6 +2208,22 @@ fn run_replicas(
         info.not_perturbed
             .insert(0, "activation cross section (MF=33)".to_string());
     }
+    match isomer_report {
+        // Off, or a transport run whose tally scored no intervals: every split
+        // is held, stated covariance or not.
+        None => info.not_perturbed.insert(
+            0,
+            "isomeric branching covariance (MF=40), every split held".to_string(),
+        ),
+        Some(r) => {
+            info.isomer_branchings_perturbed = r.perturbed;
+            info.no_isomer_branching_uncertainty = r.without;
+            info.isomer_branching_blocks_not_used = r.not_used;
+            info.isomer_branching_covariance_repaired = r.repaired;
+            info.isomer_branching_lognormal_not_carried = r.lognormal_not_carried;
+            info.isomer_production_sigma = r.production_sigma;
+        }
+    }
     if let Some(r) = &resonance {
         info.resonance_parameters = r.methods().clone();
     }
@@ -2159,6 +2315,7 @@ fn run_replicas(
         && no_half_lives
         && no_decay_branchings
         && no_fission_yields
+        && isomer_run.is_none()
         && statistical.is_none()
         && replica_tallies.is_none()
     {
@@ -2228,6 +2385,10 @@ fn run_replicas(
             _ => None,
         };
         let mut decay_branchings_floored = 0usize;
+        // One draw of every MF=40 parent's productions, read by every
+        // spectrum, as the cross sections are.
+        let isomer_draw = isomer_run.as_ref().map(|r| r.draw(request.seed, replica));
+        let mut isomer_branchings_clipped = crate::isomer_branching_uncertainty::Clipped::new();
         // A statistical draw of the whole tallied rate vector, the partials
         // re-folded into the branching the way the nominal was, so an
         // isomeric split moves with the rates it is made of.
@@ -2250,6 +2411,20 @@ fn run_replicas(
                     );
                 }
                 rates_sampled += totals.values().map(HashMap::len).sum::<usize>();
+                // The MF=40 draw re-splits this replica's own partials with
+                // its own interval productions, folded before the fold below
+                // moves the totals.
+                let folds = replica_isomer.map(|(t, covariance)| {
+                    let folds = coupled_list_rates(lists, &partials, &totals, None);
+                    let curves = crate::isomer_branching_uncertainty::tallied_curves(
+                        covariance,
+                        lists,
+                        &folds,
+                        &t.isomer[k],
+                        &isomer_reachable,
+                    );
+                    (folds, Some(curves))
+                });
                 let base = statistical_in.expect("replica tallies come with the transport");
                 let chain_k = if partials.is_empty() {
                     Arc::clone(&base.base_chain)
@@ -2263,12 +2438,18 @@ fn run_replicas(
                     )?
                     .0
                 };
-                Some((totals, chain_k))
+                Some((totals, chain_k, folds))
             }
             (None, Some(st)) => {
                 let (mut totals, partials, floored) =
                     st.rates.sample(request.seed, st.material_id, replica);
                 statistical_floored = floored;
+                // The MF=40 draw re-splits this replica's own partials, so
+                // its lists are folded from them, before the fold below
+                // moves the totals.
+                let folds = isomer_run
+                    .as_ref()
+                    .map(|_| (coupled_list_rates(lists, &partials, &totals, None), None));
                 // The nominal was guarded; a draw around it only moves the
                 // productions it is made of.
                 let chain_k = if partials.is_empty() {
@@ -2283,7 +2464,7 @@ fn run_replicas(
                     )?
                     .0
                 };
-                Some((totals, chain_k))
+                Some((totals, chain_k, folds))
             }
             (None, None) => None,
         };
@@ -2325,11 +2506,16 @@ fn run_replicas(
             // independent so the order does not change the distribution.
             // A transport run has one spectrum, the tally's own, whose rates
             // and branching this replica drew statistically.
-            let (rates, folded_chain) = match (&drawn, idx) {
-                (Some((totals, chain_k)), 0) => (totals, chain_k),
-                _ => (rates, folded_chain),
+            let (rates, folded_chain, drawn_folds, drawn_curves) = match (&drawn, idx) {
+                (Some((totals, chain_k, folds)), 0) => (
+                    totals,
+                    chain_k,
+                    folds.as_ref().map(|f| &f.0),
+                    folds.as_ref().and_then(|f| f.1.as_ref()),
+                ),
+                _ => (rates, folded_chain, None, None),
             };
-            let (rates, refolded) = match &per_group[idx] {
+            let (rates, flux_lists, refolded) = match &per_group[idx] {
                 Some(terms) => {
                     let delta = crate::flux_uncertainty::flux_deviates(
                         &terms.error,
@@ -2340,32 +2526,30 @@ fn run_replicas(
                     );
                     let mut rates =
                         crate::flux_uncertainty::perturb_rates(rates, &terms.rates, &delta);
+                    let flux_lists = (!terms.lists.is_empty())
+                        .then(|| crate::flux_uncertainty::perturb_lists(&terms.lists, &delta));
                     // The branching re-folded from this replica's productions,
                     // into the unfolded chain the nominal was folded into:
                     // the `(n,n')` isomer rates are re-made and every split
                     // moves with the bins its states are produced in. Pruned,
                     // which leaves every parent the material reaches as it is.
-                    let refolded = match &chains {
-                        Some(c) if !terms.lists.is_empty() => Some(
-                            fold_branching_into_chain(
-                                &c.base,
-                                lists,
-                                &crate::flux_uncertainty::perturb_lists(&terms.lists, &delta),
-                                &mut rates,
-                            )?
-                            .0,
-                        ),
+                    // With an MF=40 draw the re-fold waits for the
+                    // cross-section draw, which it reads, and is made below.
+                    let refolded = match (&chains, &flux_lists) {
+                        (Some(c), Some(folds)) if isomer_draw.is_none() => {
+                            Some(fold_branching_into_chain(&c.base, lists, folds, &mut rates)?.0)
+                        }
                         _ => None,
                     };
-                    (rates, refolded)
+                    (rates, flux_lists, refolded)
                 }
-                None => (rates.clone(), None),
+                None => (rates.clone(), None, None),
             };
             // A transport replica's rates already carry its cross sections.
-            let rates = if replica_tallies.is_some() {
-                rates
+            let mut drawn_rates = if replica_tallies.is_some() {
+                rates.clone()
             } else {
-                let (rates, n, floored) = draw_sampler.perturb_with(
+                let (drawn, n, floored) = draw_sampler.perturb_with(
                     &xs_draw,
                     idx,
                     &rates,
@@ -2373,8 +2557,43 @@ fn run_replicas(
                 );
                 rates_sampled += n;
                 rates_floored += floored;
-                rates
+                drawn
             };
+            // The MF=40 draw: every list re-folded, from the flux draw's
+            // folds where there is one, with the stated productions drawn.
+            // An isomer listed alone is made at its drawn production, so the
+            // cross-section draw of its reaction, the ratio of the rates
+            // either side of it, is divided back out of it, and only of it.
+            let refolded = match (&chains, &isomer_run, &isomer_draw) {
+                (Some(c), Some(run), Some(draw)) => {
+                    let base = flux_lists
+                        .as_ref()
+                        .or(drawn_folds)
+                        .unwrap_or_else(|| run.nominal(idx));
+                    let rate = |r: &ReactionRates, p: &str, k: &str| {
+                        r.get(p)
+                            .and_then(|kinds| kinds.get(k))
+                            .copied()
+                            .unwrap_or(0.0)
+                    };
+                    let ratio = |p: &str, k: &str| {
+                        let before = rate(&rates, p, k);
+                        if before > 0.0 {
+                            rate(&drawn_rates, p, k) / before
+                        } else {
+                            1.0
+                        }
+                    };
+                    let (folds, clipped) =
+                        run.perturb(idx, draw, lists, base, drawn_curves, &ratio);
+                    for (key, n) in clipped {
+                        *isomer_branchings_clipped.entry(key).or_insert(0) += n;
+                    }
+                    Some(fold_branching_into_chain(&c.base, lists, &folds, &mut drawn_rates)?.0)
+                }
+                _ => refolded,
+            };
+            let rates = drawn_rates;
             let weights = match replica_tallies {
                 Some(t) => &t.fy_weights[replica as usize],
                 None => weights,
@@ -2415,6 +2634,8 @@ fn run_replicas(
             decay_branchings_floored,
             half_lives: edits.half_lives,
             statistical_floored,
+            isomer_branchings_sampled: isomer_run.as_ref().map_or(0, IsomerRun::parents),
+            isomer_branchings_clipped,
         })
     };
 
@@ -2450,6 +2671,10 @@ fn run_replicas(
             info.decay_branchings_sampled += outcome.decay_branchings_sampled;
             info.decay_branchings_floored += outcome.decay_branchings_floored;
             info.statistical_floored += outcome.statistical_floored;
+            info.isomer_branchings_sampled += outcome.isomer_branchings_sampled;
+            for (key, n) in outcome.isomer_branchings_clipped {
+                *info.isomer_branchings_clipped.entry(key).or_insert(0) += n;
+            }
             if statistical.is_some() {
                 info.statistical_sampled += info.statistical_rates;
             }
@@ -2556,7 +2781,9 @@ fn run_replicas(
                     &alone,
                     shielding,
                     lists,
+                    isomer,
                     statistical_in,
+                    transport_isomer,
                 )?;
                 by_source.insert(source.name().to_string(), variances_of(&sub, steps.len()));
                 // Judged on the source's own replicas, which the other
@@ -3914,6 +4141,79 @@ impl CoupledDiagnostics {
     }
 }
 
+/// One list folded from a tally's partials: each target's tallied production
+/// on its first producing curve, so the per-target sum in `resolve_list`
+/// counts it once, beside the tallied total it is a split of.
+fn coupled_list(
+    rule: &ListRule<'_>,
+    per_target: &[(String, f64)],
+    rates: &ReactionRates,
+    diagnostics: Option<&CoupledDiagnostics>,
+) -> ListRates {
+    let (parent, kind) = (rule.parent.as_str(), rule.kind.as_str());
+    let mut production = vec![0.0; rule.curves.len()];
+    for (t, p) in per_target {
+        if let Some(k) = rule
+            .curves
+            .iter()
+            .zip(&rule.produces)
+            .position(|(c, produces)| *produces && c.target == *t)
+        {
+            production[k] += p;
+        }
+    }
+    let total = if kind == INELASTIC {
+        diagnostics.and_then(|d| d.inelastic_totals.get(parent).copied())
+    } else {
+        rates.get(parent).and_then(|r| r.get(kind)).copied()
+    };
+    let (clipped, extrapolated) = diagnostics
+        .and_then(|d| d.lists.get(parent))
+        .and_then(|k| k.get(&rule.label()))
+        .copied()
+        .unwrap_or((0.0, 0.0));
+    // The tally scores a list only where the parent has the transport
+    // cross section, so every list but `(n,n')` has its total; a missing
+    // rate is a zero one.
+    let has_total = kind != INELASTIC || total.is_some();
+    ListRates {
+        production,
+        to_rate: 1.0,
+        total: total.unwrap_or(0.0),
+        clipped,
+        extrapolated,
+        has_total,
+    }
+}
+
+/// [`apply_coupled_branching`]'s folds on every list of `lists`, the
+/// chain's own (see [`build_lists`]), in its order: a list the tally made no
+/// partial for is `None`, which the re-fold passes over as the coupled fold
+/// leaves it out. `rates` are the tallied totals before any fold.
+fn coupled_list_rates(
+    lists: &Lists<'_>,
+    partial_rates: &PartialRates,
+    rates: &ReactionRates,
+    diagnostics: Option<&CoupledDiagnostics>,
+) -> HashMap<String, Vec<Option<ListRates>>> {
+    let mut out = HashMap::new();
+    for (parent, tallied_kinds) in partial_rates {
+        let Some(rules) = lists.get(parent) else {
+            continue;
+        };
+        let per = rules
+            .iter()
+            .map(|rule| {
+                tallied_kinds
+                    .get(&rule.kind)
+                    .map(|t| coupled_list(rule, t, rates, diagnostics))
+            })
+            .collect();
+        out.insert(parent.clone(), per);
+    }
+    out
+}
+
 /// Apply the isomeric-branching overlay on the coupled path.
 ///
 /// The tally scores each list the way [`crate::branching_rule`] defines it,
@@ -3951,45 +4251,15 @@ pub fn apply_coupled_branching(
                 continue;
             };
             for rule in ListRule::all(parent, kind, curves)? {
-                let per_target = &tallied_kinds[kind];
-                // Each target's tallied production on its first curve, so the
-                // per-target sum in `resolve_list` counts it once.
-                let mut production = vec![0.0; rule.curves.len()];
-                for (t, p) in per_target {
-                    if let Some(k) = rule
-                        .curves
-                        .iter()
-                        .zip(&rule.produces)
-                        .position(|(c, produces)| *produces && c.target == *t)
-                    {
-                        production[k] += p;
-                    }
-                }
-                let total = if kind == INELASTIC {
-                    diagnostics.and_then(|d| d.inelastic_totals.get(parent).copied())
-                } else {
-                    rates.get(parent).and_then(|r| r.get(kind)).copied()
-                };
-                let (clipped, extrapolated) = diagnostics
-                    .and_then(|d| d.lists.get(parent))
-                    .and_then(|k| k.get(&rule.label()))
-                    .copied()
-                    .unwrap_or((0.0, 0.0));
-                // The tally scores a list only where the parent has the transport
-                // cross section, so every list but `(n,n')` has its total; a
-                // missing rate is a zero one.
-                let has_total = kind != INELASTIC || total.is_some();
                 folded
                     .entry(parent.clone())
                     .or_default()
-                    .push(Some(ListRates {
-                        production,
-                        to_rate: 1.0,
-                        total: total.unwrap_or(0.0),
-                        clipped,
-                        extrapolated,
-                        has_total,
-                    }));
+                    .push(Some(coupled_list(
+                        &rule,
+                        &tallied_kinds[kind],
+                        rates,
+                        diagnostics,
+                    )));
                 lists.entry(parent.clone()).or_default().push(rule);
             }
         }
@@ -5516,6 +5786,7 @@ mod tests {
             )),
             branch: Arc::new(BranchTable::default()),
             diagnostics: CoupledDiagnostics::default(),
+            isomer: None,
             replicas: None,
         };
         let request = DataUncertainty {

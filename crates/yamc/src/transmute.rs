@@ -158,6 +158,8 @@ impl Model {
         }
         let want_statistics =
             uncertainty.is_some_and(|u| u.wants(yani_transmute::uncertainty::Source::Statistical));
+        let want_isomer = uncertainty
+            .is_some_and(|u| u.wants(yani_transmute::uncertainty::Source::IsomerBranching));
         let want_cross_sections = uncertainty
             .is_some_and(|u| u.wants(yani_transmute::uncertainty::Source::CrossSections));
         // With the cross sections perturbed, the single transport carries one
@@ -569,6 +571,14 @@ impl Model {
             } else {
                 tallies
             };
+            // Each MF=40 state's production on its covariance intervals, which
+            // the isomer source re-splits the tallied partials with. Off
+            // without it. Before the replicas, which carry it per replica.
+            let tallies = if want_isomer {
+                tallies.with_isomer_intervals(&chain, &branch)?
+            } else {
+                tallies
+            };
             // Every replica's tally under the transport's replica weights.
             // Off without the cross-section source.
             Arc::new(if let Some(data) = &replica_weights {
@@ -690,6 +700,7 @@ impl Model {
                             diagnostics: dep_tallies
                                 .get_branching_diagnostics(mat_id, volume, 1.0)
                                 .with_material(material),
+                            isomer: dep_tallies.get_isomer_productions(mat_id, volume, 1.0),
                             replicas: dep_tallies.replica_tallied(mat_id, volume).map(|mut t| {
                                 t.resonance_parameters = resonance_methods(material);
                                 t
@@ -1474,5 +1485,382 @@ mod tests {
             mean_corr > 0.2,
             "fast threshold rates should correlate, got {mean_corr:.3}"
         );
+    }
+
+    /// One isomer-source comparison: the relative sigma of each product
+    /// after a minute's irradiation, from the transport-coupled replicas and
+    /// from the spectrum path fed the same tallied flux, and the run's report.
+    struct IsomerComparison {
+        sigmas: Vec<(String, f64, f64)>,
+        info: yani_transmute::uncertainty::Info,
+        replicas: Option<yani_transmute::ReplicaTallied>,
+    }
+
+    /// A sphere of `nuclide` (`radius` cm, `density` g/cc) under a 14.06 MeV
+    /// point source, tallied with the MF=40 intervals on, then resampled
+    /// with `sources` both ways: through `transport_replicas` and through
+    /// `transmute_material` with the tally's flux as the spectrum. The draws
+    /// are a function of the seed, the replica and the parent, so both paths
+    /// draw the same multipliers and differ only in the weights. With
+    /// `replicas`, the transport carries that many replica weights and the
+    /// transport path reads each replica's own tally.
+    #[allow(clippy::too_many_arguments)]
+    fn isomer_transport_against_spectrum(
+        nuclide: &str,
+        path: String,
+        chain_dir: &std::path::Path,
+        branch_dir: &std::path::Path,
+        density: f64,
+        radius: f64,
+        products: &[&str],
+        sources: Vec<yani_transmute::uncertainty::Source>,
+        replicas: Option<usize>,
+    ) -> IsomerComparison {
+        use crate::geo::{BoundaryType, HalfspaceType, Region, Surface};
+        use crate::geometry::cell::Cell;
+        use crate::geometry::Geometry;
+        use yamc_source::distribution::angular::AngularDistribution;
+        use yamc_source::distribution::energy::Discrete;
+        use yamc_source::distribution::spatial::Point;
+        use yamc_source::source::{
+            ParticleSource, Source, SourceEnergyDistribution, SourceSpatialDistribution,
+        };
+        use yani_transmute::uncertainty::{DataUncertainty, Ensemble};
+
+        let dir = |d: std::path::PathBuf| d.to_string_lossy().into_owned();
+        let loaded = yani::load_chain_parts(
+            &dir(chain_dir.join("decay")),
+            Some(&dir(chain_dir.join("reactions"))),
+            None,
+            Some(&dir(branch_dir.to_path_buf())),
+        )
+        .expect("chain");
+        let branch = Arc::new(loaded.branch);
+
+        let mut material = Material::new(
+            HashMap::from([(nuclide.to_string(), 1.0)]),
+            "atom",
+            "g/cc",
+            Some(density),
+        )
+        .unwrap();
+        material.set_temperature("294");
+        material
+            .read_nuclear_data(&HashMap::from([(nuclide.to_string(), path)]), None)
+            .unwrap();
+        material.set_material_id(1);
+        material.transmutable = true;
+        if replicas.is_some() {
+            material.ensure_covariance_loaded().unwrap();
+        }
+        let volume = 4.0 / 3.0 * std::f64::consts::PI * radius.powi(3);
+        material.volume = Some(volume);
+
+        let sphere = Arc::new(Surface::new_sphere(
+            0.0,
+            0.0,
+            0.0,
+            radius,
+            Some(1),
+            Some(BoundaryType::Vacuum),
+        ));
+        let region = Region::new_from_halfspace(HalfspaceType::Below(sphere));
+        let cell = Cell::new(Some(1), region, None, Some(0));
+        let geometry = Geometry::new(vec![cell], vec![Arc::new(material.clone())]).unwrap();
+        let source = ParticleSource::Neutron(Source {
+            space: SourceSpatialDistribution::Point(Point::new([0.0, 0.0, 0.0])),
+            angle: AngularDistribution::Isotropic,
+            energy: SourceEnergyDistribution::Discrete(
+                Discrete::new(vec![1.406e7], vec![1.0]).unwrap(),
+            ),
+            strength: 1.0,
+        });
+        let mut model = Model::new(geometry, vec![source], vec![]);
+        model.verbose = crate::model::Verbose::silent();
+        let cells: HashMap<u32, Vec<usize>> = HashMap::from([(1u32, vec![0usize])]);
+        let for_init: HashMap<u32, &Material> = HashMap::from([(1u32, &material)]);
+        const SEED: u64 = 11;
+        let tallies =
+            TransmutationTallies::new(&cells, &for_init, &loaded.chain, &branch, &HashMap::new())
+                .unwrap()
+                .with_isomer_intervals(&loaded.chain, &branch)
+                .unwrap();
+        let tallies = Arc::new(match replicas {
+            Some(n) => tallies.with_replicas(n, SEED),
+            None => tallies,
+        });
+        let settings = crate::model::TransportSettings {
+            total_particles: Some(20_000),
+            seed: 7,
+            threads: Some(2),
+            data_uncertainty: replicas.map(|replicas| crate::model::TransportDataUncertainty {
+                seed: SEED,
+                replicas,
+            }),
+            ..Default::default()
+        };
+        model
+            .run_internal::<NoOpTracker>(&settings, None, Some(Arc::clone(&tallies)), false)
+            .unwrap();
+
+        let spectrum = tallies.flux_spectrum(1, volume).expect("flux");
+        let tallied = yani_transmute::TransportTallied {
+            rates: tallies.get_reaction_rates(1, volume, 1.0),
+            partials: tallies.get_partial_rates(1, volume, 1.0),
+            fy_weights: tallies.get_fission_yield_weights(1),
+            spectrum: spectrum.clone(),
+            statistics: None,
+            branch: Arc::clone(&branch),
+            diagnostics: tallies
+                .get_branching_diagnostics(1, volume, 1.0)
+                .with_material(&material),
+            isomer: tallies.get_isomer_productions(1, volume, 1.0),
+            replicas: tallies.replica_tallied(1, volume),
+        };
+        let mut initial = material.clone();
+        initial.nuclides = material.get_atoms_per_barn_cm().unwrap();
+        initial.density_units = DensityUnits::Sum;
+        initial.density = None;
+        let request = DataUncertainty {
+            seed: SEED,
+            samples: Some(replicas.unwrap_or(400)),
+            sources,
+            attribution: false,
+            ..Default::default()
+        };
+        let (dt, rate) = (60.0, 1.0e14);
+        let (transport, info) = yani_transmute::transport_replicas(
+            &initial,
+            &tallied,
+            &[dt],
+            &[rate],
+            &loaded.chain,
+            loaded.parts,
+            &request,
+        )
+        .unwrap();
+        let mut spectral = initial.clone();
+        let results = yani_transmute::transmute_material(
+            &mut spectral,
+            &[spectrum],
+            &[yani_transmute::TransmuteStep {
+                dt,
+                irradiation: Some((0, rate)),
+            }],
+            Arc::clone(&loaded.chain),
+            &branch,
+            loaded.parts,
+            Some(&request),
+        )
+        .unwrap();
+        let relative = |e: &Ensemble, n: &str| {
+            let x = e.samples_at(0, n);
+            let mean = x.iter().sum::<f64>() / x.len() as f64;
+            let var = x.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (x.len() - 1) as f64;
+            var.sqrt() / mean
+        };
+        let sigmas = products
+            .iter()
+            .map(|p| {
+                let (t, s) = (
+                    relative(&transport, p),
+                    relative(&results.uncertainty[&1], p),
+                );
+                eprintln!("{nuclide} -> {p}: transport {t:.6}, spectrum path {s:.6}");
+                (p.to_string(), t, s)
+            })
+            .collect();
+        IsomerComparison {
+            sigmas,
+            info,
+            replicas: tallied.replicas,
+        }
+    }
+
+    /// The `isomer_branching` source on a transport run: an In115 sphere under
+    /// a 14 MeV point source, ENDF/B-VIII.1 In115 with its own MF=40. The
+    /// tally scores each stated state's production per MF=40 interval, and
+    /// the replicas re-split the tallied partials with them. Fed the same
+    /// tallied flux as a spectrum, the spectrum path draws the same
+    /// multipliers, so the isomers' sigmas must agree to the small difference
+    /// between the tally's continuous-energy weights and the spectrum path's
+    /// group fold. Self-skips without the fixtures.
+    #[test]
+    fn in115_isomer_branching_on_transport_matches_the_spectrum_path() {
+        let Some(in115) = yamc_test_cache::transport_nuclide("In115") else {
+            eprintln!("skipping -- In115 transport fixture absent");
+            return;
+        };
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let chain = manifest.join("tests/transmutation-endf-b8.1-sfr.arrow");
+        let branch =
+            manifest.join("../yani-transmute/tests/fixtures/endf-b8.1-branching-In115-Mo92");
+        if !chain.join("reactions").is_dir() || !branch.is_dir() {
+            eprintln!("skipping -- chain or branching fixture absent");
+            return;
+        }
+        let run = isomer_transport_against_spectrum(
+            "In115",
+            in115,
+            &chain,
+            &branch,
+            7.31,
+            3.0,
+            &["In114_m1", "In115_m1"],
+            vec![yani_transmute::uncertainty::Source::IsomerBranching],
+            None,
+        );
+        for kind in ["(n,2n)", "(n,n')"] {
+            assert!(
+                run.info
+                    .isomer_branchings_perturbed
+                    .contains(&("In115".to_string(), kind.to_string())),
+                "{kind}: {:?}",
+                run.info.isomer_branchings_perturbed
+            );
+        }
+        assert!(run.info.sources.contains(&"isomer_branching".to_string()));
+        assert!(!run
+            .info
+            .not_perturbed
+            .iter()
+            .any(|s| s.contains("every split held")));
+        for (product, t, s) in &run.sigmas {
+            assert!(*t > 0.005, "{product}: the split moves, sigma {t}");
+            assert!((t / s - 1.0).abs() < 0.01, "{product}: {t} against {s}");
+        }
+    }
+
+    /// With replica weights each replica's MF=40 interval productions are
+    /// scored under that replica's weights and cross sections, as its
+    /// partials are: on every replica a state's intervals sum to the
+    /// replica's own partial, so the weights `w_j / P` the draw folds with
+    /// are the replica's. Self-skips without the fixtures.
+    #[test]
+    fn in115_isomer_productions_follow_each_replica() {
+        use yani_transmute::uncertainty::Source as S;
+        let Some(in115) = yamc_test_cache::transport_nuclide("In115") else {
+            eprintln!("skipping -- In115 transport fixture absent");
+            return;
+        };
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let chain = manifest.join("tests/transmutation-endf-b8.1-sfr.arrow");
+        let branch =
+            manifest.join("../yani-transmute/tests/fixtures/endf-b8.1-branching-In115-Mo92");
+        if !chain.join("reactions").is_dir() || !branch.is_dir() {
+            eprintln!("skipping -- chain or branching fixture absent");
+            return;
+        }
+        let run = isomer_transport_against_spectrum(
+            "In115",
+            in115,
+            &chain,
+            &branch,
+            7.31,
+            3.0,
+            &["In114_m1", "In115_m1"],
+            vec![S::CrossSections, S::IsomerBranching],
+            Some(16),
+        );
+        let replicas = run.replicas.expect("replica tallies");
+        assert_eq!(replicas.isomer.len(), 16);
+        let mut sums = Vec::new();
+        for k in 0..16 {
+            for (kind, key, target) in [
+                ("(n,2n)", (16, 1), "In114_m1"),
+                ("(n,n')", (4, 1), "In115_m1"),
+            ] {
+                let w: f64 = replicas.isomer[k]
+                    .interval_sum("In115", key)
+                    .expect("tallied");
+                let partial = replicas.partials[k]["In115"][kind]
+                    .iter()
+                    .find(|(t, _)| t == target)
+                    .unwrap()
+                    .1;
+                assert!(
+                    (w - partial).abs() <= 1e-9 * partial,
+                    "replica {k} {target}: {w} vs {partial}"
+                );
+                sums.push(w);
+            }
+        }
+        assert!(run.info.sources.contains(&"isomer_branching".to_string()));
+        for (product, t, _) in &run.sigmas {
+            assert!(*t > 0.0, "{product}");
+        }
+    }
+
+    /// The same comparison on JEFF-4.0's Nb93 `(n,2n)` and Ni58 `(n,p)`, read
+    /// from a local release tree: `YAMC_DATA_DIR` names the directory holding
+    /// `jeff-4.0-arrow` and `transmutation-jeff-4.0.arrow`. Ignored by default.
+    /// The MF=40 source alone must agree to the weights' difference; with the
+    /// cross sections too it is printed for the record.
+    #[test]
+    #[ignore]
+    fn jeff40_isomer_branching_on_transport_matches_the_spectrum_path() {
+        use yani_transmute::uncertainty::Source as S;
+        let Some(data) = std::env::var_os("YAMC_DATA_DIR").map(std::path::PathBuf::from) else {
+            eprintln!("skipping -- YAMC_DATA_DIR unset");
+            return;
+        };
+        let chain = data.join("transmutation-jeff-4.0.arrow");
+        let neutron = data.join("jeff-4.0-arrow/neutron");
+        for (nuclide, density, products) in [
+            ("Nb93", 8.57, ["Nb92", "Nb92_m1"]),
+            ("Ni58", 8.9, ["Co58", "Co58_m1"]),
+        ] {
+            for (sources, replicas) in [
+                (vec![S::IsomerBranching], None),
+                (vec![S::CrossSections, S::IsomerBranching], None),
+                (vec![S::CrossSections], None),
+                (vec![S::CrossSections, S::IsomerBranching], Some(128)),
+                (vec![S::CrossSections], Some(128)),
+            ] {
+                eprintln!("{nuclide} {sources:?} replicas {replicas:?}");
+                let alone = sources == [S::IsomerBranching];
+                let path = neutron.join(format!("{nuclide}.arrow"));
+                let run = isomer_transport_against_spectrum(
+                    nuclide,
+                    path.to_string_lossy().into_owned(),
+                    &chain,
+                    &chain.join("branching"),
+                    density,
+                    3.0,
+                    &products,
+                    sources,
+                    replicas,
+                );
+                // With cross sections on, the two paths draw MF=33 (and
+                // MF=32) differently, so the sigmas are printed, not compared.
+                for (product, t, s) in &run.sigmas {
+                    if alone {
+                        assert!((t / s - 1.0).abs() < 0.02, "{product}: {t} against {s}");
+                    }
+                }
+                // Each replica's interval productions are its own: they sum
+                // to its partials, and they move from replica to replica.
+                if let Some(r) = &run.replicas {
+                    // The production-weighted change of the stated states'
+                    // productions from replica 0, largest over the replicas.
+                    let mut moved = 0.0f64;
+                    for (k, isomer) in r.isomer.iter().enumerate() {
+                        let (mut diff, mut base) = (0.0, 0.0);
+                        for (parent, key, w) in isomer.iter() {
+                            let a: f64 = w.iter().sum();
+                            let b = r.isomer[0].interval_sum(parent, key).unwrap_or(0.0);
+                            diff += (a - b).abs();
+                            base += b;
+                        }
+                        assert!(isomer.states() > 0, "replica {k}");
+                        moved = moved.max(diff / base);
+                    }
+                    eprintln!(
+                        "  largest change of the stated productions from replica 0: {moved:.4}"
+                    );
+                    assert!(moved > 0.0);
+                }
+            }
+        }
     }
 }

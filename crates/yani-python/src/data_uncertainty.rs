@@ -89,7 +89,23 @@ use yani_transmute::uncertainty::{
 ///   renormalised. An actinide that borrows another's yields shares its draw.
 ///   Needs a chain that carries the evaluated yields
 ///   (``fission_yields/evaluated_yields.arrow``); without one every parent is
-///   listed under ``no_fission_yield_uncertainty``.
+///   listed under ``no_fission_yield_uncertainty``;
+/// - ``"isomer_branching"``: the isomeric split of every reachable reaction
+///   whose evaluation states the MF=40 covariance of its final states'
+///   production cross sections (the MF=10 partials of the branching
+///   subsection, from its ``branching_covariance.arrow``). Each stated
+///   state's production is drawn on the covariance's own energy grid, folded
+///   against the same spectrum and weight as the nominal split, and the
+///   split re-made from the draw by the nominal branching rule. Where the
+///   list names its ground state only the shares move, and they still sum to
+///   one, while the reaction's total stays the cross sections' (MF=33), so
+///   the uncertainty of the total is not counted twice. An isomer listed
+///   alone, and every ``(n,n')`` isomer, is an absolute production: it is
+///   made at its drawn value, the ground state taking the rest of the total,
+///   so its own MF=40 sigma replaces the MF=33 sigma of its reaction that it
+///   carries with ``"cross_sections"`` alone, and can be the smaller. Applies
+///   to ``Material.transmute``; a transport run's split comes from tallied
+///   partials and is held.
 ///
 /// Each cross-section draw is a lognormal multiplier with the covariance's
 /// own mean and variance, so a sampled rate is never negative and nothing is
@@ -110,7 +126,13 @@ use yani_transmute::uncertainty::{
 ///   sigma wider than the ratio allows, or no sigma to draw), and the per-decay
 ///   photon lines and decay energy of a drawn parent, which follow its
 ///   nominal branching;
-/// - the isomeric-branching overlay from MF=9/MF=10;
+/// - the isomeric split of a reaction whose evaluation states no MF=40
+///   covariance on any of its states, listed in
+///   ``no_isomer_branching_uncertainty``, and
+///   MF=40 blocks ``"isomer_branching"`` cannot use (another evaluation's
+///   partner, a partner that is not an MF=10 production, NC, absolute and
+///   short-range layouts, a state the branching rule folds no curve for),
+///   counted in ``isomer_branching_blocks_not_used``;
 /// - covariance correlating two evaluations (MAT1 naming another material),
 ///   covariance with a quantity that is not a cross section (XMF1 not 0 or
 ///   3), covariance derived from other sections by an NC block that cannot
@@ -691,6 +713,52 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
     ] {
         d.set_item(key, set.iter().cloned().collect::<Vec<_>>())?;
     }
+    // Keyed "Parent reaction", as the other per-channel entries are.
+    for (key, set) in [
+        (
+            "isomer_branchings_perturbed",
+            &info.isomer_branchings_perturbed,
+        ),
+        (
+            "no_isomer_branching_uncertainty",
+            &info.no_isomer_branching_uncertainty,
+        ),
+    ] {
+        d.set_item(
+            key,
+            set.iter()
+                .map(|(parent, kind)| format!("{parent} {kind}"))
+                .collect::<Vec<_>>(),
+        )?;
+    }
+    d.set_item(
+        "isomer_branching_blocks_not_used",
+        info.isomer_branching_blocks_not_used.clone(),
+    )?;
+    let isomer_repairs = PyDict::new(py);
+    for (parent, r) in &info.isomer_branching_covariance_repaired {
+        let entry = PyDict::new(py);
+        field_repair(&entry, r)?;
+        isomer_repairs.set_item(parent, entry)?;
+    }
+    d.set_item("isomer_branching_covariance_repaired", isomer_repairs)?;
+    let isomer_limits = PyDict::new(py);
+    for (parent, l) in &info.isomer_branching_lognormal_not_carried {
+        isomer_limits.set_item(parent, limit_dict(l)?)?;
+    }
+    d.set_item("isomer_branching_lognormal_not_carried", isomer_limits)?;
+    // Keyed "Parent reaction Product".
+    let production_sigma = PyDict::new(py);
+    for ((parent, kind, product), sigma) in &info.isomer_production_sigma {
+        production_sigma.set_item(format!("{parent} {kind} {product}"), sigma)?;
+    }
+    d.set_item("isomer_production_sigma", production_sigma)?;
+    d.set_item("isomer_branchings_sampled", info.isomer_branchings_sampled)?;
+    let clipped = PyDict::new(py);
+    for ((parent, kind, product), n) in &info.isomer_branchings_clipped {
+        clipped.set_item(format!("{parent} {kind} {product}"), n)?;
+    }
+    d.set_item("isomer_branchings_clipped", clipped)?;
     d.set_item("statistical_rates", info.statistical_rates)?;
     d.set_item("statistical_floored", info.statistical_floored)?;
     d.set_item("statistical_sampled", info.statistical_sampled)?;

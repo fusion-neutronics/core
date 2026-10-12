@@ -661,7 +661,23 @@ class DataUncertainty:
       renormalised. An actinide that borrows another's yields shares its draw.
       Needs a chain that carries the evaluated yields
       (``fission_yields/evaluated_yields.arrow``); without one every parent is
-      listed under ``no_fission_yield_uncertainty``.
+      listed under ``no_fission_yield_uncertainty``;
+    - ``"isomer_branching"``: the isomeric split of every reachable reaction
+      whose evaluation states the MF=40 covariance of its final states'
+      production cross sections (the MF=10 partials of the branching
+      subsection, from its ``branching_covariance.arrow``). Each stated
+      state's production is drawn on the covariance's own energy grid, folded
+      against the same spectrum and weight as the nominal split, and the
+      split re-made from the draw by the nominal branching rule. Where the
+      list names its ground state only the shares move, and they still sum to
+      one, while the reaction's total stays the cross sections' (MF=33), so
+      the uncertainty of the total is not counted twice. An isomer listed
+      alone, and every ``(n,n')`` isomer, is an absolute production: it is
+      made at its drawn value, the ground state taking the rest of the total,
+      so its own MF=40 sigma replaces the MF=33 sigma of its reaction that it
+      carries with ``"cross_sections"`` alone, and can be the smaller. Applies
+      to ``Material.transmute``; a transport run's split comes from tallied
+      partials and is held.
     
     Each cross-section draw is a lognormal multiplier with the covariance's
     own mean and variance, so a sampled rate is never negative and nothing is
@@ -682,7 +698,13 @@ class DataUncertainty:
       sigma wider than the ratio allows, or no sigma to draw), and the per-decay
       photon lines and decay energy of a drawn parent, which follow its
       nominal branching;
-    - the isomeric-branching overlay from MF=9/MF=10;
+    - the isomeric split of a reaction whose evaluation states no MF=40
+      covariance on any of its states, listed in
+      ``no_isomer_branching_uncertainty``, and
+      MF=40 blocks ``"isomer_branching"`` cannot use (another evaluation's
+      partner, a partner that is not an MF=10 production, NC, absolute and
+      short-range layouts, a state the branching rule folds no curve for),
+      counted in ``isomer_branching_blocks_not_used``;
     - covariance correlating two evaluations (MAT1 naming another material),
       covariance with a quantity that is not a cross section (XMF1 not 0 or
       3), covariance derived from other sections by an NC block that cannot
@@ -3100,9 +3122,14 @@ class Model:
                   DY the evaluation states on each.
         
                 ``"flux_spectrum"`` does not apply: there is no supplied spectrum,
-                and the flux's error is the statistical one. With replica weights
-                every replica's rates come from the same histories as the
-                nominal ones, so the differences between replicas are resolved
+                and the flux's error is the statistical one.
+                ``"isomer_branching"`` re-splits the tallied partials: the tally
+                scores each MF=40 state's production on its covariance
+                intervals at the energy of each track segment (per replica with
+                replica weights), and each replica draws the state's production
+                from those weights, as a spectrum run does from its group fold.
+                With replica weights every replica's rates come from the same
+                histories as the nominal ones, so the differences between replicas are resolved
                 far more finely than the rates themselves, and ``"statistical"``
                 adds the nominal tally's error to each replica once; the sources
                 are independent, so ``sources=["statistical"]`` isolates the
@@ -6180,6 +6207,28 @@ class TransmutationResults:
           cannot carry). ``decay_branchings_floored`` /
           ``decay_branchings_sampled`` count draws whose complement was pulled
           back above zero and draws made.
+        - ``isomer_branchings_perturbed``: with the ``"isomer_branching"``
+          source, the reachable reactions, as ``"Parent reaction"``, whose
+          isomeric split was drawn from the MF=40 covariance of at least one of
+          their final states. ``no_isomer_branching_uncertainty`` lists those
+          whose split can move but whose evaluation states no MF=40 on any
+          state the run folds, held at their nominal shares, a gap.
+          ``isomer_branching_blocks_not_used`` gives, per parent, the MF=40
+          blocks not used, counted by why, a gap.
+          ``isomer_branching_covariance_repaired`` and
+          ``isomer_branching_lognormal_not_carried`` are the MF=40 matrices
+          repaired to the nearest correlation matrix (a gap) and those not a
+          lognormal's (not a gap), with the same entries as
+          ``covariance_repairs`` and ``lognormal_not_carried``.
+          ``isomer_production_sigma`` gives, as ``"Parent reaction Product"``,
+          the relative sigma MF=40 states for the product's production, folded
+          against the spectrum (the largest over the run's spectra).
+          ``isomer_branchings_sampled`` counts the draws, one per drawn parent
+          per replica. ``isomer_branchings_clipped`` gives, as
+          ``"Parent reaction Product"``, how many list draws (one per replica
+          per spectrum) scaled the product's drawn production back to the
+          drawn reaction total, the stated productions of its list having
+          come out above it; a product never clipped is absent.
         - ``statistical_rates``: with the ``"statistical"`` source on a
           transport run, how many tallied rates were sampled from their
           covariance; ``statistical_floored`` / ``statistical_sampled`` count

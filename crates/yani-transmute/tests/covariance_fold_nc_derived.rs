@@ -614,6 +614,7 @@ fn a_transport_run_reads_the_reactions_a_channel_is_derived_from() {
         statistics: None,
         branch: std::sync::Arc::new(yani::BranchTable::default()),
         diagnostics: yani_transmute::CoupledDiagnostics::default(),
+        isomer: None,
         replicas: Some(replicas),
     };
     let request = yani_transmute::uncertainty::DataUncertainty {

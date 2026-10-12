@@ -127,6 +127,23 @@ pub enum Source {
     /// evaluation's draw. Cumulative yields are not solved with and are not
     /// drawn.
     FissionYield,
+    /// The isomeric split of a reaction, from the MF=40 covariance of each
+    /// final state's production cross section (the MF=10 partials the
+    /// branching subsection carries), read from its
+    /// `branching_covariance.arrow`.
+    ///
+    /// Each stated state's production is drawn as a lognormal on the
+    /// covariance's own grid, folded against the spectrum the nominal split
+    /// was folded with, and the split re-made from the draw by the nominal
+    /// branching rule: shares of a list that names its ground state move
+    /// while the reaction total stays MF=33's, and an isomer listed alone is
+    /// made at its drawn production, the ground taking the rest. See
+    /// `isomer_branching_uncertainty` for why that counts no uncertainty
+    /// twice. On a transport run the tally scores each stated state's
+    /// production on its MF=40 intervals beside the partials, at each track
+    /// segment's energy, and the draw re-splits the tallied partials with
+    /// those weights in place of the spectrum's group fold.
+    IsomerBranching,
 }
 
 impl Source {
@@ -141,6 +158,7 @@ impl Source {
         Source::DecayEnergy,
         Source::DecayPhotonLines,
         Source::FissionYield,
+        Source::IsomerBranching,
     ];
 
     /// The name used in the API and in the coverage report.
@@ -154,6 +172,7 @@ impl Source {
             Source::DecayEnergy => "decay_energy",
             Source::DecayPhotonLines => "decay_photon_lines",
             Source::FissionYield => "fission_yield",
+            Source::IsomerBranching => "isomer_branching",
         }
     }
 
@@ -165,10 +184,7 @@ impl Source {
             .find(|s| s.name() == name)
             .ok_or_else(|| {
                 let have: Vec<&str> = Source::IMPLEMENTED.iter().map(|s| s.name()).collect();
-                format!(
-                    "unknown uncertainty source {name:?}; this build can perturb {have:?}. \
-                     Reaction branching has none in ENDF-6 to read."
-                )
+                format!("unknown uncertainty source {name:?}; this build can perturb {have:?}")
             })
     }
 }
@@ -192,7 +208,10 @@ pub struct DataUncertainty {
     /// Restricting this is how a run isolates one contribution, which is what
     /// makes "add a source, watch the sigma grow" a measurement rather than a
     /// guess. Sources are independent, so the total sigma must not DECREASE as
-    /// the set grows; that is a property worth testing.
+    /// the set grows; that is a property worth testing. The one exception is
+    /// by design: `isomer_branching` gives an isomer listed alone its stated
+    /// MF=40 uncertainty in place of the MF=33 one its reaction lends it
+    /// without, which can be the smaller (see `isomer_branching_uncertainty`).
     pub sources: Vec<Source>,
     /// Also say where the uncertainty comes from ([`Attribution`]).
     ///
@@ -801,6 +820,46 @@ pub struct Info {
     /// at nominal rather than drawn through a mapping their yields were not
     /// built with.
     pub fission_yields_mapping_mismatch: BTreeSet<String>,
+    /// Reachable `(parent, reaction)` whose isomeric split was drawn from the
+    /// MF=40 covariance of at least one of its final states.
+    pub isomer_branchings_perturbed: BTreeSet<(String, String)>,
+    /// Reachable `(parent, reaction)` with a split that can move (a list of
+    /// several states, or of isomers whose ground takes the rest) and no
+    /// stated MF=40 covariance on any state the run folds, held at their
+    /// nominal shares. Not a claim that the split is exact: the evaluation
+    /// said nothing, or the library publishes no `branching_covariance.arrow`
+    /// (JENDL-5.0).
+    pub no_isomer_branching_uncertainty: BTreeSet<(String, String)>,
+    /// Per reachable parent, its MF=40 blocks not used, counted by why: the
+    /// partner in another evaluation or not an MF=10 production, an NC block,
+    /// an absolute or short-range layout, a malformed block, or a state (or
+    /// partner) the branching rule folds no curve for. A gap.
+    pub isomer_branching_blocks_not_used: BTreeMap<String, BTreeMap<String, usize>>,
+    /// Drawn parents whose MF=40 matrix was not positive semi-definite past
+    /// round-off and was repaired to the nearest correlation matrix, every
+    /// interval keeping its evaluated sigma (as for MF=33, see
+    /// [`Info::covariance_repaired`]). A gap.
+    pub isomer_branching_covariance_repaired:
+        BTreeMap<String, crate::covariance_sample::FieldRepair>,
+    /// Drawn parents whose MF=40 matrix is not a lognormal's, with how far
+    /// the sampled one is from it. Not a gap, as for
+    /// [`Info::lognormal_not_carried`].
+    pub isomer_branching_lognormal_not_carried:
+        BTreeMap<String, crate::covariance_sample::LognormalLimit>,
+    /// Per `(parent, reaction, product)`, the relative sigma of the product's
+    /// stated production that MF=40 gives, folded against the spectrum, the
+    /// largest over the run's spectra: what the evaluation says before the
+    /// split re-normalises it.
+    pub isomer_production_sigma: BTreeMap<(String, String, String), f64>,
+    /// MF=40 draws made, one per drawn parent per replica.
+    pub isomer_branchings_sampled: usize,
+    /// Per `(parent, reaction, product)`, how many list draws (one per
+    /// replica per spectrum) gave the product's stated production a value
+    /// that, with the list's other productions, came out above the drawn
+    /// reaction total, and scaled it back to it. Only a list whose ground
+    /// takes the rest (isomers listed alone, and every `(n,n')` list) can
+    /// clip; every stated product of a clipped list draw is counted.
+    pub isomer_branchings_clipped: BTreeMap<(String, String, String), usize>,
     /// Tallied rates sampled statistically, the totals and partials together;
     /// zero off the transport path or with the source off.
     pub statistical_rates: usize,
@@ -870,7 +929,7 @@ impl Info {
             sigma_at_least_ten: sigmas.sigma_at_least_ten.clone(),
             sigma_at_least_one_outside_bound: sigmas.sigma_at_least_one_outside_bound.clone(),
             not_perturbed: [
-                "isomeric branching (MF=9/MF=10)",
+                "isomeric branching (MF=9/MF=10) of a reaction with no stated MF=40 covariance, in no_isomer_branching_uncertainty",
                 "MT=5 product multiplicities (MF=6 MT=5), whose split of the perturbed MT=5 rate is held",
                 "covariance with another evaluation (MAT1 naming another material)",
                 "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3)",
@@ -950,6 +1009,9 @@ impl Info {
             || !self.no_fission_yield_uncertainty.is_empty()
             || !self.fission_yield_uncertainty_not_carried.is_empty()
             || !self.fission_yields_mapping_mismatch.is_empty()
+            || !self.no_isomer_branching_uncertainty.is_empty()
+            || !self.isomer_branching_blocks_not_used.is_empty()
+            || !self.isomer_branching_covariance_repaired.is_empty()
     }
 }
 
@@ -1025,7 +1087,11 @@ pub struct Ensemble {
 /// - `by_source` is exact: the ensemble re-run with each source alone, so a
 ///   nuclide's statistical and nuclear-data variances are measured the same
 ///   way the total is. Sources are independent, so they sum to the total up to
-///   interaction and sampling noise, which is the unattributed residual.
+///   interaction and sampling noise, which is the unattributed residual. One
+///   interaction is by construction: an isomer listed alone, with a stated
+///   MF=40 covariance, takes the reaction's MF=33 uncertainty with
+///   `cross_sections` alone and its own MF=40 one in its place with
+///   `isomer_branching` on, so it is counted under both.
 /// - `contributors` is first order: within the cross sections, the
 ///   half-lives and the decay branchings, one deterministic solve per nuclide
 ///   (and per reaction) gives its sensitivity, and its variance is that
@@ -1045,11 +1111,12 @@ pub struct Attribution {
     /// `"all"` for every source together: `[step][nuclide]`. First order has
     /// terms only for `cross_sections`, `half_life` and `decay_branching`.
     /// `None` for every other source (`flux_spectrum`, `statistical`,
-    /// `decay_energy`, `decay_photon_lines`, `fission_yield`), whose variance
-    /// first order does not try to explain, and for `"all"` when any applied
-    /// source is one of those. The default source set applies several of them
-    /// (`flux_spectrum` or `statistical`, `decay_energy`, `decay_photon_lines`
-    /// and `fission_yield`), so with the defaults `"all"` is `None`: restrict
+    /// `decay_energy`, `decay_photon_lines`, `fission_yield`,
+    /// `isomer_branching`), whose variance first order does not try to
+    /// explain, and for `"all"` when any applied source is one of those. The
+    /// default source set applies several of them (`flux_spectrum` or
+    /// `statistical`, `decay_energy`, `decay_photon_lines`, `fission_yield`
+    /// and `isomer_branching`), so with the defaults `"all"` is `None`: restrict
     /// the sources to the three above for an `"all"` entry.
     pub linearity: BTreeMap<String, Option<Vec<HashMap<String, Linearity>>>>,
 }
@@ -2296,7 +2363,7 @@ mod tests {
         let info = Info::from_fold(&Coverage::default(), &SigmaReport::default(), true)
             .expect("no shares to check");
         for held in [
-            "isomeric branching (MF=9/MF=10)",
+            "isomeric branching (MF=9/MF=10) of a reaction with no stated MF=40 covariance, in no_isomer_branching_uncertainty",
             "MT=5 product multiplicities (MF=6 MT=5), whose split of the perturbed MT=5 rate is held",
             "covariance with another evaluation (MAT1 naming another material)",
             "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3)",
