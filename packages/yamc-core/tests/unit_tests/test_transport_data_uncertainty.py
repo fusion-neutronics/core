@@ -52,7 +52,12 @@ def test_the_nominal_mean_is_unchanged_and_the_uncertainty_is_reported():
     assert 0.0 < sigma / mean < 0.2
     assert results[capture].replica_mean[0] > 0.0
     assert results[capture].replica_standard_error[0] > 0.0
-    assert results[capture].nuclear_data_variance_negative == [False]
+    # The replicas' spread is the sigma and the deconvolved noise in
+    # quadrature, and on a thin target the noise is a small part of it.
+    spread = results[capture].nuclear_data_replica_spread[0]
+    noise = results[capture].nuclear_data_noise[0]
+    assert spread**2 == pytest.approx(sigma**2 + noise**2, rel=1e-9)
+    assert results[capture].nuclear_data_noise_dominated == [False]
 
 
 def test_local_heating_moves_with_the_capture_it_comes_from():

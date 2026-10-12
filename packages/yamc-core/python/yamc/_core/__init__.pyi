@@ -1127,6 +1127,31 @@ class Estimate:
         r"""
         How many replicas the ensemble held.
         """
+    @property
+    def replica_spread(self) -> typing.Optional[builtins.float]:
+        r"""
+        The replicas' standard deviation as they were solved, before any Monte
+        Carlo noise was removed, or None below two replicas. Equal to
+        ``std_dev`` where no noise was measured.
+        """
+    @property
+    def noise(self) -> typing.Optional[builtins.float]:
+        r"""
+        The standard deviation of the Monte Carlo noise removed from
+        ``replica_spread``, so ``std_dev**2 = replica_spread**2 - noise**2``
+        (floored at zero), or None where it was not measured.
+        
+        With transport replica weights each replica's tallied shift from the
+        nominal is resolved only to the transport's history count. Each
+        replica is solved a second time from the even half of the histories,
+        and the spread of the difference measures that noise.
+        """
+    @property
+    def noise_dominated(self) -> builtins.bool:
+        r"""
+        Whether the noise removed exceeded a quarter of the variance left: the
+        sigma is then mostly what more transport histories would sharpen.
+        """
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
@@ -5110,16 +5135,35 @@ class TallyResult:
         The score's first-order variance along the cross sections' principal
         modes, which carries no sampling error from the replicas, plus the
         nonlinear remainder the replicas estimate, each with the Monte Carlo
-        noise of the shared histories deconvolved. A bin where that noise
-        swamps the estimate reads zero and is flagged in
-        ``nuclear_data_variance_negative``; more particles would resolve it.
+        noise of the shared histories deconvolved
+        (``nuclear_data_replica_spread`` is before, ``nuclear_data_noise``
+        what was removed). A bin where that noise swamps the estimate reads
+        zero; it is flagged in ``nuclear_data_noise_dominated``, and more
+        particles would resolve it.
         """
     @property
-    def nuclear_data_variance_negative(self) -> typing.Optional[builtins.list[builtins.bool]]:
+    def nuclear_data_replica_spread(self) -> typing.Optional[builtins.list[builtins.float]]:
         r"""
-        Per bin, whether the deconvolved nuclear-data variance came out
-        negative (the replicas' noise swamps their spread), when the run was
-        given ``data_uncertainty``; ``None`` otherwise.
+        Standard deviation of the replicas per bin as scored, before the
+        Monte Carlo noise is deconvolved, ``sqrt(sigma**2 + noise**2)``, when
+        the run was given ``data_uncertainty``; ``None`` otherwise.
+        """
+    @property
+    def nuclear_data_noise(self) -> typing.Optional[builtins.list[builtins.float]]:
+        r"""
+        Standard deviation of the Monte Carlo noise deconvolved from the
+        replicas' spread per bin, when the run was given ``data_uncertainty``;
+        ``None`` otherwise. Each replica's shift from the nominal is scored on
+        the shared histories, which cancel most but not all of its noise; it
+        falls as ``1/sqrt(particles)``.
+        """
+    @property
+    def nuclear_data_noise_dominated(self) -> typing.Optional[builtins.list[builtins.bool]]:
+        r"""
+        Per bin, whether the noise variance deconvolved exceeded a quarter of
+        the nuclear-data variance left (or that variance came out negative),
+        when the run was given ``data_uncertainty``; ``None`` otherwise. The
+        sigma is still the deconvolved one; more particles would sharpen it.
         """
     @property
     def replica_mean(self) -> typing.Optional[builtins.list[builtins.float]]:
@@ -5721,7 +5765,9 @@ class TransmutationResults:
         
         The spread over an ensemble of solves with the activation cross sections
         resampled from their MF=33 covariance. In the same units as
-        ``get_nuclide_density``, so the pair reads as ``mean ± sigma``.
+        ``get_nuclide_density``, so the pair reads as ``mean ± sigma``. With
+        transport replica weights the Monte Carlo noise of the replicas'
+        tallies is removed from it (see ``get_nuclide_uncertainty_noise``).
         
         Args:
             material_id: Material ID number.
@@ -5759,6 +5805,30 @@ class TransmutationResults:
             run without ``data_uncertainty`` or with fewer than four replicas.
             Step 0 reports 0.0.
         """
+    def get_nuclide_uncertainty_noise(self, material_id: builtins.int, nuclide: builtins.str, step: builtins.int) -> typing.Optional[tuple[builtins.float, builtins.float]]:
+        r"""
+        Get what ``get_nuclide_uncertainty`` is made of: the replicas' spread
+        as solved, and the Monte Carlo noise removed from it.
+        
+        With transport replica weights, each replica's tallied shift from the
+        nominal carries Monte Carlo noise, which inflates the replicas' spread
+        at low history counts. Each replica is then solved a second time from
+        the even half of the transport's histories, and the spread of the
+        difference between the two solves measures that noise, independent of
+        every data draw. ``get_nuclide_uncertainty`` is
+        ``sqrt(replica_spread**2 - noise**2)``, zero where the noise is the
+        larger.
+        
+        Args:
+            material_id: Material ID number.
+            nuclide: Nuclide name.
+            step: As in ``get_nuclide_uncertainty``.
+        
+        Returns:
+            ``(replica_spread, noise)`` [atoms/barn-cm], noise 0.0 where it was
+            not measured, or None if the transmutation was run without
+            ``data_uncertainty``. Step 0 reports zeros.
+        """
     def get_nuclide_uncertainty_evolution(self, material_id: builtins.int, nuclide: builtins.str) -> typing.Optional[builtins.list[builtins.float]]:
         r"""
         Get the standard deviation of a nuclide's density at every timestep.
@@ -5785,6 +5855,10 @@ class TransmutationResults:
         Taking the mean inventory and evaluating once throws them away, and
         summing per-nuclide sigmas in quadrature assumes an independence that the
         resampling exists precisely to avoid assuming.
+        
+        These are the replicas as solved. With transport replica weights their
+        spread still holds the Monte Carlo noise that the sigmas this class
+        reports have removed (see ``get_nuclide_uncertainty_noise``).
         
         Args:
             material_id: Material ID number.
@@ -6366,6 +6440,15 @@ class TransmutationResults:
           ``"decay_photon_rate"``), ``nuclide`` (``None`` for a total),
           ``step`` and the ``relative_standard_error`` it reached. Listed with
           a fixed ``samples`` too, where ``hit_cap`` is never set.
+        - ``noise_removed`` / ``noisy``: whether the Monte Carlo noise in the
+          replicas' spread was measured and removed from every sigma (with
+          transport replica weights, each replica is solved a second time from
+          the even half of the transport's histories, see
+          ``get_nuclide_uncertainty_noise``), and, the largest share first,
+          every tracked sigma whose removed noise variance exceeded a quarter
+          of the variance left, as dicts of ``output``, ``nuclide``, ``step``,
+          ``replica_spread``, ``noise`` and ``std_dev`` (the sigma reported).
+          Those sigmas would sharpen most with more transport histories.
         
         Args:
             material_id: Material ID number.

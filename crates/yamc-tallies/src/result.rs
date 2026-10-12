@@ -112,6 +112,12 @@ pub struct TallyResult {
     pub run_indices: Vec<usize>,
 }
 
+/// The share of the nuclear-data variance the deconvolved Monte Carlo noise
+/// may reach before [`TallyResult::nuclear_data_noise_dominated`] flags a
+/// bin. Transmutation outputs are flagged at the same share
+/// (`yani_transmute::uncertainty::NOISE_FLAG_FRACTION`).
+pub const NOISE_FLAG_FRACTION: f64 = 0.25;
+
 impl TallyResult {
     /// Per-bin nuclear-data standard deviation of the score, when the run
     /// carried replica weights: the first-order variance along the principal
@@ -119,8 +125,8 @@ impl TallyResult {
     /// Monte Carlo noise of the shared histories deconvolved (see
     /// [`ReplicaSums::nuclear_data_variance`](crate::welford::ReplicaSums::nuclear_data_variance)).
     /// A bin whose deconvolved variance came out negative, where the noise
-    /// swamped the spread, reads zero here and is flagged by
-    /// [`TallyResult::nuclear_data_variance_negative`].
+    /// swamped the spread, reads zero here; it is among those
+    /// [`TallyResult::nuclear_data_noise_dominated`] flags.
     pub fn nuclear_data_standard_deviation(&self) -> Option<Vec<f64>> {
         let r = self.replicas.as_ref()?;
         Some(
@@ -131,15 +137,43 @@ impl TallyResult {
         )
     }
 
-    /// Per-bin flag: the deconvolved nuclear-data variance came out negative,
-    /// so the replicas' own Monte Carlo noise is larger than their spread and
-    /// the nuclear-data standard deviation is not resolved.
-    pub fn nuclear_data_variance_negative(&self) -> Option<Vec<bool>> {
+    /// Per-bin standard deviation of the replicas as scored, before the
+    /// Monte Carlo noise is deconvolved: `sqrt(sigma^2 + noise^2)`, when the
+    /// run carried replica weights.
+    pub fn nuclear_data_replica_spread(&self) -> Option<Vec<f64>> {
         let r = self.replicas.as_ref()?;
         Some(
             r.nuclear_data_variance(self.n_histories)
                 .iter()
-                .map(|(v, _)| *v < 0.0)
+                .map(|(v, n)| (v + n).max(0.0).sqrt())
+                .collect(),
+        )
+    }
+
+    /// Per-bin standard deviation of the Monte Carlo noise deconvolved from
+    /// the replicas' spread, when the run carried replica weights: the noise
+    /// in each replica's shift from the nominal that the shared histories do
+    /// not cancel. It falls as `1/sqrt(histories)`.
+    pub fn nuclear_data_noise(&self) -> Option<Vec<f64>> {
+        let r = self.replicas.as_ref()?;
+        Some(
+            r.nuclear_data_variance(self.n_histories)
+                .iter()
+                .map(|(_, n)| n.max(0.0).sqrt())
+                .collect(),
+        )
+    }
+
+    /// Per-bin flag: the noise variance deconvolved exceeded
+    /// [`NOISE_FLAG_FRACTION`] of the nuclear-data variance left (or that
+    /// variance came out negative, and the sigma reads zero). The sigma is
+    /// still unbiased, but more histories would sharpen it.
+    pub fn nuclear_data_noise_dominated(&self) -> Option<Vec<bool>> {
+        let r = self.replicas.as_ref()?;
+        Some(
+            r.nuclear_data_variance(self.n_histories)
+                .iter()
+                .map(|(v, n)| *v <= 0.0 && *n > 0.0 || *n > NOISE_FLAG_FRACTION * v.max(0.0))
                 .collect(),
         )
     }

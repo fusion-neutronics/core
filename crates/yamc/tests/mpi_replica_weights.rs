@@ -185,6 +185,17 @@ fn replica_results(dir: &Path, chain: &Arc<HashMap<String, yani::ChainNuclide>>)
             .iter()
             .map(|i| i.get("W187").copied().unwrap_or(0.0) / nominal),
     );
+    // The same replicas solved from the even half of the histories: the
+    // halves split by global history index and reduce across ranks with
+    // their history counts, so they match the serial run too.
+    let ensemble = &results.uncertainty[&1];
+    assert_eq!(ensemble.noise_scale(), Some(1.0), "both halves formed");
+    out.extend(
+        ensemble
+            .even_samples_at(0, "W187")
+            .iter()
+            .map(|v| v / nominal),
+    );
     out
 }
 
