@@ -2766,6 +2766,14 @@ class Model:
               with, those a cross-material covariance block correlates it with
               (the neutron standards, such as ENDF/B-VIII.1 U235 fission with
               U238 fission), empty where it is drawn on its own.
+              ``unexplained_deposit`` is, per heating or damage-energy row
+              the nuclide carries (301 heating, 444 damage energy, 901 local
+              heating), a list of ``(lo, hi, share)`` per energy band in eV
+              (below 1 eV, to 1 keV, to 1 MeV, to 20 MeV, above): the share
+              of the row, over lethargy, that the per-reaction deposits do not
+              reproduce there. A run moves each row by what its perturbed
+              reactions deposit; this share does not move (for a fissile
+              nuclide it holds fission's).
             - ``without_data``: sorted names of nuclides whose data carries no
               covariance at all.
             - ``not_perturbed``: inputs no transport uncertainty run perturbs
@@ -2994,7 +3002,15 @@ class Model:
                 the cross section of the reaction that made them, and keep them
                 (photon data carries no covariance), so photon tallies and
                 photon heating get the nuclear-data uncertainty of the neutron
-                transport. Not yet supported, and refused with the reason:
+                transport. Neutron heating (``heating``, ``heating-local``) and
+                ``damage-energy`` move with the cross sections too: each
+                replica adds what its perturbed reactions deposit, the energy
+                each reaction deposits rebuilt from the data by energy balance
+                (heating) and the Lindhard partition of its recoils (damage
+                energy), as NJOY's HEATR builds the stored totals; what those
+                do not reproduce (fission's share) stays nominal, per nuclide
+                in ``data_uncertainty_coverage()``. Not yet supported, and
+                refused with the reason:
                 ``compute='gpu'``, collision-estimator tallies, overlay tallies,
                 mesh tallies and per-nuclide tally bins.
                 ``model.data_uncertainty_coverage()`` lists what the evaluations

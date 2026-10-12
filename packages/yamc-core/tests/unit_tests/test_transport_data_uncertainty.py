@@ -19,13 +19,14 @@ def _has_covariance():
     return os.path.isfile(os.path.join(TESTS_DIR, "Fe56.arrow", "covariance.arrow"))
 
 
-def _model():
+def _model(tallies=None):
     material = yamc.Material(composition={"Fe56": 1.0}, density=7.87, name="iron", temperature=294)
     material.read_nuclear_data({"Fe56": os.path.join(TESTS_DIR, "Fe56.arrow")})
     sphere = yamc.Sphere(radius=0.5, boundary="vacuum")
     cell = yamc.Cell(name="sphere", region=sphere.below, material=material)
     source = yamc.NeutronSource(position=(0, 0, 0), energy=yamc.sources.Discrete([0.0253], [1.0]))
-    tallies = [yamc.Tally(scores=["flux"], name="flux"), yamc.Tally(scores=["(n,gamma)"], name="capture")]
+    if tallies is None:
+        tallies = [yamc.Tally(scores=["flux"], name="flux"), yamc.Tally(scores=["(n,gamma)"], name="capture")]
     return yamc.Model(geometry=yamc.Geometry([cell]), source=source, tallies=tallies, verbose=[]), tallies
 
 
@@ -52,6 +53,33 @@ def test_the_nominal_mean_is_unchanged_and_the_uncertainty_is_reported():
     assert results[capture].replica_mean[0] > 0.0
     assert results[capture].replica_standard_error[0] > 0.0
     assert results[capture].nuclear_data_variance_negative == [False]
+
+
+def test_local_heating_moves_with_the_capture_it_comes_from():
+    # At thermal energy nearly all of iron's local heating is capture's
+    # E + Q, so on a thin target its relative sigma is capture's, not the
+    # flux's: the deposit of each reaction moves with its cross section.
+    if not _has_covariance():
+        pytest.skip("Fe56 fixture carries no covariance")
+    model, (capture, heating, flux) = _model(
+        [
+            yamc.Tally(scores=["(n,gamma)"], name="capture"),
+            yamc.Tally(scores=["heating-local"], name="heating"),
+            yamc.Tally(scores=["flux"], name="flux"),
+        ]
+    )
+    results = model.simulate_transport(
+        total_particles=3000,
+        seed=2,
+        threads=1,
+        data_uncertainty=yamc.DataUncertainty(seed=5, samples=16),
+    )
+
+    def relative(tally):
+        return results[tally].nuclear_data_standard_deviation[0] / results[tally].mean[0]
+
+    assert relative(heating) == pytest.approx(relative(capture), rel=0.02)
+    assert relative(heating) > 10 * relative(flux)
 
 
 def test_a_convergence_target_is_refused_on_a_fixed_replica_count():

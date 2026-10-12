@@ -61,9 +61,11 @@
 //! cell's multiplier and shifted by its absolute cell's shift, a component
 //! of a sum taking the sum's, and a partial whose covariance an NC block
 //! derives moved by the named reactions' changes too
-//! ([`crate::xs_perturbation::grid_terms`]). Rows with no covariance,
-//! heating and damage rows, and the short-range noise stay nominal; particle
-//! production (MT 203 to 207) moves with the reactions emitting the particle.
+//! ([`crate::xs_perturbation::grid_terms`]). Rows with no covariance and the
+//! short-range noise stay nominal; particle production (MT 203 to 207) moves
+//! with the reactions emitting the particle, and heating, local heating and
+//! damage energy (MT 301, 901, 444) with what each moved reaction deposits
+//! ([`yamc_nuclide::deposit`]).
 //!
 //! In a nuclide's unresolved range the flight, the reaction and the tallies
 //! read a probability-table band instead of the smooth cross sections: each
@@ -92,6 +94,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use yamc_materials::Material;
+use yamc_nuclide::deposit::{deposits, Response};
 use yamc_nuclide::nuclide::Nuclide;
 use yamc_nuclide::reaction::Reaction;
 use yamc_nuclide::synthesis::{channel_of, Channel};
@@ -255,18 +258,39 @@ struct ResonanceTables {
     reactions: Vec<(i32, ResonanceReaction)>,
     /// Per tally score MT, the reactions it sums with each one's weight: one
     /// for a partial of the score, the count of the particle a production
-    /// score counts.
-    scores: HashMap<i32, Vec<(usize, f64)>>,
+    /// score counts, the reaction's deposit on the stretch for a heating or
+    /// damage-energy score.
+    scores: HashMap<i32, Vec<(usize, Weight)>>,
+}
+
+/// How much of a reaction's change a score takes.
+enum Weight {
+    /// The same at every energy.
+    Constant(f64),
+    /// Per point of the resonance stretch: a deposit per reaction, eV.
+    Table(Vec<f64>),
+}
+
+impl Weight {
+    fn at(&self, (i, f): (usize, f64)) -> f64 {
+        match self {
+            Weight::Constant(w) => *w,
+            Weight::Table(t) => t[i] + f * (t[i + 1] - t[i]),
+        }
+    }
 }
 
 impl ResonanceTables {
     /// Tabulate `replicas` draws of `resonance` under `seed` on `grid`, the
     /// nuclide's grid at the run's temperature, whose partials are `held`.
+    /// `deposits` holds, per heating or damage-energy score MT, each
+    /// reaction's deposit on the grid.
     fn new(
         resonance: &TransportResonance,
         grid: &[f64],
         held: &BTreeMap<i32, Arc<Reaction>>,
         score_mts: &BTreeSet<i32>,
+        deposits: &HashMap<i32, BTreeMap<i32, Vec<f64>>>,
         replicas: usize,
         seed: u64,
     ) -> Result<Self, String> {
@@ -303,10 +327,14 @@ impl ResonanceTables {
         }
         let mut scores = HashMap::new();
         for &x in score_mts {
-            let weights: Vec<(usize, f64)> = reactions
+            let weights: Vec<(usize, Weight)> = reactions
                 .iter()
                 .enumerate()
                 .filter_map(|(m, (mt, _))| {
+                    if let Some(by_mt) = deposits.get(&x) {
+                        let h = by_mt.get(mt)?;
+                        return Some((m, Weight::Table(h[first..first + len].to_vec())));
+                    }
                     let w = if (203..=207).contains(&x) {
                         let counts = endf::reaction::light_particles(*mt)?;
                         counts[(x - 203) as usize] as f64
@@ -315,7 +343,7 @@ impl ResonanceTables {
                     } else {
                         0.0
                     };
-                    (w != 0.0).then_some((m, w))
+                    (w != 0.0).then_some((m, Weight::Constant(w)))
                 })
                 .collect();
             if !weights.is_empty() {
@@ -682,6 +710,49 @@ fn is_fission(mt: i32) -> bool {
     matches!(mt, 18 | 19 | 20 | 21 | 38)
 }
 
+/// The MT whose replica table a score reads: a reaction rate's or a
+/// production's own, MT 301, 901 or 444 for neutron heating, local heating
+/// and damage energy; `None` for flux and photon scores.
+fn score_mt(score: &Score) -> Option<i32> {
+    match score {
+        Score::ReactionRate(r) => Some(r.mt.as_i32()),
+        Score::Production(p) => Some(p.mt.as_i32()),
+        Score::Heating(_) => Some(Response::Heating.mt()),
+        Score::HeatingLocal(_) => Some(Response::HeatingLocal.mt()),
+        Score::DamageEnergy(_) => Some(Response::DamageEnergy.mt()),
+        Score::Flux(_) | Score::PhotonXS(_) => None,
+    }
+}
+
+/// The score table of a heating or damage-energy score `x` (MT 301, 901 or
+/// 444), or `None` for any other MT.
+///
+/// The stored row is the nominal, and a replica moves it by what its
+/// partials' changes deposit, `Σ_mt h_mt Δσ_mt`, with `h_mt` each reaction's
+/// deposit per reaction ([`yamc_nuclide::deposit`]): a covered partial
+/// joins its sources' tables with its cross section (or a derived term's
+/// weight) times `h_mt`. What the partials do not reproduce of the stored
+/// row (fission's share above all) stays nominal.
+fn deposit_table(
+    x: i32,
+    held: &BTreeMap<i32, Arc<Reaction>>,
+    terms_of: &HashMap<i32, PartialTerms>,
+    deposits: &HashMap<i32, BTreeMap<i32, Vec<f64>>>,
+    n: usize,
+) -> Option<ScoreTable> {
+    let by_mt = deposits.get(&x)?;
+    let nominal = held
+        .get(&x)
+        .map_or_else(|| vec![0.0; n], |row| on_grid(row, n));
+    let mut by_source: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
+    for (mt, h) in by_mt {
+        if let (Some(terms), Some(reaction)) = (terms_of.get(mt), held.get(mt)) {
+            add_terms(&mut by_source, terms, &on_grid(reaction, n), |i| h[i]);
+        }
+    }
+    Some((by_source.into_iter().collect(), nominal))
+}
+
 /// The score table of a particle-production score (MT 203 to 207: proton,
 /// deuteron, triton, helion and alpha production), or `None` for any other
 /// MT.
@@ -766,11 +837,7 @@ impl ReplicaContext {
         let score_mts: BTreeSet<i32> = tallies
             .iter()
             .flat_map(|t| t.scores.iter())
-            .filter_map(|s| match s {
-                Score::ReactionRate(r) => Some(r.mt.as_i32()),
-                Score::Production(p) => Some(p.mt.as_i32()),
-                _ => None,
-            })
+            .filter_map(score_mt)
             .collect();
         let mut out = Vec::with_capacity(materials.len());
         let mut registry = ModeRegistry::default();
@@ -1166,8 +1233,31 @@ impl ReplicaContext {
             .map(|(mt, r)| (*mt, on_grid(r, n)))
             .collect();
 
+        // Each reaction's deposit, for the heating and damage-energy scores:
+        // the covered partials' and those the sampled resonances move.
+        let moved: BTreeSet<i32> = terms_of
+            .keys()
+            .copied()
+            .chain(resonance.iter().flat_map(|(r, _)| r.reactions()))
+            .collect();
+        let deposits: HashMap<i32, BTreeMap<i32, Vec<f64>>> = {
+            use rayon::prelude::*;
+            score_mts
+                .iter()
+                .filter_map(|&x| Some((x, Response::from_mt(x)?)))
+                .filter(|(x, _)| held.contains_key(x) && !moved.is_empty())
+                .collect::<Vec<_>>()
+                .into_par_iter()
+                .map(|(x, response)| (x, deposits(&nuclide, t, response, &moved)))
+                .collect()
+        };
+
         let mut scores = HashMap::new();
         for &x in score_mts {
+            if let Some(table) = deposit_table(x, &held, &terms_of, &deposits, n) {
+                scores.insert(x, table);
+                continue;
+            }
             if let Some(table) = production_table(x, &held, &terms_of, n) {
                 scores.insert(x, table);
                 continue;
@@ -1212,6 +1302,7 @@ impl ReplicaContext {
                 &grid,
                 &held,
                 score_mts,
+                &deposits,
                 relative.len(),
                 seed,
             )?),
@@ -1584,9 +1675,11 @@ impl ReplicaContext {
         })
     }
 
-    /// `Σ'_x,k / Σ_x` for a reaction-rate or particle-production score at `e`
-    /// in the material, into `out`; all ones for flux, for a score nothing
-    /// perturbs, and for heating and damage scores, which stay nominal.
+    /// `Σ'_x,k / Σ_x` for a reaction-rate, particle-production, heating or
+    /// damage-energy score at `e` in the material, into `out`; all ones for
+    /// flux and for a score nothing perturbs. A heating or damage-energy
+    /// score moves by the deposit-weighted change of its partials
+    /// ([`deposit_table`]) over the stored row.
     ///
     /// Inside a nuclide's unresolved range a tally reads the total, elastic,
     /// fission, absorption and capture from its band, so that nuclide's
@@ -1603,10 +1696,8 @@ impl ReplicaContext {
     ) {
         out.fill(1.0);
         grad.fill(0.0);
-        let x = match score {
-            Score::ReactionRate(rr) => rr.mt.as_i32(),
-            Score::Production(p) => p.mt.as_i32(),
-            _ => return,
+        let Some(x) = score_mt(score) else {
+            return;
         };
         let Some(m) = self.material_at(slot) else {
             return;
@@ -1667,8 +1758,8 @@ impl ReplicaContext {
                 .as_ref()
                 .and_then(|r| Some((r, r.local(at)?, r.scores.get(&x)?)))
             {
-                for &(m, w) in weights {
-                    res.add(m, local, nuc.density * w, &mut change);
+                for (m, w) in weights {
+                    res.add(*m, local, nuc.density * w.at(local), &mut change);
                 }
             }
         }
@@ -1731,8 +1822,8 @@ impl ReplicaChanges for ReplicaContext {
             }
             if let Some(weights) = local.and_then(|(res, _)| res.scores.get(x)) {
                 let (res, at) = local.expect("checked above");
-                for &(m, w) in weights {
-                    res.add(m, at, w, out);
+                for (m, w) in weights {
+                    res.add(*m, at, w.at(at), out);
                     moved = true;
                 }
             }
@@ -2194,6 +2285,128 @@ mod nc_derived_tests {
             assert!(
                 (sampled / total - 1.0).abs() < 0.06,
                 "Pb208 total at {e} eV: sd {sampled} against {total}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod deposit_tests {
+    //! Heating, local heating and damage energy under the replica weights
+    //! against the rerun rows of the same draws, point by point: both move
+    //! the stored row by `Σ_mt h_mt Δσ_mt`, so a replica's score factor at a
+    //! grid point is the rerun's row over the nominal one.
+    use super::*;
+    use crate::xs_perturbation::perturbed_nuclide;
+    use yamc_tallies::score::{DamageEnergyScore, HeatingLocalScore, HeatingScore};
+    use yani_transmute::covariance_sample::Sampler;
+
+    const SEED: u64 = 5;
+
+    /// `name` alone, with its covariance, or `None` where its fixture
+    /// carries none.
+    fn pure(name: &str, density: f64) -> Option<Material> {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("tests/{name}.arrow"));
+        if !dir.join("covariance.arrow").is_file() {
+            return None;
+        }
+        let mut m = Material::new(
+            HashMap::from([(name.to_string(), 1.0)]),
+            "atom",
+            "g/cm3",
+            Some(density),
+        )
+        .expect("material");
+        m.set_temperature("294");
+        m.read_nuclear_data(
+            &HashMap::from([(name.to_string(), dir.to_string_lossy().into_owned())]),
+            None,
+        )
+        .expect("read nuclear data");
+        m.ensure_covariance_loaded().expect("read covariance");
+        Some(m)
+    }
+
+    #[test]
+    fn replica_deposits_are_the_reruns_rows() {
+        let mut checked = 0;
+        for (name, density) in [("Fe56", 7.87), ("W184", 19.3)] {
+            let Some(m) = pure(name, density) else {
+                eprintln!("skipping {name}: its fixture carries no covariance");
+                continue;
+            };
+            replica_deposits_match(&m, name);
+            checked += 1;
+        }
+        eprintln!("checked {checked} nuclides");
+    }
+
+    fn replica_deposits_match(m: &Material, name: &str) {
+        let replicas = 6;
+        let tally = |score: Score| {
+            let mut t = Tally::new();
+            t.scores = vec![score];
+            Arc::new(t)
+        };
+        let scores = [
+            (Score::Heating(HeatingScore), 301),
+            (Score::HeatingLocal(HeatingLocalScore), 901),
+            (Score::DamageEnergy(DamageEnergyScore), 444),
+        ];
+        let tallies: Vec<Arc<Tally>> = scores.iter().map(|(s, _)| tally(s.clone())).collect();
+        let ctx = ReplicaContext::new(&[Arc::new(m.clone())], &tallies, None, replicas, SEED)
+            .expect("replica context");
+        let (fields, _) = yani_transmute::covariance_fold::transport_fields(m, &Default::default());
+        let cells = fields
+            .iter()
+            .filter_map(|(n, t)| t.field.clone().map(|f| (n.clone(), f)))
+            .collect();
+        let sampler = Sampler::new(&cells, &[]);
+        let data = &m.nuclide_data[name];
+        let energies = data.energy.as_ref().expect("grid")["294"].as_slice();
+        let n = energies.len();
+        let points: Vec<usize> = (1..n - 1)
+            .filter(|&i| energies[i - 1] < energies[i] && energies[i] < energies[i + 1])
+            .step_by(53)
+            .collect();
+        let mut out = vec![0.0; replicas];
+        let mut grad = vec![0.0; ctx.n_modes()];
+        let mut moved = [0.0_f64; 3];
+        for k in 0..replicas {
+            let draw = sampler.draw(SEED, k as u64);
+            let (p, _) = perturbed_nuclide(
+                data,
+                &fields[name],
+                draw.relative(name).expect("relative"),
+                draw.absolute(name).expect("absolute"),
+                None,
+            )
+            .expect("perturb");
+            for (j, (score, mt)) in scores.iter().enumerate() {
+                let before = on_grid(&data.reactions[0][mt], n);
+                let after = on_grid(&p.reactions[0][mt], n);
+                for &i in &points {
+                    if before[i] == 0.0 {
+                        continue;
+                    }
+                    ctx.score_ratio(Some(0), score, energies[i], None, &mut out, &mut grad);
+                    let rerun = after[i] / before[i];
+                    assert!(
+                        (out[k] - rerun).abs() <= 1e-9 * rerun.abs().max(1.0),
+                        "{name} MT {mt} replica {k} at {:e} eV: {} against the rerun's {rerun}",
+                        energies[i],
+                        out[k]
+                    );
+                    moved[j] = moved[j].max((rerun - 1.0).abs());
+                }
+            }
+        }
+        for (j, (_, mt)) in scores.iter().enumerate() {
+            assert!(
+                moved[j] > 1e-3,
+                "{name} MT {mt} moves, by up to {}",
+                moved[j]
             );
         }
     }

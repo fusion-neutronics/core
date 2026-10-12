@@ -13,6 +13,7 @@ pub mod config;
 pub mod covariance;
 pub mod data;
 pub mod delayed_neutrons;
+pub mod deposit;
 pub mod fast_xs;
 pub mod fission_photon;
 pub mod group_structures;
