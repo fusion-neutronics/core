@@ -480,6 +480,15 @@ pub struct Model {
     pub convergence_targets: Vec<yamc_tallies::ConvergenceTarget>,
 }
 
+/// How an error names a material: by name, else by id, else by its slot.
+fn material_label(material: &yamc_materials::material::Material, slot: usize) -> String {
+    match (&material.name, material.material_id) {
+        (Some(name), _) => format!("material '{name}'"),
+        (None, Some(id)) => format!("material {id}"),
+        (None, None) => format!("material in slot {slot}"),
+    }
+}
+
 impl Model {
     /// True when photons will be in flight during the run -- either a
     /// source emits photons, or secondary-photon production is enabled.
@@ -1153,7 +1162,9 @@ impl Model {
 
         for (i, material_arc) in self.geometry.materials_mut().iter_mut().enumerate() {
             let mut material = (**material_arc).clone();
-            let _ = material.ensure_nuclides_loaded();
+            material
+                .ensure_nuclides_loaded()
+                .map_err(|e| format!("{}: {e}", material_label(&material, i)))?;
             Self::prepare_material_photon_data(&mut material, i, ttb_enabled, true)?;
             *material_arc = Arc::new(material);
         }
@@ -1344,7 +1355,9 @@ impl Model {
                 eprintln!("[DEBUG] Material slot {i} calculating macroscopic XS...");
             }
             let mut material = (**material_arc).clone();
-            let _ = material.ensure_nuclides_loaded();
+            material
+                .ensure_nuclides_loaded()
+                .map_err(|e| format!("{}: {e}", material_label(&material, i)))?;
             material.calculate_macroscopic_xs(&mt_filter, true);
             if has_nuclide_tallies {
                 material.populate_per_nuclide_xs();

@@ -1739,11 +1739,9 @@ pub fn get_or_load_nuclide(
     scope: &LoadScope,
 ) -> Result<Arc<Nuclide>, Box<dyn std::error::Error>> {
     // Get path/keyword from map
-    let path_or_keyword = path_map.get(nuclide_name).ok_or_else(|| {
-        format!(
-            "No data file provided for nuclide '{nuclide_name}'. Please supply a path for all nuclides."
-        )
-    })?;
+    let path_or_keyword = path_map
+        .get(nuclide_name)
+        .ok_or_else(|| crate::config::missing_cross_section_message(nuclide_name))?;
 
     // Resolve keywords/URLs to local paths (when download feature is enabled).
     // This is also the download: only the sections `scope` needs are fetched.
