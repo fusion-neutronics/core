@@ -7,6 +7,7 @@ use crate::covariance_fold::{cell_fields, fold_rate_covariance, reachable_mts, F
 use crate::covariance_sample::Sampler;
 use crate::cross_material::CrossMaterial;
 use crate::damage::DamageRequest;
+use crate::isomer_branching_uncertainty::{IsomerCovariance, IsomerRun, IsomerSpectrum};
 use crate::multigroup::{collapse_with_lists, fold_list, scale_rates, Collapsed};
 use crate::results::TransmutationResults;
 use crate::self_shielding::{Shielding, ShieldingInfo};
@@ -332,6 +333,14 @@ pub fn transmute_materials(
     // The report is merged across a material's spectra rather than assigned,
     // so a schedule naming two spectra reports both spectra's nuclides.
     let lists = build_lists(&chain, branch)?;
+    // The MF=40 blocks, read and placed on the lists once for every material,
+    // and only when the isomer source can use them.
+    let isomer = match uncertainty {
+        Some(u) if u.wants(crate::uncertainty::Source::IsomerBranching) => {
+            Some(IsomerCovariance::from_table(branch, &lists)?)
+        }
+        _ => None,
+    };
     let mut shared_spectra: Vec<MultigroupSpectrum> = Vec::new();
     let mut per_spectrum: Vec<PerSpectrum> = Vec::new();
     let mut shared_info: Vec<ShieldingInfo> = Vec::new();
@@ -404,6 +413,7 @@ pub fn transmute_materials(
             shielding: cases[c].shielding.as_ref(),
             lists: &lists,
             cross: &cross,
+            isomer: isomer.as_ref(),
         });
         solve_case(
             &initial[c],
@@ -818,6 +828,8 @@ struct Replicas<'a> {
     lists: &'a Lists<'a>,
     /// The run's cross-material covariance, over every material.
     cross: &'a CrossMaterial,
+    /// The MF=40 covariance placed on `lists`, when the isomer source is on.
+    isomer: Option<&'a IsomerCovariance>,
 }
 
 /// One material's timeline, stepped from `initial` with steps whose spectrum
@@ -876,6 +888,7 @@ fn solve_case(
             r.request,
             r.shielding,
             r.lists,
+            r.isomer,
             None,
             r.cross,
         )?),
@@ -914,6 +927,10 @@ struct ReplicaOutcome {
     decay_branchings_floored: usize,
     /// Statistically drawn rates that came out negative and were floored.
     statistical_floored: usize,
+    /// MF=40 parents drawn, and the stated productions scaled back to the
+    /// drawn total.
+    isomer_branchings_sampled: usize,
+    isomer_branchings_clipped: crate::isomer_branching_uncertainty::Clipped,
 }
 
 /// Load the cross sections a transport-free solve of this material needs, into
@@ -1453,6 +1470,9 @@ pub fn transport_replicas(
         None,
         // No supplied flux, so nothing for a flux replica to re-fold.
         &HashMap::new(),
+        // A tallied split is scored at collisions and carries no energy to
+        // fold MF=40 over (see `Source::IsomerBranching`).
+        None,
         // Always the transport path, even with no statistics to sample: that
         // is what keeps `flux_spectrum` out of it.
         Some(statistics.as_ref().unwrap_or(&no_statistics)),
@@ -1673,6 +1693,7 @@ fn run_replicas(
     request: &DataUncertainty,
     shielding: Option<&Shielding>,
     lists: &Lists<'_>,
+    isomer: Option<&IsomerCovariance>,
     statistical: Option<&TransportStatistics<'_>>,
     cross: &CrossMaterial,
 ) -> Result<(Ensemble, Info), Box<dyn std::error::Error>> {
@@ -1686,6 +1707,7 @@ fn run_replicas(
     let applies = |s: crate::uncertainty::Source| match s {
         crate::uncertainty::Source::Statistical => transport,
         crate::uncertainty::Source::FluxSpectrum => !transport,
+        crate::uncertainty::Source::IsomerBranching => !transport,
         _ => true,
     };
     if !transport && request.flux_response != crate::uncertainty::FluxResponse::default() {
@@ -1941,6 +1963,7 @@ fn run_replicas(
                     &spectrum.masses,
                     &spectrum.boundaries,
                     shielding,
+                    &|_| true,
                 );
                 flux_coverage.rates_without_terms.extend(
                     crate::flux_uncertainty::rates_without_terms(
@@ -1965,6 +1988,58 @@ fn run_replicas(
         }
     }
 
+    // The isomeric split's MF=40 draw, on the spectrum path: each spectrum's
+    // list folds, with the per-group terms of the parents whose MF=40 it
+    // draws, read once into the weights a replica's draw is folded with.
+    // Where no parent the material reaches states anything its lists make,
+    // there is nothing to draw, and the replicas take exactly the path they
+    // took without this source.
+    let want_isomer = !transport && request.wants(crate::uncertainty::Source::IsomerBranching);
+    let (isomer_run, isomer_report) = if want_isomer {
+        let none = IsomerCovariance::default();
+        let covariance = isomer.unwrap_or(&none);
+        let seeds: Vec<&str> = initial
+            .nuclides
+            .keys()
+            .chain(initial.nuclide_data.keys())
+            .map(|s| s.as_str())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let mut reachable = yani::reachable_nuclides(chain, &seeds);
+        for (_, _, folded_chain) in per_spectrum {
+            reachable.extend(yani::reachable_nuclides(folded_chain, &seeds));
+        }
+        let reachable: std::collections::BTreeSet<String> = reachable.into_iter().collect();
+        let keep = |p: &str| covariance.has(p) && reachable.contains(p);
+        let terms: Vec<crate::flux_uncertainty::PerGroupLists> = spectra
+            .iter()
+            .map(|s| {
+                crate::multigroup::per_group_list_rates(
+                    initial,
+                    chain,
+                    lists,
+                    &s.masses,
+                    &s.boundaries,
+                    shielding,
+                    &keep,
+                )
+            })
+            .collect();
+        let views: Vec<IsomerSpectrum> = terms
+            .iter()
+            .zip(spectra)
+            .map(|(t, s)| IsomerSpectrum {
+                lists: t,
+                boundaries: &s.boundaries,
+            })
+            .collect();
+        let (run, report) = IsomerRun::new(covariance, lists, &views, &reachable);
+        (run, Some(report))
+    } else {
+        (None, None)
+    };
+
     // The sources that edit the chain rather than the rates work on copies
     // pruned once to what the material can reach, so each replica copies only
     // the part of the chain its solve walks.
@@ -1978,7 +2053,9 @@ fn run_replicas(
         .iter()
         .flatten()
         .any(|terms| !terms.lists.is_empty());
-    let chains = (edits_chain || refolds).then(|| replica_chains(initial, chain, per_spectrum));
+    // So does an MF=40 replica, which re-folds every list from its draw.
+    let chains = (edits_chain || refolds || isomer_run.is_some())
+        .then(|| replica_chains(initial, chain, per_spectrum));
 
     // Half-lives: sampled per replica from the evaluation's stated sigma, and
     // substituted into every chain the replica is solved with, the base one
@@ -2167,6 +2244,22 @@ fn run_replicas(
         info.not_perturbed
             .insert(0, "activation cross section (MF=33)".to_string());
     }
+    match isomer_report {
+        // Off, or a transport run, whose split is the tallied partials': every
+        // split is held, stated covariance or not.
+        None => info.not_perturbed.insert(
+            0,
+            "isomeric branching covariance (MF=40), every split held".to_string(),
+        ),
+        Some(r) => {
+            info.isomer_branchings_perturbed = r.perturbed;
+            info.no_isomer_branching_uncertainty = r.without;
+            info.isomer_branching_blocks_not_used = r.not_used;
+            info.isomer_branching_covariance_repaired = r.repaired;
+            info.isomer_branching_lognormal_not_carried = r.lognormal_not_carried;
+            info.isomer_production_sigma = r.production_sigma;
+        }
+    }
     if let Some(r) = &resonance {
         info.resonance_parameters = r.methods().clone();
     }
@@ -2268,6 +2361,7 @@ fn run_replicas(
         && no_half_lives
         && no_decay_branchings
         && no_fission_yields
+        && isomer_run.is_none()
         && statistical.is_none()
         && replica_tallies.is_none()
     {
@@ -2337,6 +2431,10 @@ fn run_replicas(
             _ => None,
         };
         let mut decay_branchings_floored = 0usize;
+        // One draw of every MF=40 parent's productions, read by every
+        // spectrum, as the cross sections are.
+        let isomer_draw = isomer_run.as_ref().map(|r| r.draw(request.seed, replica));
+        let mut isomer_branchings_clipped = crate::isomer_branching_uncertainty::Clipped::new();
         // A statistical draw of the whole tallied rate vector, the partials
         // re-folded into the branching the way the nominal was, so an
         // isomeric split moves with the rates it is made of.
@@ -2438,7 +2536,7 @@ fn run_replicas(
                 (Some((totals, chain_k)), 0) => (totals, chain_k),
                 _ => (rates, folded_chain),
             };
-            let (rates, refolded) = match &per_group[idx] {
+            let (rates, flux_lists, refolded) = match &per_group[idx] {
                 Some(terms) => {
                     let delta = crate::flux_uncertainty::flux_deviates(
                         &terms.error,
@@ -2449,32 +2547,30 @@ fn run_replicas(
                     );
                     let mut rates =
                         crate::flux_uncertainty::perturb_rates(rates, &terms.rates, &delta);
+                    let flux_lists = (!terms.lists.is_empty())
+                        .then(|| crate::flux_uncertainty::perturb_lists(&terms.lists, &delta));
                     // The branching re-folded from this replica's productions,
                     // into the unfolded chain the nominal was folded into:
                     // the `(n,n')` isomer rates are re-made and every split
                     // moves with the bins its states are produced in. Pruned,
                     // which leaves every parent the material reaches as it is.
-                    let refolded = match &chains {
-                        Some(c) if !terms.lists.is_empty() => Some(
-                            fold_branching_into_chain(
-                                &c.base,
-                                lists,
-                                &crate::flux_uncertainty::perturb_lists(&terms.lists, &delta),
-                                &mut rates,
-                            )?
-                            .0,
-                        ),
+                    // With an MF=40 draw the re-fold waits for the
+                    // cross-section draw, which it reads, and is made below.
+                    let refolded = match (&chains, &flux_lists) {
+                        (Some(c), Some(folds)) if isomer_draw.is_none() => {
+                            Some(fold_branching_into_chain(&c.base, lists, folds, &mut rates)?.0)
+                        }
                         _ => None,
                     };
-                    (rates, refolded)
+                    (rates, flux_lists, refolded)
                 }
-                None => (rates.clone(), None),
+                None => (rates.clone(), None, None),
             };
             // A transport replica's rates already carry its cross sections.
-            let rates = if replica_tallies.is_some() {
-                rates
+            let mut drawn_rates = if replica_tallies.is_some() {
+                rates.clone()
             } else {
-                let (rates, n, floored) = draw_sampler.perturb_with(
+                let (drawn, n, floored) = draw_sampler.perturb_with(
                     &xs_draw,
                     idx,
                     &rates,
@@ -2482,8 +2578,39 @@ fn run_replicas(
                 );
                 rates_sampled += n;
                 rates_floored += floored;
-                rates
+                drawn
             };
+            // The MF=40 draw: every list re-folded, from the flux draw's
+            // folds where there is one, with the stated productions drawn.
+            // An isomer listed alone is made at its drawn production, so the
+            // cross-section draw of its reaction, the ratio of the rates
+            // either side of it, is divided back out of it, and only of it.
+            let refolded = match (&chains, &isomer_run, &isomer_draw) {
+                (Some(c), Some(run), Some(draw)) => {
+                    let base = flux_lists.as_ref().unwrap_or_else(|| run.nominal(idx));
+                    let rate = |r: &ReactionRates, p: &str, k: &str| {
+                        r.get(p)
+                            .and_then(|kinds| kinds.get(k))
+                            .copied()
+                            .unwrap_or(0.0)
+                    };
+                    let ratio = |p: &str, k: &str| {
+                        let before = rate(&rates, p, k);
+                        if before > 0.0 {
+                            rate(&drawn_rates, p, k) / before
+                        } else {
+                            1.0
+                        }
+                    };
+                    let (folds, clipped) = run.perturb(idx, draw, lists, base, &ratio);
+                    for (key, n) in clipped {
+                        *isomer_branchings_clipped.entry(key).or_insert(0) += n;
+                    }
+                    Some(fold_branching_into_chain(&c.base, lists, &folds, &mut drawn_rates)?.0)
+                }
+                _ => refolded,
+            };
+            let rates = drawn_rates;
             let weights = match replica_tallies {
                 Some(t) => &t.fy_weights[replica as usize],
                 None => weights,
@@ -2524,6 +2651,8 @@ fn run_replicas(
             decay_branchings_floored,
             half_lives: edits.half_lives,
             statistical_floored,
+            isomer_branchings_sampled: isomer_run.as_ref().map_or(0, IsomerRun::parents),
+            isomer_branchings_clipped,
         })
     };
 
@@ -2559,6 +2688,10 @@ fn run_replicas(
             info.decay_branchings_sampled += outcome.decay_branchings_sampled;
             info.decay_branchings_floored += outcome.decay_branchings_floored;
             info.statistical_floored += outcome.statistical_floored;
+            info.isomer_branchings_sampled += outcome.isomer_branchings_sampled;
+            for (key, n) in outcome.isomer_branchings_clipped {
+                *info.isomer_branchings_clipped.entry(key).or_insert(0) += n;
+            }
             if statistical.is_some() {
                 info.statistical_sampled += info.statistical_rates;
             }
@@ -2666,6 +2799,7 @@ fn run_replicas(
                     &alone,
                     shielding,
                     lists,
+                    isomer,
                     statistical_in,
                     cross,
                 )?;

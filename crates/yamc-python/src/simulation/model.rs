@@ -1634,9 +1634,13 @@ impl PyModel {
     ///           DY the evaluation states on each.
     ///
     ///         ``"flux_spectrum"`` does not apply: there is no supplied spectrum,
-    ///         and the flux's error is the statistical one. With replica weights
-    ///         every replica's rates come from the same histories as the
-    ///         nominal ones, so the differences between replicas are resolved
+    ///         and the flux's error is the statistical one.
+    ///         Nor does ``"isomer_branching"``: the isomeric split here is the
+    ///         tallied partials', scored at collisions with no energy to fold
+    ///         the MF=40 covariance over, so every split is held and the report
+    ///         says so under ``not_perturbed``.
+    ///         With replica weights every replica's rates come from the same
+    ///         histories as the nominal ones, so the differences between replicas are resolved
     ///         far more finely than the rates themselves, and ``"statistical"``
     ///         adds the nominal tally's error to each replica once; the sources
     ///         are independent, so ``sources=["statistical"]`` isolates the

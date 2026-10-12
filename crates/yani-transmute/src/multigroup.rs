@@ -1943,6 +1943,13 @@ pub fn per_group_reaction_rates(
 /// transport data from its partials alone over the groups with flux. The
 /// folded sums are kept beside the terms, so a replica re-folds the branching
 /// from a perturbation of exactly what the nominal run folded.
+///
+/// `terms_for` says which parents' per-group terms to keep. Every list is
+/// folded whatever it says, since a re-fold needs every parent's sums, but a
+/// parent it turns down keeps empty terms, which a perturbation reads as no
+/// change. The flux source keeps them all; the isomer source only those of
+/// the parents whose MF=40 it draws, which on a whole library is a small
+/// share of a table that runs to tens of MB at 709 groups.
 pub(crate) fn per_group_list_rates(
     material: &Material,
     chain: &HashMap<String, ChainNuclide>,
@@ -1950,6 +1957,7 @@ pub(crate) fn per_group_list_rates(
     multigroup_flux: &[f64],
     group_boundaries: &[f64],
     shielding: Option<&Shielding>,
+    terms_for: &(dyn Fn(&str) -> bool + Sync),
 ) -> crate::flux_uncertainty::PerGroupLists {
     let n_groups = multigroup_flux.len();
     let setup = CollapseSetup::new(material, multigroup_flux, shielding);
@@ -1963,9 +1971,14 @@ pub(crate) fn per_group_list_rates(
     let fold = |bound: &Bound<'_, '_>,
                 groups: &mut dyn Iterator<Item = usize>,
                 shape: Option<&FluxShape>| {
-        let curves = bound.rule.curves.len();
-        let mut production = vec![vec![0.0; n_groups]; curves];
-        let mut total = vec![0.0; n_groups];
+        let keep = terms_for(&bound.rule.parent);
+        let (curves, n) = if keep {
+            (bound.rule.curves.len(), n_groups)
+        } else {
+            (0, 0)
+        };
+        let mut production = vec![vec![0.0; n]; curves];
+        let mut total = vec![0.0; n];
         let folded = fold_list_by_group(
             bound,
             multigroup_flux,
@@ -1974,6 +1987,9 @@ pub(crate) fn per_group_list_rates(
             shape,
             1.0,
             |g, group, phi| {
+                if !keep {
+                    return;
+                }
                 for (k, p) in group.production.iter().enumerate() {
                     production[k][g] = p * phi;
                 }
