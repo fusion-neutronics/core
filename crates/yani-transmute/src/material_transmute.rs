@@ -304,6 +304,8 @@ pub fn transmute_materials(
     let mut initial: Vec<Material> = Vec::with_capacity(cases.len());
     for (c, case) in cases.iter_mut().enumerate() {
         check_chain_drives(case.material, &case.steps, &chain).map_err(|e| named(c, ids[c], e))?;
+        check_cross_sections_found(case.material, &case.steps, &chain)
+            .map_err(|e| named(c, ids[c], e))?;
         preload_activation_data(
             case.material,
             &chain,
@@ -713,6 +715,42 @@ fn check_chain_drives(
         held.join(" "),
     )
     .into())
+}
+
+/// Refuse to irradiate a material when its own nuclides have no neutron cross
+/// sections to be found.
+///
+/// The products are another matter: a library may legitimately not publish
+/// some of them, and a product with no data still decays. But the composition
+/// with no cross sections cannot activate at all, and with no library
+/// configured the solve used to return pure decay of an unirradiated material,
+/// zero activity, without a word. Only the chain's reactive nuclides count,
+/// since nothing reads the cross sections of the others, and only when a step
+/// irradiates.
+fn check_cross_sections_found(
+    material: &Material,
+    steps: &[TransmuteStep],
+    chain: &HashMap<String, ChainNuclide>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !steps.iter().any(|st| st.irradiation.is_some()) {
+        return Ok(());
+    }
+    let cfg = yamc_nuclide::config::CONFIG
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let mut missing: Vec<&str> = material
+        .nuclides
+        .keys()
+        .filter(|n| chain.get(*n).is_some_and(|cn| !cn.reactions.is_empty()))
+        .filter(|n| !material.nuclide_data.contains_key(*n))
+        .filter(|n| cfg.get_cross_section(n).is_none())
+        .map(String::as_str)
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    missing.sort_unstable();
+    Err(cfg.missing_cross_sections(&missing).into())
 }
 
 /// Everything a collapse reads, so two materials with equal keys collapse to

@@ -116,6 +116,19 @@ fn expand_composition_entry(
 }
 
 impl PyMaterial {
+    /// Load the neutron cross sections a neutron query needs, or say why
+    /// there are none.
+    ///
+    /// The core loads on demand too, but where a query cannot return an error
+    /// it panics, which reaches Python as a ``PanicException`` that ``except
+    /// Exception`` does not catch. Loading here first turns a missing
+    /// library into a ``ValueError`` naming how to configure one.
+    fn load_neutron_data(&mut self) -> PyResult<()> {
+        self.internal
+            .ensure_nuclides_loaded()
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
     /// The factor that turns a per-cm3 quantity into the one `per` asks for.
     ///
     /// Activity, decay heat and the photon spectrum all count atoms, and the
@@ -221,14 +234,19 @@ impl PyMaterial {
     ///
     /// Returns:
     ///     Optional[float]: Sampled distance in cm, or None if total XS unavailable.
-    fn sample_distance_to_collision(&self, energy: f64, seed: Option<u64>) -> Option<f64> {
+    fn sample_distance_to_collision(
+        &mut self,
+        energy: f64,
+        seed: Option<u64>,
+    ) -> PyResult<Option<f64>> {
         use rand::rngs::StdRng;
         use rand::SeedableRng;
+        self.load_neutron_data()?;
         let mut rng = match seed {
             Some(s) => StdRng::seed_from_u64(s),
             None => StdRng::seed_from_u64(12345),
         };
-        self.internal.sample_distance_to_collision(energy, &mut rng)
+        Ok(self.internal.sample_distance_to_collision(energy, &mut rng))
     }
 
     /// Create a new material with a declarative composition and density.
@@ -717,8 +735,9 @@ impl PyMaterial {
     /// Returns:
     ///     List[float]: Energy grid in eV.
     #[pyo3(text_signature = "(self)")]
-    fn unified_energy_grid_neutron(&mut self) -> Vec<f64> {
-        self.internal.unified_energy_grid_neutron()
+    fn unified_energy_grid_neutron(&mut self) -> PyResult<Vec<f64>> {
+        self.load_neutron_data()?;
+        Ok(self.internal.unified_energy_grid_neutron())
     }
 
     /// Calculate microscopic neutron cross sections on the unified energy grid.
@@ -732,9 +751,11 @@ impl PyMaterial {
     fn calculate_microscopic_xs_neutron(
         &mut self,
         mt_filter: Option<Vec<i32>>,
-    ) -> HashMap<String, HashMap<i32, Vec<f64>>> {
-        self.internal
-            .calculate_microscopic_xs_neutron(mt_filter.as_ref())
+    ) -> PyResult<HashMap<String, HashMap<i32, Vec<f64>>>> {
+        self.load_neutron_data()?;
+        Ok(self
+            .internal
+            .calculate_microscopic_xs_neutron(mt_filter.as_ref()))
     }
 
     /// Number density (atoms / barn-cm) per nuclide.
@@ -1180,8 +1201,9 @@ impl PyMaterial {
     ///
     /// Returns:
     ///     Optional[float]: Mean free path (cm) or None if total XS unavailable.
-    fn mean_free_path_neutron(&mut self, energy: f64) -> Option<f64> {
-        self.internal.mean_free_path_neutron(energy)
+    fn mean_free_path_neutron(&mut self, energy: f64) -> PyResult<Option<f64>> {
+        self.load_neutron_data()?;
+        Ok(self.internal.mean_free_path_neutron(energy))
     }
 
     /// Sorted list of all unique MT reaction numbers present.
@@ -1203,9 +1225,10 @@ impl PyMaterial {
     /// Returns:
     ///     str: Selected nuclide name.
     #[pyo3(signature = (energy, seed=None))]
-    fn sample_interacting_nuclide(&self, energy: f64, seed: Option<u64>) -> PyResult<String> {
+    fn sample_interacting_nuclide(&mut self, energy: f64, seed: Option<u64>) -> PyResult<String> {
         use rand::rngs::StdRng;
         use rand::SeedableRng;
+        self.load_neutron_data()?;
         let mut rng = match seed {
             Some(s) => StdRng::seed_from_u64(s),
             None => StdRng::seed_from_u64(12345),
@@ -1236,6 +1259,7 @@ impl PyMaterial {
         >,
         temperature: Option<String>,
     ) -> PyResult<(Vec<f64>, Vec<f64>)> {
+        self.load_neutron_data()?;
         let temp_ref = temperature.as_deref();
         // Handle both int and str inputs
         if let Ok(mt_number) = reaction.extract::<i32>() {
