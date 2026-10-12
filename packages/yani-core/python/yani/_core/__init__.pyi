@@ -3370,9 +3370,11 @@ class TransmutationResults:
           the relative sigma MF=40 states for the product's production, folded
           against the spectrum (the largest over the run's spectra).
           ``isomer_branchings_sampled`` counts the draws, one per drawn parent
-          per replica, and ``isomer_branchings_clipped`` the reactions whose
-          drawn isomer productions exceeded the drawn total and were scaled
-          back to it.
+          per replica. ``isomer_branchings_clipped`` gives, as
+          ``"Parent reaction Product"``, how many list draws (one per replica
+          per spectrum) scaled the product's drawn production back to the
+          drawn reaction total, the stated productions of its list having
+          come out above it; a product never clipped is absent.
         - ``statistical_rates``: with the ``"statistical"`` source on a
           transport run, how many tallied rates were sampled from their
           covariance; ``statistical_floored`` / ``statistical_sampled`` count

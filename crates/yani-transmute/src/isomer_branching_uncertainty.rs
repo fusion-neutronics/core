@@ -45,8 +45,8 @@
 //!   production is the evaluation's absolute partial, so the isomer is made at
 //!   its drawn production whatever the replica's MF=33 draw did to the
 //!   reaction total, and the ground state takes the rest. Above the drawn
-//!   total the stated productions are scaled back to it, and the draw is
-//!   counted (`Info::isomer_branchings_clipped`). A state with no MF=40 keeps
+//!   total the stated productions are scaled back to it, and each is
+//!   counted by name (`Info::isomer_branchings_clipped`). A state with no MF=40 keeps
 //!   its nominal share of the total, as without this source, and so moves
 //!   with the total's MF=33 draw.
 //!
@@ -521,6 +521,10 @@ pub(crate) struct IsomerSpectrum<'a> {
 /// One replica's draw: per drawn parent, its multipliers minus one.
 pub(crate) type IsomerDraw = Vec<crate::covariance_sample::GaussianDraw>;
 
+/// Per `(parent, reaction, product)`, the list draws whose stated production
+/// of the product was scaled back to the drawn reaction total.
+pub(crate) type Clipped = BTreeMap<(String, String, String), usize>;
+
 impl IsomerRun {
     /// Read `covariance` against `spectra` for the parents in `reachable`.
     ///
@@ -721,8 +725,8 @@ impl IsomerRun {
     /// resonance draws, one where neither moved it. A stated production of a
     /// list whose ground takes the rest does not follow it; everything else
     /// on such a list does, so the shares nothing states are kept. Returns the
-    /// folds and how many lists' stated productions had to be scaled back to
-    /// the drawn total.
+    /// folds and, keyed `(parent, reaction, product)`, the stated productions
+    /// that had to be scaled back to the drawn total (one each).
     pub(crate) fn perturb(
         &self,
         idx: usize,
@@ -730,9 +734,9 @@ impl IsomerRun {
         lists: &Lists<'_>,
         base: &HashMap<String, Vec<Option<ListRates>>>,
         total_ratio: &dyn Fn(&str, &str) -> f64,
-    ) -> (HashMap<String, Vec<Option<ListRates>>>, usize) {
+    ) -> (HashMap<String, Vec<Option<ListRates>>>, Clipped) {
         let spectrum = &self.spectra[idx];
-        let mut clipped = 0usize;
+        let mut clipped = Clipped::new();
         let mut out = base.clone();
         for (parent, per) in out.iter_mut() {
             let Some(rules) = lists.get(parent) else {
@@ -783,7 +787,12 @@ impl IsomerRun {
                 // clips an absolute partial above it.
                 let room = folded.total - held;
                 let scale = if folded.has_total && drawn > 0.0 && held + drawn > folded.total {
-                    clipped += 1;
+                    for (k, curve) in rule.curves.iter().enumerate() {
+                        if rule.produces[k] && s[k] > 0.0 {
+                            let key = (parent.clone(), rule.kind.clone(), curve.target.clone());
+                            *clipped.entry(key).or_insert(0) += 1;
+                        }
+                    }
                     room.max(0.0) / drawn
                 } else {
                     1.0
@@ -1243,7 +1252,7 @@ mod tests {
         for replica in 0..4000 {
             let draw = run.draw(7, replica);
             let (out, clipped) = run.perturb(0, &draw, &lists, &base, &|_, _| 1.0);
-            assert_eq!(clipped, 0);
+            assert!(clipped.is_empty());
             let p = &out["Nb93"][0].as_ref().unwrap().production;
             ground.push(p[0] / 3.0);
             isomer.push(p[1]);
@@ -1349,7 +1358,16 @@ mod tests {
         for replica in 0..400 {
             let draw = run.draw(5, replica);
             let (out, clipped) = run.perturb(0, &draw, &lists, &base, &|_, _| 1.25);
-            clipped_any += clipped;
+            if !clipped.is_empty() {
+                // Each stated product of the list is named, once per
+                // clipped draw: the ground states its (negligible) MF=40 too.
+                let key = |p: &str| ("Nb93".to_string(), "(n,2n)".to_string(), p.to_string());
+                assert_eq!(
+                    clipped,
+                    Clipped::from([(key("Nb92"), 1), (key("Nb92_m1"), 1)])
+                );
+                clipped_any += 1;
+            }
             let folded = out["Nb93"][0].as_ref().unwrap();
             assert!((folded.total - 5.0).abs() < 1e-12);
             let sum: f64 = folded.production.iter().sum();
@@ -1358,7 +1376,7 @@ mod tests {
                 "{sum} > {}",
                 folded.total
             );
-            if clipped == 0 {
+            if clipped.is_empty() {
                 // The ground's stated draw is negligible, so it is about
                 // three times its 1.0 multiplier: unmoved by the total's draw.
                 assert!((folded.production[0] / 3.0 - 1.0).abs() < 0.01);
