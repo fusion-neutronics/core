@@ -7339,6 +7339,7 @@ version = "0.1.0"
 dependencies = [
  "arrow-ipc",
  "endf",
+ "faer",
  "lzma-rs",
  "rayon",
  "tempfile",

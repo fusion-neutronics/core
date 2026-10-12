@@ -332,9 +332,16 @@ fn f_functions(a: f64) -> [f64; 5] {
 /// Each half-line is reduced to non-negative arguments, where `F_n` is a sum of
 /// positive terms, so a difference of `F_n` loses no more than the ratio of
 /// their sizes; across zero the two halves are added.
+#[cfg(test)]
 fn h_functions(a: f64, b: f64) -> [f64; 5] {
-    let positive = |lo: f64, hi: f64| {
-        let (fl, fh) = (f_functions(lo), f_functions(hi));
+    h_functions_from(a, b, &mut f_functions)
+}
+
+/// [`h_functions`] with `F_n` taken from `f`, which [`FunctionCache`] uses to
+/// evaluate each `F_n` once where neighbouring stretches share an end.
+fn h_functions_from(a: f64, b: f64, f: &mut impl FnMut(f64) -> [f64; 5]) -> [f64; 5] {
+    let mut positive = |lo: f64, hi: f64| {
+        let (fl, fh) = (f(lo), f(hi));
         std::array::from_fn(|n| fl[n] - fh[n])
     };
     let reflect = |h: [f64; 5]| -> [f64; 5] {
@@ -348,6 +355,47 @@ fn h_functions(a: f64, b: f64) -> [f64; 5] {
         let below = reflect(positive(0.0, -a));
         let above = positive(0.0, b);
         std::array::from_fn(|n| below[n] + above[n])
+    }
+}
+
+/// The last few [`f_functions`] evaluated, by the bits of their argument.
+///
+/// Consecutive stretches of a table share an end, so `F_n` at `b - t` for
+/// one is `F_n` at `a - t` for the next, the same argument to the bit; each
+/// `erfc` and exponential is then taken once per point of the table rather
+/// than twice. The values are the function's own, so nothing changes but the
+/// count.
+struct FunctionCache {
+    keys: [u64; 4],
+    filled: [bool; 4],
+    values: [[f64; 5]; 4],
+    next: usize,
+}
+
+impl FunctionCache {
+    fn new() -> Self {
+        Self {
+            keys: [0; 4],
+            filled: [false; 4],
+            values: [[0.0; 5]; 4],
+            next: 0,
+        }
+    }
+
+    fn get(&mut self, a: f64) -> [f64; 5] {
+        let key = a.to_bits();
+        for k in 0..4 {
+            if self.filled[k] && self.keys[k] == key {
+                return self.values[k];
+            }
+        }
+        let v = f_functions(a);
+        let k = self.next;
+        self.keys[k] = key;
+        self.filled[k] = true;
+        self.values[k] = v;
+        self.next = (k + 1) % 4;
+        v
     }
 }
 
@@ -411,8 +459,16 @@ impl GaussLegendre {
 /// of subtracting the two when `st` is small.
 fn kernel(s: f64, t: f64) -> f64 {
     let d = s - t;
-    (-d * d).exp() * -(-4.0 * s * t).exp_m1()
+    let z = 4.0 * s * t;
+    // `1 - exp(-z)` is 1 to the bit once `exp(-z)` is below half an ulp of
+    // one (`z` past 37.4), which is every point above a few `kT/A`, so the
+    // second exponential is not taken there.
+    let far = if z > FAR { 1.0 } else { -(-z).exp_m1() };
+    (-d * d).exp() * far
 }
+
+/// Past this `4st`, [`kernel`]'s `1 - exp(-4st)` is exactly one.
+const FAR: f64 = 50.0;
 
 // ---------------------------------------------------------------------------
 // Forward broadening
@@ -421,7 +477,8 @@ fn kernel(s: f64, t: f64) -> f64 {
 /// A 0 K cross section in velocity units: `x = √(αE)`, values unchanged.
 struct VelocityTable<'a> {
     x: Vec<f64>,
-    sigma: &'a [f64],
+    /// One or more cross sections on the same points.
+    sigmas: &'a [&'a [f64]],
 }
 
 /// One stretch of the 0 K cross section, in `x`.
@@ -483,6 +540,7 @@ fn quadratic_times_square(u: f64, c0: f64, c1: f64, c2: f64) -> [f64; 5] {
 
 /// `∫_a^b (x/y)² σ₀(x) [exp(-(x - y)²) - exp(-(x + y)²)] dx/√π` over one
 /// stretch.
+#[cfg(test)]
 fn stretch_integral(
     stretch: Stretch,
     a: f64,
@@ -491,40 +549,113 @@ fn stretch_integral(
     reach: f64,
     short: &GaussLegendre,
 ) -> f64 {
+    let mut out = [0.0];
+    stretch_integrals(
+        |_| stretch,
+        &mut out,
+        a,
+        b,
+        y,
+        reach,
+        short,
+        &mut FunctionCache::new(),
+    );
+    out[0]
+}
+
+/// [`stretch_integral`] for several cross sections on one stretch at once,
+/// column `k`'s stretch `stretch(k)`, each added to `out[k]`.
+///
+/// The kernel and the `F_n` depend on the stretch's ends and `y` alone, so
+/// they are taken once for every column, and each column's arithmetic is
+/// otherwise exactly [`stretch_integral`]'s, so each comes out as it would
+/// on its own.
+#[allow(clippy::too_many_arguments)]
+fn stretch_integrals(
+    stretch: impl Fn(usize) -> Stretch,
+    out: &mut [f64],
+    a: f64,
+    b: f64,
+    y: f64,
+    reach: f64,
+    short: &GaussLegendre,
+    cache: &mut FunctionCache,
+) {
     if b - a < SHORT {
         let inv_y = 1.0 / y;
-        return FRAC_1_SQRT_PI
-            * short.integrate(a, b, |x| {
-                let r = x * inv_y;
-                r * r * stretch.at(a, b, x) * kernel(x, y)
-            });
+        let (mid, half) = (0.5 * (a + b), 0.5 * (b - a));
+        let points = short.nodes.len();
+        let mut xs = [0.0; SHORT_POINTS];
+        let mut kernels = [0.0; SHORT_POINTS];
+        for k in 0..points {
+            let x = mid + half * short.nodes[k];
+            xs[k] = x;
+            kernels[k] = kernel(x, y);
+        }
+        for (column, o) in out.iter_mut().enumerate() {
+            let stretch = stretch(column);
+            let sum: f64 = short
+                .weights
+                .iter()
+                .zip(xs.iter().zip(&kernels))
+                .map(|(&w, (&x, &kernel))| {
+                    let r = x * inv_y;
+                    w * (r * r * stretch.at(a, b, x) * kernel)
+                })
+                .sum();
+            *o += FRAC_1_SQRT_PI * (sum * half);
+        }
+        return;
     }
-    let mut total = 0.0;
+    let mut totals = [0.0_f64; MANY];
+    debug_assert!(out.len() <= MANY);
     for (t, sign) in [(y, 1.0), (-y, -1.0)] {
         // The second exponential is exp(-(x + y)²), which is negligible once
         // the stretch starts `reach` widths above -y.
         if a - t > reach {
             continue;
         }
-        let c = stretch.coefficients(a, b, t);
-        let h = h_functions(a - t, b - t);
-        let sum: f64 = c.iter().zip(&h).map(|(c, h)| c * h).sum();
-        total += sign * sum;
+        let h = h_functions_from(a - t, b - t, &mut |v| cache.get(v));
+        for (column, total) in totals.iter_mut().enumerate().take(out.len()) {
+            let c = stretch(column).coefficients(a, b, t);
+            let sum: f64 = c.iter().zip(&h).map(|(c, h)| c * h).sum();
+            *total += sign * sum;
+        }
     }
-    total
+    for (o, total) in out.iter_mut().zip(totals) {
+        *o += total;
+    }
 }
 
+/// The most cross sections [`broaden_many`] takes in one pass.
+const MANY: usize = 8;
+
 impl VelocityTable<'_> {
-    /// The broadened cross section at `y > 0`.
-    fn broaden_at(&self, y: f64, reach: f64, short: &GaussLegendre) -> f64 {
+    /// Every column's broadened cross section at `y > 0`, into `out`.
+    fn broaden_at(
+        &self,
+        y: f64,
+        reach: f64,
+        short: &GaussLegendre,
+        cache: &mut FunctionCache,
+        out: &mut [f64],
+    ) {
         let x = &self.x;
-        let s = self.sigma;
+        let s = &self.sigmas;
         let n = x.len();
         let (lo, hi) = (y - reach, y + reach);
-        let mut total = 0.0;
+        out.fill(0.0);
         if x[0] > lo {
-            let c = s[0] * x[0];
-            total += stretch_integral(Stretch::OneOverV { c }, 0.0, x[0], y, reach, short);
+            stretch_integrals(
+                |k| Stretch::OneOverV { c: s[k][0] * x[0] },
+                out,
+                0.0,
+                x[0],
+                y,
+                reach,
+                short,
+                cache,
+            );
         }
         // Intervals [x[i], x[i + 1]] that reach into the window.
         let first = x.partition_point(|&v| v <= lo).saturating_sub(1);
@@ -536,17 +667,32 @@ impl VelocityTable<'_> {
             if b <= lo || b <= a {
                 continue;
             }
-            let stretch = Stretch::Linear {
-                s0: s[i],
-                s1: s[i + 1],
-            };
-            total += stretch_integral(stretch, a, b, y, reach, short);
+            stretch_integrals(
+                |k| Stretch::Linear {
+                    s0: s[k][i],
+                    s1: s[k][i + 1],
+                },
+                out,
+                a,
+                b,
+                y,
+                reach,
+                short,
+                cache,
+            );
         }
         if x[n - 1] < hi {
-            let stretch = Stretch::Constant { s: s[n - 1] };
-            total += stretch_integral(stretch, x[n - 1], f64::INFINITY, y, reach, short);
+            stretch_integrals(
+                |k| Stretch::Constant { s: s[k][n - 1] },
+                out,
+                x[n - 1],
+                f64::INFINITY,
+                y,
+                reach,
+                short,
+                cache,
+            );
         }
-        total
     }
 }
 
@@ -589,7 +735,38 @@ pub fn broaden_within(
             "the kernel's reach must be positive, got {reach}"
         )));
     }
-    check_table("the 0 K cross section", energy, sigma)?;
+    let mut out = broaden_many_within(energy, &[sigma], awr, temperature, at, reach)?;
+    Ok(out.pop().expect("one cross section"))
+}
+
+/// [`broaden`] for several cross sections on the same energies, `sigmas`,
+/// each broadened exactly as [`broaden`] broadens it on its own, to the bit.
+///
+/// The kernel and the `erfc` and exponentials of the closed form depend on
+/// the energies alone, so broadening the reactions of one table together
+/// takes them once for all of them, which is most of the cost.
+pub fn broaden_many(
+    energy: &[f64],
+    sigmas: &[&[f64]],
+    awr: f64,
+    temperature: f64,
+    at: &[f64],
+) -> Result<Vec<Vec<f64>>> {
+    broaden_many_within(energy, sigmas, awr, temperature, at, WINDOW)
+}
+
+/// [`broaden_many`] with [`broaden_within`]'s reach.
+fn broaden_many_within(
+    energy: &[f64],
+    sigmas: &[&[f64]],
+    awr: f64,
+    temperature: f64,
+    at: &[f64],
+    reach: f64,
+) -> Result<Vec<Vec<f64>>> {
+    for sigma in sigmas {
+        check_table("the 0 K cross section", energy, sigma)?;
+    }
     check_awr_temperature(awr, temperature)?;
     if let Some(e) = at.iter().find(|e| !(e.is_finite() && **e > 0.0)) {
         return Err(invalid(format!(
@@ -597,18 +774,34 @@ pub fn broaden_within(
         )));
     }
     if temperature == 0.0 {
-        return Ok(at.iter().map(|&e| interpolate(energy, sigma, e)).collect());
+        return Ok(sigmas
+            .iter()
+            .map(|sigma| at.iter().map(|&e| interpolate(energy, sigma, e)).collect())
+            .collect());
     }
     let alpha = alpha(awr, temperature);
-    let table = VelocityTable {
-        x: energy.iter().map(|&e| (alpha * e).sqrt()).collect(),
-        sigma,
-    };
+    let x: Vec<f64> = energy.iter().map(|&e| (alpha * e).sqrt()).collect();
     let short = GaussLegendre::new(SHORT_POINTS);
-    Ok(at
+    let mut out: Vec<Vec<f64>> = sigmas
         .iter()
-        .map(|&e| table.broaden_at((alpha * e).sqrt(), reach, &short))
-        .collect())
+        .map(|_| Vec::with_capacity(at.len()))
+        .collect();
+    for chunk in (0..sigmas.len()).step_by(MANY) {
+        let columns = &sigmas[chunk..(chunk + MANY).min(sigmas.len())];
+        let table = VelocityTable {
+            x: x.clone(),
+            sigmas: columns,
+        };
+        let mut cache = FunctionCache::new();
+        let mut values = vec![0.0; columns.len()];
+        for &e in at {
+            table.broaden_at((alpha * e).sqrt(), reach, &short, &mut cache, &mut values);
+            for (o, v) in out[chunk..].iter_mut().zip(&values) {
+                o.push(*v);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// A 0 K cross section at `e` under the same continuation [`broaden`] uses.
