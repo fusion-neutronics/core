@@ -1201,6 +1201,26 @@ impl PyTransmutationResults {
     ///   cannot carry). ``decay_branchings_floored`` /
     ///   ``decay_branchings_sampled`` count draws whose complement was pulled
     ///   back above zero and draws made.
+    /// - ``isomer_branchings_perturbed``: with the ``"isomer_branching"``
+    ///   source, the reachable reactions, as ``"Parent reaction"``, whose
+    ///   isomeric split was drawn from the MF=40 covariance of at least one of
+    ///   their final states. ``no_isomer_branching_uncertainty`` lists those
+    ///   whose split can move but whose evaluation states no MF=40 on any
+    ///   state the run folds, held at their nominal shares, a gap.
+    ///   ``isomer_branching_blocks_not_used`` gives, per parent, the MF=40
+    ///   blocks not used, counted by why, a gap.
+    ///   ``isomer_branching_covariance_repaired`` and
+    ///   ``isomer_branching_lognormal_not_carried`` are the MF=40 matrices
+    ///   repaired to the nearest correlation matrix (a gap) and those not a
+    ///   lognormal's (not a gap), with the same entries as
+    ///   ``covariance_repairs`` and ``lognormal_not_carried``.
+    ///   ``isomer_production_sigma`` gives, as ``"Parent reaction Product"``,
+    ///   the relative sigma MF=40 states for the product's production, folded
+    ///   against the spectrum (the largest over the run's spectra).
+    ///   ``isomer_branchings_sampled`` counts the draws, one per drawn parent
+    ///   per replica, and ``isomer_branchings_clipped`` the reactions whose
+    ///   drawn isomer productions exceeded the drawn total and were scaled
+    ///   back to it.
     /// - ``statistical_rates``: with the ``"statistical"`` source on a
     ///   transport run, how many tallied rates were sampled from their
     ///   covariance; ``statistical_floored`` / ``statistical_sampled`` count

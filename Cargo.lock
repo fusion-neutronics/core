@@ -7337,6 +7337,7 @@ dependencies = [
 name = "yani-transmute"
 version = "0.1.0"
 dependencies = [
+ "arrow-ipc",
  "endf",
  "lzma-rs",
  "rayon",
@@ -7348,6 +7349,7 @@ dependencies = [
  "yamc-rng",
  "yamc-test-cache",
  "yani",
+ "yani-convert",
  "yani-decay",
 ]
 

@@ -74,8 +74,9 @@ stack; pick `yamc` when the spectrum should come from a transport solve.
   parameters (drawn per replica and the resonance cross sections rebuilt from
   them, where the library publishes them, and otherwise their first-order
   group covariance), half-lives, decay energies, decay photon line
-  intensities and energies, two-mode decay branching and a supplied flux
-  spectrum's stated error. Other inputs (the self-shielding correction, the
+  intensities and energies, two-mode decay branching, the isomeric split of
+  each reaction whose final states carry an MF=40 covariance, and a supplied
+  flux spectrum's stated error. Other inputs (the self-shielding correction, the
   material composition) are held at nominal, and `get_data_uncertainty_info`
   lists every one it held. There are no first-order sensitivity coefficients.
 - The decay data do not state how a nuclide's photon line intensities are

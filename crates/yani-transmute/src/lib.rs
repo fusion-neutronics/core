@@ -24,6 +24,7 @@ mod fission_yield_uncertainty;
 pub mod flux_uncertainty;
 mod gas;
 mod history_statistics;
+mod isomer_branching_uncertainty;
 mod material_transmute;
 pub mod multigroup;
 pub mod nearest_correlation;
