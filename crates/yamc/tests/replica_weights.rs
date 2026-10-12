@@ -255,6 +255,58 @@ fn each_replica_matches_its_rerun_on_a_thin_target() {
     }
 }
 
+/// Heating, local heating and damage energy move with the reactions behind
+/// them: on a thin target at 14.1 MeV each replica's tally matches the rerun
+/// whose rows carry what the same draw's reactions deposit, and they move.
+#[test]
+fn heating_and_damage_match_their_reruns_on_a_thin_target() {
+    let Some(dir) = fixture() else {
+        eprintln!("skipping: Fe56 fixture carries no covariance");
+        return;
+    };
+    let m = iron(&dir);
+    let replicas = 4;
+    let scores = ["heating", "heating-local", "damage-energy"];
+    let weighted = run_scores(
+        m.clone(),
+        0.2,
+        14.1e6,
+        20_000,
+        7,
+        Some(TransportDataUncertainty {
+            seed: SEED,
+            replicas,
+        }),
+        &scores,
+    );
+    for (i, score) in scores.iter().enumerate() {
+        let nominal = weighted[i].get_mean()[0];
+        let mut moved = 0.0_f64;
+        for k in 0..replicas {
+            let (x, _) = replica(&weighted[i], k);
+            let y = run_scores(
+                rerun_material(&m, k as u64),
+                0.2,
+                14.1e6,
+                20_000,
+                7,
+                None,
+                &scores,
+            )[i]
+                .get_mean()[0];
+            assert!(
+                (x / y - 1.0).abs() < 2e-3,
+                "replica {k} {score}: weighted {x:e}, rerun {y:e} (nominal {nominal:e})"
+            );
+            moved = moved.max((x / nominal - 1.0).abs());
+        }
+        assert!(
+            moved > 5e-3,
+            "{score} moves with the cross sections, by {moved}"
+        );
+    }
+}
+
 /// A nuclide with no covariance perturbs nothing, but its capture is part
 /// of the material's: each replica's capture rate on a mixed target must
 /// still match its rerun, the uncovered share diluting the change.

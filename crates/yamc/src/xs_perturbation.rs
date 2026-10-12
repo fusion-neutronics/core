@@ -24,11 +24,13 @@
 //!    the loader's own builder.
 //!
 //! Particle-production rows (MT 203 to 207) move by what the reactions
-//! emitting the particle moved, each weighted by how many it emits. What is
-//! held at nominal: rows with no covariance (named in the coverage report),
-//! heating, KERMA and damage rows (absolute values with no per-reaction
-//! split), and the short-range (`lb = 8`) noise, which averages away along a
-//! track.
+//! emitting the particle moved, each weighted by how many it emits. Heating,
+//! local heating and damage energy (MT 301, 901 and 444) move by what the
+//! moved reactions deposit, `Σ_mt h_mt Δσ_mt`, with `h_mt` each reaction's
+//! deposit per reaction ([`yamc_nuclide::deposit`]); the part of a row its
+//! partials do not reproduce (fission's share) stays nominal. What is held
+//! at nominal: rows with no covariance (named in the coverage report) and the
+//! short-range (`lb = 8`) noise, which averages away along a track.
 //!
 //! In the unresolved range each probability-table band moves by its smooth
 //! channel's relative change. A table of factors on the smooth cross sections
@@ -45,6 +47,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use yamc_materials::Material;
+use yamc_nuclide::deposit::{deposits, Response};
 use yamc_nuclide::nuclide::{FastXSGrid, Nuclide};
 use yamc_nuclide::reaction::Reaction;
 use yamc_nuclide::synthesis::{synthesize, SYNTHETIC_MTS};
@@ -405,6 +408,37 @@ pub fn perturbed_nuclide(
                     })
                     .collect();
                 new.insert(*mt, Arc::new(with_values(&reaction, values)));
+            }
+        }
+
+        // The heating and damage-energy rows, moved by what the moved
+        // partials deposit. Not floored: a KERMA may be negative.
+        let moved: BTreeSet<i32> = new
+            .iter()
+            .filter(|(mt, r)| !r.redundant && reactions.get(mt).is_some_and(|b| !Arc::ptr_eq(b, r)))
+            .map(|(mt, _)| *mt)
+            .collect();
+        if !moved.is_empty() {
+            for response in Response::ALL {
+                let Some(stored) = reactions.get(&response.mt()) else {
+                    continue;
+                };
+                let mut change = vec![0.0; n];
+                for (mt, h) in deposits(nuclide, t, response, &moved) {
+                    let (b, a) = (on_full_grid(&reactions[&mt], n), on_full_grid(&new[&mt], n));
+                    for i in 0..n {
+                        change[i] += h[i] * (a[i] - b[i]);
+                    }
+                }
+                let start = stored.threshold_idx.min(n);
+                let values = stored
+                    .cross_section
+                    .as_slice()
+                    .iter()
+                    .zip(&change[start..])
+                    .map(|(v, d)| v + d)
+                    .collect();
+                new.insert(response.mt(), Arc::new(with_values(stored, values)));
             }
         }
 
