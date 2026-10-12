@@ -24,13 +24,17 @@
 //!
 //! # The eigensolver
 //!
-//! Every factorization is an eigendecomposition, by Householder
-//! tridiagonalization and implicit QL ([`symmetric_eigen`]): bit-reproducible
-//! across platforms because it is pure arithmetic in a fixed order, O(n³)
-//! once on fields that run to hundreds of cells, and it gives the
-//! eigenvectors that set the round-off negatives of a PSD matrix to zero. A
-//! Cholesky would be the obvious choice if the matrices were positive
-//! definite, and they are only semi-definite at best.
+//! Every factorization is an eigendecomposition of a correlation matrix
+//! ([`clipped_factor`]), scaled back by the standard deviations, so a cell is
+//! factorized as accurately as its own variance allows however far it sits
+//! from the largest. Large blocks go to faer's blocked tridiagonalization and
+//! divide and conquer ([`dense_eigen`]), which signs every eigenvector by a
+//! fixed rule so the factor is a function of the matrix and not of the
+//! solver; small ones go to cyclic Jacobi. Each runs in a fixed order, so a
+//! factorization is the same on any thread count. A Cholesky would be the
+//! obvious choice if the matrices were positive definite, and they are only
+//! semi-definite at best: the eigenvectors set the round-off negatives of a
+//! PSD matrix to zero.
 //!
 //! # Repair keeps every evaluated sigma
 //!
@@ -1509,10 +1513,20 @@ struct NuclideDraw {
     short: Vec<Vec<Vec<f64>>>,
 }
 
-/// The factor `L` of a symmetric matrix with its negative eigenvalues set
-/// to zero, `L Lᵀ`, and whether that did anything: any eigenvalue below
-/// `-1e-12` of the largest. Where it did not, `L Lᵀ` is the matrix itself,
-/// exactly, and is not recomputed.
+/// A factor `L` of a symmetric matrix with its negative part set to zero,
+/// `L Lᵀ`, and whether that did anything. Where it did not, `L Lᵀ` is the
+/// matrix itself, exactly, and is not recomputed.
+///
+/// The matrix is factorized in its correlation coordinates: with `S` the
+/// standard deviations (one where a diagonal is not positive), `R = S⁻¹ A
+/// S⁻¹ = V Λ Vᵀ` and `L = S V √Λ₊`. `R` has a unit diagonal, so its
+/// eigendecomposition is as accurate for a cell of variance 1e-10 as for one
+/// of 0.3 beside it (JENDL-5.0 Pu239's log-space field spans nine orders in
+/// one coupled block), and goes to the fast solver at any size where `A`'s
+/// would need Jacobi, which is O(n³) per sweep. `S` is a congruence, so `R`
+/// has as many negative eigenvalues as `A`; it is clipped where one is below
+/// `-1e-12` of the largest in magnitude, a threshold that is now relative to
+/// every cell's own variance rather than to the largest.
 ///
 /// Only for a matrix that is PSD to round-off, or one whose remaining
 /// negative part is reported where it is made: a repair of the evaluation is
@@ -1521,11 +1535,31 @@ pub(crate) fn clipped_factor(matrix: &[f64], n: usize) -> (Vec<f64>, Vec<f64>, b
     if n == 0 {
         return (Vec::new(), Vec::new(), false);
     }
-    let (values, vectors) = eigen(matrix, n);
+    let scale: Vec<f64> = (0..n)
+        .map(|i| {
+            let v = matrix[i * n + i];
+            if v > 0.0 {
+                v.sqrt()
+            } else {
+                1.0
+            }
+        })
+        .collect();
+    let mut correlation = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            correlation[i * n + j] = if i == j && matrix[i * n + i] > 0.0 {
+                1.0
+            } else {
+                matrix[i * n + j] / (scale[i] * scale[j])
+            };
+        }
+    }
+    let (values, vectors) = eigen(&correlation, n);
     let lambda_min = values.iter().cloned().fold(f64::INFINITY, f64::min);
     let lambda_max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let clipped = lambda_min < -1.0e-12 * lambda_max.abs().max(lambda_min.abs());
-    // L = V √Λ: column j of V is eigenvector j, so L[i][j] = V[i][j] · √λ_j.
+    // L = S V √Λ: column j of V is eigenvector j, so L[i][j] = S_i V[i][j] √λ_j.
     let mut l = vec![0.0; n * n];
     for j in 0..n {
         let s = values[j].max(0.0).sqrt();
@@ -1533,16 +1567,27 @@ pub(crate) fn clipped_factor(matrix: &[f64], n: usize) -> (Vec<f64>, Vec<f64>, b
             continue;
         }
         for i in 0..n {
-            l[i * n + j] = vectors[i * n + j] * s;
+            l[i * n + j] = scale[i] * vectors[i * n + j] * s;
         }
     }
     let product = if clipped {
+        let factor = faer::MatRef::from_row_major_slice(&l, n, n);
+        let mut x = faer::Mat::<f64>::zeros(n, n);
+        faer::linalg::matmul::matmul(
+            x.as_mut(),
+            faer::Accum::Replace,
+            factor,
+            factor.transpose(),
+            1.0,
+            faer::Par::Seq,
+        );
+        clear_upper_state();
+        // Symmetric to the bit, from the lower triangle.
         let mut product = vec![0.0; n * n];
         for i in 0..n {
-            for j in i..n {
-                let v: f64 = (0..n).map(|k| l[i * n + k] * l[j * n + k]).sum();
-                product[i * n + j] = v;
-                product[j * n + i] = v;
+            for j in 0..=i {
+                product[i * n + j] = x[(i, j)];
+                product[j * n + i] = x[(i, j)];
             }
         }
         product
@@ -2743,7 +2788,7 @@ pub(crate) fn standard_normals(state: &mut u64, n: usize) -> Vec<f64> {
 /// variances span more than [`DYNAMIC_RANGE`], goes to [`jacobi_eigen`], which
 /// keeps a small eigenvalue beside a huge one to high relative accuracy
 /// (TENDL-2017 has channels at a variance near 3e17 beside ordinary ones);
-/// the rest to [`symmetric_eigen`].
+/// the rest to [`dense_eigen`].
 ///
 /// Returns `(eigenvalues, eigenvectors)` with eigenvector `j` in COLUMN `j`
 /// of the row-major `n × n` result, blocks in order of their first index, so
@@ -2764,10 +2809,11 @@ fn blockwise(matrix: &[f64], n: usize, want_vectors: bool) -> (Vec<f64>, Vec<f64
 }
 
 /// [`eigen`] for a caller that wants only the leading eigenpairs: every
-/// block past [`SMALL_BLOCK`] goes to QL whatever its dynamic range, since
-/// QL's error, relative to the largest eigenvalue, is what the leading ones
-/// need. Far faster on a large field (O16's 2839 cells) than Jacobi.
-fn leading_eigen(matrix: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
+/// block past [`SMALL_BLOCK`] goes to [`dense_eigen`] whatever its dynamic
+/// range, since its error, relative to the largest eigenvalue, is what the
+/// leading ones need. Far faster on a large field (O16's 2839 cells) than
+/// Jacobi, which is O(n³) per sweep.
+pub(crate) fn leading_eigen(matrix: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
     blocks_eigen(matrix, n, true, false)
 }
 
@@ -2804,7 +2850,7 @@ fn blocks_eigen(
             if m <= SMALL_BLOCK || (small_accurately && lo > 0.0 && hi / lo > DYNAMIC_RANGE) {
                 jacobi_eigen(&sub, m)
             } else {
-                tridiagonal_ql(&sub, m, want_vectors)
+                dense_eigen(&sub, m, want_vectors)
             };
         for c in 0..m {
             let col = values.len();
@@ -2848,6 +2894,59 @@ pub(crate) fn coupled_blocks(matrix: &[f64], n: usize) -> Vec<Vec<usize>> {
         blocks.entry(r).or_default().push(i);
     }
     blocks.into_values().collect()
+}
+
+/// Blocks at least this large go to [`eigen_pool`]; below it a parallel
+/// decomposition gains nothing (20 ms either way at 542 cells).
+#[cfg(not(target_arch = "wasm32"))]
+const PARALLEL_EIGEN: usize = 1024;
+
+/// The degree of a parallel decomposition, and the size of [`eigen_pool`].
+/// Four takes a 2203-cell decomposition from 0.84 s to 0.45 s; eight only to
+/// 0.31 s, as the reduction's matrix-vector products do not scale.
+#[cfg(not(target_arch = "wasm32"))]
+const EIGEN_DEGREE: usize = 4;
+
+/// The threads [`dense_eigen`] decomposes a large block on, made on first
+/// use. A caller on the shared pool waits for it by running that pool's
+/// other work, as rayon does across pools, so nothing sits idle.
+#[cfg(not(target_arch = "wasm32"))]
+fn eigen_pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(EIGEN_DEGREE)
+            .thread_name(|i| format!("yani-eigen-{i}"))
+            .build()
+            .expect("the eigensolver's thread pool starts")
+    })
+}
+
+/// Clear the upper halves of the vector registers on this thread, after a
+/// faer call.
+///
+/// faer's x86-64 matrix-product kernels (`private-gemm-x86`, hand-written
+/// assembly) return without `vzeroupper`, so the thread that ran one is left
+/// with dirty upper state, and every scalar SSE instruction after it pays
+/// for merging into the wide registers: an `exp` and `sqrt` loop runs six
+/// times slower after a single 300 x 300 product on a Zen 5 core, until this
+/// is called. Every faer call in this crate runs either on the calling
+/// thread, followed by this, or on [`eigen_pool`]'s own threads, so nothing
+/// it leaves behind slows the transport or broadening that runs on a thread
+/// next. A no-op off x86-64 and where AVX is absent (then nothing could have
+/// dirtied the state).
+pub(crate) fn clear_upper_state() {
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[target_feature(enable = "avx")]
+        unsafe fn zero_upper() {
+            std::arch::x86_64::_mm256_zeroupper();
+        }
+        if std::arch::is_x86_feature_detected!("avx") {
+            // SAFETY: the CPU supports AVX, checked just above.
+            unsafe { zero_upper() };
+        }
+    }
 }
 
 /// Blocks at most this size go to [`jacobi_eigen`]: there its cost is nothing
@@ -2949,247 +3048,104 @@ fn jacobi_eigen(matrix: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
     (values, v)
 }
 
-/// Eigen-decompose a symmetric matrix: Householder reduction to tridiagonal
-/// form, then the implicit QL algorithm with shifts (EISPACK `tred2` and
-/// `tql2`, in the form JAMA gives them).
+/// Eigen-decompose a symmetric matrix by faer's Householder
+/// tridiagonalization and divide and conquer (the method of LAPACK's
+/// `dsyevd`), with or without the eigenvectors (empty when not asked for).
 ///
-/// Returns `(eigenvalues, eigenvectors)` with eigenvector `j` in COLUMN `j` of
-/// the row-major `n × n` result.
+/// Returns `(eigenvalues, eigenvectors)`, eigenvalues ascending, with
+/// eigenvector `j` in COLUMN `j` of the row-major `n × n` result, each
+/// signed so that its largest component (the first, on a tie) is positive.
+/// The sign of an eigenvector is arbitrary and is all two correct solvers
+/// disagree on where the eigenvalues are distinct, so fixing it makes a
+/// factor `V √Λ`, and so every draw made with it, a function of the matrix
+/// rather than of the solver.
 ///
-/// Pure arithmetic in a fixed order with no data-dependent parallelism, so it
-/// is a pure function of its input: two runs on the same matrix give the same
-/// last bit, on every platform, which is what the reproducibility contract
-/// needs. It is O(n³) once, where cyclic Jacobi is O(n³) per sweep, and that
-/// matters here: a nuclide's field has a cell per covariance interval of
-/// every reaction it reaches, hundreds on an evaluation like ENDF/B-VIII.1
-/// Fe56.
-// Index loops kept as EISPACK writes them, so the port can be checked line
-// by line against the reference.
-#[cfg(test)]
-fn symmetric_eigen(matrix: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
-    tridiagonal_ql(matrix, n, true)
-}
-
-/// [`symmetric_eigen`], optionally without the eigenvectors: the reduction
-/// still uses the matrix as its workspace, but the transformations are not
-/// accumulated and the QL rotations are not applied to them.
+/// The blocked reduction is where the speed is: on a 2203-cell block
+/// (Th232's MF=33 field) it takes 0.8 s on one thread where the EISPACK
+/// `tred2` and `tql2` it replaced took 6.2 s, and 0.45 s on four.
+///
+/// A block of [`PARALLEL_EIGEN`] cells or more is decomposed at a degree of
+/// [`EIGEN_DEGREE`], on a pool of that many threads kept for it
+/// ([`eigen_pool`]); a smaller one sequentially, on the calling thread. The
+/// degree is a function of the size alone because faer splits work by the
+/// degree it is given, so the result is the same on any thread count. The
+/// pool is its own because faer's x86-64 matrix-product kernels leave the
+/// thread that ran them slow until its vector state is cleared
+/// ([`clear_upper_state`]), and on the shared pool that would be whichever
+/// threads ran faer's tasks, out of reach of anything here; the calling
+/// thread is cleared after every decomposition.
+///
+/// Falls back to [`jacobi_eigen`] where faer reports no convergence, which
+/// it can only on a matrix that is not finite.
 #[allow(clippy::needless_range_loop)]
-fn tridiagonal_ql(matrix: &[f64], n: usize, want_vectors: bool) -> (Vec<f64>, Vec<f64>) {
+fn dense_eigen(matrix: &[f64], n: usize, want_vectors: bool) -> (Vec<f64>, Vec<f64>) {
+    use faer::dyn_stack::{MemBuffer, MemStack};
+    use faer::linalg::evd::{self_adjoint_evd, self_adjoint_evd_scratch, ComputeEigenvectors};
     if n == 0 {
         return (Vec::new(), Vec::new());
     }
-    // Symmetrize on the way in. The fold fills both halves with the same
-    // value, so this is a no-op on real input; it costs nothing and means a
-    // caller cannot hand in something the reduction would silently misread.
-    let mut v = matrix.to_vec();
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let m = 0.5 * (v[i * n + j] + v[j * n + i]);
-            v[i * n + j] = m;
-            v[j * n + i] = m;
-        }
+    // Symmetrized on the way in, so a caller cannot hand in something the
+    // reduction (which reads one triangle) would silently misread. A no-op
+    // on real input.
+    let a = faer::Mat::<f64>::from_fn(n, n, |i, j| 0.5 * (matrix[i * n + j] + matrix[j * n + i]));
+    let compute = if want_vectors {
+        ComputeEigenvectors::Yes
+    } else {
+        ComputeEigenvectors::No
+    };
+    let mut values = faer::diag::Diag::<f64>::zeros(n);
+    let side = if want_vectors { n } else { 0 };
+    let mut u = faer::Mat::<f64>::zeros(side, side);
+    let mut solve = |par: faer::Par| {
+        let mut buffer = MemBuffer::new(self_adjoint_evd_scratch::<f64>(
+            n,
+            compute,
+            par,
+            Default::default(),
+        ));
+        self_adjoint_evd(
+            a.as_ref(),
+            values.as_mut(),
+            want_vectors.then(|| u.as_mut()),
+            par,
+            MemStack::new(&mut buffer),
+            Default::default(),
+        )
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let solved = if n >= PARALLEL_EIGEN {
+        eigen_pool().install(|| solve(faer::Par::rayon(EIGEN_DEGREE)))
+    } else {
+        solve(faer::Par::Seq)
+    };
+    #[cfg(target_arch = "wasm32")]
+    let solved = solve(faer::Par::Seq);
+    clear_upper_state();
+    if solved.is_err() {
+        let (values, vectors) = jacobi_eigen(matrix, n);
+        return (values, if want_vectors { vectors } else { Vec::new() });
     }
-    // The reduction runs on the transpose (the input is symmetric, so that
-    // is the same matrix): its inner loops walk columns of `V`, which are
-    // then contiguous rows, and the accumulated `V` comes out transposed,
-    // which is the layout the QL rotations below want.
-    let at = |i: usize, j: usize| j * n + i;
-    let mut d = vec![0.0; n];
-    let mut e = vec![0.0; n];
-
-    // tred2: Householder reduction to tridiagonal form, accumulating the
-    // transformations in `v`.
+    let values: Vec<f64> = (0..n).map(|i| values[i]).collect();
+    if !want_vectors {
+        return (values, Vec::new());
+    }
+    let mut vectors = vec![0.0; n * n];
     for j in 0..n {
-        d[j] = v[at(n - 1, j)];
-    }
-    for i in (1..n).rev() {
-        let mut scale = 0.0;
-        let mut h = 0.0;
-        for k in 0..i {
-            scale += d[k].abs();
-        }
-        if scale == 0.0 {
-            e[i] = d[i - 1];
-            for j in 0..i {
-                d[j] = v[at(i - 1, j)];
-                v[at(i, j)] = 0.0;
-                v[at(j, i)] = 0.0;
-            }
-        } else {
-            for k in 0..i {
-                d[k] /= scale;
-                h += d[k] * d[k];
-            }
-            let mut f = d[i - 1];
-            let mut g = h.sqrt();
-            if f > 0.0 {
-                g = -g;
-            }
-            e[i] = scale * g;
-            h -= f * g;
-            d[i - 1] = f - g;
-            for x in e.iter_mut().take(i) {
-                *x = 0.0;
-            }
-            for j in 0..i {
-                f = d[j];
-                v[at(j, i)] = f;
-                g = e[j] + v[at(j, j)] * f;
-                for k in (j + 1)..i {
-                    g += v[at(k, j)] * d[k];
-                    e[k] += v[at(k, j)] * f;
-                }
-                e[j] = g;
-            }
-            f = 0.0;
-            for j in 0..i {
-                e[j] /= h;
-                f += e[j] * d[j];
-            }
-            let hh = f / (h + h);
-            for j in 0..i {
-                e[j] -= hh * d[j];
-            }
-            for j in 0..i {
-                f = d[j];
-                g = e[j];
-                for k in j..i {
-                    v[at(k, j)] -= f * e[k] + g * d[k];
-                }
-                d[j] = v[at(i - 1, j)];
-                v[at(i, j)] = 0.0;
+        let column = u.col(j);
+        let mut largest = 0.0_f64;
+        let mut sign = 1.0;
+        for i in 0..n {
+            let x = column[i];
+            if x.abs() > largest {
+                largest = x.abs();
+                sign = if x < 0.0 { -1.0 } else { 1.0 };
             }
         }
-        d[i] = h;
-    }
-    if !want_vectors {
-        // The tridiagonal's diagonal is on the diagonal of the workspace.
-        for j in 0..n {
-            d[j] = v[at(j, j)];
+        for i in 0..n {
+            vectors[i * n + j] = sign * column[i];
         }
     }
-    for i in 0..(n - 1) {
-        if !want_vectors {
-            break;
-        }
-        v[at(n - 1, i)] = v[at(i, i)];
-        v[at(i, i)] = 1.0;
-        let h = d[i + 1];
-        if h != 0.0 {
-            for k in 0..=i {
-                d[k] = v[at(k, i + 1)] / h;
-            }
-            for j in 0..=i {
-                let mut g = 0.0;
-                for k in 0..=i {
-                    g += v[at(k, i + 1)] * v[at(k, j)];
-                }
-                for k in 0..=i {
-                    v[at(k, j)] -= g * d[k];
-                }
-            }
-        }
-        for k in 0..=i {
-            v[at(k, i + 1)] = 0.0;
-        }
-    }
-    if want_vectors {
-        for j in 0..n {
-            d[j] = v[at(n - 1, j)];
-            v[at(n - 1, j)] = 0.0;
-        }
-        v[at(n - 1, n - 1)] = 1.0;
-    }
-    e[0] = 0.0;
-
-    // tql2: the implicit QL algorithm on the tridiagonal matrix. The
-    // rotations combine two eigenvector COLUMNS, which in the transposed `V`
-    // are two contiguous rows; it is transposed back after.
-    for i in 1..n {
-        e[i - 1] = e[i];
-    }
-    e[n - 1] = 0.0;
-    let mut f = 0.0;
-    let mut tst1: f64 = 0.0;
-    let eps = f64::EPSILON;
-    for l in 0..n {
-        tst1 = tst1.max(d[l].abs() + e[l].abs());
-        let mut m = l;
-        while m < n {
-            if e[m].abs() <= eps * tst1 {
-                break;
-            }
-            m += 1;
-        }
-        // `e[n - 1]` is zero, so `m` stops at `n - 1` at the latest.
-        let m = m.min(n - 1);
-        if m > l {
-            // Convergence is cubic; the cap only keeps a pathological input
-            // from spinning.
-            for _ in 0..64 {
-                let mut g = d[l];
-                let mut p = (d[l + 1] - g) / (2.0 * e[l]);
-                let mut r = p.hypot(1.0);
-                if p < 0.0 {
-                    r = -r;
-                }
-                d[l] = e[l] / (p + r);
-                d[l + 1] = e[l] * (p + r);
-                let dl1 = d[l + 1];
-                let mut h = g - d[l];
-                for x in d.iter_mut().skip(l + 2) {
-                    *x -= h;
-                }
-                f += h;
-                p = d[m];
-                let mut c = 1.0;
-                let mut c2 = c;
-                let mut c3 = c;
-                let el1 = e[l + 1];
-                let mut s = 0.0;
-                let mut s2 = 0.0;
-                for i in (l..m).rev() {
-                    c3 = c2;
-                    c2 = c;
-                    s2 = s;
-                    g = c * e[i];
-                    h = c * p;
-                    r = p.hypot(e[i]);
-                    e[i + 1] = s * r;
-                    s = e[i] / r;
-                    c = p / r;
-                    p = c * d[i] - s * g;
-                    d[i + 1] = h + s * (c * g + s * d[i]);
-                    if want_vectors {
-                        let (lo, hi) = v.split_at_mut((i + 1) * n);
-                        let (col_i, col_next) = (&mut lo[i * n..], &mut hi[..n]);
-                        for (a, b) in col_i.iter_mut().zip(col_next.iter_mut()) {
-                            let h = *b;
-                            *b = s * *a + c * h;
-                            *a = c * *a - s * h;
-                        }
-                    }
-                }
-                p = -s * s2 * c3 * el1 * e[l] / dl1;
-                e[l] = s * p;
-                d[l] = c * p;
-                if e[l].abs() <= eps * tst1 {
-                    break;
-                }
-            }
-        }
-        d[l] += f;
-        e[l] = 0.0;
-    }
-    if !want_vectors {
-        return (d, Vec::new());
-    }
-    for i in 0..n {
-        for j in (i + 1)..n {
-            v.swap(at(i, j), at(j, i));
-        }
-    }
-    (d, v)
+    (values, vectors)
 }
 
 /// A positive multiplier with mean 1 and variance `sigma^2`, from a standard
@@ -3262,7 +3218,7 @@ mod tests {
     #[test]
     fn the_eigensolver_recovers_a_known_spectrum() {
         // diag(4, 1) rotated by 45 degrees: [[2.5, 1.5], [1.5, 2.5]].
-        let (values, _) = symmetric_eigen(&[2.5, 1.5, 1.5, 2.5], 2);
+        let (values, _) = dense_eigen(&[2.5, 1.5, 1.5, 2.5], 2, true);
         let mut v = values;
         v.sort_by(f64::total_cmp);
         assert!((v[0] - 1.0).abs() < 1e-12, "{v:?}");
@@ -3283,7 +3239,7 @@ mod tests {
                 a[j * n + i] = x;
             }
         }
-        let (values, v) = symmetric_eigen(&a, n);
+        let (values, v) = dense_eigen(&a, n, true);
         for i in 0..n {
             for j in 0..n {
                 let rebuilt: f64 = (0..n)
@@ -3295,6 +3251,72 @@ mod tests {
                 assert!((dot - want).abs() < 1e-12, "VᵀV ({i},{j}) = {dot}");
             }
         }
+    }
+
+    /// Two different correct solvers give the same signed eigenvectors where
+    /// the eigenvalues are distinct, so a factor `V √Λ`, and every draw made
+    /// with it, depends on the matrix and not on which solver made it.
+    #[test]
+    fn the_signed_eigenvectors_do_not_depend_on_the_solver() {
+        let n = 40;
+        let mut state = yamc_rng::expand_seed(11);
+        let mut a = vec![0.0; n * n];
+        for i in 0..n {
+            for j in i..n {
+                let x = yamc_rng::next_xi(&mut state) - 0.5;
+                a[i * n + j] = x;
+                a[j * n + i] = x;
+            }
+        }
+        let (values, vectors) = dense_eigen(&a, n, true);
+        assert!(values.windows(2).all(|w| w[0] <= w[1]), "ascending");
+        let (jv, jw) = jacobi_eigen(&a, n);
+        for (k, &lambda) in values.iter().enumerate() {
+            let j = (0..n)
+                .min_by(|&x, &y| (jv[x] - lambda).abs().total_cmp(&(jv[y] - lambda).abs()))
+                .unwrap();
+            assert!((jv[j] - lambda).abs() < 1e-12);
+            // The Jacobi vector, signed by the same rule.
+            let column: Vec<f64> = (0..n).map(|i| jw[i * n + j]).collect();
+            let top = column
+                .iter()
+                .copied()
+                .fold(0.0_f64, |m, x| if x.abs() > m.abs() { x } else { m });
+            for i in 0..n {
+                let want = column[i] * top.signum();
+                assert!((vectors[i * n + k] - want).abs() < 1e-10, "({i},{k})");
+            }
+        }
+    }
+
+    /// A block large enough to be decomposed in parallel gives the same bits
+    /// whatever pool the caller is on, since the degree is fixed by the size.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_parallel_decomposition_does_not_depend_on_the_thread_count() {
+        let n = PARALLEL_EIGEN + 3;
+        let mut state = yamc_rng::expand_seed(5);
+        let mut a = vec![0.0; n * n];
+        for i in 0..n {
+            for j in i..n {
+                let x = yamc_rng::next_xi(&mut state) - 0.5;
+                a[i * n + j] = x;
+                a[j * n + i] = x;
+            }
+        }
+        let on = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let (values, vectors) = pool.install(|| dense_eigen(&a, n, true));
+            let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            (bits(&values), bits(&vectors))
+        };
+        assert!(
+            on(1) == on(6),
+            "the decomposition moved with the thread count"
+        );
     }
 
     /// The eigenvalues-only path gives the same eigenvalues as the full one.
@@ -3310,8 +3332,8 @@ mod tests {
                 a[j * n + i] = x;
             }
         }
-        let mut full = symmetric_eigen(&a, n).0;
-        let mut alone = tridiagonal_ql(&a, n, false).0;
+        let mut full = dense_eigen(&a, n, true).0;
+        let mut alone = dense_eigen(&a, n, false).0;
         full.sort_by(f64::total_cmp);
         alone.sort_by(f64::total_cmp);
         for (x, y) in full.iter().zip(&alone) {
@@ -3513,12 +3535,16 @@ mod tests {
         }
     }
 
-    /// A covariance that needs no repair is sampled exactly as before the
-    /// nearest-correlation repair existed: these are the bits the clipping
-    /// sampler drew for the same seeds, relative and absolute. The bits were
-    /// taken on x86-64 Linux; other targets may round the last place
-    /// differently in `ln`, `exp` and fused arithmetic, so each value is held
-    /// to within a few units in the last place rather than bit for bit.
+    /// A covariance that needs no repair draws the same bits for the same
+    /// seeds, relative and absolute, and its sampled covariance is the stated
+    /// one exactly. The draws are those of the factor taken in correlation
+    /// coordinates ([`clipped_factor`]); they changed when the factor moved
+    /// there from the covariance's own eigenvectors, as any change of factor
+    /// changes which draw a seed gives, and the sampled covariance did not
+    /// change by a bit. The bits were taken on x86-64 Linux; other targets
+    /// may round the last place differently in `ln`, `exp` and fused
+    /// arithmetic, so each value is held to within a few units in the last
+    /// place rather than bit for bit.
     #[test]
     fn a_valid_matrix_draws_as_it_always_did() {
         // Within `ulps` units in the last place, for finite values of one sign.
@@ -3544,19 +3570,19 @@ mod tests {
         assert!(s.repairs(0).is_empty());
         let before: [[u64; 3]; 3] = [
             [
-                13816687105146680565,
-                13809921563573214875,
-                13807147318081454187,
+                4587990443619488198,
+                13818970804308309710,
+                13812111412136125290,
             ],
             [
-                13799776928416527474,
-                4596996472187675269,
-                4591291726209650103,
+                13815471223962756273,
+                4603451844143360514,
+                4590501187854479632,
             ],
             [
-                13821431275358218956,
-                13820582890229615446,
-                4569554506801662790,
+                13818665005865055790,
+                13819014559515083008,
+                13808565353241219085,
             ],
         ];
         for (r, want) in before.iter().enumerate() {
@@ -3596,13 +3622,13 @@ mod tests {
         let bits = |v: &[f64]| v.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
         assert_ulps(
             &bits(&g.0),
-            &[4580321971225683108, 13814906861411971440],
+            &[13803772130947921108, 13815771369775950707],
             4,
             "gaussian draw",
         );
         assert_ulps(
             &bits(&g.1),
-            &[4613374713056438380, 4607834391228464327],
+            &[4612903346379675386, 13837398245936369071],
             4,
             "gaussian draw multipliers",
         );

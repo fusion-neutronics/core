@@ -40,6 +40,15 @@ yamc-nuclide = { path = "../yamc-nuclide", default-features = false }
 # user-tunable knob.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rayon = "1.10"
+# The dense symmetric eigensolver and matrix products behind every covariance
+# factorization and nearest-correlation repair, split on target as `yani`
+# splits it (and already in the build through it, so the edge adds nothing).
+# Its parallelism runs at a fixed degree on a pool of its own (see
+# `covariance_sample::dense_eigen`).
+faer = { version = "0.24", default-features = false, features = ["std", "rayon"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+faer = { version = "0.24", default-features = false, features = ["std"] }
 
 [features]
 default = ["arrow"]

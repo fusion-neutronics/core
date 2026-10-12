@@ -231,6 +231,11 @@ const FLANKS: [f64; 4] = [17.9, 18.4, 19.2, 19.8];
 /// seed gives nearly the same histories in a rerun, so each replica's
 /// capture must match its rerun's closely: this checks the reaction-rate
 /// factor with each replica's own rebuilt cross section.
+///
+/// That the parameters move the capture at all is checked on more replicas
+/// than are rerun: the replicas spread it by about 1% (one standard
+/// deviation), so four can all land within 0.4% of nominal, as the four of
+/// this seed do, and sixteen all within 1% about one time in a thousand.
 #[test]
 fn each_replica_matches_its_rerun_on_a_thin_target() {
     let tmp = tempfile::tempdir().expect("temp dir");
@@ -239,7 +244,7 @@ fn each_replica_matches_its_rerun_on_a_thin_target() {
         return;
     };
     let m = tungsten(&dir);
-    let replicas = 4;
+    let (replicas, rerun) = (16, 4);
     let geometry = (0.005, &FLANKS[..]);
     let weighted = run(
         m.clone(),
@@ -252,11 +257,12 @@ fn each_replica_matches_its_rerun_on_a_thin_target() {
         }),
     );
     let nominal = weighted[1].get_mean()[0];
-    let mut moved = 0.0_f64;
-    for k in 0..replicas {
+    let moved = (0..replicas)
+        .map(|k| (replica(&weighted[1], k).0 / nominal - 1.0).abs())
+        .fold(0.0_f64, f64::max);
+    for k in 0..rerun {
         let (x, _) = replica(&weighted[1], k);
         let y = run(rerun_material(&m, k as u64), geometry, 20_000, 7, None)[1].get_mean()[0];
-        moved = moved.max((y / nominal - 1.0).abs());
         eprintln!("replica {k}: weighted capture {x:e}, rerun {y:e}, nominal {nominal:e}");
         assert!(
             (x / y - 1.0).abs() < 2e-3,
