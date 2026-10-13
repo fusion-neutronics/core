@@ -266,7 +266,7 @@ async fn finish_section(
             Fetched::Absent => {
                 return Err(format!(
                     "{url}: 404, but its version.json names byte ranges"
-                ))
+                ));
             }
         }
     }
@@ -299,7 +299,7 @@ impl ReleaseView {
                         "{what} is not available in '{}' release {} ({dir}/{} is not in its \
                          manifest)",
                         self.release.manifest.keyword, self.release.manifest.release, section.name
-                    ))
+                    ));
                 }
                 None => {}
             }
@@ -323,7 +323,7 @@ async fn resolve_release(library_url: &str, stats: &mut Stats) -> Result<Release
                 "{latest_url}: 404. '{keyword}' has not been published in the release layout \
                  yet, which this build reads; use a page exported by a yamc release that reads \
                  the older layout, or embed the cross sections in the page."
-            ))
+            ));
         }
     };
     let pointer = parse_latest(keyword, &latest)?;
@@ -335,7 +335,7 @@ async fn resolve_release(library_url: &str, stats: &mut Stats) -> Result<Release
             return Err(format!(
                 "{manifest_url}: 404, named by {latest_url}; the release is not completely \
                  published, try again shortly"
-            ))
+            ));
         }
     };
     stats.metadata_bytes += latest.len() + manifest.len();

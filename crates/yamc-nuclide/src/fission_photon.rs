@@ -70,15 +70,15 @@ impl ReleaseFunction {
                  region would give the wrong photon production"
             ));
         }
-        if let Some(&scheme) = interpolation.first() {
-            if scheme != ENDF_LIN_LIN {
-                return Err(format!(
-                    "{context}: fission energy release table uses ENDF interpolation \
+        if let Some(&scheme) = interpolation.first()
+            && scheme != ENDF_LIN_LIN
+        {
+            return Err(format!(
+                "{context}: fission energy release table uses ENDF interpolation \
                      scheme {scheme}, but only {ENDF_LIN_LIN} (linear-linear) is \
                      supported. Treating it as linear-linear would silently bias \
                      fission photon production"
-                ));
-            }
+            ));
         }
         Ok(Self::LinLinTable { x, y })
     }

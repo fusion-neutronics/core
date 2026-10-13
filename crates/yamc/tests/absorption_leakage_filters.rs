@@ -289,8 +289,20 @@ fn test_absorption_leakage_filters() {
     // Test 6: MaterialFilter equivalence
     let cell1_vs_mat1_diff = (tally1.get_mean()[0] - tally1_mat.get_mean()[0]).abs();
     let cell2_vs_mat2_diff = (tally2.get_mean()[0] - tally2_mat.get_mean()[0]).abs();
-    assert!(cell1_vs_mat1_diff < tolerance, "CellFilter and MaterialFilter should give same results for cell 1 ({:?} vs {:?}), difference: {:?}", tally1.get_mean()[0], tally1_mat.get_mean()[0], cell1_vs_mat1_diff);
-    assert!(cell2_vs_mat2_diff < tolerance, "CellFilter and MaterialFilter should give same results for cell 2 ({:?} vs {:?}), difference: {:?}", tally2.get_mean()[0], tally2_mat.get_mean()[0], cell2_vs_mat2_diff);
+    assert!(
+        cell1_vs_mat1_diff < tolerance,
+        "CellFilter and MaterialFilter should give same results for cell 1 ({:?} vs {:?}), difference: {:?}",
+        tally1.get_mean()[0],
+        tally1_mat.get_mean()[0],
+        cell1_vs_mat1_diff
+    );
+    assert!(
+        cell2_vs_mat2_diff < tolerance,
+        "CellFilter and MaterialFilter should give same results for cell 2 ({:?} vs {:?}), difference: {:?}",
+        tally2.get_mean()[0],
+        tally2_mat.get_mean()[0],
+        cell2_vs_mat2_diff
+    );
 
     // Test 7: Mixed filter intersection tests
     let mixed_match_diff = (tally1.get_mean()[0] - tally4_match.get_mean()[0]).abs();

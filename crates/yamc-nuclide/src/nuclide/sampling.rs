@@ -252,13 +252,13 @@ impl Nuclide {
         rng: &mut R,
     ) -> Option<&Reaction> {
         // Auto-load data if not available
-        if self.reactions.is_empty() && self.name.is_some() {
-            if let Some(name) = &self.name.clone() {
-                if self.auto_load_from_config(name, Some(temperature)).is_err() {
-                    println!("[sample_reaction] Failed to auto-load data for nuclide '{name}'");
-                    return None;
-                }
-            }
+        if self.reactions.is_empty()
+            && self.name.is_some()
+            && let Some(name) = &self.name.clone()
+            && self.auto_load_from_config(name, Some(temperature)).is_err()
+        {
+            println!("[sample_reaction] Failed to auto-load data for nuclide '{name}'");
+            return None;
         }
 
         let temp_reactions = self.reactions_for_temp(temperature)?;
@@ -386,7 +386,13 @@ impl Nuclide {
                     };
                     eprintln!(
                         "[NUC_RXN_FAST] E={:.2}eV urr_r={:.6} xs_abs={:.4} xs_scat={:.4} total={:.4} P(abs)={:.4} P(scat)={:.4}",
-                        energy, urr_xs.urr_random, xs_absorption, xs_scattering_final, total_xs, p_abs, p_scat
+                        energy,
+                        urr_xs.urr_random,
+                        xs_absorption,
+                        xs_scattering_final,
+                        total_xs,
+                        p_abs,
+                        p_scat
                     );
                 }
             }
@@ -505,7 +511,14 @@ impl Nuclide {
                         };
                         eprintln!(
                             "[NUC_RXN] E={:.2}eV urr_r={:.6} xs_abs={:.4} xs_scat={:.4} xs_fis={:.4} total={:.4} P(abs)={:.4} P(scat)={:.4}",
-                            energy, urr_xs.urr_random, xs_absorption, xs_scattering_final, xs_fission, total_xs, p_abs, p_scat
+                            energy,
+                            urr_xs.urr_random,
+                            xs_absorption,
+                            xs_scattering_final,
+                            xs_fission,
+                            total_xs,
+                            p_abs,
+                            p_scat
                         );
                     }
                 }
@@ -571,10 +584,11 @@ impl Nuclide {
         // Compute scattering XS by summing all scattering reactions
         let mut xs_scattering = 0.0;
         for (&mt, reaction) in temp_reactions.iter() {
-            if is_scattering_mt(mt) && !reaction.redundant {
-                if let Some(xs) = reaction.cross_section_at(energy) {
-                    xs_scattering += xs;
-                }
+            if is_scattering_mt(mt)
+                && !reaction.redundant
+                && let Some(xs) = reaction.cross_section_at(energy)
+            {
+                xs_scattering += xs;
             }
         }
 
@@ -711,10 +725,11 @@ impl Nuclide {
 
         let mut xs_scattering = 0.0;
         for (&mt, reaction) in temp_reactions.iter() {
-            if is_scattering_mt(mt) && !reaction.redundant {
-                if let Some(xs) = reaction.cross_section_at(energy) {
-                    xs_scattering += xs;
-                }
+            if is_scattering_mt(mt)
+                && !reaction.redundant
+                && let Some(xs) = reaction.cross_section_at(energy)
+            {
+                xs_scattering += xs;
             }
         }
 
@@ -904,12 +919,11 @@ impl Nuclide {
 
         // Fast path: use pre-computed scattering XS data with cached reaction pointers
         // This avoids HashMap lookup entirely - returns &Reaction directly
-        if let Some(fast_grid) = self.fast_xs.get(temp_idx) {
-            if !fast_grid.scatter_mt_xs.is_empty() {
-                if let Some(reaction) = fast_grid.sample_scatter_reaction(energy, rng) {
-                    return reaction;
-                }
-            }
+        if let Some(fast_grid) = self.fast_xs.get(temp_idx)
+            && !fast_grid.scatter_mt_xs.is_empty()
+            && let Some(reaction) = fast_grid.sample_scatter_reaction(energy, rng)
+        {
+            return reaction;
         }
 
         // Slow path fallback: needs temp_reactions for indexed lookup
@@ -929,12 +943,11 @@ impl Nuclide {
             if reaction.redundant {
                 continue;
             }
-            if is_scattering_mt(mt) {
-                if let Some(xs) = reaction.cross_section_at(energy) {
-                    if xs > 0.0 {
-                        total_scattering_xs += xs;
-                    }
-                }
+            if is_scattering_mt(mt)
+                && let Some(xs) = reaction.cross_section_at(energy)
+                && xs > 0.0
+            {
+                total_scattering_xs += xs;
             }
         }
 
@@ -953,14 +966,13 @@ impl Nuclide {
             if reaction.redundant {
                 continue;
             }
-            if is_scattering_mt(mt) {
-                if let Some(xs) = reaction.cross_section_at(energy) {
-                    if xs > 0.0 {
-                        accum += xs;
-                        if xi < accum {
-                            return reaction;
-                        }
-                    }
+            if is_scattering_mt(mt)
+                && let Some(xs) = reaction.cross_section_at(energy)
+                && xs > 0.0
+            {
+                accum += xs;
+                if xi < accum {
+                    return reaction;
                 }
             }
         }
@@ -1022,10 +1034,10 @@ impl Nuclide {
         let temp_idx = self.get_temp_idx(temperature)?;
 
         // Fast path: use pre-computed fission XS data with cached reaction pointers
-        if let Some(fast_grid) = self.fast_xs.get(temp_idx) {
-            if !fast_grid.fission_mt_xs.is_empty() {
-                return fast_grid.sample_fission_reaction(energy, draw_xi);
-            }
+        if let Some(fast_grid) = self.fast_xs.get(temp_idx)
+            && !fast_grid.fission_mt_xs.is_empty()
+        {
+            return fast_grid.sample_fission_reaction(energy, draw_xi);
         }
 
         // Slow path fallback: needs temp_reactions for indexed lookup
@@ -1040,12 +1052,11 @@ impl Nuclide {
             if reaction.redundant {
                 continue;
             }
-            if is_fission_mt(mt) {
-                if let Some(xs) = reaction.cross_section_at(energy) {
-                    if xs > 0.0 {
-                        fission_rxns.push((mt, reaction, xs));
-                    }
-                }
+            if is_fission_mt(mt)
+                && let Some(xs) = reaction.cross_section_at(energy)
+                && xs > 0.0
+            {
+                fission_rxns.push((mt, reaction, xs));
             }
         }
         fission_rxns.sort_unstable_by_key(|&(mt, _, _)| mt);
@@ -1113,7 +1124,9 @@ impl Nuclide {
             .collect();
 
         if available_inelastic_mts.is_empty() {
-            panic!("sample_inelastic_constituent: No inelastic constituent reactions (MT 50-91) available in this nuclide at temperature '{temperature}'. This indicates missing nuclear data or incorrect MT 4 sampling.");
+            panic!(
+                "sample_inelastic_constituent: No inelastic constituent reactions (MT 50-91) available in this nuclide at temperature '{temperature}'. This indicates missing nuclear data or incorrect MT 4 sampling."
+            );
         }
 
         // Helper to get cross section for a given MT
@@ -1128,7 +1141,9 @@ impl Nuclide {
         let total_inelastic_xs: f64 = available_inelastic_mts.iter().map(|&mt| get_xs(mt)).sum();
 
         if total_inelastic_xs <= 0.0 {
-            panic!("sample_inelastic_constituent: Total inelastic cross section is zero at energy {energy} eV for temperature '{temperature}'. All constituent reactions have zero cross section.");
+            panic!(
+                "sample_inelastic_constituent: Total inelastic cross section is zero at energy {energy} eV for temperature '{temperature}'. All constituent reactions have zero cross section."
+            );
         }
 
         // Sample which specific inelastic reaction occurs
@@ -1146,7 +1161,9 @@ impl Nuclide {
         }
 
         // This should never be reached due to the sampling logic above
-        panic!("sample_inelastic_constituent: Failed to sample any inelastic reaction despite having available MTs and positive total cross section. This indicates a bug in the sampling logic.");
+        panic!(
+            "sample_inelastic_constituent: Failed to sample any inelastic reaction despite having available MTs and positive total cross section. This indicates a bug in the sampling logic."
+        );
     }
 
     /// Sample a specific absorption constituent reaction (MTs that make up MT 101) at a given energy and temperature.
@@ -1171,12 +1188,11 @@ impl Nuclide {
         // Pass 1: Compute total absorption cross section
         let mut total_xs = 0.0;
         for (&mt, reaction) in temp_reactions.iter() {
-            if is_absorption_mt(mt) {
-                if let Some(xs) = reaction.cross_section_at(energy) {
-                    if xs > 0.0 {
-                        total_xs += xs;
-                    }
-                }
+            if is_absorption_mt(mt)
+                && let Some(xs) = reaction.cross_section_at(energy)
+                && xs > 0.0
+            {
+                total_xs += xs;
             }
         }
 
@@ -1188,14 +1204,13 @@ impl Nuclide {
         let xi = rng.random_range(0.0..total_xs);
         let mut accum = 0.0;
         for (&mt, reaction) in temp_reactions.iter() {
-            if is_absorption_mt(mt) {
-                if let Some(xs) = reaction.cross_section_at(energy) {
-                    if xs > 0.0 {
-                        accum += xs;
-                        if xi < accum {
-                            return reaction;
-                        }
-                    }
+            if is_absorption_mt(mt)
+                && let Some(xs) = reaction.cross_section_at(energy)
+                && xs > 0.0
+            {
+                accum += xs;
+                if xi < accum {
+                    return reaction;
                 }
             }
         }

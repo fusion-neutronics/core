@@ -360,26 +360,26 @@ where
         let mut loss = 0.0;
 
         // Decay contributions
-        if let Some(half_life) = nuc.half_life {
-            if half_life > 0.0 {
-                let lambda = ln2 / half_life;
-                // The whole decay constant, whatever the modes lead to. A mode
-                // with no target (spontaneous fission, or a stored self-target:
-                // the chain reader's `modelled_decay_target`) removes its share
-                // of the parent and adds no residual nucleus. Any light
-                // particle it emits is still added below.
-                loss += lambda;
-                for decay in &nuc.decays {
-                    if let Some(target) = &decay.target {
-                        if let Some(&row) = index.get(target.as_str()) {
-                            sink(row, col, decay.branching * lambda);
-                        }
-                    }
-                    // Add light particle production from decay (He4 from alpha decay, etc.)
-                    for &(particle, count) in decay_particle_products(&decay.kind) {
-                        if let Some(&row) = index.get(particle) {
-                            sink(row, col, decay.branching * lambda * count);
-                        }
+        if let Some(half_life) = nuc.half_life
+            && half_life > 0.0
+        {
+            let lambda = ln2 / half_life;
+            // The whole decay constant, whatever the modes lead to. A mode
+            // with no target (spontaneous fission, or a stored self-target:
+            // the chain reader's `modelled_decay_target`) removes its share
+            // of the parent and adds no residual nucleus. Any light
+            // particle it emits is still added below.
+            loss += lambda;
+            for decay in &nuc.decays {
+                if let Some(target) = &decay.target
+                    && let Some(&row) = index.get(target.as_str())
+                {
+                    sink(row, col, decay.branching * lambda);
+                }
+                // Add light particle production from decay (He4 from alpha decay, etc.)
+                for &(particle, count) in decay_particle_products(&decay.kind) {
+                    if let Some(&row) = index.get(particle) {
+                        sink(row, col, decay.branching * lambda * count);
                     }
                 }
             }
@@ -426,10 +426,10 @@ where
                     // `target` rather than `produced_target`: a reaction back
                     // into its own parent is charged to `loss` above, and
                     // adding it back here is what makes it cancel.
-                    if let Some(target) = &rx.target {
-                        if let Some(&row) = index.get(target.as_str()) {
-                            sink(row, col, rx.branching * rate);
-                        }
+                    if let Some(target) = &rx.target
+                        && let Some(&row) = index.get(target.as_str())
+                    {
+                        sink(row, col, rx.branching * rate);
                     }
                     // Add light particle production (H1, He4, etc.)
                     for &(particle, count) in light_particle_products(&rx.kind) {
@@ -442,43 +442,43 @@ where
                     // Products are accumulated into `fy_fold`
                     // first so each one reaches the sink once, leaving the
                     // sparsity pattern the same as a single-energy yield.
-                    if rx.kind.contains("fission") {
-                        if let Some(fy_set) = &nuc.fission_yields {
-                            let weights = fy_weights.get(name.as_str()).ok_or_else(|| {
-                                format!(
-                                    "no fission-yield spectrum weights for {name}, which has \
+                    if rx.kind.contains("fission")
+                        && let Some(fy_set) = &nuc.fission_yields
+                    {
+                        let weights = fy_weights.get(name.as_str()).ok_or_else(|| {
+                            format!(
+                                "no fission-yield spectrum weights for {name}, which has \
                                      yields and a non-zero {} rate; the driver must compute \
                                      them from the flux",
-                                    rx.kind
-                                )
-                            })?;
-                            for (k, &c_k) in weights.iter().enumerate() {
-                                if c_k == 0.0 {
-                                    continue;
-                                }
-                                let Some(fy) = fy_set.yields.get(k) else {
-                                    return Err(format!(
-                                        "{name} has {} fission-yield spectrum weights but {} \
+                                rx.kind
+                            )
+                        })?;
+                        for (k, &c_k) in weights.iter().enumerate() {
+                            if c_k == 0.0 {
+                                continue;
+                            }
+                            let Some(fy) = fy_set.yields.get(k) else {
+                                return Err(format!(
+                                    "{name} has {} fission-yield spectrum weights but {} \
                                          tabulated energies",
-                                        weights.len(),
-                                        fy_set.yields.len()
-                                    ));
-                                };
-                                for (product, yield_val) in &fy.products {
-                                    if let Some(&row) = index.get(product.as_str()) {
-                                        if fy_fold[row] == 0.0 {
-                                            fy_touched.push(row);
-                                        }
-                                        fy_fold[row] += c_k * yield_val;
+                                    weights.len(),
+                                    fy_set.yields.len()
+                                ));
+                            };
+                            for (product, yield_val) in &fy.products {
+                                if let Some(&row) = index.get(product.as_str()) {
+                                    if fy_fold[row] == 0.0 {
+                                        fy_touched.push(row);
                                     }
+                                    fy_fold[row] += c_k * yield_val;
                                 }
                             }
-                            for &row in &fy_touched {
-                                sink(row, col, rx.branching * rate * fy_fold[row]);
-                                fy_fold[row] = 0.0;
-                            }
-                            fy_touched.clear();
                         }
+                        for &row in &fy_touched {
+                            sink(row, col, rx.branching * rate * fy_fold[row]);
+                            fy_fold[row] = 0.0;
+                        }
+                        fy_touched.clear();
                     }
                 }
             }

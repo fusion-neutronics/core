@@ -123,7 +123,9 @@ fn diag_radius_sweep_deep_tail() {
         eprintln!("skipping -- no GPU with f64 compute available");
         return;
     }
-    eprintln!("\n| radius cm | deep-tail CPU (<49keV) | deep-tail GPU | GPU/CPU | total CPU | total GPU |");
+    eprintln!(
+        "\n| radius cm | deep-tail CPU (<49keV) | deep-tail GPU | GPU/CPU | total CPU | total GPU |"
+    );
     eprintln!("|---|---|---|---|---|---|");
     for &r in &[1.0_f64, 5.0, 20.0] {
         let (mut cpu_m, cpu_t, settings) = build_r(r);

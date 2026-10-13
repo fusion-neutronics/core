@@ -469,7 +469,9 @@ fn photons_match_their_reruns(mode: Mode) {
                 let x = s1 / h;
                 let sx = ((s2 - s1 * s1 / h) / (h - 1.0) / h).sqrt();
                 let z = (x - y) / (sx * sx + sy * sy).sqrt();
-                eprintln!("{mode:?} replica {k} tally {t} score {b}: {x:e} ± {sx:e}, rerun {y:e} ± {sy:e}, z = {z:+.2}");
+                eprintln!(
+                    "{mode:?} replica {k} tally {t} score {b}: {x:e} ± {sx:e}, rerun {y:e} ± {sy:e}, z = {z:+.2}"
+                );
                 assert!(
                     z.abs() < 4.0,
                     "{mode:?} replica {k} tally {t} score {b}: z = {z:.2}"

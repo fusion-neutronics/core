@@ -240,16 +240,16 @@ pub fn check_sizes(
             continue;
         }
         let path = dir.join(&file.path);
-        if let Ok(meta) = std::fs::metadata(&path) {
-            if meta.len() != file.bytes {
-                return Err(format!(
-                    "{}: size mismatch, the release manifest says {} bytes and the file has {}. \
+        if let Ok(meta) = std::fs::metadata(&path)
+            && meta.len() != file.bytes
+        {
+            return Err(format!(
+                "{}: size mismatch, the release manifest says {} bytes and the file has {}. \
                      The local copy is incomplete or modified; download it again.",
-                    path.display(),
-                    file.bytes,
-                    meta.len()
-                ));
-            }
+                path.display(),
+                file.bytes,
+                meta.len()
+            ));
         }
     }
     Ok(())
@@ -345,14 +345,14 @@ pub fn parse_manifest(
             manifest.release
         ));
     }
-    if let Some(p) = pointer {
-        if manifest.release != p.release || manifest.format_version != p.format_version {
-            return Err(format!(
-                "'{keyword}' {LATEST} names release {} (format_version {}) but its manifest \
+    if let Some(p) = pointer
+        && (manifest.release != p.release || manifest.format_version != p.format_version)
+    {
+        return Err(format!(
+            "'{keyword}' {LATEST} names release {} (format_version {}) but its manifest \
                  describes release {} (format_version {})",
-                p.release, p.format_version, manifest.release, manifest.format_version
-            ));
-        }
+            p.release, p.format_version, manifest.release, manifest.format_version
+        ));
     }
     check_format_version(keyword, &manifest.release, manifest.format_version)?;
     let mut by_path = HashMap::with_capacity(manifest.files.len());

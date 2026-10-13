@@ -1018,12 +1018,12 @@ pub fn broadened_weight(
 ) -> Result<BroadenedWeight> {
     check_awr_temperature(awr, temperature)?;
     let pieces = flux.pieces()?;
-    if let Some(e) = broaden_below {
-        if e.is_nan() || e <= 0.0 {
-            return Err(invalid(format!(
-                "the upper limit of broadening must be positive, got {e}"
-            )));
-        }
+    if let Some(e) = broaden_below
+        && (e.is_nan() || e <= 0.0)
+    {
+        return Err(invalid(format!(
+            "the upper limit of broadening must be positive, got {e}"
+        )));
     }
     // At 0 K nothing is broadened and w is the flux itself.
     let limit = if temperature == 0.0 {

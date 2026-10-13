@@ -257,7 +257,7 @@ impl<'a> Continuum<'a> {
     }
 
     /// The integral over each interval between consecutive points, in order.
-    pub fn interval_integrals(&self) -> impl Iterator<Item = f64> + 'a {
+    pub fn interval_integrals(&self) -> impl Iterator<Item = f64> + 'a + use<'a> {
         let linear = self.linear;
         self.energies
             .windows(2)

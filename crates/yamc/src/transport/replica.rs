@@ -178,17 +178,17 @@ impl Source {
                 }
             }
         }
-        if own > 0.0 {
-            if let Some(c) = Self::cell(&self.absolute, e) {
-                for (o, a) in out.iter_mut().zip(&self.absolute_shift[c * r..(c + 1) * r]) {
-                    *o += scale * a / own;
-                }
-                let (offset, k) = self.absolute_modes;
-                if k > 0 && !modes.is_empty() {
-                    let loading = &self.absolute_loading[c * k..(c + 1) * k];
-                    for (o, l) in modes[offset..offset + k].iter_mut().zip(loading) {
-                        *o += scale * l / own;
-                    }
+        if own > 0.0
+            && let Some(c) = Self::cell(&self.absolute, e)
+        {
+            for (o, a) in out.iter_mut().zip(&self.absolute_shift[c * r..(c + 1) * r]) {
+                *o += scale * a / own;
+            }
+            let (offset, k) = self.absolute_modes;
+            if k > 0 && !modes.is_empty() {
+                let loading = &self.absolute_loading[c * k..(c + 1) * k];
+                for (o, l) in modes[offset..offset + k].iter_mut().zip(loading) {
+                    *o += scale * l / own;
                 }
             }
         }
@@ -534,11 +534,10 @@ impl ReplicaNuclide {
             .resonance
             .as_ref()
             .and_then(|r| Some((r, r.local(at)?)))
+            && let Some(m) = res.reactions.iter().position(|(rmt, _)| *rmt == p)
         {
-            if let Some(m) = res.reactions.iter().position(|(rmt, _)| *rmt == p) {
-                res.add(m, local, scale, out);
-                moved = true;
-            }
+            res.add(m, local, scale, out);
+            moved = true;
         }
         moved
     }
@@ -977,10 +976,11 @@ impl ReplicaContext {
                 .iter()
                 .map(|d| d.absolute(name).unwrap_or(&[]))
                 .collect();
-            if transport.is_some() && !registry.by_name.contains_key(name) {
-                if let Some(modes) = sampler.modes(name, KEPT_CORRELATION) {
-                    registry.register(name, modes, &relative, &absolute);
-                }
+            if transport.is_some()
+                && !registry.by_name.contains_key(name)
+                && let Some(modes) = sampler.modes(name, KEPT_CORRELATION)
+            {
+                registry.register(name, modes, &relative, &absolute);
             }
             let resonance = sampling.get(name).and_then(|r| r.as_ref().ok());
             let Some(tab) = Self::nuclide(
@@ -1394,13 +1394,13 @@ impl ReplicaContext {
                 let own = ReplicaNuclide::at(&s.own, at);
                 s.add_change(e, own, nuc.density * sum, out, grad);
             }
-            if let Some(res) = &nuc.resonance {
-                if let Some(local) = res.local(at) {
-                    for m in 0..res.reactions.len() {
-                        let scale = nuc.density * res.band_factor(m, g.as_ref());
-                        if scale != 0.0 {
-                            res.add(m, local, scale, out);
-                        }
+            if let Some(res) = &nuc.resonance
+                && let Some(local) = res.local(at)
+            {
+                for m in 0..res.reactions.len() {
+                    let scale = nuc.density * res.band_factor(m, g.as_ref());
+                    if scale != 0.0 {
+                        res.add(m, local, scale, out);
                     }
                 }
             }
@@ -1490,16 +1490,16 @@ impl ReplicaContext {
         // the same inside a band, which cancels within its channel. A replica
         // whose drawn cross section is zero where the nominal is not could not
         // have made this collision, and its ratio goes to zero.
-        if let Some((res, local)) = nuc.resonance.as_ref().and_then(|r| Some((r, r.local(at)?))) {
-            if let Some(m) = res.reactions.iter().position(|(rmt, _)| *rmt == mt) {
-                let nominal = &res.reactions[m].1.nominal;
-                let (i, f) = local;
-                let sigma = nominal[i] + f * (nominal[i + 1] - nominal[i]);
-                if sigma > 0.0 {
-                    res.add(m, local, 1.0 / sigma, out);
-                    for f in out.iter_mut() {
-                        *f = f.max(0.0);
-                    }
+        if let Some((res, local)) = nuc.resonance.as_ref().and_then(|r| Some((r, r.local(at)?)))
+            && let Some(m) = res.reactions.iter().position(|(rmt, _)| *rmt == mt)
+        {
+            let nominal = &res.reactions[m].1.nominal;
+            let (i, f) = local;
+            let sigma = nominal[i] + f * (nominal[i + 1] - nominal[i]);
+            if sigma > 0.0 {
+                res.add(m, local, 1.0 / sigma, out);
+                for f in out.iter_mut() {
+                    *f = f.max(0.0);
                 }
             }
         }

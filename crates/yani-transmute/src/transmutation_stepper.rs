@@ -204,7 +204,7 @@ fn fed_during_step(triplets: &[(usize, usize, f64)], n0: &[f64]) -> Vec<bool> {
     let mut queue: VecDeque<usize> = n0
         .iter()
         .enumerate()
-        .filter(|(_, &d)| d > 0.0)
+        .filter(|&(_, &d)| d > 0.0)
         .map(|(i, _)| i)
         .collect();
     while let Some(parent) = queue.pop_front() {
@@ -244,10 +244,11 @@ fn collect_nuclides_and_densities_from_hashmap(
         if let Some(nuc) = chain.get(&name) {
             // Always follow decay pathways (decays happen regardless of flux)
             for decay in &nuc.decays {
-                if let Some(target) = &decay.target {
-                    if chain.contains_key(target) && visited.insert(target.clone()) {
-                        queue.push_back(target.clone());
-                    }
+                if let Some(target) = &decay.target
+                    && chain.contains_key(target)
+                    && visited.insert(target.clone())
+                {
+                    queue.push_back(target.clone());
                 }
                 for &(particle, _) in decay_particle_products(&decay.kind) {
                     let p = particle.to_string();
@@ -262,10 +263,11 @@ fn collect_nuclides_and_densities_from_hashmap(
                 for rx in &nuc.reactions {
                     let rate = *rate_map.get(rx.kind.as_str()).unwrap_or(&0.0);
                     if rate > 0.0 {
-                        if let Some(target) = &rx.target {
-                            if chain.contains_key(target) && visited.insert(target.clone()) {
-                                queue.push_back(target.clone());
-                            }
+                        if let Some(target) = &rx.target
+                            && chain.contains_key(target)
+                            && visited.insert(target.clone())
+                        {
+                            queue.push_back(target.clone());
                         }
                         for &(particle, _) in light_particle_products(&rx.kind) {
                             let p = particle.to_string();
@@ -279,16 +281,16 @@ fn collect_nuclides_and_densities_from_hashmap(
                         // superset keeps network discovery independent of that
                         // (a product that ends up with zero yield only costs an
                         // empty matrix row).
-                        if rx.kind.contains("fission") {
-                            if let Some(fy_set) = &nuc.fission_yields {
-                                for fy in &fy_set.yields {
-                                    for (product, yield_val) in &fy.products {
-                                        if *yield_val > 0.0
-                                            && chain.contains_key(product)
-                                            && visited.insert(product.clone())
-                                        {
-                                            queue.push_back(product.clone());
-                                        }
+                        if rx.kind.contains("fission")
+                            && let Some(fy_set) = &nuc.fission_yields
+                        {
+                            for fy in &fy_set.yields {
+                                for (product, yield_val) in &fy.products {
+                                    if *yield_val > 0.0
+                                        && chain.contains_key(product)
+                                        && visited.insert(product.clone())
+                                    {
+                                        queue.push_back(product.clone());
                                     }
                                 }
                             }

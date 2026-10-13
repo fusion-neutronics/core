@@ -1183,10 +1183,10 @@ pub(crate) fn collapse_with_lists(
             // Only for a nuclide this material holds data for: the memo is
             // what that data collapsed to, and a material without it
             // collapses the nuclide to nothing.
-            if material.nuclide_data.contains_key(name.as_str()) {
-                if let Some(done) = held.as_ref().and_then(|h| h.get(name.as_str())) {
-                    return Some(done.clone());
-                }
+            if material.nuclide_data.contains_key(name.as_str())
+                && let Some(done) = held.as_ref().and_then(|h| h.get(name.as_str()))
+            {
+                return Some(done.clone());
             }
             context.collapse_nuclide(name, chain_nuclide, lists.get(name.as_str()))
         };
@@ -1203,10 +1203,10 @@ pub(crate) fn collapse_with_lists(
 
     if let Some(mut held) = held {
         for ((name, _), collapsed) in entries.iter().zip(&collapsed) {
-            if let Some(c) = collapsed {
-                if !held.contains_key(name.as_str()) {
-                    held.insert((*name).clone(), c.clone());
-                }
+            if let Some(c) = collapsed
+                && !held.contains_key(name.as_str())
+            {
+                held.insert((*name).clone(), c.clone());
             }
         }
     }

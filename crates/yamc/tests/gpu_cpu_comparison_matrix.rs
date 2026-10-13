@@ -524,7 +524,9 @@ fn fissile_table() {
 #[test]
 fn gpu_cpu_comparison_matrix() {
     if yamc_test_cache::on_ci() {
-        eprintln!("skipping the CPU/GPU comparison matrix: it prints tables for a person to read and asserts nothing, so a runner learns nothing from it");
+        eprintln!(
+            "skipping the CPU/GPU comparison matrix: it prints tables for a person to read and asserts nothing, so a runner learns nothing from it"
+        );
         return;
     }
 
@@ -614,7 +616,9 @@ fn multinuclide_table() {
     if !std::path::Path::new("tests/H2.arrow").exists()
         || !std::path::Path::new("tests/C12.arrow").exists()
     {
-        println!("\n## 6. Multi-nuclide material (H2:C12)\n\n_skipped -- tests/H2.arrow or tests/C12.arrow absent._");
+        println!(
+            "\n## 6. Multi-nuclide material (H2:C12)\n\n_skipped -- tests/H2.arrow or tests/C12.arrow absent._"
+        );
         return;
     }
 

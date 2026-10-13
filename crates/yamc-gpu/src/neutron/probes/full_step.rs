@@ -436,7 +436,9 @@ mod tests {
                 }
             }
         }
-        println!("full_step: max distance ulp = {max_d}, max energy ulp = {max_e}, max |mu_lab| abs = {max_mu:e}");
+        println!(
+            "full_step: max distance ulp = {max_d}, max energy ulp = {max_e}, max |mu_lab| abs = {max_mu:e}"
+        );
         assert!(max_mu < 1e-10, "mu_lab abs drift {max_mu:e}");
     }
 }

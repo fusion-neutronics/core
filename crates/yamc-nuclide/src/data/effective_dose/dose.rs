@@ -160,15 +160,14 @@ fn parse_dose_data(data: &str, column_index: usize) -> (Vec<f64>, Vec<f64>) {
         }
 
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() > column_index {
-            if let (Ok(energy_mev), Ok(coeff)) = (
+        if parts.len() > column_index
+            && let (Ok(energy_mev), Ok(coeff)) = (
                 parse_scientific_notation(parts[0]),
                 parse_scientific_notation(parts[column_index]),
             ) {
                 energies.push(energy_mev * 1e6); // Convert MeV to eV
                 coefficients.push(coeff);
             }
-        }
     }
 
     (energies, coefficients)

@@ -196,7 +196,7 @@ pub fn parse_mf33_subsection(reader: &mut Reader) -> Result<Mf33Subsection> {
             _ => {
                 return Err(Error::Unsupported {
                     what: "an unrecognised MF=33 LB value",
-                })
+                });
             }
         }
         sub.ni_subsections.push(subsub);
@@ -380,7 +380,7 @@ pub fn split_mf34_block(
         _ => {
             return Err(Error::Unsupported {
                 what: "an MF=34 LB value other than 0, 1, 2, 5 or 6",
-            })
+            });
         }
     }
     Ok(block)

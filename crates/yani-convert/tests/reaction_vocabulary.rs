@@ -82,10 +82,10 @@ fn every_name_the_writer_can_emit_resolves_on_the_reader_side() {
 fn a_shared_name_means_the_same_mt_on_both_sides() {
     let mut disagreements = Vec::new();
     for info in REACTIONS.iter() {
-        if let Some(mt) = yani::reaction_type_to_mt(info.name) {
-            if !info.mts.contains(&mt) {
-                disagreements.push((info.name, mt, info.mts));
-            }
+        if let Some(mt) = yani::reaction_type_to_mt(info.name)
+            && !info.mts.contains(&mt)
+        {
+            disagreements.push((info.name, mt, info.mts));
         }
     }
 

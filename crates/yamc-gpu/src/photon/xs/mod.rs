@@ -140,10 +140,8 @@ pub fn dominant_element_for_reaction(
             }
             // Degenerate grid entirely below the floor: fall back to the
             // grid max so we still produce a deterministic pick.
-            if !any_above_floor {
-                if let Some(&log_e) = grid.last() {
-                    score = *density * reaction.micro(&el.calculate_xs(log_e.exp()));
-                }
+            if !any_above_floor && let Some(&log_e) = grid.last() {
+                score = *density * reaction.micro(&el.calculate_xs(log_e.exp()));
             }
         }
         let z = el.atomic_number;

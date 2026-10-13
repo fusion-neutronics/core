@@ -496,7 +496,7 @@ fn read_sources(batch: &RecordBatch) -> Result<Vec<(String, DecaySource)>, Box<d
                     energies.len(),
                     values.len()
                 )
-                .into())
+                .into());
             }
             (Some(lb), Some(energies), Some(values)) => Some(SourceCovariance {
                 ls: int(covariance_ls, i),
@@ -509,7 +509,7 @@ fn read_sources(batch: &RecordBatch) -> Result<Vec<(String, DecaySource)>, Box<d
                     "sources.arrow: a row of {nuclide} gives its covariance only in part; \
                      covariance_lb, covariance_energies and covariance_values go together"
                 )
-                .into())
+                .into());
             }
         };
 
@@ -577,7 +577,7 @@ fn anything_curve(
                  does not give)",
                 here()
             )
-            .into())
+            .into());
         }
     };
     if energy.is_empty() || energy.len() != values.len() {
@@ -872,10 +872,10 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
         let parent_yields = chain
             .get(&parent_name)
             .and_then(|p| p.fission_yields.clone());
-        if let Some(yields) = parent_yields {
-            if let Some(nuc) = chain.get_mut(&nuclide_name) {
-                nuc.fission_yields = Some(yields);
-            }
+        if let Some(yields) = parent_yields
+            && let Some(nuc) = chain.get_mut(&nuclide_name)
+        {
+            nuc.fission_yields = Some(yields);
         }
     }
 
@@ -1041,7 +1041,7 @@ impl ChainSections {
                     "unknown chain subsection '{other}' \
                      (expected decay, reactions, fission_yields or branching)"
                 )
-                .into())
+                .into());
             }
         };
         target.insert(file.to_string(), bytes);
@@ -1112,7 +1112,7 @@ fn attach_evaluated_yields(
                         "{SECTION}: unknown kind {other:?} for {nuclide} at {energy} eV \
                          (expected independent or cumulative)"
                     )
-                    .into())
+                    .into());
                 }
             };
             if slot.is_some() {

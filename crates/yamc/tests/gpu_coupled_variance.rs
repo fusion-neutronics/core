@@ -15,15 +15,17 @@
 //! Self-skips if the local Fe56 / Fe arrow files or an f64 GPU are absent. Run:
 //!   cargo test -p yamc --features gpu --release --test gpu_coupled_variance
 //!
-//! `--test-threads=1` used to be required, because the launch-chunk override is
-//! a process-global env var and a test that set it changed what its concurrent
-//! siblings launched. `GpuTest` serialises the binary instead, so
-//! the plain invocation above is now the right one.
+//! The launch-chunk override is a process-global env var, so the multi-chunk
+//! tests set it on a child run of themselves (`common::relaunch`) rather than in
+//! this process, and the plain invocation above needs no `--test-threads=1`.
 
 #![cfg(all(feature = "gpu", not(target_os = "macos")))]
 
 use std::collections::HashMap;
 use std::sync::Arc;
+
+mod common;
+use common::relaunch::in_child_with_env;
 
 use yamc::geo::{BoundaryType, HalfspaceType, Region, Surface, SurfaceKind};
 use yamc::geometry::cell::Cell;
@@ -48,61 +50,6 @@ use yamc_tallies::tally::Tally;
 fn data_present() -> bool {
     std::path::Path::new("tests/Fe56.arrow").exists()
         && std::path::Path::new("tests/Fe.arrow").exists()
-}
-
-/// Serialises every test in this binary, and scopes the launch-chunk override
-/// to the one test that sets it.
-///
-/// `YAMC_GPU_LAUNCH_CHUNK` is a process-global env var read inside
-/// `launch_chunk_size`, so a test that sets it changes what every test running
-/// CONCURRENTLY in the same binary launches. The module header used to tell the
-/// reader to pass `--test-threads=1`; a plain `cargo test` does not, so the
-/// documented local GPU gate failed three tests that all passed serially.
-///
-/// Two things make this correct where a lock around the set/remove pair alone
-/// would not:
-///
-/// * every test takes the guard, including the ones that do not set the
-///   override, because they still READ it and must be kept out of the window;
-/// * the previous value is restored in `Drop`, so a panic between setting it
-///   and clearing it cannot leak the override into every later test.
-fn exclusive() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|p| p.into_inner())
-}
-
-/// Holds the binary lock and the launch-chunk override together, restoring the
-/// override when it drops. Construct it FIRST in a test, and keep it alive for
-/// the whole body.
-struct GpuTest {
-    _guard: std::sync::MutexGuard<'static, ()>,
-    previous: Option<String>,
-}
-
-impl GpuTest {
-    /// Serialise against the other tests without touching the override.
-    fn new() -> Self {
-        Self {
-            _guard: exclusive(),
-            previous: std::env::var("YAMC_GPU_LAUNCH_CHUNK").ok(),
-        }
-    }
-
-    /// Serialise, and force the launch chunk for the duration.
-    fn with_chunk(chunk: usize) -> Self {
-        let held = Self::new();
-        std::env::set_var("YAMC_GPU_LAUNCH_CHUNK", chunk.to_string());
-        held
-    }
-}
-
-impl Drop for GpuTest {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(v) => std::env::set_var("YAMC_GPU_LAUNCH_CHUNK", v),
-            None => std::env::remove_var("YAMC_GPU_LAUNCH_CHUNK"),
-        }
-    }
 }
 
 fn gpu_available() -> bool {
@@ -260,7 +207,6 @@ fn coupled_total_particles_invariance() {
         eprintln!("skipping coupled invariance: data/GPU absent");
         return;
     }
-    let _held = GpuTest::new();
     let n = 3000usize;
     let cid = 1;
     let (mut m1, s1) = build_coupled(
@@ -305,7 +251,6 @@ fn coupled_gpu_cpu_std_dev_parity() {
         eprintln!("skipping coupled std_dev parity: data/GPU absent");
         return;
     }
-    let _held = GpuTest::new();
     let total = 120_000usize;
     let cid = 1;
     let bins = energy_bins(20);
@@ -364,7 +309,6 @@ fn photon_source_total_particles_invariance() {
         eprintln!("skipping photon-source invariance: data/GPU absent");
         return;
     }
-    let _held = GpuTest::new();
     let n = 3000usize;
     let (mut m1, s1) = build_photon(flux_tally(1, ParticleType::Photon, None), n);
     let r1 = run_gpu_retry(&mut m1, &s1).expect("GPU run N");
@@ -375,7 +319,9 @@ fn photon_source_total_particles_invariance() {
         r1.n_particles, n,
         "photon N must be the source-photon count"
     );
-    eprintln!("photon_source_total_particles_invariance: {n} source photons bit-identical across N and 2N");
+    eprintln!(
+        "photon_source_total_particles_invariance: {n} source photons bit-identical across N and 2N"
+    );
 }
 
 /// Multi-CHUNK invariance for the per-history photon path: a small launch chunk
@@ -389,14 +335,23 @@ fn photon_source_multi_chunk_invariance() {
     }
     let chunk = 700usize;
     let n = 3 * chunk;
-    let _held = GpuTest::with_chunk(chunk);
+    if !in_child_with_env(
+        "photon_source_multi_chunk_invariance",
+        "YAMC_GPU_LAUNCH_CHUNK",
+        &chunk.to_string(),
+    ) {
+        return;
+    }
     let (mut m1, s1) = build_photon(flux_tally(1, ParticleType::Photon, None), n);
     let r1 = run_gpu_retry(&mut m1, &s1);
     let (mut m2, s2) = build_photon(flux_tally(1, ParticleType::Photon, None), 2 * n);
     let r2 = run_gpu_retry(&mut m2, &s2);
     let (r1, r2) = (r1.expect("GPU run N"), r2.expect("GPU run 2N"));
     assert_prefix_bit_identical(&r1, &r2, n, "photon-source multi-chunk");
-    eprintln!("photon_source_multi_chunk_invariance: {n} photons bit-identical across N and 2N over {} chunks", n / chunk);
+    eprintln!(
+        "photon_source_multi_chunk_invariance: {n} photons bit-identical across N and 2N over {} chunks",
+        n / chunk
+    );
 }
 
 #[test]
@@ -405,7 +360,6 @@ fn photon_source_gpu_cpu_std_dev_parity() {
         eprintln!("skipping photon-source std_dev parity: data/GPU absent");
         return;
     }
-    let _held = GpuTest::new();
     let total = 120_000usize;
     let bins = energy_bins(20);
     let cpu = flux_tally(1, ParticleType::Photon, Some(bins.clone()));
@@ -430,7 +384,13 @@ fn mixed_source_total_particles_invariance() {
         return;
     }
     let n = 3000usize;
-    let _held = GpuTest::with_chunk(n);
+    if !in_child_with_env(
+        "mixed_source_total_particles_invariance",
+        "YAMC_GPU_LAUNCH_CHUNK",
+        &n.to_string(),
+    ) {
+        return;
+    }
     let (mut m1, s1) = build_mixed(
         flux_tally(1, ParticleType::Neutron, None),
         flux_tally(1, ParticleType::Photon, None),
@@ -449,7 +409,9 @@ fn mixed_source_total_particles_invariance() {
         r1.n_particles, n,
         "mixed N must be the source-particle count"
     );
-    eprintln!("mixed_source_total_particles_invariance: {n} source particles bit-identical across N and 2N");
+    eprintln!(
+        "mixed_source_total_particles_invariance: {n} source particles bit-identical across N and 2N"
+    );
 }
 
 #[test]
@@ -458,7 +420,6 @@ fn mixed_source_gpu_cpu_std_dev_parity() {
         eprintln!("skipping mixed-source std_dev parity: data/GPU absent");
         return;
     }
-    let _held = GpuTest::new();
     let total = 120_000usize;
     let bins = energy_bins(20);
     let cpu_n = flux_tally(1, ParticleType::Neutron, Some(bins.clone()));
@@ -499,7 +460,13 @@ fn coupled_total_particles_invariance_multi_chunk() {
     }
     let chunk = 700usize;
     let n = 3 * chunk;
-    let _held = GpuTest::with_chunk(chunk);
+    if !in_child_with_env(
+        "coupled_total_particles_invariance_multi_chunk",
+        "YAMC_GPU_LAUNCH_CHUNK",
+        &chunk.to_string(),
+    ) {
+        return;
+    }
     let (mut m1, s1) = build_coupled(
         flux_tally(1, ParticleType::Neutron, None),
         flux_tally(1, ParticleType::Photon, None),
@@ -514,7 +481,10 @@ fn coupled_total_particles_invariance_multi_chunk() {
     let r2 = run_gpu_retry(&mut m2, &s2);
     let (r1, r2) = (r1.expect("GPU run N"), r2.expect("GPU run 2N"));
     assert_prefix_bit_identical(&r1, &r2, n, "coupled multi-chunk");
-    eprintln!("coupled_total_particles_invariance_multi_chunk: {n} source neutrons bit-identical over {} chunks", n / chunk);
+    eprintln!(
+        "coupled_total_particles_invariance_multi_chunk: {n} source neutrons bit-identical over {} chunks",
+        n / chunk
+    );
 }
 
 /// Per-bin GPU/CPU std_dev parity over well-populated bins. Bands are wide

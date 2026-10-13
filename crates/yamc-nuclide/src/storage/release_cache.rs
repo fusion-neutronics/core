@@ -302,7 +302,7 @@ impl Registry {
         let release = match self.manifest(keyword, &pointer, &release_dir) {
             Ok(release) => release,
             Err(ManifestError::Unreachable(reason)) => {
-                return Ok(self.offline(keyword, &library_dir, reason))
+                return Ok(self.offline(keyword, &library_dir, reason));
             }
             Err(ManifestError::Invalid(e)) => return Err(e),
         };
@@ -336,10 +336,10 @@ impl Registry {
         release_dir: &Path,
     ) -> Result<Release, ManifestError> {
         let cached = release_dir.join(MANIFEST);
-        if let Ok(bytes) = fs::read(&cached) {
-            if let Ok(release) = parse_manifest(keyword, &bytes, Some(pointer)) {
-                return Ok(release);
-            }
+        if let Ok(bytes) = fs::read(&cached)
+            && let Ok(release) = parse_manifest(keyword, &bytes, Some(pointer))
+        {
+            return Ok(release);
         }
         let url = format!("{}{keyword}/{}", self.origin, pointer.manifest);
         let bytes = match self.get_small(&url, false) {
@@ -349,7 +349,7 @@ impl Registry {
                     "'{keyword}' {LATEST} names release {} but its manifest {url} answers 404. \
                      The release is not completely published; try again shortly.",
                     pointer.release
-                )))
+                )));
             }
             Err(Unreachable(reason)) => return Err(ManifestError::Unreachable(reason)),
         };
@@ -860,7 +860,7 @@ fn needed_files<'a>(
         match release.release.file(&path) {
             Some(file) => needed.push(file),
             None if *required => {
-                return Err(not_in_release_error(keyword, release, dir, what, &path))
+                return Err(not_in_release_error(keyword, release, dir, what, &path));
             }
             None => {}
         }
@@ -1028,7 +1028,7 @@ fn fetch_verified(
                 return Err(format!(
                     "{url}: 404, but the release manifest lists {} ({} bytes)",
                     expected.path, expected.bytes
-                ))
+                ));
             }
             Ok((_, Some((bytes, sha256)))) => {
                 return verify(
@@ -1039,7 +1039,7 @@ fn fetch_verified(
                 )
                 .inspect_err(|_| {
                     fs::remove_file(dest).ok();
-                })
+                });
             }
             Ok((status, None)) => last = format!("HTTP {status}"),
             Err(e) => last = e,

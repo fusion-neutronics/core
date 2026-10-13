@@ -1,7 +1,7 @@
 [package]
 name = "yamc-nuclide"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 rust-version.workspace = true
 description = "Evaluated neutron nuclear data for yamc -- Nuclide, Reaction, and reaction-product sampling"
 license = "MIT OR Apache-2.0"

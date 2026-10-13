@@ -745,17 +745,17 @@ pub fn build_topology(data: ArrowMeshData) -> Result<MeshTopology, MeshError> {
         let fwd_vol = sv_pair[0];
         let rev_vol = sv_pair[1];
 
-        if let Some(vol) = fwd_vol {
-            if (vol as usize) < num_volumes as usize {
-                volume_surfaces[vol as usize].push((surf_id, Sense::Forward));
-                surface_volumes[surf_idx].0 = Some(vol);
-            }
+        if let Some(vol) = fwd_vol
+            && (vol as usize) < num_volumes as usize
+        {
+            volume_surfaces[vol as usize].push((surf_id, Sense::Forward));
+            surface_volumes[surf_idx].0 = Some(vol);
         }
-        if let Some(vol) = rev_vol {
-            if (vol as usize) < num_volumes as usize {
-                volume_surfaces[vol as usize].push((surf_id, Sense::Reverse));
-                surface_volumes[surf_idx].1 = Some(vol);
-            }
+        if let Some(vol) = rev_vol
+            && (vol as usize) < num_volumes as usize
+        {
+            volume_surfaces[vol as usize].push((surf_id, Sense::Reverse));
+            surface_volumes[surf_idx].1 = Some(vol);
         }
     }
 
@@ -896,10 +896,11 @@ fn parse_pair(s: &str) -> [Option<u32>; 2] {
     let mut result = [None, None];
     for (i, part) in parts.iter().enumerate().take(2) {
         let trimmed = part.trim();
-        if trimmed != "null" && !trimmed.is_empty() {
-            if let Ok(v) = trimmed.parse::<u32>() {
-                result[i] = Some(v);
-            }
+        if trimmed != "null"
+            && !trimmed.is_empty()
+            && let Ok(v) = trimmed.parse::<u32>()
+        {
+            result[i] = Some(v);
         }
     }
     result
@@ -1039,15 +1040,16 @@ fn parse_physical_groups_json(json_str: &str) -> Vec<(i32, String, i32, Vec<u32>
             // Inside an entry object
             if ch == '}' {
                 // End of entry
-                if let Ok(pg_id) = current_key.parse::<i32>() {
-                    if !current_name.is_empty() && current_dim >= 0 {
-                        result.push((
-                            pg_id,
-                            current_name.clone(),
-                            current_dim,
-                            current_surface_ids.clone(),
-                        ));
-                    }
+                if let Ok(pg_id) = current_key.parse::<i32>()
+                    && !current_name.is_empty()
+                    && current_dim >= 0
+                {
+                    result.push((
+                        pg_id,
+                        current_name.clone(),
+                        current_dim,
+                        current_surface_ids.clone(),
+                    ));
                 }
                 in_entry = false;
             } else if ch == '"' {
@@ -1093,10 +1095,10 @@ fn parse_physical_groups_json(json_str: &str) -> Vec<(i32, String, i32, Vec<u32>
                         }
                         i += 1;
                     }
-                    if !num_str.is_empty() {
-                        if let Ok(n) = num_str.parse::<u32>() {
-                            current_surface_ids.push(n);
-                        }
+                    if !num_str.is_empty()
+                        && let Ok(n) = num_str.parse::<u32>()
+                    {
+                        current_surface_ids.push(n);
                     }
                     // i now points at ']', will be incremented at end of loop
                     continue;

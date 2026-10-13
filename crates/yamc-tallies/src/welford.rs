@@ -1086,7 +1086,7 @@ impl WelfordTallyStats {
                 return Err(
                     "cannot combine a tally carrying nuclear-data replicas with one that does not"
                         .to_string(),
-                )
+                );
             }
         }
         match (self.comoment.as_mut(), other.comoment.as_ref()) {
@@ -1100,7 +1100,7 @@ impl WelfordTallyStats {
                 return Err(
                     "cannot combine a tally carrying a covariance with one that does not"
                         .to_string(),
-                )
+                );
             }
         }
         let n_a = self.n_histories as f64;

@@ -1383,10 +1383,10 @@ impl PyModel {
                     if let Some(ref name) = cell.name {
                         cn.insert(cell.cell_id, name.clone());
                     }
-                    if cell.material_id != -1 {
-                        if let Some(ref name) = cell.material_name {
-                            mn.insert(cell.material_id, name.clone());
-                        }
+                    if cell.material_id != -1
+                        && let Some(ref name) = cell.material_name
+                    {
+                        mn.insert(cell.material_id, name.clone());
                     }
                 }
                 (json, "csg", cn, mn)
@@ -1400,10 +1400,10 @@ impl PyModel {
                 let mut mn = std::collections::HashMap::new();
                 for vol in &geo_mesh.volumes {
                     cn.insert(vol.cell_id, format!("Volume {}", vol.cell_id));
-                    if vol.material_id != -1 {
-                        if let Some(ref name) = vol.material_name {
-                            mn.insert(vol.material_id, name.clone());
-                        }
+                    if vol.material_id != -1
+                        && let Some(ref name) = vol.material_name
+                    {
+                        mn.insert(vol.material_id, name.clone());
                     }
                 }
                 (json, "mesh", cn, mn)

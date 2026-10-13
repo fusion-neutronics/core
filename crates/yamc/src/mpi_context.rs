@@ -354,11 +354,15 @@ pub fn mpi_rank() -> i32 {
             eprintln!(
                 "\n⚠️  WARNING: Detected MPI environment but YAMC was not built with MPI support!"
             );
-            eprintln!("   You are running under mpirun/mpiexec, but this YAMC installation cannot use MPI.");
+            eprintln!(
+                "   You are running under mpirun/mpiexec, but this YAMC installation cannot use MPI."
+            );
             eprintln!("   To enable MPI support, rebuild YAMC with:");
             eprintln!("     maturin develop --release --features \"pyo3,mpi\"");
             eprintln!("   Or install system packages first:");
-            eprintln!("     sudo apt-get install -y libopenmpi-dev openmpi-bin build-essential clang libclang-dev");
+            eprintln!(
+                "     sudo apt-get install -y libopenmpi-dev openmpi-bin build-essential clang libclang-dev"
+            );
             eprintln!("   Continuing in single-process mode...\n");
         }
         0
@@ -386,11 +390,15 @@ pub fn mpi_size() -> i32 {
             eprintln!(
                 "\n⚠️  WARNING: Detected MPI environment but YAMC was not built with MPI support!"
             );
-            eprintln!("   You are running under mpirun/mpiexec, but this YAMC installation cannot use MPI.");
+            eprintln!(
+                "   You are running under mpirun/mpiexec, but this YAMC installation cannot use MPI."
+            );
             eprintln!("   To enable MPI support, rebuild YAMC with:");
             eprintln!("     maturin develop --release --features \"pyo3,mpi\"");
             eprintln!("   Or install system packages first:");
-            eprintln!("     sudo apt-get install -y libopenmpi-dev openmpi-bin build-essential clang libclang-dev");
+            eprintln!(
+                "     sudo apt-get install -y libopenmpi-dev openmpi-bin build-essential clang libclang-dev"
+            );
             eprintln!("   Continuing in single-process mode...\n");
         }
         1

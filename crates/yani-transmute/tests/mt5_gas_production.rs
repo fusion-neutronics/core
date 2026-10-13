@@ -567,12 +567,12 @@ fn tendl_under_dt_is_unchanged() {
         let mut config = yamc_nuclide::config::Config::global();
         for entry in std::fs::read_dir(&neutron).expect("library directory") {
             let path = entry.expect("entry").path();
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if let Some(nuclide) = name.strip_suffix(".arrow") {
-                    config
-                        .cross_sections
-                        .insert(nuclide.to_string(), path.to_string_lossy().to_string());
-                }
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && let Some(nuclide) = name.strip_suffix(".arrow")
+            {
+                config
+                    .cross_sections
+                    .insert(nuclide.to_string(), path.to_string_lossy().to_string());
             }
         }
     }

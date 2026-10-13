@@ -636,10 +636,10 @@ impl Bvh {
                 stack[stack_ptr]
             };
 
-            if let Some((_, best_t)) = closest {
-                if node_tmin > best_t {
-                    continue;
-                }
+            if let Some((_, best_t)) = closest
+                && node_tmin > best_t
+            {
+                continue;
             }
 
             let node = &self.nodes[node_idx as usize];
@@ -717,10 +717,10 @@ impl Bvh {
             for &(slot, tmin_val) in hits.iter().take(nhits) {
                 let meta = node.child_meta[slot];
 
-                if let Some((_, best_t)) = closest {
-                    if tmin_val > best_t {
-                        continue;
-                    }
+                if let Some((_, best_t)) = closest
+                    && tmin_val > best_t
+                {
+                    continue;
                 }
 
                 if Bvh4Node::is_child_leaf(meta) {
@@ -728,15 +728,15 @@ impl Bvh {
                     let count = Bvh4Node::child_count(meta);
                     for j in offset..(offset + count) {
                         let prim_idx = self.indices[j as usize];
-                        if let Some(t) = test_fn(prim_idx) {
-                            if t > 0.0 {
-                                match closest {
-                                    None => closest = Some((prim_idx, t)),
-                                    Some((_, best_t)) if t < best_t => {
-                                        closest = Some((prim_idx, t));
-                                    }
-                                    _ => {}
+                        if let Some(t) = test_fn(prim_idx)
+                            && t > 0.0
+                        {
+                            match closest {
+                                None => closest = Some((prim_idx, t)),
+                                Some((_, best_t)) if t < best_t => {
+                                    closest = Some((prim_idx, t));
                                 }
+                                _ => {}
                             }
                         }
                     }
@@ -767,10 +767,10 @@ impl Bvh {
             return;
         }
         let inv_dir = [1.0 / direction[0], 1.0 / direction[1], 1.0 / direction[2]];
-        if let Some(ref rb) = self.root_bounds {
-            if rb.ray_intersect(origin, inv_dir).is_none() {
-                return;
-            }
+        if let Some(ref rb) = self.root_bounds
+            && rb.ray_intersect(origin, inv_dir).is_none()
+        {
+            return;
         }
         let mut stack: Vec<u32> = Vec::with_capacity(128);
         stack.push(0);
@@ -818,10 +818,10 @@ impl Bvh {
         }
 
         // Quick root bounds check
-        if let Some(ref rb) = self.root_bounds {
-            if !rb.contains_point(point) {
-                return None;
-            }
+        if let Some(ref rb) = self.root_bounds
+            && !rb.contains_point(point)
+        {
+            return None;
         }
 
         let mut stack = [0u32; 64];
@@ -1040,10 +1040,10 @@ impl Bvh {
                 stack[stack_ptr]
             };
 
-            if let Some((_, best_t)) = closest {
-                if node_tmin > best_t {
-                    continue;
-                }
+            if let Some((_, best_t)) = closest
+                && node_tmin > best_t
+            {
+                continue;
             }
 
             let node = &self.nodes[node_idx as usize];
@@ -1114,10 +1114,10 @@ impl Bvh {
             }
 
             for &(slot, tmin_val) in hits.iter().take(nhits) {
-                if let Some((_, best_t)) = closest {
-                    if tmin_val > best_t {
-                        continue;
-                    }
+                if let Some((_, best_t)) = closest
+                    && tmin_val > best_t
+                {
+                    continue;
                 }
 
                 let meta = node.child_meta[slot];
@@ -1218,10 +1218,10 @@ impl Bvh {
                         if tri_mask & (1 << k) == 0 {
                             continue;
                         }
-                        if let Some((_, best_t)) = closest {
-                            if t >= best_t {
-                                continue;
-                            }
+                        if let Some((_, best_t)) = closest
+                            && t >= best_t
+                        {
+                            continue;
                         }
                         let prim_idx = self.indices[(offset as usize) + k];
                         if accept(prim_idx) {

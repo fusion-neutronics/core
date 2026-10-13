@@ -148,7 +148,7 @@ pub fn dose_coefficients(
         _ => {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "Particle '{particle}' not supported. Must be 'neutron' or 'photon'."
-            )))
+            )));
         }
     };
 
@@ -158,7 +158,7 @@ pub fn dose_coefficients(
         other => {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "dose_quantity must be 'effective' or 'ambient', got '{other}'"
-            )))
+            )));
         }
     };
 
@@ -171,7 +171,7 @@ pub fn dose_coefficients(
         _ => {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "Invalid data_source '{data_source}'. Must be 'icrp74' or 'icrp116'"
-            )))
+            )));
         }
     };
 
@@ -213,7 +213,7 @@ pub fn dose_coefficients(
         _ => {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "Invalid geometry '{geometry}'. Must be one of: AP, PA, LLAT, RLAT, ROT, ISO"
-            )))
+            )));
         }
     };
 

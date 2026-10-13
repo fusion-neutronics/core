@@ -181,7 +181,7 @@ pub struct DisplacementDamage {
 fn elements_of(nuclides: &HashMap<String, f64>) -> HashSet<String> {
     nuclides
         .iter()
-        .filter(|(_, &n)| n > 0.0)
+        .filter(|&(_, &n)| n > 0.0)
         .map(|(name, _)| element_symbol_from_nuclide(name))
         .collect()
 }
@@ -207,7 +207,7 @@ pub(crate) fn ensure_damage_data_loaded(
     let composition: HashSet<String> = material
         .nuclides
         .iter()
-        .filter(|(_, &n)| n > 0.0)
+        .filter(|&(_, &n)| n > 0.0)
         .map(|(name, _)| name.clone())
         .collect();
     let mut present: HashSet<String> = composition.clone();
@@ -317,7 +317,7 @@ pub(crate) fn displacement_damage(
                     state
                         .nuclides
                         .iter()
-                        .filter(|(_, &n)| n > 0.0)
+                        .filter(|&(_, &n)| n > 0.0)
                         .map(|(name, _)| name.clone()),
                 );
             }

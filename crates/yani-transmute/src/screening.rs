@@ -207,7 +207,8 @@ fn peak_fractions(
         if let Some(w) = weights.get(name) {
             return *w;
         }
-        let w = match chain.get_key_value(name) {
+
+        match chain.get_key_value(name) {
             Some((key, cn)) => {
                 let lambda = match cn.half_life {
                     Some(t) if t > 0.0 => std::f64::consts::LN_2 / t,
@@ -219,8 +220,7 @@ fn peak_fractions(
                 w
             }
             None => [0.0; 3],
-        };
-        w
+        }
     };
     let mut peaks: HashMap<String, (f64, f64)> = HashMap::new();
     for state in states {

@@ -1,7 +1,7 @@
 [package]
 name = "yani-transmute"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 rust-version.workspace = true
 description = "Transmutation and activation driver over the yani solver -- irradiation schedules, multigroup spectrum collapse, per-material inventories"
 license = "MIT OR Apache-2.0"

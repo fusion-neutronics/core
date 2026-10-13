@@ -239,7 +239,7 @@ pub(super) fn recover_segment_coplanar_region(
     vset.sort_unstable();
     vset.dedup();
     macro_rules! bail {
-        ($why:expr) => {{
+        ($why:expr_2021) => {{
             if dbg {
                 eprintln!(
                     "    [copl DBG] ({a},{b}): bail - {} (region: {} faces, {} flat, {} verts)",

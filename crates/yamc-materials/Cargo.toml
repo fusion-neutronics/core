@@ -1,7 +1,7 @@
 [package]
 name = "yamc-materials"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 rust-version.workspace = true
 description = "Material composition and macroscopic cross-section data for yamc"
 license = "MIT OR Apache-2.0"

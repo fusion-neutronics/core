@@ -972,10 +972,10 @@ pub fn collect_q_values(material: &Material, into: &mut QValues) {
     let name = gnds_name(z as u32, a as u32, meta.liso as u32);
     let entry = into.entry(name).or_default();
     for &(mf, mt) in material.section_data.keys() {
-        if mf == 3 {
-            if let Some(section) = material.mf3(mt) {
-                entry.insert(mt, section.qi);
-            }
+        if mf == 3
+            && let Some(section) = material.mf3(mt)
+        {
+            entry.insert(mt, section.qi);
         }
     }
 }
@@ -1201,10 +1201,10 @@ impl Chain {
                     let z = data.nuclide.atomic_number + info.delta_z;
                     let symbol = ATOMIC_SYMBOL.get(z as usize).copied().unwrap_or("?");
                     let mut daughter = Some(format!("{symbol}{a}"));
-                    if let Some(d) = &daughter {
-                        if !decay_data.contains_key(d) {
-                            daughter = replace_missing(d, &decay_data);
-                        }
+                    if let Some(d) = &daughter
+                        && !decay_data.contains_key(d)
+                    {
+                        daughter = replace_missing(d, &decay_data);
                     }
 
                     // The first MT of the reaction that the evaluation has.

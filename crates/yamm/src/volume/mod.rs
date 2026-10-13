@@ -324,7 +324,9 @@ fn carve_interior(dt: &Delaunay3D, boundary_faces: &[[usize; 3]]) -> Vec<[usize;
         }
     }
     if (conflicts > 0 || unvisited > 0) && std::env::var("YAMM_CARVE_DBG").is_ok() {
-        eprintln!("    [carve DBG] parity conflicts={conflicts} unvisited={unvisited} (surface separation defects)");
+        eprintln!(
+            "    [carve DBG] parity conflicts={conflicts} unvisited={unvisited} (surface separation defects)"
+        );
     }
     if std::env::var("YAMM_CARVE_DBG").is_ok() {
         let mut n_live_real = 0usize;
@@ -385,7 +387,14 @@ fn carve_interior(dt: &Delaunay3D, boundary_faces: &[[usize; 3]]) -> Vec<[usize;
         }
         eprintln!(
             "    [carve DBG] live_real={} hull={} outside={} inside={} | bset={} present={} (real|real={} real|hull={})",
-            n_live_real, n_hull, n_outside, out.len(), bset.len(), present, between_two_real, between_real_and_hull
+            n_live_real,
+            n_hull,
+            n_outside,
+            out.len(),
+            bset.len(),
+            present,
+            between_two_real,
+            between_real_and_hull
         );
     }
     out
@@ -833,10 +842,11 @@ fn mesh_volume_delaunay(input: &VolumeInputRef<'_>) -> Result<VolumeOutput> {
     // exact, e.g. fine meshes where a discarded duplicate Delaunay build alone
     // costs ~60s at 184k pts) pays nothing. This env forces the attempt
     // everywhere (testing / debugging); YAMM_NO_CONFORMING disables both.
-    if std::env::var("YAMM_CONFORMING").is_ok() && std::env::var("YAMM_NO_CONFORMING").is_err() {
-        if let Some(out) = mesh_volume_conforming(input, &all_points, n_boundary) {
-            return Ok(out);
-        }
+    if std::env::var("YAMM_CONFORMING").is_ok()
+        && std::env::var("YAMM_NO_CONFORMING").is_err()
+        && let Some(out) = mesh_volume_conforming(input, &all_points, n_boundary)
+    {
+        return Ok(out);
     }
 
     if !has_interior_points {
@@ -1302,7 +1312,11 @@ fn mesh_volume_delaunay(input: &VolumeInputRef<'_>) -> Result<VolumeOutput> {
                 let mt = clip::CROSSING_MIN_T_E9.load(Relaxed);
                 eprintln!(
                     "    [clip] crossings: {tot} | min(t,1-t): smallest={:.3e} under-1e-3={} under-1e-6={} under-1e-9={}",
-                    if mt == u64::MAX { f64::NAN } else { mt as f64 / 1e9 },
+                    if mt == u64::MAX {
+                        f64::NAN
+                    } else {
+                        mt as f64 / 1e9
+                    },
                     clip::CROSSING_NEAR[0].load(Relaxed),
                     clip::CROSSING_NEAR[1].load(Relaxed),
                     clip::CROSSING_NEAR[2].load(Relaxed),
@@ -1763,7 +1777,11 @@ fn mesh_volume_delaunay(input: &VolumeInputRef<'_>) -> Result<VolumeOutput> {
         let bv_now = boundary_enclosed_volume(input.boundary_vertices, input.boundary_triangles);
         eprintln!(
             "    [vol] clip filter: post-clip tet-sum {v_now:.6} vs boundary {bv_now:.6} (err {:+.3e})",
-            if bv_now > 0.0 { v_now / bv_now - 1.0 } else { 0.0 }
+            if bv_now > 0.0 {
+                v_now / bv_now - 1.0
+            } else {
+                0.0
+            }
         );
         // Everything appended by the merge is a crossing point, which lies exactly
         // on a boundary triangle. Original tet corners were deduplicated onto
@@ -1799,10 +1817,17 @@ fn mesh_volume_delaunay(input: &VolumeInputRef<'_>) -> Result<VolumeOutput> {
     drop_degenerate_tets(&all_points, &mut tets, "delaunay");
 
     let t6 = t_step.elapsed();
-    eprintln!("  [vol] Timing: BCC={:.1}s Delaunay={:.1}s Recovery={:.1}s Filter={:.1}s Overlap={:.1}s Improve={:.1}s Total={:.1}s ({} tets)",
-              t1.as_secs_f64(), t2.as_secs_f64(), t3.as_secs_f64(),
-              t4.as_secs_f64(), t5.as_secs_f64(), t6.as_secs_f64(),
-              t_start.elapsed().as_secs_f64(), tets.len());
+    eprintln!(
+        "  [vol] Timing: BCC={:.1}s Delaunay={:.1}s Recovery={:.1}s Filter={:.1}s Overlap={:.1}s Improve={:.1}s Total={:.1}s ({} tets)",
+        t1.as_secs_f64(),
+        t2.as_secs_f64(),
+        t3.as_secs_f64(),
+        t4.as_secs_f64(),
+        t5.as_secs_f64(),
+        t6.as_secs_f64(),
+        t_start.elapsed().as_secs_f64(),
+        tets.len()
+    );
     // EXACTNESS SIGNAL. Count the FINAL tets the boundary passes
     // through. This is exact and cheap (measured 0.0s on every zoo model,
     // including BlanketModule's 25743 tets), and it is what the caller should
@@ -2110,7 +2135,7 @@ fn remove_overlapping_tets(vertices: &[[f64; 3]], tets: &mut Vec<[usize; 4]>) {
     let cells: Vec<(&(i64, i64, i64), &Vec<usize>)> = grid.iter().collect();
     let mut overlapping: Vec<(usize, usize)> = cells
         .par_iter()
-        .flat_map_iter(|(&(cx, cy, cz), indices)| {
+        .flat_map_iter(|&(&(cx, cy, cz), indices)| {
             let grid = &grid;
             let data = &data;
             let tets = &*tets;

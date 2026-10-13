@@ -781,7 +781,9 @@ mod tests {
             }
             both_hit += 1;
         }
-        println!("boundary distance: max ULP = {max_ulps}, both-miss = {both_miss}, both-hit = {both_hit}");
+        println!(
+            "boundary distance: max ULP = {max_ulps}, both-miss = {both_miss}, both-hit = {both_hit}"
+        );
         // 128 ulps in f64 is ~3e-14 relative -- still vastly below MC
         // noise. Higher than sphere_distance's 16 because we do the
         // sphere quadratic followed by the plane divide and a min

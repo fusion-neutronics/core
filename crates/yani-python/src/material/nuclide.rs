@@ -367,12 +367,11 @@ impl PyNuclide {
             .loaded_temperatures
             .iter()
             .position(|t| t == temperature)?;
-        if let Some(temp_reactions) = self.reactions.get(temp_idx) {
-            if let Some(reaction) = temp_reactions.get(&mt) {
-                if !reaction.energy.is_empty() {
-                    return Some(reaction.energy.to_vec());
-                }
-            }
+        if let Some(temp_reactions) = self.reactions.get(temp_idx)
+            && let Some(reaction) = temp_reactions.get(&mt)
+            && !reaction.energy.is_empty()
+        {
+            return Some(reaction.energy.to_vec());
         }
         None
     }

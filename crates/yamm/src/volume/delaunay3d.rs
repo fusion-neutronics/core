@@ -1123,7 +1123,7 @@ impl Delaunay3D {
         }
         let sev_dbg = std::env::var("YAMM_SEV_DBG").is_ok();
         macro_rules! sbail {
-            ($why:expr) => {{
+            ($why:expr_2021) => {{
                 if sev_dbg {
                     eprintln!(
                         "    [sev DBG] split_edge_at_vertex({a},{b};{w}): bail - {}",

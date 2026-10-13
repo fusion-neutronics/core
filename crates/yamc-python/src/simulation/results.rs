@@ -336,7 +336,7 @@ impl PyTallyResult {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "unknown field {other:?}; expected \"mean\", \"standard_deviation\", \
                      \"relative_error\", \"variance\", or \"total_count\""
-                )))
+                )));
             }
         };
         if !self.inner.shape.is_empty() {

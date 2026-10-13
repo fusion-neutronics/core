@@ -781,14 +781,14 @@ pub(crate) fn compute_shape_and_dims(tally: &Tally) -> (Vec<usize>, Vec<String>)
         // Avoid double-dimensioning: only add if no regular mesh was added above
         // AND we have an unstructured mesh filter.
         let has_regular_mesh = tally.get_mesh_filter().is_some();
-        if !has_regular_mesh {
-            if let Some(f) = tally.filters.iter().find_map(|f| match f {
+        if !has_regular_mesh
+            && let Some(f) = tally.filters.iter().find_map(|f| match f {
                 Filter::UnstructuredMesh(um) => Some(um),
                 _ => None,
-            }) {
-                shape.push(f.num_bins());
-                dims.push("mesh".to_string());
-            }
+            })
+        {
+            shape.push(f.num_bins());
+            dims.push("mesh".to_string());
         }
     }
 

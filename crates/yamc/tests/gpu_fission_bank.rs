@@ -232,7 +232,7 @@ fn run_gpu(nuclide: &str, r: f64, fission_bank: bool) -> Scores {
                     fission: tally_sum(&fission),
                     flux: tally_sum(&flux),
                     thermal: thermal_bin(&thermal),
-                }
+                };
             }
             Err(e) => last_err = e.to_string(),
         }

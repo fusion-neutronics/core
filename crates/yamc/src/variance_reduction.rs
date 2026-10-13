@@ -388,19 +388,19 @@ impl WeightWindowGeneratorDeGVR {
                 ));
             }
         }
-        if let Some(e) = self.photon_energy {
-            if !(e > 0.0 && e.is_finite()) {
-                return Err(format!(
-                    "WeightWindowGeneratorDeGVR requires photon_energy > 0 (got {e})"
-                ));
-            }
+        if let Some(e) = self.photon_energy
+            && !(e > 0.0 && e.is_finite())
+        {
+            return Err(format!(
+                "WeightWindowGeneratorDeGVR requires photon_energy > 0 (got {e})"
+            ));
         }
-        if let Some(n) = self.density_reduction {
-            if n < 2.0 {
-                return Err(format!(
-                    "WeightWindowGeneratorDeGVR requires density_reduction >= 2 (got {n})"
-                ));
-            }
+        if let Some(n) = self.density_reduction
+            && n < 2.0
+        {
+            return Err(format!(
+                "WeightWindowGeneratorDeGVR requires density_reduction >= 2 (got {n})"
+            ));
         }
         if self.ratio <= 1.0 {
             return Err(format!(
@@ -668,10 +668,10 @@ mod tests {
 
     #[test]
     fn degvr_build_bounds_normalizes_and_sentinels() {
-        let gen = degvr(3.0, 5.0, 32.0);
+        let generator = degvr(3.0, 5.0, 32.0);
         // 4 voxels, single group; voxel 1 is the peak, voxel 3 unscored.
         let flux = vec![2.0, 8.0, 4.0, 0.0];
-        let wwb = gen.build_bounds(&flux, ParticleType::Neutron);
+        let wwb = generator.build_bounds(&flux, ParticleType::Neutron);
         assert!(wwb.validate().is_ok());
         // peak voxel (flux 8): survival weight 1.0 -> lower = 1 / survival_factor
         assert!((wwb.lower_bounds[1] - 1.0 / 3.0).abs() < 1e-12);
@@ -728,34 +728,34 @@ mod tests {
     #[test]
     fn degvr_validate_particles_list() {
         // A valid multi-particle generator (neutron + photon) passes.
-        let mut gen = degvr(3.0, 5.0, 4.0);
-        gen.particles = vec![ParticleType::Neutron, ParticleType::Photon];
-        assert!(gen.validate().is_ok());
+        let mut generator = degvr(3.0, 5.0, 4.0);
+        generator.particles = vec![ParticleType::Neutron, ParticleType::Photon];
+        assert!(generator.validate().is_ok());
 
         // Empty particle list is rejected.
-        gen.particles = vec![];
-        assert!(gen.validate().is_err());
+        generator.particles = vec![];
+        assert!(generator.validate().is_err());
 
         // Duplicate particle types are rejected.
-        gen.particles = vec![ParticleType::Photon, ParticleType::Photon];
-        assert!(gen.validate().is_err());
+        generator.particles = vec![ParticleType::Photon, ParticleType::Photon];
+        assert!(generator.validate().is_err());
 
         // A non-positive photon_energy override is rejected.
-        gen.particles = vec![ParticleType::Photon];
-        gen.photon_energy = Some(0.0);
-        assert!(gen.validate().is_err());
-        gen.photon_energy = Some(2.5e6);
-        assert!(gen.validate().is_ok());
+        generator.particles = vec![ParticleType::Photon];
+        generator.photon_energy = Some(0.0);
+        assert!(generator.validate().is_err());
+        generator.photon_energy = Some(2.5e6);
+        assert!(generator.validate().is_ok());
     }
 
     #[test]
     fn degvr_build_bounds_stamps_requested_particle() {
         // build_bounds tags the window with the particle passed in, letting one
         // generator emit a window per requested particle type.
-        let gen = degvr(3.0, 5.0, 4.0);
+        let generator = degvr(3.0, 5.0, 4.0);
         let flux = vec![2.0, 8.0, 4.0, 1.0];
-        let n = gen.build_bounds(&flux, ParticleType::Neutron);
-        let p = gen.build_bounds(&flux, ParticleType::Photon);
+        let n = generator.build_bounds(&flux, ParticleType::Neutron);
+        let p = generator.build_bounds(&flux, ParticleType::Photon);
         assert_eq!(n.particle, ParticleType::Neutron);
         assert_eq!(p.particle, ParticleType::Photon);
         // Same flux field -> identical bounds regardless of the tag.
@@ -764,12 +764,12 @@ mod tests {
 
     #[test]
     fn degvr_serde_round_trips_particles_and_photon_energy() {
-        let mut gen = degvr(3.0, 5.0, 4.0);
-        gen.particles = vec![ParticleType::Neutron, ParticleType::Photon];
-        gen.photon_energy = Some(1.5e6);
-        let json = serde_json::to_string(&gen).unwrap();
+        let mut generator = degvr(3.0, 5.0, 4.0);
+        generator.particles = vec![ParticleType::Neutron, ParticleType::Photon];
+        generator.photon_energy = Some(1.5e6);
+        let json = serde_json::to_string(&generator).unwrap();
         let back: WeightWindowGeneratorDeGVR = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, gen);
+        assert_eq!(back, generator);
         assert_eq!(
             back.particles,
             vec![ParticleType::Neutron, ParticleType::Photon]

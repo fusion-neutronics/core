@@ -86,10 +86,10 @@ fn flat_correlated_sampler_matches_the_reference_implementation() {
     let mut rng = yamc::util::fast_rng::FastRng::new(0x5EED_0371);
     for _ in 0..N {
         let (e_cm, mu_cm) = correlated.sample(E_IN, &mut rng);
-        if let Some((_, e_lab)) = cm_to_lab(E_IN, e_cm, mu_cm, awr) {
-            if let Some(k) = bin_of(e_lab) {
-                ref_hist[k] += 1;
-            }
+        if let Some((_, e_lab)) = cm_to_lab(E_IN, e_cm, mu_cm, awr)
+            && let Some(k) = bin_of(e_lab)
+        {
+            ref_hist[k] += 1;
         }
     }
 
@@ -107,10 +107,8 @@ fn flat_correlated_sampler_matches_the_reference_implementation() {
     for _ in 0..N {
         let xi3 = yamc_rng::next_xi(&mut pcg);
         let (_mu_lab, e_lab, ok) = flat.sample_kinematics(E_IN, awr, e_cm_closed, xi3, &mut pcg);
-        if ok {
-            if let Some(k) = bin_of(e_lab) {
-                flat_hist[k] += 1;
-            }
+        if ok && let Some(k) = bin_of(e_lab) {
+            flat_hist[k] += 1;
         }
     }
 

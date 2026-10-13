@@ -61,7 +61,10 @@ fn assert_same(m: &CylindricalMesh, r0: [f64; 3], r1: [f64; 3]) {
         "crossing count differs for r0={r0:?} r1={r1:?}: twin {} vs ref {}\n twin={twin:?}\n ref={:?}",
         twin.len(),
         reference.len(),
-        reference.iter().map(|c| (c.bin, c.length_fraction)).collect::<Vec<_>>(),
+        reference
+            .iter()
+            .map(|c| (c.bin, c.length_fraction))
+            .collect::<Vec<_>>(),
     );
     for (i, (t, rc)) in twin.iter().zip(reference.iter()).enumerate() {
         assert_eq!(

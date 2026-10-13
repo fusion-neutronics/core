@@ -214,7 +214,9 @@ fn gpu_urr_mn55_loglog_matches_cpu_in_resonance_region() {
     yamc::gpu::run_on_gpu(&mut gpu_m, &settings).expect("GPU dispatch");
     let gpu = gpu_t.get_mean().iter().sum::<f64>();
     let ratio = gpu / cpu;
-    eprintln!("Mn55 r=5 ({source_e:.2e} eV, LogLog URR): CPU = {cpu:.4e}  GPU = {gpu:.4e}  ratio = {ratio:.3}");
+    eprintln!(
+        "Mn55 r=5 ({source_e:.2e} eV, LogLog URR): CPU = {cpu:.4e}  GPU = {gpu:.4e}  ratio = {ratio:.3}"
+    );
     assert!(
         (0.92..1.08).contains(&ratio),
         "Mn55 LogLog URR GPU/CPU flux ratio {ratio:.3} outside [0.92, 1.08]"

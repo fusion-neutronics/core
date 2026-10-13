@@ -173,10 +173,10 @@ fn answer(mut stream: TcpStream, state: &State) {
         if reader.read_line(&mut line).map_or(true, |n| n == 0) || line == "\r\n" {
             break;
         }
-        if let Some((name, value)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("range") {
-                range = Some(value.trim().to_string());
-            }
+        if let Some((name, value)) = line.split_once(':')
+            && name.trim().eq_ignore_ascii_case("range")
+        {
+            range = Some(value.trim().to_string());
         }
     }
     let path = request_line

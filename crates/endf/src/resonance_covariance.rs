@@ -400,7 +400,7 @@ fn orbital(
         _ => {
             return Err(Error::Mismatched {
                 what: "MF=32 Breit-Wigner or Reich-Moore parameters and the MF=2 range",
-            })
+            });
         }
     };
     let mut best: Option<((f64, bool, f64), Location)> = None;
@@ -745,7 +745,7 @@ fn read_unresolved(
                 .parameters
                 .iter()
                 .zip(&spins)
-                .filter(|(par, &j)| !close(j, par[1]))
+                .filter(|&(par, &j)| !close(j, par[1]))
                 .count();
             (0..spins.len()).map(Some).collect()
         } else {
@@ -978,7 +978,7 @@ fn scale_unresolved(
             Quantity::ReducedNeutronWidth => &mut section.gno,
             Quantity::CaptureWidth => &mut section.gg,
             Quantity::FissionWidth | Quantity::CompetitiveWidth => {
-                return (spin < section.aj.len()).then_some(())
+                return (spin < section.aj.len()).then_some(());
             }
             _ => return None,
         };
@@ -1105,10 +1105,10 @@ pub fn resonance_edges(range: &dyn crate::resonance::RangeReconstruction) -> Vec
     energies.sort_by(f64::total_cmp);
     energies.dedup();
     let mut edges = vec![el];
-    if let Some(&first) = energies.first() {
-        if 0.5 * first > el {
-            edges.push(0.5 * first);
-        }
+    if let Some(&first) = energies.first()
+        && 0.5 * first > el
+    {
+        edges.push(0.5 * first);
     }
     for w in energies.windows(2) {
         edges.push((w[0] * w[1]).sqrt());
@@ -2237,11 +2237,11 @@ mod rebuild_tests {
                 .clone();
             if let ResonanceParameters::Unresolved(u) = &mut range.parameters {
                 for p in u.ranges.iter_mut().flat_map(|s| s.parameters.iter_mut()) {
-                    if let UnresolvedParameters::CaseC { amux, gx, gg, .. } = p {
-                        if gx.iter().all(|x| *x == 0.0) {
-                            *gx = gg.iter().map(|g| 0.3 * g).collect();
-                            *amux = amux.max(1.0);
-                        }
+                    if let UnresolvedParameters::CaseC { amux, gx, gg, .. } = p
+                        && gx.iter().all(|x| *x == 0.0)
+                    {
+                        *gx = gg.iter().map(|g| 0.3 * g).collect();
+                        *amux = amux.max(1.0);
                     }
                 }
             }

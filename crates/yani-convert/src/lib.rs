@@ -726,15 +726,12 @@ fn merge_manifest(
 ) -> Result<(), Box<dyn Error>> {
     let manifest_path = out.join("manifest.json");
     let mut subsections = serde_json::Map::new();
-    if let Ok(text) = std::fs::read_to_string(&manifest_path) {
-        if let Ok(existing) = serde_json::from_str::<serde_json::Value>(&text) {
-            if existing.get("library").and_then(|v| v.as_str()) == Some(provenance.library.as_str())
-            {
-                if let Some(map) = existing.get("subsections").and_then(|v| v.as_object()) {
-                    subsections = map.clone();
-                }
-            }
-        }
+    if let Ok(text) = std::fs::read_to_string(&manifest_path)
+        && let Ok(existing) = serde_json::from_str::<serde_json::Value>(&text)
+        && existing.get("library").and_then(|v| v.as_str()) == Some(provenance.library.as_str())
+        && let Some(map) = existing.get("subsections").and_then(|v| v.as_object())
+    {
+        subsections = map.clone();
     }
     for subsection in written {
         // Replaced rather than merged with what was there. The subsection's

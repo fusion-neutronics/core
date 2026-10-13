@@ -73,7 +73,7 @@ fn csg_geometry<'a>(
         GeometryKind::Mesh(_) => {
             return Err(format!(
                 "{what}: mesh-geometry models are not supported in the wasm viewer yet"
-            ))
+            ));
         }
     };
     let _ = what;
@@ -357,10 +357,10 @@ impl WasmSimulation {
             if let Some(ref n) = cell.name {
                 cell_names.insert(cell.cell_id, n.clone());
             }
-            if cell.material_id != -1 {
-                if let Some(ref name) = cell.material_name {
-                    material_names.insert(cell.material_id, name.clone());
-                }
+            if cell.material_id != -1
+                && let Some(ref name) = cell.material_name
+            {
+                material_names.insert(cell.material_id, name.clone());
             }
         }
 
@@ -606,10 +606,10 @@ impl WasmSimulation {
                     if let Some(ref n) = cell.name {
                         cn.insert(cell.cell_id, n.clone());
                     }
-                    if cell.material_id != -1 {
-                        if let Some(ref name) = cell.material_name {
-                            mn.insert(cell.material_id, name.clone());
-                        }
+                    if cell.material_id != -1
+                        && let Some(ref name) = cell.material_name
+                    {
+                        mn.insert(cell.material_id, name.clone());
                     }
                 }
                 let table = yamc_plot::build_surface_table(&csg);
@@ -622,7 +622,7 @@ impl WasmSimulation {
             }
             #[cfg(feature = "mesh")]
             GeometryKind::Mesh(_) => {
-                return Err("mesh-geometry tally overlay not supported in wasm yet".into())
+                return Err("mesh-geometry tally overlay not supported in wasm yet".into());
             }
         };
 

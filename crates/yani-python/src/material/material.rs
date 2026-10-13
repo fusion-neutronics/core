@@ -1052,7 +1052,7 @@ impl PyMaterial {
             other => {
                 return Err(PyValueError::new_err(format!(
                     "dose_quantity must be 'absorbed-air' or 'effective', got '{other}'"
-                )))
+                )));
             }
         };
         let atom_densities = self
@@ -1591,7 +1591,7 @@ pub(crate) fn shielding_request(
             return Err(PyValueError::new_err(
                 "give self_shielding_chord or self_shielding_shape, not both: a shape \
                  already determines the chord",
-            ))
+            ));
         }
         (Some(chord), None) => Some(chord),
         (None, Some(shape)) => {

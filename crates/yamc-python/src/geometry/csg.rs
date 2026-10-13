@@ -188,9 +188,10 @@ impl PyGeometry {
                 match mat.internal.get_material_id() {
                     Some(id) => {
                         if used_material_ids.contains(&id) {
-                            return Err(pyo3::exceptions::PyValueError::new_err(
-                                format!("Duplicate Material id {} found. All material IDs must be unique across all cells.", id)
-                            ));
+                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                                "Duplicate Material id {} found. All material IDs must be unique across all cells.",
+                                id
+                            )));
                         }
                         used_material_ids.insert(id);
                     }
@@ -451,15 +452,13 @@ impl PyGeometry {
             if let Some(mat) = cell
                 .material_idx
                 .and_then(|i| self.inner.materials.get(i as usize))
+                && mat.transmutable
+                && let (Some(mat_id), Some(cell_id)) = (mat.material_id, cell.cell_id)
             {
-                if mat.transmutable {
-                    if let (Some(mat_id), Some(cell_id)) = (mat.material_id, cell.cell_id) {
-                        transmutable_mat_cells
-                            .entry(mat_id)
-                            .or_default()
-                            .push(cell_id);
-                    }
-                }
+                transmutable_mat_cells
+                    .entry(mat_id)
+                    .or_default()
+                    .push(cell_id);
             }
         }
         for (mat_id, cell_ids) in &transmutable_mat_cells {
@@ -652,10 +651,10 @@ impl PyGeometry {
             if let Some(ref name) = cell.name {
                 cell_names.insert(cell.cell_id, name.clone());
             }
-            if cell.material_id != -1 {
-                if let Some(ref name) = cell.material_name {
-                    material_names.insert(cell.material_id, name.clone());
-                }
+            if cell.material_id != -1
+                && let Some(ref name) = cell.material_name
+            {
+                material_names.insert(cell.material_id, name.clone());
             }
         }
 

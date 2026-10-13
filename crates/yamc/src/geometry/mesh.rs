@@ -105,10 +105,10 @@ impl MeshGeometry {
                 used_mat_ids.insert(id);
             }
         }
-        if let Some(ref ic) = implicit_complement_material {
-            if let Some(id) = ic.get_material_id() {
-                used_mat_ids.insert(id);
-            }
+        if let Some(ref ic) = implicit_complement_material
+            && let Some(id) = ic.get_material_id()
+        {
+            used_mat_ids.insert(id);
         }
         let mut next_mat_id: u32 = used_mat_ids.iter().copied().max().map_or(1, |m| m + 1);
         for mat in materials.values_mut() {

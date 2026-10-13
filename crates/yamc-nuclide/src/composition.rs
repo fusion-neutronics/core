@@ -68,12 +68,12 @@ pub fn atomic_mass(nuclide: &str) -> Result<f64, String> {
         return Ok(mass);
     }
     // Metastable fallback: strip the `_m<n>` suffix and retry on the ground state.
-    if let Some((base, suffix)) = nuclide.rsplit_once('_') {
-        if suffix.starts_with('m') && suffix[1..].chars().all(|c| c.is_ascii_digit()) {
-            if let Some(&mass) = crate::data::ATOMIC_MASS.get(base) {
-                return Ok(mass);
-            }
-        }
+    if let Some((base, suffix)) = nuclide.rsplit_once('_')
+        && suffix.starts_with('m')
+        && suffix[1..].chars().all(|c| c.is_ascii_digit())
+        && let Some(&mass) = crate::data::ATOMIC_MASS.get(base)
+    {
+        return Ok(mass);
     }
     Err(format!(
         "Nuclide '{nuclide}' not found in AME2020 atomic mass table"

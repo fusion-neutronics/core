@@ -29,6 +29,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod common;
+use common::relaunch::in_child_with_env;
+
 use yamc::geo::{BoundaryType, HalfspaceType, Region, Surface, SurfaceKind};
 use yamc::geometry::cell::Cell;
 use yamc::geometry::Geometry;
@@ -52,37 +55,9 @@ const SEED: u64 = 20260913;
 const SOURCE_E: f64 = 14.06e6;
 /// Small launch chunk so a stop after a handful of launches is a real
 /// decision, not the first chunk overshooting every target at once.
+/// Each test sets it on a child run of itself (`common::relaunch`), because
+/// the override is a process-global env var read inside the dispatch.
 const CHUNK: usize = 2_000;
-
-/// Serialises every test in this binary and scopes the launch-chunk override
-/// to it (the override is a process-global env var read inside the dispatch),
-/// restoring the previous value on drop. Same shape as `gpu_coupled_variance`.
-struct GpuTest {
-    _guard: std::sync::MutexGuard<'static, ()>,
-    previous: Option<String>,
-}
-
-impl GpuTest {
-    fn with_chunk(chunk: usize) -> Self {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let previous = std::env::var("YAMC_GPU_LAUNCH_CHUNK").ok();
-        std::env::set_var("YAMC_GPU_LAUNCH_CHUNK", chunk.to_string());
-        Self {
-            _guard: guard,
-            previous,
-        }
-    }
-}
-
-impl Drop for GpuTest {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(v) => std::env::set_var("YAMC_GPU_LAUNCH_CHUNK", v),
-            None => std::env::remove_var("YAMC_GPU_LAUNCH_CHUNK"),
-        }
-    }
-}
 
 struct Case {
     nuclide: &'static str,
@@ -216,7 +191,13 @@ fn gpu_ready() -> bool {
 
 #[test]
 fn an_uncapped_neutron_run_stops_when_the_target_is_met() {
-    let _env = GpuTest::with_chunk(CHUNK);
+    if !in_child_with_env(
+        "an_uncapped_neutron_run_stops_when_the_target_is_met",
+        "YAMC_GPU_LAUNCH_CHUNK",
+        &CHUNK.to_string(),
+    ) {
+        return;
+    }
     let (Some(case), true) = (fe56(), gpu_ready()) else {
         return;
     };
@@ -263,7 +244,13 @@ fn an_uncapped_neutron_run_stops_when_the_target_is_met() {
 
 #[test]
 fn a_particle_cap_alongside_the_target_does_not_change_where_it_stops() {
-    let _env = GpuTest::with_chunk(CHUNK);
+    if !in_child_with_env(
+        "a_particle_cap_alongside_the_target_does_not_change_where_it_stops",
+        "YAMC_GPU_LAUNCH_CHUNK",
+        &CHUNK.to_string(),
+    ) {
+        return;
+    }
     let (Some(case), true) = (fe56(), gpu_ready()) else {
         return;
     };
@@ -286,7 +273,13 @@ fn a_particle_cap_alongside_the_target_does_not_change_where_it_stops() {
 /// per-bin `sum` / `sum_sq` it sits beside.
 #[test]
 fn single_bin_aggregate_moments_reproduce_the_bin_statistics() {
-    let _env = GpuTest::with_chunk(CHUNK);
+    if !in_child_with_env(
+        "single_bin_aggregate_moments_reproduce_the_bin_statistics",
+        "YAMC_GPU_LAUNCH_CHUNK",
+        &CHUNK.to_string(),
+    ) {
+        return;
+    }
     let (Some(case), true) = (fe56(), gpu_ready()) else {
         return;
     };
@@ -321,7 +314,13 @@ fn single_bin_aggregate_moments_reproduce_the_bin_statistics() {
 /// identity holds there, and the run stops on the target.
 #[test]
 fn fissile_per_source_aggregate_stops_on_the_target_and_matches_the_bin() {
-    let _env = GpuTest::with_chunk(CHUNK);
+    if !in_child_with_env(
+        "fissile_per_source_aggregate_stops_on_the_target_and_matches_the_bin",
+        "YAMC_GPU_LAUNCH_CHUNK",
+        &CHUNK.to_string(),
+    ) {
+        return;
+    }
     let (Some(case), true) = (u235(), gpu_ready()) else {
         eprintln!("skipping: U235 not in the cache or no GPU");
         return;
@@ -355,7 +354,13 @@ fn fissile_per_source_aggregate_stops_on_the_target_and_matches_the_bin() {
 /// aggregates agree within statistics.
 #[test]
 fn multi_bin_aggregate_agrees_with_the_cpu() {
-    let _env = GpuTest::with_chunk(CHUNK);
+    if !in_child_with_env(
+        "multi_bin_aggregate_agrees_with_the_cpu",
+        "YAMC_GPU_LAUNCH_CHUNK",
+        &CHUNK.to_string(),
+    ) {
+        return;
+    }
     let (Some(case), true) = (fe56(), gpu_ready()) else {
         return;
     };
@@ -517,7 +522,13 @@ fn assert_single_bin_identity(label: &str, tally: &Tally, n: u64) {
 /// totals, and the run stops on the target.
 #[test]
 fn a_photon_run_stops_when_the_target_is_met() {
-    let _env = GpuTest::with_chunk(CHUNK);
+    if !in_child_with_env(
+        "a_photon_run_stops_when_the_target_is_met",
+        "YAMC_GPU_LAUNCH_CHUNK",
+        &CHUNK.to_string(),
+    ) {
+        return;
+    }
     if !gpu_ready() {
         return;
     }
@@ -541,7 +552,13 @@ fn a_photon_run_stops_when_the_target_is_met() {
 /// the run stops once both meet it.
 #[test]
 fn a_coupled_run_stops_when_both_tallies_meet_the_target() {
-    let _env = GpuTest::with_chunk(CHUNK);
+    if !in_child_with_env(
+        "a_coupled_run_stops_when_both_tallies_meet_the_target",
+        "YAMC_GPU_LAUNCH_CHUNK",
+        &CHUNK.to_string(),
+    ) {
+        return;
+    }
     if !gpu_ready() {
         return;
     }

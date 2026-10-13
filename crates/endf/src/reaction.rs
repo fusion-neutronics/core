@@ -455,19 +455,19 @@ fn fission_products_endf(material: &Material) -> Result<(Vec<Product>, Vec<Produ
     }
     let has_prompt = prompt.is_some();
 
-    if let Some(total) = material.mf1_mt452(452) {
-        if let Some(yield_) = nu_yield(&total.nu) {
-            let neutron = Product {
-                name: "neutron".to_string(),
-                yield_,
-                emission_mode: EmissionMode::Total,
-                ..Default::default()
-            };
-            if has_prompt {
-                derived_products.push(neutron);
-            } else {
-                products.push(neutron);
-            }
+    if let Some(total) = material.mf1_mt452(452)
+        && let Some(yield_) = nu_yield(&total.nu)
+    {
+        let neutron = Product {
+            name: "neutron".to_string(),
+            yield_,
+            emission_mode: EmissionMode::Total,
+            ..Default::default()
+        };
+        if has_prompt {
+            derived_products.push(neutron);
+        } else {
+            products.push(neutron);
         }
     }
 
@@ -1035,7 +1035,7 @@ pub(crate) fn photon_products_ace(table: &Table, rx: &Reaction) -> Result<Vec<Pr
             _ => {
                 return Err(Error::BadAceTable {
                     what: format!("photon production MFTYPE {mftype}, expected 12, 13 or 16"),
-                })
+                });
             }
         };
 
@@ -1061,7 +1061,7 @@ pub(crate) fn photon_products_ace(table: &Table, rx: &Reaction) -> Result<Vec<Pr
             _ => {
                 return Err(Error::BadAceTable {
                     what: "a photon distribution that is not uncorrelated".into(),
-                })
+                });
             }
         }
 
@@ -1347,10 +1347,12 @@ mod ace_tests {
                 .collect::<Vec<_>>()
         );
         // Li6 has no fission, so nothing is a derived product.
-        assert!((0..=t.nxs[4]).all(|i| Reaction::from_ace(&t, i)
-            .unwrap()
-            .derived_products
-            .is_empty()));
+        assert!((0..=t.nxs[4]).all(|i| {
+            Reaction::from_ace(&t, i)
+                .unwrap()
+                .derived_products
+                .is_empty()
+        }));
     }
 
     #[test]

@@ -166,7 +166,9 @@ mod fission_chi_flat_tests {
         let (mf, sf) = mean_std(&flat);
         let mr = (mp - mf).abs() / mp.abs().max(1e-30);
         let sr = (sp - sf).abs() / sp.abs().max(1e-30);
-        eprintln!("{label}: prod ({mp:.4e},{sp:.4e}) flat ({mf:.4e},{sf:.4e}) mean_rel={mr:.4} std_rel={sr:.4}");
+        eprintln!(
+            "{label}: prod ({mp:.4e},{sp:.4e}) flat ({mf:.4e},{sf:.4e}) mean_rel={mr:.4} std_rel={sr:.4}"
+        );
         assert!(mr < 0.015, "{label}: mean differs by {mr:.4}");
         assert!(sr < 0.03, "{label}: std differs by {sr:.4}");
     }

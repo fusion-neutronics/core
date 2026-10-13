@@ -442,10 +442,10 @@ pub fn size_field_from_surface(
 
             let kappa = k1.abs().max(k2.abs());
             let cap = |mut h: f64, k: f64| {
-                if let Some(tol) = chordal_tolerance {
-                    if k > 1e-12 {
-                        h = h.min((8.0 * tol / k).sqrt());
-                    }
+                if let Some(tol) = chordal_tolerance
+                    && k > 1e-12
+                {
+                    h = h.min((8.0 * tol / k).sqrt());
                 }
                 h = h.max(min_h);
                 if let Some(mh) = max_h {

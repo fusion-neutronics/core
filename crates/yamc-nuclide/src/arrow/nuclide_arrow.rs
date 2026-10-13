@@ -106,7 +106,7 @@ fn read_fission_photon_release(
                     "{context}: unknown fission energy release kind {other:?}; expected \
                      \"polynomial\" or \"tabulated\""
                 )
-                .into())
+                .into());
             }
         };
         match role.as_str() {
@@ -117,7 +117,7 @@ fn read_fission_photon_release(
                     "{nuclide}: unknown fission energy release role {other:?}; expected \
                      \"prompt_photons\" or \"delayed_photons\""
                 )
-                .into())
+                .into());
             }
         }
     }
@@ -824,15 +824,14 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
         // Compute nu from reaction products when a separate dataset is not available.
         if let Some(first_temp_reactions) = reactions_per_temp.first() {
             for &mt in &[18i32, 19, 20, 21, 38] {
-                if let Some(rxn) = first_temp_reactions.get(&mt) {
-                    if let Some(neutron_prod) = rxn.products.iter().find(|p| {
+                if let Some(rxn) = first_temp_reactions.get(&mt)
+                    && let Some(neutron_prod) = rxn.products.iter().find(|p| {
                         p.is_particle_type(&crate::reaction_product::ParticleType::Neutron)
-                    }) {
-                        if let Some(ref y) = neutron_prod.product_yield {
-                            fission_nu = Some(fission_nu_from_yield(y));
-                            break;
-                        }
-                    }
+                    })
+                    && let Some(ref y) = neutron_prod.product_yield
+                {
+                    fission_nu = Some(fission_nu_from_yield(y));
+                    break;
                 }
             }
         }
@@ -1015,7 +1014,7 @@ fn parse_distribution(
                 other,
                 row,
                 &["uncorrelated", "correlated", "kalbach-mann", "nbody"],
-            ))
+            ));
         }
     };
 
@@ -1611,7 +1610,7 @@ fn parse_product(
                 other,
                 row,
                 &["neutron", "photon"],
-            ))
+            ));
         }
     };
 
@@ -1628,12 +1627,12 @@ fn parse_product(
     let mut distributions: Vec<AngleEnergyDistribution> = Vec::new();
     let mut applicabilities: Vec<Tabulated1D> = Vec::new();
     for di in 0..n_dist {
-        if let Some(dist_data) = distributions_map.get(&(mt, prod_idx, di)) {
-            if let Some(ref ae_dist) = dist_data.angle_energy_dist {
-                distributions.push(ae_dist.clone());
-                if let Some(ref app) = dist_data.applicability {
-                    applicabilities.push(app.clone());
-                }
+        if let Some(dist_data) = distributions_map.get(&(mt, prod_idx, di))
+            && let Some(ref ae_dist) = dist_data.angle_energy_dist
+        {
+            distributions.push(ae_dist.clone());
+            if let Some(ref app) = dist_data.applicability {
+                applicabilities.push(app.clone());
             }
         }
     }
@@ -1701,7 +1700,7 @@ fn parse_yield(
                 other,
                 row,
                 &["Polynomial", "Tabulated1D"],
-            ))
+            ));
         }
     })
 }

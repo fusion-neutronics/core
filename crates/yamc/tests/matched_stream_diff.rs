@@ -792,7 +792,9 @@ fn run_case(label: &str, case: &SphereCase, energy_ev: f64, n: usize) -> CaseRep
     if !rep.predivergence_mt.is_empty() {
         let mut mts: Vec<_> = rep.predivergence_mt.iter().collect();
         mts.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-        eprintln!("MT of the last MATCHING collision before the first divergence, top {MISMATCH_PAIRS_SHOWN}:");
+        eprintln!(
+            "MT of the last MATCHING collision before the first divergence, top {MISMATCH_PAIRS_SHOWN}:"
+        );
         for (mt, count) in mts.into_iter().take(MISMATCH_PAIRS_SHOWN) {
             eprintln!("  cpu MT {mt:>3} : {count}");
         }
@@ -1138,7 +1140,7 @@ fn nxn_spill_depth_is_sufficient() {
             .pend_depth_hist
             .iter()
             .enumerate()
-            .filter(|(_, &count)| count > 0)
+            .filter(|&(_, &count)| count > 0)
             .map(|(depth, count)| format!("{depth}:{count}"))
             .collect();
         println!(

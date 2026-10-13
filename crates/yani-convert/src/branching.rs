@@ -232,7 +232,7 @@ fn bin_law(curve: &Tabulated1D, bin: usize) -> i32 {
         .breakpoints
         .iter()
         .zip(&curve.interpolation)
-        .find(|(&b, _)| (bin as i64) < b as i64 - 1)
+        .find(|&(&b, _)| (bin as i64) < b as i64 - 1)
         .map_or(*curve.interpolation.last().unwrap_or(&2), |(_, &law)| law)
 }
 
@@ -902,13 +902,13 @@ impl BranchingExtractor {
             // Per file (MF=9 first, then MF=10): the description of each state
             // that gave a row, and whether every one had its ground listed.
             let mut list_lines: [(Vec<String>, bool); 2] = [(Vec::new(), true), (Vec::new(), true)];
-            if let Some(sum) = partial_sum(material, *mt, states) {
-                if sum.share > PARTIAL_SUM_TOLERANCE {
-                    stats.partial_sum_mismatches.push(format!(
+            if let Some(sum) = partial_sum(material, *mt, states)
+                && sum.share > PARTIAL_SUM_TOLERANCE
+            {
+                stats.partial_sum_mismatches.push(format!(
                         "{parent} MT{mt}: {} sum to {:.3} of {} at {:.4e} eV, a defect of {:.1}% of the nonelastic cross section",
                         sum.partials, sum.ratio, sum.total, sum.energy, 100.0 * sum.share
                     ));
-                }
             }
             for s in states {
                 let Some((z, a)) = s.nuclide() else {
@@ -1250,7 +1250,11 @@ impl BranchingExtractor {
                                         "MF=9 and MF=10 give IZAP {zap} no state at that LFS, MF=40 gives it one at {:.1} keV",
                                         mf40_ev / 1.0e3
                                     ),
-                                    UnresolvedPartner::OtherExcitation { zap, mf10_ev, mf40_ev } => {
+                                    UnresolvedPartner::OtherExcitation {
+                                        zap,
+                                        mf10_ev,
+                                        mf40_ev,
+                                    } => {
                                         let mf10 = match mf10_ev {
                                             Some(ev) => format!("at {:.1} keV", ev / 1.0e3),
                                             None => "with no excitation energy".to_string(),
@@ -1562,7 +1566,7 @@ fn partner_target(
     match states.and_then(|states| {
         states
             .iter()
-            .find(|(&(state_zap, lfs), _)| state_zap == zap && lfs as f64 == xlfs1)
+            .find(|&(&(state_zap, lfs), _)| state_zap == zap && lfs as f64 == xlfs1)
     }) {
         None => Err(UnresolvedPartner::NotInMf10 { zap, mf40_ev }),
         Some((_, state))
@@ -2030,7 +2034,7 @@ mod tests {
             .energy
             .iter()
             .enumerate()
-            .filter(|(_, &e)| e == 2.0)
+            .filter(|&(_, &e)| e == 2.0)
             .map(|(i, _)| i)
             .collect();
         assert_eq!(

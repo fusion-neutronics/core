@@ -620,7 +620,9 @@ mod tests {
         let (fe, fes) = mean_std(&flat.iter().map(|x| x.0).collect::<Vec<_>>());
         let (pm, pms) = mean_std(&prod.iter().map(|x| x.1).collect::<Vec<_>>());
         let (fm, fms) = mean_std(&flat.iter().map(|x| x.1).collect::<Vec<_>>());
-        eprintln!("KM e_out: prod ({pe:.4e},{pes:.4e}) flat ({fe:.4e},{fes:.4e}) | mu: prod ({pm:.4},{pms:.4}) flat ({fm:.4},{fms:.4})");
+        eprintln!(
+            "KM e_out: prod ({pe:.4e},{pes:.4e}) flat ({fe:.4e},{fes:.4e}) | mu: prod ({pm:.4},{pms:.4}) flat ({fm:.4},{fms:.4})"
+        );
         // Outgoing energy: uniform over [1e6, 1e7] both sides.
         assert!(((pe - fe) / pe).abs() < 0.01, "KM e_out mean differs");
         assert!(((pes - fes) / pes).abs() < 0.03, "KM e_out std differs");

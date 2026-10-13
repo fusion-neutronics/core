@@ -1071,14 +1071,14 @@ where
         let mut overlay_bounds: HashMap<&str, HashMap<&str, f64>> = HashMap::new();
         for rx in &cn.reactions {
             let mut branching = rx.branching;
-            if let (Some(kinds), Some(target)) = (overlay, rx.target.as_deref()) {
-                if let Some(curves) = kinds.get(&rx.kind) {
-                    let per_target = overlay_bounds
-                        .entry(rx.kind.as_str())
-                        .or_insert_with(|| overlay_branching_bounds(name, cn, &rx.kind, curves));
-                    if let Some(&bound) = per_target.get(target) {
-                        branching = branching.max(bound);
-                    }
+            if let (Some(kinds), Some(target)) = (overlay, rx.target.as_deref())
+                && let Some(curves) = kinds.get(&rx.kind)
+            {
+                let per_target = overlay_bounds
+                    .entry(rx.kind.as_str())
+                    .or_insert_with(|| overlay_branching_bounds(name, cn, &rx.kind, curves));
+                if let Some(&bound) = per_target.get(target) {
+                    branching = branching.max(bound);
                 }
             }
             // Tested before the product: an unbounded overlay branching is
@@ -1094,10 +1094,10 @@ where
             // A reaction back into its own parent moves no atoms, so it is not
             // an edge: taking it as one would feed the parent's bound from
             // itself.
-            if let Some(target) = rx.produced_target(name) {
-                if chain.contains_key(target) {
-                    edges.push((name, target, frac));
-                }
+            if let Some(target) = rx.produced_target(name)
+                && chain.contains_key(target)
+            {
+                edges.push((name, target, frac));
             }
             for ejectile in ejectile_nuclides(&rx.kind) {
                 if chain.contains_key(ejectile) {
@@ -1118,10 +1118,10 @@ where
                 if frac <= 0.0 {
                     continue;
                 }
-                if let Some(target) = &dk.target {
-                    if chain.contains_key(target) {
-                        edges.push((name, target, frac));
-                    }
+                if let Some(target) = &dk.target
+                    && chain.contains_key(target)
+                {
+                    edges.push((name, target, frac));
                 }
                 for ejectile in ejectile_nuclides(&dk.kind) {
                     if chain.contains_key(ejectile) {
@@ -1166,10 +1166,10 @@ where
     for _ in 0..MAX_SWEEPS {
         let mut accum: HashMap<&str, f64> = HashMap::new();
         for (parent, child, frac) in &edges {
-            if let Some(&b) = bounds.get(parent) {
-                if b > 0.0 {
-                    *accum.entry(child).or_insert(0.0) += b * frac;
-                }
+            if let Some(&b) = bounds.get(parent)
+                && b > 0.0
+            {
+                *accum.entry(child).or_insert(0.0) += b * frac;
             }
         }
         for (name, &d) in seeds {
@@ -1485,10 +1485,10 @@ pub fn reduce_chain(
             let mut nuc = nuclide.clone();
             // Keep reactions/decays but clear targets that point outside the reduced set
             for rx in nuc.reactions.iter_mut().chain(nuc.decays.iter_mut()) {
-                if let Some(ref target) = rx.target {
-                    if !visited.contains(target) {
-                        rx.target = None;
-                    }
+                if let Some(ref target) = rx.target
+                    && !visited.contains(target)
+                {
+                    rx.target = None;
                 }
             }
             reduced.insert(name.clone(), nuc);

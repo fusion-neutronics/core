@@ -999,7 +999,7 @@ fn fetch(url: &str, spans: &[Range]) -> Result<Fetched, Box<dyn std::error::Erro
                     return Ok(Fetched::Body {
                         partial: status == 206,
                         bytes,
-                    })
+                    });
                 }
                 Err(e) => {
                     last_failure = e;
@@ -1075,7 +1075,7 @@ fn fetch_spans(url: &str, spans: &[Range]) -> Result<Spans, Box<dyn std::error::
                 Fetched::Absent => {
                     return Err(
                         format!("{url}: 404, but its version.json names byte ranges").into(),
-                    )
+                    );
                 }
             }
         }
@@ -1167,14 +1167,14 @@ fn parse_byteranges(body: &[u8]) -> Option<Vec<(u64, Vec<u8>)>> {
             if line.is_empty() {
                 break;
             }
-            if let Some((name, value)) = line.split_once(':') {
-                if name.trim().eq_ignore_ascii_case("content-range") {
-                    // `bytes 64-767/10442154`
-                    let spec = value.trim().strip_prefix("bytes ")?;
-                    let (first_last, _) = spec.split_once('/')?;
-                    let (first, last) = first_last.split_once('-')?;
-                    range = Some((first.parse().ok()?, last.parse().ok()?));
-                }
+            if let Some((name, value)) = line.split_once(':')
+                && name.trim().eq_ignore_ascii_case("content-range")
+            {
+                // `bytes 64-767/10442154`
+                let spec = value.trim().strip_prefix("bytes ")?;
+                let (first_last, _) = spec.split_once('/')?;
+                let (first, last) = first_last.split_once('-')?;
+                range = Some((first.parse().ok()?, last.parse().ok()?));
             }
         }
         let (first, last) = range?;

@@ -39,12 +39,12 @@ pub fn mesh_face(input: &FaceInput) -> Result<FaceOutput> {
             }
         }
     }
-    if let MeshMode::Fine { target_edge_length } = &input.mode {
-        if *target_edge_length <= 0.0 {
-            return Err(MesherError::InvalidInput(format!(
-                "target_edge_length must be positive, got {target_edge_length}"
-            )));
-        }
+    if let MeshMode::Fine { target_edge_length } = &input.mode
+        && *target_edge_length <= 0.0
+    {
+        return Err(MesherError::InvalidInput(format!(
+            "target_edge_length must be positive, got {target_edge_length}"
+        )));
     }
     // Step 1: Collect all boundary vertices from edges
     let (boundary_vertices, outer_constraints, outer_loop_len) =

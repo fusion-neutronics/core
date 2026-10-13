@@ -920,10 +920,11 @@ fn partial_rates_within(
     let pieces = partial_rates(flux, reaction, &cut, scale);
     let mut per_interval = vec![0.0; grid.len() - 1];
     for (w, part) in cut.windows(2).zip(pieces.per_interval) {
-        if w[0] >= range.0 && w[1] <= range.1 {
-            if let Some(k) = interval_holding(grid, w[0], w[1]) {
-                per_interval[k] += part;
-            }
+        if w[0] >= range.0
+            && w[1] <= range.1
+            && let Some(k) = interval_holding(grid, w[0], w[1])
+        {
+            per_interval[k] += part;
         }
     }
     Partials { per_interval }
@@ -1472,7 +1473,7 @@ fn derivation(
     nc.ci
         .iter()
         .zip(&nc.xmti)
-        .filter(|(_, &x)| !synthetic || reactions.contains_key(&(x as i32)))
+        .filter(|&(_, &x)| !synthetic || reactions.contains_key(&(x as i32)))
         .map(|(&c, &x)| {
             let mt = x as i32;
             let named = f64::from(mt) == x
@@ -1867,13 +1868,13 @@ pub(crate) fn single_component_lumps(blocks: &[CovarianceBlock]) -> Cow<'_, [Cov
                 if b.is_same_evaluation() {
                     // `mt1 == 0` means `mt` itself, and stays so.
                     b.mt1 = read(b.mt1);
-                    if let CovarianceData::Nc(nc) = &mut b.data {
-                        if nc.lty == 0 {
-                            for x in &mut nc.xmti {
-                                let mt = *x as i32;
-                                if f64::from(mt) == *x {
-                                    *x = f64::from(read(mt));
-                                }
+                    if let CovarianceData::Nc(nc) = &mut b.data
+                        && nc.lty == 0
+                    {
+                        for x in &mut nc.xmti {
+                            let mt = *x as i32;
+                            if f64::from(mt) == *x {
+                                *x = f64::from(read(mt));
                             }
                         }
                     }
@@ -2481,15 +2482,17 @@ fn fold_nuclide(
             coverage.rate_fraction_covered.insert(key.clone(), share);
         }
         let mut ratios = Vec::new();
-        if let (Some(&weighted), Some(&full)) = (weighted_rate.get(&channel), rates.get(kind)) {
-            if full != 0.0 && weighted / full > 1.0 + PARTIALS_ROUNDING {
-                ratios.push(weighted / full);
-            }
+        if let (Some(&weighted), Some(&full)) = (weighted_rate.get(&channel), rates.get(kind))
+            && full != 0.0
+            && weighted / full > 1.0 + PARTIALS_ROUNDING
+        {
+            ratios.push(weighted / full);
         }
-        if let (Some(&spanning), Some(&full)) = (spanning_rate.get(&channel), rates.get(kind)) {
-            if full != 0.0 && spanning / full < 1.0 - PARTIALS_ROUNDING {
-                ratios.push(spanning / full);
-            }
+        if let (Some(&spanning), Some(&full)) = (spanning_rate.get(&channel), rates.get(kind))
+            && full != 0.0
+            && spanning / full < 1.0 - PARTIALS_ROUNDING
+        {
+            ratios.push(spanning / full);
         }
         // A derived term's partials against its own reaction's rate, carried
         // over to the rate the covariance is divided by through the fold's
@@ -2500,15 +2503,15 @@ fn fold_nuclide(
             .filter(|&&full| full != 0.0 && own_rate != 0.0)
         {
             let to_full = BARN_TO_CM2 * own_rate / full;
-            if let Some(&weighted) = derived_weighted.get(&channel) {
-                if weighted * to_full > 1.0 + PARTIALS_ROUNDING {
-                    ratios.push(weighted * to_full);
-                }
+            if let Some(&weighted) = derived_weighted.get(&channel)
+                && weighted * to_full > 1.0 + PARTIALS_ROUNDING
+            {
+                ratios.push(weighted * to_full);
             }
-            if let Some(&spanning) = derived_spanning.get(&channel) {
-                if spanning * to_full < 1.0 - PARTIALS_ROUNDING {
-                    ratios.push(spanning * to_full);
-                }
+            if let Some(&spanning) = derived_spanning.get(&channel)
+                && spanning * to_full < 1.0 - PARTIALS_ROUNDING
+            {
+                ratios.push(spanning * to_full);
             }
         }
         ratios.extend(mismatched.iter().map(|(_, ratio)| *ratio));

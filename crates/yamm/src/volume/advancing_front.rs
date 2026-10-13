@@ -693,11 +693,11 @@ impl AdvancingFront {
             };
 
             // Check if this face already has 2 adjacent tets (fully internal)
-            if let Some(&count) = self.face_tet_count.get(&key) {
-                if count >= 2 {
-                    self.remove_front_face(&key);
-                    continue;
-                }
+            if let Some(&count) = self.face_tet_count.get(&key)
+                && count >= 2
+            {
+                self.remove_front_face(&key);
+                continue;
             }
 
             let ideal = self.ideal_point(&ff);
@@ -720,13 +720,12 @@ impl AdvancingFront {
             }
 
             // Strategy 2: Try existing point with broader search
-            if !formed {
-                if let Some(idx) = self.find_existing_point(&ff) {
-                    if self.validate_tet(&ff, idx) {
-                        self.create_tet(key, ff.clone(), idx);
-                        formed = true;
-                    }
-                }
+            if !formed
+                && let Some(idx) = self.find_existing_point(&ff)
+                && self.validate_tet(&ff, idx)
+            {
+                self.create_tet(key, ff.clone(), idx);
+                formed = true;
             }
 
             // Strategy 3: Create new vertex at ideal position

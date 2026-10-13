@@ -301,7 +301,7 @@ impl PyTally {
                 Err(_) => {
                     return Err(pyo3::exceptions::PyValueError::new_err(
                         "Cannot filter on material with no ID - assign an id first",
-                    ))
+                    ));
                 }
             }
         }
@@ -505,7 +505,7 @@ impl PyTally {
                     return Err(pyo3::exceptions::PyValueError::new_err(format!(
                         "Particle '{}' not supported for dose_coefficients. Must be 'neutron' or 'photon'.",
                         dc_particle
-                    )))
+                    )));
                 }
             };
             let geom = match dc_geometry.to_uppercase().as_str() {
@@ -519,7 +519,7 @@ impl PyTally {
                     return Err(pyo3::exceptions::PyValueError::new_err(format!(
                         "Invalid geometry '{}'. Must be one of: AP, PA, LLAT, RLAT, ROT, ISO",
                         dc_geometry
-                    )))
+                    )));
                 }
             };
             let source = match dc_source.to_lowercase().as_str() {
@@ -529,7 +529,7 @@ impl PyTally {
                     return Err(pyo3::exceptions::PyValueError::new_err(format!(
                         "Invalid data_source '{}'. Must be 'icrp74' or 'icrp116'",
                         dc_source
-                    )))
+                    )));
                 }
             };
             let (energy, coeffs) = rust_dose_coefficients(dc_particle_kind, geom, source);
@@ -546,7 +546,7 @@ impl PyTally {
                 _ => {
                     return Err(pyo3::exceptions::PyValueError::new_err(
                         "particle must be 'neutron' or 'photon'",
-                    ))
+                    ));
                 }
             };
             filters.push(Filter::ParticleType(ParticleTypeFilter::new(pt_enum)));
@@ -933,7 +933,7 @@ impl PyTally {
                 Err(_) => {
                     return Err(pyo3::exceptions::PyValueError::new_err(
                         "Cannot filter on material with no ID - assign an id first",
-                    ))
+                    ));
                 }
             }
         }

@@ -1269,34 +1269,31 @@ impl TransmutationTallies {
             };
 
             for (mt_idx, &mt) in mat_data.mt_numbers.iter().enumerate() {
-                if let Some(reaction) = reactions.get(&mt) {
-                    if let Some(xs) = reaction.cross_section_at(energy) {
-                        if xs > 0.0 {
-                            let bin_idx = nuc_idx * n_mts + mt_idx;
-                            atomic_add_f64(&mat_data.batch_accum[bin_idx], xs * track_length);
-                            if let Some(h) = &mut history {
-                                h.add_rate(bin_idx, xs * track_length);
-                            }
+                if let Some(reaction) = reactions.get(&mt)
+                    && let Some(xs) = reaction.cross_section_at(energy)
+                    && xs > 0.0
+                {
+                    let bin_idx = nuc_idx * n_mts + mt_idx;
+                    atomic_add_f64(&mat_data.batch_accum[bin_idx], xs * track_length);
+                    if let Some(h) = &mut history {
+                        h.add_rate(bin_idx, xs * track_length);
+                    }
 
-                            // Split this segment's fission rate across the
-                            // nuclide's tabulated yield energies,
-                            // reusing the cross section already in hand. Two
-                            // hats are non-zero at most, so two adds.
-                            if Some(mt_idx) == mat_data.fy_mt_idx {
-                                if let Some(ch) = &mat_data.fy_channels[nuc_idx] {
-                                    if let Some(hats) =
-                                        fission_yield_interp_weights(&ch.energies, &ch.laws, energy)
-                                    {
-                                        for (k, w) in hats {
-                                            if w != 0.0 {
-                                                atomic_add_f64(
-                                                    &mat_data.fy_batch[ch.offset + k],
-                                                    w * xs * track_length,
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
+                    // Split this segment's fission rate across the
+                    // nuclide's tabulated yield energies,
+                    // reusing the cross section already in hand. Two
+                    // hats are non-zero at most, so two adds.
+                    if Some(mt_idx) == mat_data.fy_mt_idx
+                        && let Some(ch) = &mat_data.fy_channels[nuc_idx]
+                        && let Some(hats) =
+                            fission_yield_interp_weights(&ch.energies, &ch.laws, energy)
+                    {
+                        for (k, w) in hats {
+                            if w != 0.0 {
+                                atomic_add_f64(
+                                    &mat_data.fy_batch[ch.offset + k],
+                                    w * xs * track_length,
+                                );
                             }
                         }
                     }

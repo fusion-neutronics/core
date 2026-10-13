@@ -1935,16 +1935,16 @@ fn run_replicas(
                 .into(),
         );
     }
-    if let (Some(t), Some(n)) = (replica_tallies, request.samples) {
-        if n != t.replicas() {
-            return Err(format!(
-                "the transport carried {} replica weights and the request asks for {n} \
+    if let (Some(t), Some(n)) = (replica_tallies, request.samples)
+        && n != t.replicas()
+    {
+        return Err(format!(
+            "the transport carried {} replica weights and the request asks for {n} \
                  replicas; a transport-coupled run with replica weights solves exactly the \
                  replicas its transport carried",
-                t.replicas()
-            )
-            .into());
-        }
+            t.replicas()
+        )
+        .into());
     }
 
     // One fold per distinct spectrum and one factorization per nuclide, not
@@ -4301,10 +4301,10 @@ fn refine_chain(
                 // share of the total (n,n') rate (the loaded branchings are
                 // 0.0 placeholders), so assign it directly.
                 for rx in nuc.reactions.iter_mut().filter(|r| &r.kind == kind) {
-                    if let Some(t) = &rx.target {
-                        if let Some(&f) = tmap.get(t) {
-                            rx.branching = f;
-                        }
+                    if let Some(t) = &rx.target
+                        && let Some(&f) = tmap.get(t)
+                    {
+                        rx.branching = f;
                     }
                 }
             } else if kind.as_str() == ANYTHING {
@@ -4355,19 +4355,19 @@ fn refine_chain(
                 let mut base_sum = 0.0;
                 let mut f_sum = 0.0;
                 for rx in nuc.reactions.iter().filter(|r| &r.kind == kind) {
-                    if let Some(t) = &rx.target {
-                        if let Some(&f) = tmap.get(t) {
-                            base_sum += rx.branching;
-                            f_sum += f;
-                        }
+                    if let Some(t) = &rx.target
+                        && let Some(&f) = tmap.get(t)
+                    {
+                        base_sum += rx.branching;
+                        f_sum += f;
                     }
                 }
                 if base_sum > 0.0 && f_sum > 0.0 {
                     for rx in nuc.reactions.iter_mut().filter(|r| &r.kind == kind) {
-                        if let Some(t) = &rx.target {
-                            if let Some(&f) = tmap.get(t) {
-                                rx.branching = (f / f_sum) * base_sum;
-                            }
+                        if let Some(t) = &rx.target
+                            && let Some(&f) = tmap.get(t)
+                        {
+                            rx.branching = (f / f_sum) * base_sum;
                         }
                     }
                 }

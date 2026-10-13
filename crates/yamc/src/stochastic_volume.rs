@@ -58,10 +58,10 @@ pub fn calculate_stochastic_volumes(
                 let y = ll[1] + w[1] * rng.random();
                 let z = ll[2] + w[2] * rng.random();
 
-                if let Some(bin) = classify((x, y, z)) {
-                    if bin < n_bins {
-                        local_hits[bin] += 1;
-                    }
+                if let Some(bin) = classify((x, y, z))
+                    && bin < n_bins
+                {
+                    local_hits[bin] += 1;
                 }
             }
 

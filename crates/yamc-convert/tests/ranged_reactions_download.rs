@@ -204,10 +204,10 @@ fn serve(
             }
             if let Some(spec) = line.to_ascii_lowercase().strip_prefix("range: bytes=") {
                 for one in spec.trim().split(',') {
-                    if let Some((a, b)) = one.trim().split_once('-') {
-                        if let (Ok(a), Ok(b)) = (a.parse::<usize>(), b.parse::<usize>()) {
-                            requested.push((a, b));
-                        }
+                    if let Some((a, b)) = one.trim().split_once('-')
+                        && let (Ok(a), Ok(b)) = (a.parse::<usize>(), b.parse::<usize>())
+                    {
+                        requested.push((a, b));
                     }
                 }
             }

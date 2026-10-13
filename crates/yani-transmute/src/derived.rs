@@ -1019,13 +1019,12 @@ fn replica_chain(
                 && crate::uncertainty::has_decay_photon_sigma(&cn);
             if let Some((seed, replica)) = decay_energy {
                 let total_only = !crate::uncertainty::components_state_sigma(&cn);
-                if !(lines_set_gamma && total_only) {
-                    if let Some((total, parts)) =
+                if !(lines_set_gamma && total_only)
+                    && let Some((total, parts)) =
                         crate::uncertainty::sample_decay_energy(&cn, seed, replica)
-                    {
-                        cn.decay_energy = total;
-                        cn.decay_energy_components = parts;
-                    }
+                {
+                    cn.decay_energy = total;
+                    cn.decay_energy_components = parts;
                 }
             }
             // After the half-life, whose rescale keeps each line's sigma in

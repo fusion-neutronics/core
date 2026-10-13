@@ -43,7 +43,7 @@ impl Interpolation {
             _ => {
                 return Err(Error::BadInterpolation {
                     name: name.to_string(),
-                })
+                });
             }
         })
     }
@@ -59,7 +59,7 @@ impl Interpolation {
             _ => {
                 return Err(Error::BadInterpolation {
                     name: code.to_string(),
-                })
+                });
             }
         })
     }
@@ -425,7 +425,7 @@ pub fn combine_distributions(dists: &[Univariate], probs: &[f64]) -> Result<Univ
                         Univariate::Uniform(_) => "combining a uniform distribution",
                         _ => "combining a nested mixture",
                     },
-                })
+                });
             }
         }
     }

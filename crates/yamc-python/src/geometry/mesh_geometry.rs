@@ -425,10 +425,10 @@ impl PyMeshGeometry {
         let mut material_names = std::collections::HashMap::new();
         for vol in &geo_mesh.volumes {
             cell_names.insert(vol.cell_id, format!("Volume {}", vol.cell_id));
-            if vol.material_id != -1 {
-                if let Some(ref name) = vol.material_name {
-                    material_names.insert(vol.material_id, name.clone());
-                }
+            if vol.material_id != -1
+                && let Some(ref name) = vol.material_name
+            {
+                material_names.insert(vol.material_id, name.clone());
             }
         }
 

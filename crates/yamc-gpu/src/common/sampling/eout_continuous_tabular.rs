@@ -652,7 +652,11 @@ mod tests {
             assert!(
                 (gpu_e[i] - cpu_e[i]).abs() <= tol,
                 "sample {i}: energy diverged (gpu {} cpu {}, tol {tol}, energy {}, off {}, seed {})",
-                gpu_e[i], cpu_e[i], energy_in[i], eg_off[i], seeds[i]
+                gpu_e[i],
+                cpu_e[i],
+                energy_in[i],
+                eg_off[i],
+                seeds[i]
             );
             // Slot 0 (n_eout=2, n_x>=2) must overwrite the -1 sentinel.
             if eg_off[i] == 0 {

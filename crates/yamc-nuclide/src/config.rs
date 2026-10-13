@@ -135,8 +135,7 @@ impl Config {
                 if !is_keyword_or_directory(nuclide_or_keyword) {
                     panic!(
                         "Invalid cross section source: '{}'. Must be a keyword ({}) or a directory path.",
-                        nuclide_or_keyword,
-                        "tendl-2025, fendl-3.2d, endf-b8.1"
+                        nuclide_or_keyword, "tendl-2025, fendl-3.2d, endf-b8.1"
                     );
                 }
                 self.default_cross_section = Some(nuclide_or_keyword.to_string());

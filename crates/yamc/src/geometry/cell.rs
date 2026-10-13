@@ -80,12 +80,13 @@ impl Cell {
         // Use cached surfaces for fast iteration (avoids repeated collection)
         for (surface_arc, _sense) in &self.cached_surfaces {
             let surface: &crate::geo::Surface = surface_arc.as_ref();
-            if let Some(dist) = surface.distance_to_surface(point, direction) {
-                if dist > 1e-10 && dist < min_dist {
-                    min_dist = dist;
-                    closest_boundary = Some(surface.boundary.clone());
-                    closest_surface_id = surface.surface_id;
-                }
+            if let Some(dist) = surface.distance_to_surface(point, direction)
+                && dist > 1e-10
+                && dist < min_dist
+            {
+                min_dist = dist;
+                closest_boundary = Some(surface.boundary.clone());
+                closest_surface_id = surface.surface_id;
             }
         }
 
@@ -101,17 +102,18 @@ impl Cell {
         // Use cached surfaces for fast iteration
         for (surface_arc, _sense) in &self.cached_surfaces {
             let surface: &crate::geo::Surface = surface_arc.as_ref();
-            if let Some(dist) = surface.distance_to_surface(point, direction) {
-                if dist > 1e-10 && dist < min_dist {
-                    // Check if crossing this surface actually exits the region
-                    let p_next = (
-                        point[0] + direction[0] * (dist + eps),
-                        point[1] + direction[1] * (dist + eps),
-                        point[2] + direction[2] * (dist + eps),
-                    );
-                    if !self.flat_region.contains(p_next) {
-                        min_dist = dist;
-                    }
+            if let Some(dist) = surface.distance_to_surface(point, direction)
+                && dist > 1e-10
+                && dist < min_dist
+            {
+                // Check if crossing this surface actually exits the region
+                let p_next = (
+                    point[0] + direction[0] * (dist + eps),
+                    point[1] + direction[1] * (dist + eps),
+                    point[2] + direction[2] * (dist + eps),
+                );
+                if !self.flat_region.contains(p_next) {
+                    min_dist = dist;
                 }
             }
         }

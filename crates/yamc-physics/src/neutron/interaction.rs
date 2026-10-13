@@ -488,10 +488,11 @@ fn fission_progeny_energy(
     pcg: &mut u64,
 ) -> f64 {
     use yamc_rng::next_xi;
-    if let Some((beta, delayed_chi)) = delayed {
-        if beta > 0.0 && next_xi(pcg) < beta {
-            return fission_chi_or_incident(delayed_chi, e_in, pcg);
-        }
+    if let Some((beta, delayed_chi)) = delayed
+        && beta > 0.0
+        && next_xi(pcg) < beta
+    {
+        return fission_chi_or_incident(delayed_chi, e_in, pcg);
     }
     fission_chi_or_incident(prompt, e_in, pcg)
 }

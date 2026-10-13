@@ -579,7 +579,7 @@ pub fn parse_mf2(reader: &mut Reader) -> Result<Mf2> {
                     4 => {
                         return Err(Error::Unsupported {
                             what: "the Adler-Adler resonance formalism (MF=2, LRF=4)",
-                        })
+                        });
                     }
                     7 => ResonanceParameters::RMatrixLimited(Box::new(parse_r_matrix_limited(
                         reader,
@@ -587,7 +587,7 @@ pub fn parse_mf2(reader: &mut Reader) -> Result<Mf2> {
                     _ => {
                         return Err(Error::Unsupported {
                             what: "an unrecognised MF=2 resonance formalism",
-                        })
+                        });
                     }
                 }
             } else if lru == 2 {

@@ -40,7 +40,7 @@ impl SourceSpatialDistribution {
     pub fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> [f64; 3] {
         match self {
             SourceSpatialDistribution::Point(p) => p.sample(rng),
-            SourceSpatialDistribution::CylindricalRing(ref c) => c.sample(rng),
+            SourceSpatialDistribution::CylindricalRing(c) => c.sample(rng),
         }
     }
 }

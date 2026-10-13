@@ -176,7 +176,7 @@ fn angle_at_energy(angle: &AngleAtEnergy, mt: i32) -> Result<Flat, Box<dyn Error
                  else; converting it here would be inventing a tabulation the \
                  evaluation did not give"
             )
-            .into())
+            .into());
         }
     })
 }
@@ -286,7 +286,7 @@ fn write_energy(row: &mut Row, energy: &EnergyDistribution, mt: i32) -> Result<(
                     _ => "an unrecognised law",
                 }
             )
-            .into())
+            .into());
         }
     }
     Ok(())

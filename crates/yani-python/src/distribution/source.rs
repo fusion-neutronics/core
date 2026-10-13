@@ -63,7 +63,7 @@ pub(crate) fn extract_source_energy_distribution(
         }
     } else {
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "Energy must be a Discrete, Histogram, Uniform, or Normal distribution or a float (e.g., yamc.Histogram([0.0, 1e6, 20e6], [0.3, 0.7]) or yamc.Discrete([14.06e6], [1.0]) or 14.06e6)"
+            "Energy must be a Discrete, Histogram, Uniform, or Normal distribution or a float (e.g., yamc.Histogram([0.0, 1e6, 20e6], [0.3, 0.7]) or yamc.Discrete([14.06e6], [1.0]) or 14.06e6)",
         ))
     }
 }
@@ -138,7 +138,7 @@ fn source_repr(name: &str, src: &Source, strength: f64) -> String {
             let pos = p.position();
             format!("({}, {}, {})", pos[0], pos[1], pos[2])
         }
-        SourceSpatialDistribution::CylindricalRing(ref c) => {
+        SourceSpatialDistribution::CylindricalRing(c) => {
             let o = c.origin;
             format!("CylindricalRing(origin=[{}, {}, {}])", o[0], o[1], o[2])
         }

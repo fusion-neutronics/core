@@ -231,7 +231,7 @@ pub fn read_resonance_parameters(
                     "{nuclide} resonance_parameters.arrow holds MF={mf} MT={mt}; \
                      only MF=2 and MF=32 MT=151 belong there"
                 )
-                .into())
+                .into());
             }
         };
         if slot.replace(get_str(&batch, "text", row)?).is_some() {

@@ -196,16 +196,15 @@ pub fn combine_results(
             }
         }
         for (idx, matched) in matched_existing.iter().enumerate() {
-            if !matched {
-                if let Some(key) = &entries[idx].key {
-                    if warned_keys.insert(key.clone()) {
-                        warnings.push(format!(
-                            "tally {} is not present in all combined results; it is carried \
+            if !matched
+                && let Some(key) = &entries[idx].key
+                && warned_keys.insert(key.clone())
+            {
+                warnings.push(format!(
+                    "tally {} is not present in all combined results; it is carried \
                              with the statistics of the runs that scored it",
-                            key_display(key)
-                        ));
-                    }
-                }
+                    key_display(key)
+                ));
             }
         }
     }
@@ -269,14 +268,14 @@ fn validate_compatible(
         // The fingerprint names a library, not its release, so two runs on two
         // releases of one library match there and are caught here.
         for (keyword, release) in &run.data_releases {
-            if let Some(ref_release) = reference.data_releases.get(keyword) {
-                if ref_release.manifest_sha256 != release.manifest_sha256 {
-                    return Err(format!(
-                        "cannot combine: the runs read different releases of {keyword}: \
+            if let Some(ref_release) = reference.data_releases.get(keyword)
+                && ref_release.manifest_sha256 != release.manifest_sha256
+            {
+                return Err(format!(
+                    "cannot combine: the runs read different releases of {keyword}: \
                          {} vs {}",
-                        ref_release.release, release.release
-                    ));
-                }
+                    ref_release.release, release.release
+                ));
             }
         }
         if run.fingerprint != reference.fingerprint {
