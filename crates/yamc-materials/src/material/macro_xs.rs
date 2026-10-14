@@ -50,12 +50,12 @@ impl Material {
             // Use flat buffer when available (GPU-friendly contiguous layout)
             let n_mts = self.macroscopic_xs_mt_numbers.len();
             if let Some(n_energies) = self.macroscopic_xs_flat.len().checked_div(n_mts) {
-                if let Ok(mt_idx) = self.macroscopic_xs_mt_numbers.binary_search(&mt) {
-                    if i_grid + 1 < n_energies {
-                        let xs0 = self.macroscopic_xs_flat[i_grid * n_mts + mt_idx];
-                        let xs1 = self.macroscopic_xs_flat[(i_grid + 1) * n_mts + mt_idx];
-                        return xs0 + f * (xs1 - xs0);
-                    }
+                if let Ok(mt_idx) = self.macroscopic_xs_mt_numbers.binary_search(&mt)
+                    && i_grid + 1 < n_energies
+                {
+                    let xs0 = self.macroscopic_xs_flat[i_grid * n_mts + mt_idx];
+                    let xs1 = self.macroscopic_xs_flat[(i_grid + 1) * n_mts + mt_idx];
+                    return xs0 + f * (xs1 - xs0);
                 }
             } else if let Some(xs_vec) = self.macroscopic_xs_neutron.get(&mt) {
                 // Fallback to HashMap when flat buffer not yet built
@@ -173,10 +173,10 @@ impl Material {
         for nuclide in self.nuclides.keys() {
             if let Some(nuclide_data) = self.nuclide_data.get(nuclide) {
                 // Check if there's a top-level energy grid
-                if let Some(energy_map) = &nuclide_data.energy {
-                    if let Some(energy_grid) = energy_map.get(&temperature) {
-                        all_energies.extend(energy_grid);
-                    }
+                if let Some(energy_map) = &nuclide_data.energy
+                    && let Some(energy_grid) = energy_map.get(&temperature)
+                {
+                    all_energies.extend(energy_grid);
                 }
             }
         }
@@ -238,35 +238,34 @@ impl Material {
         for nuclide_name in self.nuclides.keys() {
             if let Some(nuclide_data) = self.nuclide_data.get(nuclide_name) {
                 let mut nuclide_reactions_map: HashMap<i32, Vec<f64>> = HashMap::new();
-                if let Some(temp_reactions) = nuclide_data.reactions_for_temp(&temperature) {
-                    if let Some(energy_map) = &nuclide_data.energy {
-                        if let Some(energy_grid) = energy_map.get(&temperature) {
-                            for (&mt, reaction) in temp_reactions {
-                                if let Some(ref set) = mt_set_opt {
-                                    if !set.contains(&mt) {
-                                        continue;
+                if let Some(temp_reactions) = nuclide_data.reactions_for_temp(&temperature)
+                    && let Some(energy_map) = &nuclide_data.energy
+                    && let Some(energy_grid) = energy_map.get(&temperature)
+                {
+                    for (&mt, reaction) in temp_reactions {
+                        if let Some(ref set) = mt_set_opt
+                            && !set.contains(&mt)
+                        {
+                            continue;
+                        }
+                        let threshold_idx = reaction.threshold_idx;
+                        if threshold_idx < energy_grid.len() {
+                            let reaction_energy = &energy_grid[threshold_idx..];
+                            if reaction.cross_section.len() == reaction_energy.len() {
+                                let mut xs_values = Vec::with_capacity(grid.len());
+                                for &grid_energy in &grid {
+                                    if grid_energy < reaction_energy[0] {
+                                        xs_values.push(0.0);
+                                    } else {
+                                        let xs = interpolate_linear(
+                                            reaction_energy,
+                                            &reaction.cross_section,
+                                            grid_energy,
+                                        );
+                                        xs_values.push(xs);
                                     }
                                 }
-                                let threshold_idx = reaction.threshold_idx;
-                                if threshold_idx < energy_grid.len() {
-                                    let reaction_energy = &energy_grid[threshold_idx..];
-                                    if reaction.cross_section.len() == reaction_energy.len() {
-                                        let mut xs_values = Vec::with_capacity(grid.len());
-                                        for &grid_energy in &grid {
-                                            if grid_energy < reaction_energy[0] {
-                                                xs_values.push(0.0);
-                                            } else {
-                                                let xs = interpolate_linear(
-                                                    reaction_energy,
-                                                    &reaction.cross_section,
-                                                    grid_energy,
-                                                );
-                                                xs_values.push(xs);
-                                            }
-                                        }
-                                        nuclide_reactions_map.insert(mt, xs_values);
-                                    }
-                                }
+                                nuclide_reactions_map.insert(mt, xs_values);
                             }
                         }
                     }
@@ -332,7 +331,9 @@ impl Material {
 
         // If by_nuclide is true, ensure MT=1 is in the filter
         if by_nuclide && !mt_filter.contains(&1) {
-            panic!("If by_nuclide is true, mt_filter must contain 1 (total). Otherwise, per-nuclide total cross section makes no sense.");
+            panic!(
+                "If by_nuclide is true, mt_filter must contain 1 (total). Otherwise, per-nuclide total cross section makes no sense."
+            );
         }
 
         // Use cached microscopic XS if available and covering all requested MTs.
@@ -617,23 +618,23 @@ impl Material {
                 .as_ref()
                 .and_then(|keys| keys.binary_search_by(|k| k.as_str().cmp(nuclide)).ok())
                 .and_then(|idx| by_nuc.get(idx));
-            if let Some(nuc_xs) = nuc_xs {
-                if let Some(xs_vec) = nuc_xs.get(&mt) {
-                    // Reuse fast O(1) lookup if available
-                    if let Some(ref fast_xs) = self.fast_xs {
-                        let (_, i_grid, f) =
-                            fast_xs.lookup_total(energy, &self.unified_energy_grid_neutron);
-                        if i_grid + 1 < xs_vec.len() {
-                            return xs_vec[i_grid] + f * (xs_vec[i_grid + 1] - xs_vec[i_grid]);
-                        }
+            if let Some(nuc_xs) = nuc_xs
+                && let Some(xs_vec) = nuc_xs.get(&mt)
+            {
+                // Reuse fast O(1) lookup if available
+                if let Some(ref fast_xs) = self.fast_xs {
+                    let (_, i_grid, f) =
+                        fast_xs.lookup_total(energy, &self.unified_energy_grid_neutron);
+                    if i_grid + 1 < xs_vec.len() {
+                        return xs_vec[i_grid] + f * (xs_vec[i_grid + 1] - xs_vec[i_grid]);
                     }
-                    // Fallback to linear interpolation
-                    return crate::interpolate_linear(
-                        &self.unified_energy_grid_neutron,
-                        xs_vec,
-                        energy,
-                    );
                 }
+                // Fallback to linear interpolation
+                return crate::interpolate_linear(
+                    &self.unified_energy_grid_neutron,
+                    xs_vec,
+                    energy,
+                );
             }
         }
         0.0

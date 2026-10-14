@@ -319,10 +319,10 @@ pub fn segments(
 
     // A tally overlay is small next to the model, so most tracks come nowhere
     // near it. Reject those on the volume's AABB before touching the BVH.
-    if let Some(bb) = topo.volume_aabbs.get(volume as usize) {
-        if !intersect::segment_hits_aabb(start, direction, total_dist, bb) {
-            return Vec::new();
-        }
+    if let Some(bb) = topo.volume_aabbs.get(volume as usize)
+        && !intersect::segment_hits_aabb(start, direction, total_dist, bb)
+    {
+        return Vec::new();
     }
 
     let mut out: Vec<(TetrahedronId, f64)> = Vec::new();

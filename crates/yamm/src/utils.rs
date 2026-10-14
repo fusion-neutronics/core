@@ -1002,11 +1002,11 @@ pub fn close_open_edges(vertices: &[[f64; 3]], triangles: &[[usize; 3]]) -> Vec<
             ];
             let mut creates_nm = false;
             for &ek in &edges_to_check {
-                if let Some(&c) = edge_count.get(&ek) {
-                    if c >= 2 {
-                        creates_nm = true;
-                        break;
-                    }
+                if let Some(&c) = edge_count.get(&ek)
+                    && c >= 2
+                {
+                    creates_nm = true;
+                    break;
                 }
             }
             if creates_nm {
@@ -2174,11 +2174,11 @@ pub fn fill_missing_uvs(
     }
     let mut filled: Vec<usize> = Vec::new();
     for &v in &missing {
-        if let Some(&(su, sv, n)) = sums.get(&v) {
-            if n > 0 {
-                out[v] = [su / n as f64, sv / n as f64];
-                filled.push(v);
-            }
+        if let Some(&(su, sv, n)) = sums.get(&v)
+            && n > 0
+        {
+            out[v] = [su / n as f64, sv / n as f64];
+            filled.push(v);
         }
     }
     (out, filled)

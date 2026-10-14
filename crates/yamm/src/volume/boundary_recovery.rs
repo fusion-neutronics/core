@@ -290,15 +290,15 @@ fn check_flip_eligibility(
     if let Constraint::None = constraint {
         return true;
     }
-    if let Some((u, v)) = new_edge {
-        if edge_crosses_constraint(tets, u, v, constraint) {
-            return false;
-        }
+    if let Some((u, v)) = new_edge
+        && edge_crosses_constraint(tets, u, v, constraint)
+    {
+        return false;
     }
-    if let Some([a, b, c]) = new_face {
-        if face_crosses_constraint(tets, a, b, c, constraint) {
-            return false;
-        }
+    if let Some([a, b, c]) = new_face
+        && face_crosses_constraint(tets, a, b, c, constraint)
+    {
+        return false;
     }
     true
 }
@@ -2822,26 +2822,26 @@ fn finddirection(tets: &Delaunay3D, a: usize, b: usize) -> Obstruction {
         // planes). Record as a candidate ACROSSVERT (only used if no interior or
         // edge hit is found).
         if zr && zp {
-            if best_vert.is_none() {
-                if let Obstruction::AcrossVert { v } = acrossvert_or_edge(tets, a, b, q) {
-                    best_vert = Some(v);
-                }
+            if best_vert.is_none()
+                && let Obstruction::AcrossVert { v } = acrossvert_or_edge(tets, a, b, q)
+            {
+                best_vert = Some(v);
             }
             continue;
         }
         if zr && zq {
-            if best_vert.is_none() {
-                if let Obstruction::AcrossVert { v } = acrossvert_or_edge(tets, a, b, p) {
-                    best_vert = Some(v);
-                }
+            if best_vert.is_none()
+                && let Obstruction::AcrossVert { v } = acrossvert_or_edge(tets, a, b, p)
+            {
+                best_vert = Some(v);
             }
             continue;
         }
         if zp && zq {
-            if best_vert.is_none() {
-                if let Obstruction::AcrossVert { v } = acrossvert_or_edge(tets, a, b, r) {
-                    best_vert = Some(v);
-                }
+            if best_vert.is_none()
+                && let Obstruction::AcrossVert { v } = acrossvert_or_edge(tets, a, b, r)
+            {
+                best_vert = Some(v);
             }
             continue;
         }
@@ -4939,13 +4939,13 @@ pub fn lawson_restore(
             let mut did_flip = false;
             if all_same && s01 != 0.0 && s12 != 0.0 && s20 != 0.0 {
                 // Convex bipyramid → 2-3 flip (removes the shared face, makes (d,e)).
-                if !flip23_destroys_protected(tets, t, n, protect) {
-                    if let Some(new_idx) = flip_2_to_3(tets, t, n, &protect.active) {
-                        // Push the newly-created link faces incident to new_vertex.
-                        push_new_link_faces(tets, &new_idx, new_vertex, &mut stack);
-                        did_flip = true;
-                        flips += 1;
-                    }
+                if !flip23_destroys_protected(tets, t, n, protect)
+                    && let Some(new_idx) = flip_2_to_3(tets, t, n, &protect.active)
+                {
+                    // Push the newly-created link faces incident to new_vertex.
+                    push_new_link_faces(tets, &new_idx, new_vertex, &mut stack);
+                    did_flip = true;
+                    flips += 1;
                 }
             } else {
                 // Reflex/flat edge: pick the shared-face edge (a', b') whose
@@ -4960,14 +4960,13 @@ pub fn lawson_restore(
                 } else {
                     None
                 };
-                if let Some((pp, qq)) = edge_opt {
-                    if !ring_flip_destroys_protected(tets, pp, qq, protect) {
-                        if let Some(new_idx) = flip_nm(tets, pp, qq, &protect.active) {
-                            push_new_link_faces(tets, &new_idx, new_vertex, &mut stack);
-                            did_flip = true;
-                            flips += 1;
-                        }
-                    }
+                if let Some((pp, qq)) = edge_opt
+                    && !ring_flip_destroys_protected(tets, pp, qq, protect)
+                    && let Some(new_idx) = flip_nm(tets, pp, qq, &protect.active)
+                {
+                    push_new_link_faces(tets, &new_idx, new_vertex, &mut stack);
+                    did_flip = true;
+                    flips += 1;
                 }
             }
             let _ = did_flip; // a no-op flip simply leaves the face un-flipped
@@ -5038,7 +5037,9 @@ pub fn lawson_restore(
             }
         }
         if nd > 0 {
-            eprintln!("    [lawson DBG] m={new_vertex}: {nd} link faces still non-Delaunay after {flips} flips");
+            eprintln!(
+                "    [lawson DBG] m={new_vertex}: {nd} link faces still non-Delaunay after {flips} flips"
+            );
         }
     }
 
@@ -5276,7 +5277,12 @@ pub fn recover_segments_with_steiner(
         }
         eprintln!(
             "    [seg DBG] segments={} missing={} | vertex_on={} face_cross={} edge_cross={} none={}",
-            seg_set.len(), n_missing, n_vertex_on, n_face_cross, n_edge_cross, n_none
+            seg_set.len(),
+            n_missing,
+            n_vertex_on,
+            n_face_cross,
+            n_edge_cross,
+            n_none
         );
         // INPUT QUALITY: length percentiles of all vs missing segments, and the
         // minimum angle over the boundary triangles. A boundary triangulation
@@ -5534,7 +5540,7 @@ pub fn recover_segments_with_steiner(
     };
     let mut v_prev = if volck { total_vol(tets) } else { 0.0 };
     macro_rules! volprobe {
-        ($label:expr, $a:expr, $b:expr) => {
+        ($label:expr_2021, $a:expr_2021, $b:expr_2021) => {
             if volck {
                 let v = total_vol(tets);
                 if (v - v_prev).abs() > 1e-9 {
@@ -5564,7 +5570,7 @@ pub fn recover_segments_with_steiner(
     let mut t_lawson = 0.0f64;
     let mut t_children = 0.0f64;
     macro_rules! timed {
-        ($acc:ident, $body:expr) => {{
+        ($acc:ident, $body:expr_2021) => {{
             if prof {
                 let _t = std::time::Instant::now();
                 let r = $body;
@@ -5869,62 +5875,61 @@ pub fn recover_segments_with_steiner(
         // ({a,b,x,y} ring -> {a,w,x,y}+{w,b,x,y}; exactly volume-preserving),
         // unless (u, v) is itself a protected boundary segment. Re-queue and
         // continue - a productive step that consumes no split budget.
-        if ff_pt.is_none() {
-            if let Obstruction::AcrossEdge { u, v } = ff_obs {
-                let key = (u.min(v), u.max(v));
-                if dbg && psegs.contains(&key) {
-                    eprintln!("    [voe DBG] ({a},{b}): obstruction edge ({u},{v}) is PROTECTED");
-                }
-                if !psegs.contains(&key) {
-                    let pu = tets.vertices[u];
-                    let pv = tets.vertices[v];
-                    let d2v = [pv[0] - pu[0], pv[1] - pu[1], pv[2] - pu[2]];
-                    let l2 = d2v[0] * d2v[0] + d2v[1] * d2v[1] + d2v[2] * d2v[2];
-                    let mut done = false;
-                    if l2 > 0.0 {
-                        for &e in &[a, b] {
-                            let pe = tets.vertices[e];
-                            let pu_pe = [pe[0] - pu[0], pe[1] - pu[1], pe[2] - pu[2]];
-                            let t_on =
-                                (pu_pe[0] * d2v[0] + pu_pe[1] * d2v[1] + pu_pe[2] * d2v[2]) / l2;
-                            if !(t_on > 1e-6 && t_on < 1.0 - 1e-6) {
-                                continue;
-                            }
-                            let proj = [
-                                pu[0] + t_on * d2v[0],
-                                pu[1] + t_on * d2v[1],
-                                pu[2] + t_on * d2v[2],
-                            ];
-                            let dist2 = (pe[0] - proj[0]).powi(2)
-                                + (pe[1] - proj[1]).powi(2)
-                                + (pe[2] - proj[2]).powi(2);
-                            // On the line within fp noise, relative to the
-                            // edge's own scale.
-                            if dist2 <= l2 * 1e-24 {
-                                let ok = tets.split_edge_at_vertex(u, v, e);
-                                if dbg {
-                                    eprintln!(
+        if ff_pt.is_none()
+            && let Obstruction::AcrossEdge { u, v } = ff_obs
+        {
+            let key = (u.min(v), u.max(v));
+            if dbg && psegs.contains(&key) {
+                eprintln!("    [voe DBG] ({a},{b}): obstruction edge ({u},{v}) is PROTECTED");
+            }
+            if !psegs.contains(&key) {
+                let pu = tets.vertices[u];
+                let pv = tets.vertices[v];
+                let d2v = [pv[0] - pu[0], pv[1] - pu[1], pv[2] - pu[2]];
+                let l2 = d2v[0] * d2v[0] + d2v[1] * d2v[1] + d2v[2] * d2v[2];
+                let mut done = false;
+                if l2 > 0.0 {
+                    for &e in &[a, b] {
+                        let pe = tets.vertices[e];
+                        let pu_pe = [pe[0] - pu[0], pe[1] - pu[1], pe[2] - pu[2]];
+                        let t_on = (pu_pe[0] * d2v[0] + pu_pe[1] * d2v[1] + pu_pe[2] * d2v[2]) / l2;
+                        if !(t_on > 1e-6 && t_on < 1.0 - 1e-6) {
+                            continue;
+                        }
+                        let proj = [
+                            pu[0] + t_on * d2v[0],
+                            pu[1] + t_on * d2v[1],
+                            pu[2] + t_on * d2v[2],
+                        ];
+                        let dist2 = (pe[0] - proj[0]).powi(2)
+                            + (pe[1] - proj[1]).powi(2)
+                            + (pe[2] - proj[2]).powi(2);
+                        // On the line within fp noise, relative to the
+                        // edge's own scale.
+                        if dist2 <= l2 * 1e-24 {
+                            let ok = tets.split_edge_at_vertex(u, v, e);
+                            if dbg {
+                                eprintln!(
                                         "    [voe DBG] ({a},{b}): endpoint {e} ON edge ({u},{v}) t={t_on:.4} -> split {}",
                                         if ok { "OK" } else { "REJECTED" }
                                     );
-                                }
-                                if ok {
-                                    done = true;
-                                    break;
-                                }
-                            } else if dbg && dist2 <= l2 * 1e-12 {
-                                eprintln!(
+                            }
+                            if ok {
+                                done = true;
+                                break;
+                            }
+                        } else if dbg && dist2 <= l2 * 1e-12 {
+                            eprintln!(
                                     "    [voe DBG] ({a},{b}): endpoint {e} NEAR edge ({u},{v}) dist2={dist2:e} (tol {:e})",
                                     l2 * 1e-24
                                 );
-                            }
                         }
                     }
-                    if done {
-                        queue.push_back((a.min(b), a.max(b), depth));
-                        volprobe!("vertex-on-edge", a, b);
-                        continue;
-                    }
+                }
+                if done {
+                    queue.push_back((a.min(b), a.max(b), depth));
+                    volprobe!("vertex-on-edge", a, b);
+                    continue;
                 }
             }
         }
@@ -5983,17 +5988,17 @@ pub fn recover_segments_with_steiner(
             // the segment endpoints - the voe class, but invisible to the
             // march in the near-tangent neighbourhood. Resolve topologically
             // (no Steiner point, no budget) and re-attempt the segment.
-            if let Some((u, v, e)) = timed!(t_fallback, edge_through_endpoint(tets, a, b, &psegs)) {
-                if tets.split_edge_at_vertex(u, v, e) {
-                    if dbg {
-                        eprintln!(
-                            "    [seg DBG] edge-through-endpoint: split ({u},{v}) at {e} for ({a},{b})"
-                        );
-                    }
-                    queue.push_back((a.min(b), a.max(b), depth));
-                    volprobe!("edge-through-endpoint", a, b);
-                    continue;
+            if let Some((u, v, e)) = timed!(t_fallback, edge_through_endpoint(tets, a, b, &psegs))
+                && tets.split_edge_at_vertex(u, v, e)
+            {
+                if dbg {
+                    eprintln!(
+                        "    [seg DBG] edge-through-endpoint: split ({u},{v}) at {e} for ({a},{b})"
+                    );
                 }
+                queue.push_back((a.min(b), a.max(b), depth));
+                volprobe!("edge-through-endpoint", a, b);
+                continue;
             }
         }
         // NOTE: a "dust-coplanar covering face"

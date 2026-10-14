@@ -865,7 +865,7 @@ impl PyTransmutationResults {
             other => {
                 return Err(PyValueError::new_err(format!(
                     "dose_quantity must be 'absorbed-air' or 'effective', got '{other}'"
-                )))
+                )));
             }
         };
         self.derived(

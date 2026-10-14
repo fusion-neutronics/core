@@ -198,10 +198,9 @@ impl StatisticalRates {
                     if let Some(states) = partials
                         .get_mut(&label.nuclide)
                         .and_then(|k| k.get_mut(&label.kind))
+                        && let Some((_, v)) = states.iter_mut().find(|(t, _)| t == target)
                     {
-                        if let Some((_, v)) = states.iter_mut().find(|(t, _)| t == target) {
-                            add(v, delta);
-                        }
+                        add(v, delta);
                     }
                 }
             }

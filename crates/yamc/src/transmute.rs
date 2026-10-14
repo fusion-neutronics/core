@@ -141,7 +141,7 @@ impl Model {
                 return Err(format!(
                     "method must be \"independent\" or \"coupled\", got \"{method}\""
                 )
-                .into())
+                .into());
             }
         };
         // Coupled mode re-runs transport every step, so its rates carry noise

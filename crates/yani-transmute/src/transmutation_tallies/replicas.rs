@@ -422,21 +422,17 @@ impl ReplicaSums {
                 for ((o, w), x) in out.iter_mut().zip(weights.iter()).zip(d.iter()) {
                     *o += w * x;
                 }
-                if Some(mt_idx) == mat.fy_mt_idx {
-                    if let Some(ch) = &mat.fy_channels[nuc_idx] {
-                        if let Some(hats) =
-                            fission_yield_interp_weights(&ch.energies, &ch.laws, energy)
-                        {
-                            for (h, hw) in hats {
-                                if hw == 0.0 {
-                                    continue;
-                                }
-                                let out = &mut buf[row(layout.fission + ch.offset + h)];
-                                for ((o, w), x) in out.iter_mut().zip(weights.iter()).zip(d.iter())
-                                {
-                                    *o += hw * w * x;
-                                }
-                            }
+                if Some(mt_idx) == mat.fy_mt_idx
+                    && let Some(ch) = &mat.fy_channels[nuc_idx]
+                    && let Some(hats) = fission_yield_interp_weights(&ch.energies, &ch.laws, energy)
+                {
+                    for (h, hw) in hats {
+                        if hw == 0.0 {
+                            continue;
+                        }
+                        let out = &mut buf[row(layout.fission + ch.offset + h)];
+                        for ((o, w), x) in out.iter_mut().zip(weights.iter()).zip(d.iter()) {
+                            *o += hw * w * x;
                         }
                     }
                 }

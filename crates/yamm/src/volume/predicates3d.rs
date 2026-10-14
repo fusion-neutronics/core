@@ -109,7 +109,9 @@ pub fn in_sphere_sos(
         // Two of five points geometrically coincide => duplicate vertex bug.
         // Do NOT extend the cascade / loosen (no-hide-errors). Mirror TetGen's
         // terminatetetgen(this, 2) at tetgen.cxx:5188.
-        panic!("in_sphere_sos: degenerate term B == 0 => duplicate vertex (ids {ia},{ib},{ic},{id},{ie})");
+        panic!(
+            "in_sphere_sos: degenerate term B == 0 => duplicate vertex (ids {ia},{ib},{ic},{id},{ie})"
+        );
     }
     if odd {
         b_ori = -b_ori;

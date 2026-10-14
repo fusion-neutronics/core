@@ -610,7 +610,7 @@ pub fn reconstruction(
         _ => {
             return Err(Error::Unsupported {
                 what: "the cross sections of this resonance formalism",
-            })
+            });
         }
     })
 }
@@ -1757,15 +1757,16 @@ impl UnresolvedAverages {
         // NAPS=2 takes the channel radius from an energy-dependent radius,
         // which NRO=0 does not give (refused above when it does), so here it
         // is illegal, as NJOY's csunr2 says.
-        let channel_radius =
-            match range.naps {
-                0 => channel_radius_formula(awri),
-                1 => u.ap,
-                _ => return Err(Error::Mismatched {
+        let channel_radius = match range.naps {
+            0 => channel_radius_formula(awri),
+            1 => u.ap,
+            _ => {
+                return Err(Error::Mismatched {
                     what:
                         "an unresolved range's NAPS and its scattering radius (NAPS=2 needs NRO=1)",
-                }),
-            };
+                });
+            }
+        };
         let mut orbitals = Vec::with_capacity(u.ranges.len());
         // NJOY interpolates on the first (l, J)'s energies, by the law of the
         // last (case C), or linearly on ES (case B).

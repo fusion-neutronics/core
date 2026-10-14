@@ -1345,60 +1345,66 @@ impl Nuclide {
 
     /// Get the element name with auto-loading if not available
     pub fn get_element(&mut self) -> Option<String> {
-        if self.element.is_none() && self.name.is_some() {
-            if let Some(name) = &self.name.clone() {
-                let _ = self.auto_load_from_config(name, None);
-            }
+        if self.element.is_none()
+            && self.name.is_some()
+            && let Some(name) = &self.name.clone()
+        {
+            let _ = self.auto_load_from_config(name, None);
         }
         self.element.clone()
     }
 
     /// Get the atomic number with auto-loading if not available
     pub fn get_atomic_number(&mut self) -> Option<u32> {
-        if self.atomic_number.is_none() && self.name.is_some() {
-            if let Some(name) = &self.name.clone() {
-                let _ = self.auto_load_from_config(name, None);
-            }
+        if self.atomic_number.is_none()
+            && self.name.is_some()
+            && let Some(name) = &self.name.clone()
+        {
+            let _ = self.auto_load_from_config(name, None);
         }
         self.atomic_number
     }
 
     /// Get the mass number with auto-loading if not available
     pub fn get_mass_number(&mut self) -> Option<u32> {
-        if self.mass_number.is_none() && self.name.is_some() {
-            if let Some(name) = &self.name.clone() {
-                let _ = self.auto_load_from_config(name, None);
-            }
+        if self.mass_number.is_none()
+            && self.name.is_some()
+            && let Some(name) = &self.name.clone()
+        {
+            let _ = self.auto_load_from_config(name, None);
         }
         self.mass_number
     }
 
     /// Get the atomic symbol with auto-loading if not available
     pub fn get_atomic_symbol(&mut self) -> Option<String> {
-        if self.atomic_symbol.is_none() && self.name.is_some() {
-            if let Some(name) = &self.name.clone() {
-                let _ = self.auto_load_from_config(name, None);
-            }
+        if self.atomic_symbol.is_none()
+            && self.name.is_some()
+            && let Some(name) = &self.name.clone()
+        {
+            let _ = self.auto_load_from_config(name, None);
         }
         self.atomic_symbol.clone()
     }
 
     /// Get the neutron number with auto-loading if not available
     pub fn get_neutron_number(&mut self) -> Option<u32> {
-        if self.neutron_number.is_none() && self.name.is_some() {
-            if let Some(name) = &self.name.clone() {
-                let _ = self.auto_load_from_config(name, None);
-            }
+        if self.neutron_number.is_none()
+            && self.name.is_some()
+            && let Some(name) = &self.name.clone()
+        {
+            let _ = self.auto_load_from_config(name, None);
         }
         self.neutron_number
     }
 
     /// Get available temperatures with auto-loading if not available
     pub fn get_available_temperatures(&mut self) -> Vec<String> {
-        if self.available_temperatures.is_empty() && self.name.is_some() {
-            if let Some(name) = &self.name.clone() {
-                let _ = self.auto_load_from_config(name, None);
-            }
+        if self.available_temperatures.is_empty()
+            && self.name.is_some()
+            && let Some(name) = &self.name.clone()
+        {
+            let _ = self.auto_load_from_config(name, None);
         }
         self.available_temperatures.clone()
     }
@@ -1503,10 +1509,8 @@ impl Nuclide {
             let needs_temp_load = !self.loaded_temperatures.contains(&temp_key.to_string())
                 && crate::temperature::resolve(temp_key, &self.available_temperatures).is_ok();
 
-            if needs_temp_load {
-                if let Some(name) = self.name.clone() {
-                    self.auto_load_additional_temperature(&name, temp)?;
-                }
+            if needs_temp_load && let Some(name) = self.name.clone() {
+                self.auto_load_additional_temperature(&name, temp)?;
             }
         }
 
@@ -1776,13 +1780,13 @@ pub fn get_or_load_nuclide(
             Ok(cache) => cache,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if let Some(weak) = cache.get(&cache_key) {
-            if let Some(existing) = weak.upgrade() {
-                if existing.load_scope.covers(scope) && serves_temperatures(&existing, scope) {
-                    return Ok(existing);
-                }
-                cached_scope = Some(existing.load_scope.clone());
+        if let Some(weak) = cache.get(&cache_key)
+            && let Some(existing) = weak.upgrade()
+        {
+            if existing.load_scope.covers(scope) && serves_temperatures(&existing, scope) {
+                return Ok(existing);
             }
+            cached_scope = Some(existing.load_scope.clone());
         }
     }
 

@@ -25,7 +25,7 @@ pub fn duration_to_seconds(value: f64, unit: &str) -> Result<f64, String> {
         other => {
             return Err(format!(
                 "unknown duration unit {other:?}; use one of: s, min, h, d, a (year)"
-            ))
+            ));
         }
     };
     Ok(value * per_unit)

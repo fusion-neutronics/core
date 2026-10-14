@@ -23,14 +23,17 @@
 //!   cargo test -p yamc --features gpu --release \
 //!       --test gpu_batch_free_variance -- --nocapture
 //!
-//! `--test-threads=1` used to be required: the launch-chunk override is a
-//! process-global env var, so a test that set it changed what its concurrent
-//! siblings launched. `GpuTest` serialises the binary instead.
+//! The launch-chunk override is a process-global env var, so the multi-chunk
+//! test sets it on a child run of itself (`common::relaunch`) rather than in
+//! this process, and no `--test-threads=1` is needed.
 
 #![cfg(all(feature = "gpu", not(target_os = "macos")))]
 
 use std::collections::HashMap;
 use std::sync::Arc;
+
+mod common;
+use common::relaunch::in_child_with_env;
 
 use yamc::geo::{BoundaryType, HalfspaceType, Region, Surface, SurfaceKind};
 use yamc::geometry::cell::Cell;
@@ -67,61 +70,6 @@ fn data_present(nuclide: &str) -> bool {
 
 fn gpu_available() -> bool {
     yamc_gpu::GpuContext::new().is_ok()
-}
-
-/// Serialises every test in this binary, and scopes the launch-chunk override
-/// to the one test that sets it.
-///
-/// `YAMC_GPU_LAUNCH_CHUNK` is a process-global env var read inside
-/// `launch_chunk_size`, so a test that sets it changes what every test running
-/// CONCURRENTLY in the same binary launches. The module header used to tell the
-/// reader to pass `--test-threads=1`; a plain `cargo test` does not, so the
-/// documented local GPU gate failed three tests that all passed serially.
-///
-/// Two things make this correct where a lock around the set/remove pair alone
-/// would not:
-///
-/// * every test takes the guard, including the ones that do not set the
-///   override, because they still READ it and must be kept out of the window;
-/// * the previous value is restored in `Drop`, so a panic between setting it
-///   and clearing it cannot leak the override into every later test.
-fn exclusive() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|p| p.into_inner())
-}
-
-/// Holds the binary lock and the launch-chunk override together, restoring the
-/// override when it drops. Construct it FIRST in a test, and keep it alive for
-/// the whole body.
-struct GpuTest {
-    _guard: std::sync::MutexGuard<'static, ()>,
-    previous: Option<String>,
-}
-
-impl GpuTest {
-    /// Serialise against the other tests without touching the override.
-    fn new() -> Self {
-        Self {
-            _guard: exclusive(),
-            previous: std::env::var("YAMC_GPU_LAUNCH_CHUNK").ok(),
-        }
-    }
-
-    /// Serialise, and force the launch chunk for the duration.
-    fn with_chunk(chunk: usize) -> Self {
-        let held = Self::new();
-        std::env::set_var("YAMC_GPU_LAUNCH_CHUNK", chunk.to_string());
-        held
-    }
-}
-
-impl Drop for GpuTest {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(v) => std::env::set_var("YAMC_GPU_LAUNCH_CHUNK", v),
-            None => std::env::remove_var("YAMC_GPU_LAUNCH_CHUNK"),
-        }
-    }
 }
 
 /// Single-nuclide sphere (r=RADIUS, `Below` so the GPU AABB pass accepts it),
@@ -253,7 +201,6 @@ fn total_particles_invariance() {
         eprintln!("skipping total_particles_invariance: data/GPU absent");
         return;
     }
-    let _held = GpuTest::new();
     let n: usize = 3000;
 
     // Run N histories.
@@ -300,7 +247,13 @@ fn total_particles_invariance_multi_chunk() {
     // Force an 800-history launch chunk: N = 2400 spans 3 chunks, 2N = 4800 spans 6.
     let chunk = 800usize;
     let n = 3 * chunk;
-    let _held = GpuTest::with_chunk(chunk);
+    if !in_child_with_env(
+        "total_particles_invariance_multi_chunk",
+        "YAMC_GPU_LAUNCH_CHUNK",
+        &chunk.to_string(),
+    ) {
+        return;
+    }
 
     let (g1, c1) = nuclide_sphere(nuclide, 2.0);
     let (mut m1, s1) = build_model(g1, vec![spectral_tally(c1)], n);
@@ -340,7 +293,6 @@ fn gpu_cpu_per_history_std_dev_parity() {
         eprintln!("skipping gpu_cpu_per_history_std_dev_parity: data/GPU absent");
         return;
     }
-    let _held = GpuTest::new();
     // Dense C12 => many collisions => a history sweeps >32 distinct energy bins
     // (exercises the exact-variance spill). Enough histories that the std_dev
     // ESTIMATE itself is well-resolved on both backends.

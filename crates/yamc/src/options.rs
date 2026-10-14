@@ -76,7 +76,7 @@ impl Verbose {
                     return Err(format!(
                         "unknown verbose flag {other:?}; expected \"progress\", \"eta\", \
                          \"tally\", \"summary\", or \"nuclear_data\""
-                    ))
+                    ));
                 }
             }
         }

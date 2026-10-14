@@ -189,12 +189,12 @@ impl AngleDistribution {
             }
             _ => {}
         }
-        if matches!((data.ltt, data.li), (2, 0) | (3, 0)) {
-            if let Some(tab) = &data.tabulated {
-                out.energy.extend_from_slice(&tab.energy);
-                out.mu
-                    .extend(tab.mu.iter().cloned().map(AngleAtEnergy::Tabulated));
-            }
+        if matches!((data.ltt, data.li), (2, 0) | (3, 0))
+            && let Some(tab) = &data.tabulated
+        {
+            out.energy.extend_from_slice(&tab.energy);
+            out.mu
+                .extend(tab.mu.iter().cloned().map(AngleAtEnergy::Tabulated));
         }
         out
     }

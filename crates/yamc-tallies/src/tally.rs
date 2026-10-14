@@ -713,10 +713,10 @@ impl Tally {
             .unwrap_or(&[]);
 
         // Early filter: if particle type filter is set and doesn't match, skip
-        if let Some(required_pt) = cached_pt_filter {
-            if required_pt != particle_type {
-                return;
-            }
+        if let Some(required_pt) = cached_pt_filter
+            && required_pt != particle_type
+        {
+            return;
         }
 
         let is_neutron = particle_type == yamc_particle::ParticleType::Neutron;
@@ -745,16 +745,16 @@ impl Tally {
 
         // Check material filter
         for filter in &self.filters {
-            if let Filter::Material(mf) = filter {
-                if !mf.matches(material_id) {
-                    return;
-                }
+            if let Filter::Material(mf) = filter
+                && !mf.matches(material_id)
+            {
+                return;
             }
         }
 
         // Get energy bin using cached bins
         // Energy bin convention: [E0, E1], (E1, E2], ... (En-1, En]
-        let energy_bin = if let Some(ref bins) = energy_bins {
+        let energy_bin = if let Some(bins) = energy_bins {
             if energy < bins[0] || energy > bins[bins.len() - 1] {
                 return;
             }
@@ -800,24 +800,22 @@ impl Tally {
         // Neutrons use MT 301; photons use the macroscopic photon
         // heating estimate -- the analog collision deposit belongs to
         // collision-estimator tallies only.
-        if has_heating {
-            if let Some(material) = material {
-                let heating_xs = if is_neutron {
-                    material.lookup_heating_xs(energy)
-                } else if is_photon {
-                    material.calculate_photon_xs(energy).heating
-                } else {
-                    0.0
-                };
-                // Neutron KERMA (MT 301) is legitimately negative in
-                // endothermic charged-particle windows (e.g. O16
-                // 7.4-13 MeV); guard on `!= 0.0` so those negatives fold
-                // in. Photon heating is non-negative.
-                if heating_xs != 0.0 {
-                    for &score_idx in heating_indices {
-                        let bin_idx = score_idx * num_e_bins + energy_bin;
-                        score_fn(bin_idx, heating_xs * weighted_track_length);
-                    }
+        if has_heating && let Some(material) = material {
+            let heating_xs = if is_neutron {
+                material.lookup_heating_xs(energy)
+            } else if is_photon {
+                material.calculate_photon_xs(energy).heating
+            } else {
+                0.0
+            };
+            // Neutron KERMA (MT 301) is legitimately negative in
+            // endothermic charged-particle windows (e.g. O16
+            // 7.4-13 MeV); guard on `!= 0.0` so those negatives fold
+            // in. Photon heating is non-negative.
+            if heating_xs != 0.0 {
+                for &score_idx in heating_indices {
+                    let bin_idx = score_idx * num_e_bins + energy_bin;
+                    score_fn(bin_idx, heating_xs * weighted_track_length);
                 }
             }
         }
@@ -825,22 +823,20 @@ impl Tally {
         // Heating-local scores: track-length KERMA for both particle
         // types (photons reuse the heating estimate -- with no electron
         // transport, local and total deposition coincide).
-        if has_heating_local {
-            if let Some(material) = material {
-                let heating_local_xs = if is_neutron {
-                    material.lookup_heating_local_xs(energy)
-                } else if is_photon {
-                    material.calculate_photon_xs(energy).heating
-                } else {
-                    0.0
-                };
-                // See heating note above: negative neutron KERMA (MT 901)
-                // must fold in.
-                if heating_local_xs != 0.0 {
-                    for &score_idx in heating_local_indices {
-                        let bin_idx = score_idx * num_e_bins + energy_bin;
-                        score_fn(bin_idx, heating_local_xs * weighted_track_length);
-                    }
+        if has_heating_local && let Some(material) = material {
+            let heating_local_xs = if is_neutron {
+                material.lookup_heating_local_xs(energy)
+            } else if is_photon {
+                material.calculate_photon_xs(energy).heating
+            } else {
+                0.0
+            };
+            // See heating note above: negative neutron KERMA (MT 901)
+            // must fold in.
+            if heating_local_xs != 0.0 {
+                for &score_idx in heating_local_indices {
+                    let bin_idx = score_idx * num_e_bins + energy_bin;
+                    score_fn(bin_idx, heating_local_xs * weighted_track_length);
                 }
             }
         }
@@ -848,74 +844,69 @@ impl Tally {
         // Neutron-specific scores: only fire for neutrons
         if is_neutron {
             // Score all production scores (H1, H2, H3, He3, He4)
-            if has_production {
-                if let Some(material) = material {
-                    for &(score_idx, mt) in production_indices {
-                        let production_xs = material.lookup_production_xs(mt, energy);
-                        if production_xs > 0.0 {
-                            let bin_idx = score_idx * num_e_bins + energy_bin;
-                            score_fn(bin_idx, production_xs * weighted_track_length);
-                        }
+            if has_production && let Some(material) = material {
+                for &(score_idx, mt) in production_indices {
+                    let production_xs = material.lookup_production_xs(mt, energy);
+                    if production_xs > 0.0 {
+                        let bin_idx = score_idx * num_e_bins + energy_bin;
+                        score_fn(bin_idx, production_xs * weighted_track_length);
                     }
                 }
             }
 
             // Score all damage-energy scores (MT 444)
-            if has_damage_energy {
-                if let Some(material) = material {
-                    let damage_energy_xs = material.lookup_damage_energy_xs(energy);
-                    if damage_energy_xs > 0.0 {
-                        for &score_idx in damage_energy_indices {
-                            let bin_idx = score_idx * num_e_bins + energy_bin;
-                            score_fn(bin_idx, damage_energy_xs * weighted_track_length);
-                        }
+            if has_damage_energy && let Some(material) = material {
+                let damage_energy_xs = material.lookup_damage_energy_xs(energy);
+                if damage_energy_xs > 0.0 {
+                    for &score_idx in damage_energy_indices {
+                        let bin_idx = score_idx * num_e_bins + energy_bin;
+                        score_fn(bin_idx, damage_energy_xs * weighted_track_length);
                     }
                 }
             }
 
             // Score all MT reaction scores (Score::ReactionRate variants)
-            if has_mt {
-                if let Some(material) = material {
-                    for &(score_idx, mt) in mt_indices {
-                        let xs = material.macro_xs_by_mt(mt, energy, urr_xs);
-                        if xs > 0.0 {
-                            let bin_idx = score_idx * num_e_bins + energy_bin;
-                            score_fn(bin_idx, xs * weighted_track_length);
-                        }
+            if has_mt && let Some(material) = material {
+                for &(score_idx, mt) in mt_indices {
+                    let xs = material.macro_xs_by_mt(mt, energy, urr_xs);
+                    if xs > 0.0 {
+                        let bin_idx = score_idx * num_e_bins + energy_bin;
+                        score_fn(bin_idx, xs * weighted_track_length);
                     }
                 }
             }
         }
 
         // Photon-specific scores: only fire for photons
-        if is_photon && (has_photon || has_mt) {
-            if let Some(material) = material {
-                let photon_xs = material.calculate_photon_xs(energy);
-                for &(score_idx, component) in photon_indices {
-                    let xs = match component {
-                        0 => photon_xs.coherent,
-                        1 => photon_xs.incoherent,
-                        2 => photon_xs.photoelectric,
-                        3 => photon_xs.pair_production,
-                        _ => unreachable!(),
-                    };
-                    if xs > 0.0 {
-                        let bin_idx = score_idx * num_e_bins + energy_bin;
-                        score_fn(bin_idx, xs * weighted_track_length);
-                    }
+        if is_photon
+            && (has_photon || has_mt)
+            && let Some(material) = material
+        {
+            let photon_xs = material.calculate_photon_xs(energy);
+            for &(score_idx, component) in photon_indices {
+                let xs = match component {
+                    0 => photon_xs.coherent,
+                    1 => photon_xs.incoherent,
+                    2 => photon_xs.photoelectric,
+                    3 => photon_xs.pair_production,
+                    _ => unreachable!(),
+                };
+                if xs > 0.0 {
+                    let bin_idx = score_idx * num_e_bins + energy_bin;
+                    score_fn(bin_idx, xs * weighted_track_length);
                 }
-                // ReactionRate scores on the photon path. MT=TOTAL is the
-                // particle-agnostic total interaction rate -- the photon total
-                // macroscopic XS (Σ_total,photon · track length), matching the
-                // GPU SCORE_TOTAL fast path and OpenMC's photon `total`. A
-                // specific neutron MT is a category error for a photon (it does
-                // not undergo a neutron reaction), so it scores nothing -- the
-                // GPU rejects it at validation; here it is silently skipped.
-                for &(score_idx, mt) in mt_indices {
-                    if mt == Mt::TOTAL.as_i32() && photon_xs.total > 0.0 {
-                        let bin_idx = score_idx * num_e_bins + energy_bin;
-                        score_fn(bin_idx, photon_xs.total * weighted_track_length);
-                    }
+            }
+            // ReactionRate scores on the photon path. MT=TOTAL is the
+            // particle-agnostic total interaction rate -- the photon total
+            // macroscopic XS (Σ_total,photon · track length), matching the
+            // GPU SCORE_TOTAL fast path and OpenMC's photon `total`. A
+            // specific neutron MT is a category error for a photon (it does
+            // not undergo a neutron reaction), so it scores nothing -- the
+            // GPU rejects it at validation; here it is silently skipped.
+            for &(score_idx, mt) in mt_indices {
+                if mt == Mt::TOTAL.as_i32() && photon_xs.total > 0.0 {
+                    let bin_idx = score_idx * num_e_bins + energy_bin;
+                    score_fn(bin_idx, photon_xs.total * weighted_track_length);
                 }
             }
         }
@@ -1015,10 +1006,10 @@ impl Tally {
 
         // Check particle type filter early
         for filter in &self.filters {
-            if let Filter::ParticleType(ptf) = filter {
-                if !ptf.matches(particle_type) {
-                    return;
-                }
+            if let Filter::ParticleType(ptf) = filter
+                && !ptf.matches(particle_type)
+            {
+                return;
             }
         }
 
@@ -1384,7 +1375,7 @@ impl Tally {
         // we duplicate the small body across the three mesh dispatch
         // branches instead.
         macro_rules! apply_crossing {
-            ($bin:expr, $length_fraction:expr) => {{
+            ($bin:expr_2021, $length_fraction:expr_2021) => {{
                 let length_fraction = $length_fraction;
                 let bin = $bin;
                 for &(score_idx, nuc_idx, base) in &contribs {
@@ -1533,10 +1524,10 @@ impl Tally {
 
         // Particle-type filter is a hard gate.
         for filter in &self.filters {
-            if let Filter::ParticleType(ptf) = filter {
-                if !ptf.matches(particle_type) {
-                    return;
-                }
+            if let Filter::ParticleType(ptf) = filter
+                && !ptf.matches(particle_type)
+            {
+                return;
             }
         }
 
@@ -2355,15 +2346,15 @@ impl Tally {
         } else {
             None
         };
-        if let Some(axis) = axis {
-            if let Some(score) = self.scores.iter().find(|s| s.mt().is_none()) {
-                return Err(format!(
+        if let Some(axis) = axis
+            && let Some(score) = self.scores.iter().find(|s| s.mt().is_none())
+        {
+            return Err(format!(
                     "Tally '{}': {axis} cannot apply to the '{}' score, which has no cross section to fold it into -- the axis would be silently ignored (and with several scores, applied to some of them and not others). Score '{}' in its own tally.",
                     self.display_name(),
                     score.name(),
                     score.name(),
                 ));
-            }
         }
         Ok(())
     }
@@ -2420,16 +2411,16 @@ impl Tally {
         // Validate score/estimator compatibility. Heating-family scores
         // require the collision estimator; everything else is permissive.
         for score in &self.scores {
-            if let Some(required) = score.required_estimator() {
-                if required != self.estimator {
-                    return Err(format!(
-                        "Tally '{}' uses estimator {} but score {:?} requires {}",
-                        self.display_name(),
-                        self.estimator,
-                        score.name(),
-                        required,
-                    ));
-                }
+            if let Some(required) = score.required_estimator()
+                && required != self.estimator
+            {
+                return Err(format!(
+                    "Tally '{}' uses estimator {} but score {:?} requires {}",
+                    self.display_name(),
+                    self.estimator,
+                    score.name(),
+                    required,
+                ));
             }
         }
 

@@ -208,25 +208,25 @@ impl Geometry {
     > {
         // --- Validate material_idx bounds ---------------------------------------
         for cell in &cells {
-            if let Some(idx) = cell.material_idx {
-                if (idx as usize) >= materials.len() {
-                    return Err(format!(
-                        "Cell material_idx {idx} out of bounds (materials.len() = {})",
-                        materials.len()
-                    ));
-                }
+            if let Some(idx) = cell.material_idx
+                && (idx as usize) >= materials.len()
+            {
+                return Err(format!(
+                    "Cell material_idx {idx} out of bounds (materials.len() = {})",
+                    materials.len()
+                ));
             }
         }
 
         // --- Auto-assign cell IDs ------------------------------------------------
         let mut used_cell_ids: HashSet<u32> = HashSet::new();
         for cell in &cells {
-            if let Some(id) = cell.cell_id {
-                if !used_cell_ids.insert(id) {
-                    return Err(format!(
-                        "Duplicate cell_id {id} found. All cell IDs must be unique."
-                    ));
-                }
+            if let Some(id) = cell.cell_id
+                && !used_cell_ids.insert(id)
+            {
+                return Err(format!(
+                    "Duplicate cell_id {id} found. All cell IDs must be unique."
+                ));
             }
         }
         let mut next_cell_id: u32 = used_cell_ids.iter().copied().max().map_or(1, |m| m + 1);
@@ -244,12 +244,13 @@ impl Geometry {
         // --- Auto-assign material IDs -------------------------------------------
         let mut used_material_ids: HashSet<u32> = HashSet::new();
         for (idx, material_arc) in materials.iter().enumerate() {
-            if let Some(id) = material_arc.get_material_id() {
-                if !used_material_ids.insert(id) && idx < n_user_materials {
-                    return Err(format!(
-                        "Duplicate material_id {id} found. All material IDs must be unique."
-                    ));
-                }
+            if let Some(id) = material_arc.get_material_id()
+                && !used_material_ids.insert(id)
+                && idx < n_user_materials
+            {
+                return Err(format!(
+                    "Duplicate material_id {id} found. All material IDs must be unique."
+                ));
             }
         }
         let mut next_material_id: u32 =
@@ -281,12 +282,12 @@ impl Geometry {
 
         let mut used_surface_ids = HashSet::new();
         for surface in &unique_surfaces {
-            if let Some(id) = surface.surface_id {
-                if !used_surface_ids.insert(id) {
-                    return Err(format!(
-                        "Duplicate surface_id {id} found. All surface IDs must be unique."
-                    ));
-                }
+            if let Some(id) = surface.surface_id
+                && !used_surface_ids.insert(id)
+            {
+                return Err(format!(
+                    "Duplicate surface_id {id} found. All surface IDs must be unique."
+                ));
             }
         }
 

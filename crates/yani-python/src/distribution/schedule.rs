@@ -128,10 +128,10 @@ impl PyPulse {
     ) -> PyResult<Self> {
         // Validate any source is a neutron source (activation is by neutrons),
         // but keep the original object so identity grouping works across steps.
-        if let Some(s) = source {
-            if !s.is_instance_of::<PyNeutronSource>() {
-                return Err(PyTypeError::new_err("Pulse source must be a NeutronSource"));
-            }
+        if let Some(s) = source
+            && !s.is_instance_of::<PyNeutronSource>()
+        {
+            return Err(PyTypeError::new_err("Pulse source must be a NeutronSource"));
         }
         if rate < 0.0 {
             return Err(PyValueError::new_err("rate must be non-negative"));
@@ -311,7 +311,7 @@ pub fn cooldown_steps(
         other => {
             return Err(PyValueError::new_err(format!(
                 "unknown spacing={other:?}; expected 'log' or 'linear'"
-            )))
+            )));
         }
     };
 
@@ -1018,7 +1018,7 @@ impl PyPulseSchedule {
                             "results dict is missing a tally result for one of the schedule's \
                              sources; pass {source: results[tally]} for every source in \
                              schedule.sources",
-                        ))
+                        ));
                     }
                 }
             }
@@ -1055,7 +1055,7 @@ fn histogram_spectrum(
         _ => {
             return Err(PyValueError::new_err(
                 "Material.transmute pulse source must be a NeutronSource",
-            ))
+            ));
         }
     };
     match energy {

@@ -126,7 +126,7 @@ impl AngleEnergy {
             5 => {
                 return Err(Error::Unsupported {
                     what: "ACE law 5, the general evaporation spectrum",
-                })
+                });
             }
             7 => uncorrelated(EnergyDistribution::maxwell_from_ace(xss, idx)),
             9 => uncorrelated(EnergyDistribution::evaporation_from_ace(xss, idx)),
@@ -144,7 +144,7 @@ impl AngleEnergy {
             _ => {
                 return Err(Error::Unsupported {
                     what: "this ACE secondary energy distribution law",
-                })
+                });
             }
         })
     }

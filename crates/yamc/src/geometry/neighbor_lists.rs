@@ -37,10 +37,11 @@ impl NeighborLists {
         // Slow path: full linear search
         let found = cells.iter().position(|cell| cell.contains(point));
         // Learn: add newly discovered neighbor
-        if let Some(idx) = found {
-            if idx != prev_cell && !self.lists[prev_cell].contains(&idx) {
-                self.lists[prev_cell].push(idx);
-            }
+        if let Some(idx) = found
+            && idx != prev_cell
+            && !self.lists[prev_cell].contains(&idx)
+        {
+            self.lists[prev_cell].push(idx);
         }
         found
     }

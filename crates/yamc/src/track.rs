@@ -491,10 +491,10 @@ impl Tracker for RealTracker {
             return;
         }
 
-        if let Some(track) = self.current_track.take() {
-            if !track.events.is_empty() {
-                self.tracks.push(track);
-            }
+        if let Some(track) = self.current_track.take()
+            && !track.events.is_empty()
+        {
+            self.tracks.push(track);
         }
     }
 
@@ -674,10 +674,10 @@ impl Tracker for RealTracker {
 
     fn into_storage(mut self) -> TrackStorage {
         // Finalize any remaining track
-        if let Some(track) = self.current_track.take() {
-            if !track.events.is_empty() {
-                self.tracks.push(track);
-            }
+        if let Some(track) = self.current_track.take()
+            && !track.events.is_empty()
+        {
+            self.tracks.push(track);
         }
         TrackStorage {
             tracks: self.tracks,

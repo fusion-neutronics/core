@@ -1737,10 +1737,10 @@ pub fn set_compton_profile_pz(pz: Vec<f64>) {
     if shared_grids_suppressed() {
         return;
     }
-    if let Ok(mut stored) = COMPTON_PROFILE_PZ.write() {
-        if stored.is_none() {
-            *stored = Some(Arc::new(pz));
-        }
+    if let Ok(mut stored) = COMPTON_PROFILE_PZ.write()
+        && stored.is_none()
+    {
+        *stored = Some(Arc::new(pz));
     }
 }
 
@@ -1759,10 +1759,10 @@ pub fn set_ttb_e_grid(grid: Vec<f64>) {
     if shared_grids_suppressed() {
         return;
     }
-    if let Ok(mut stored) = TTB_E_GRID.write() {
-        if stored.is_none() {
-            *stored = Some(grid);
-        }
+    if let Ok(mut stored) = TTB_E_GRID.write()
+        && stored.is_none()
+    {
+        *stored = Some(grid);
     }
 }
 
@@ -1781,10 +1781,10 @@ pub fn set_ttb_k_grid(grid: Vec<f64>) {
     if shared_grids_suppressed() {
         return;
     }
-    if let Ok(mut stored) = TTB_K_GRID.write() {
-        if stored.is_none() {
-            *stored = Some(grid);
-        }
+    if let Ok(mut stored) = TTB_K_GRID.write()
+        && stored.is_none()
+    {
+        *stored = Some(grid);
     }
 }
 

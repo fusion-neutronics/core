@@ -411,7 +411,7 @@ pub fn py_fusion_neutron_spectrum(ion_temp: f64, reactants: &str) -> PyResult<Py
         _ => {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Invalid reactants. Must be 'DD' or 'DT'.",
-            ))
+            ));
         }
     };
     match yamc_source::distribution::energy::fusion_neutron_spectrum(ion_temp, r) {

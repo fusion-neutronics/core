@@ -152,7 +152,7 @@ pub fn parse_mf5(reader: &mut Reader) -> Result<Mf5> {
             _ => {
                 return Err(Error::Unsupported {
                     what: "an unrecognised MF=5 energy distribution law",
-                })
+                });
             }
         };
 

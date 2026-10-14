@@ -554,11 +554,11 @@ pub(crate) fn transport_particle<T: Tracker>(
         };
         // Record the band the flight sampled against, so the collision's
         // nuclide selection, reaction split and tally scoring reuse it.
-        if let Some(ref sf) = smooth_flight {
-            if let Some(band) = sf.urr_random {
-                particle.urr_random = yamc_particle::particle::urr_from_option(Some(band));
-                particle.urr_energy = particle.energy;
-            }
+        if let Some(ref sf) = smooth_flight
+            && let Some(band) = sf.urr_random
+        {
+            particle.urr_random = yamc_particle::particle::urr_from_option(Some(band));
+            particle.urr_energy = particle.energy;
         }
         let CollisionSampling {
             collision_data,
@@ -1973,61 +1973,53 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
                         photon.replica = Some(state);
                     }
                 };
-                if let Some(temp_idx) = nuclide.get_temp_idx(material.temperature()) {
-                    if let Some(fast_grid) = nuclide.fast_xs.get(temp_idx) {
-                        let (i_grid, f) = fast_grid.lookup_grid_index(incoming_energy);
-                        if use_decay_photons {
-                            // D1S mode: use precomputed decay photon data
-                            // (photon yields were replaced with decay data at setup time).
-                            // `nuclide_id` comes from `Material.sample_collision_data`;
-                            // indexing `decay_photon_nuclide_data` by it avoids a String-keyed HashMap lookup.
-                            if let Some(id) = nuclide_id {
-                                let slot = id.get() as usize - 1;
-                                if let Some(decay_photon_temps) =
-                                    decay_photon_nuclide_data.get(slot)
-                                {
-                                    if let Some(temp_idx) =
-                                        nuclide.get_temp_idx(material.temperature())
-                                    {
-                                        if let Some(decay_photon_nuc) =
-                                            decay_photon_temps.get(temp_idx)
-                                        {
-                                            let (total_xs, _, _, _) =
-                                                fast_grid.lookup(incoming_energy);
-                                            yamc_physics::photon::decay_photon_production::sample_decay_photons(
-                                                particle,
-                                                decay_photon_nuc,
-                                                i_grid,
-                                                f,
-                                                total_xs,
-                                                particle_bank,
-                                                rng,
-                                                inherit,
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            // Prompt mode: sample from nuclear data
-                            let photon_prod_xs = fast_grid.lookup_photon_prod(i_grid, f);
-                            if photon_prod_xs > 0.0 {
+                if let Some(temp_idx) = nuclide.get_temp_idx(material.temperature())
+                    && let Some(fast_grid) = nuclide.fast_xs.get(temp_idx)
+                {
+                    let (i_grid, f) = fast_grid.lookup_grid_index(incoming_energy);
+                    if use_decay_photons {
+                        // D1S mode: use precomputed decay photon data
+                        // (photon yields were replaced with decay data at setup time).
+                        // `nuclide_id` comes from `Material.sample_collision_data`;
+                        // indexing `decay_photon_nuclide_data` by it avoids a String-keyed HashMap lookup.
+                        if let Some(id) = nuclide_id {
+                            let slot = id.get() as usize - 1;
+                            if let Some(decay_photon_temps) = decay_photon_nuclide_data.get(slot)
+                                && let Some(temp_idx) = nuclide.get_temp_idx(material.temperature())
+                                && let Some(decay_photon_nuc) = decay_photon_temps.get(temp_idx)
+                            {
                                 let (total_xs, _, _, _) = fast_grid.lookup(incoming_energy);
-                                yamc_physics::photon::photon_production::sample_secondary_photons(
+                                yamc_physics::photon::decay_photon_production::sample_decay_photons(
                                     particle,
-                                    incoming_energy,
-                                    incoming_direction,
-                                    nuclide,
-                                    fast_grid,
+                                    decay_photon_nuc,
                                     i_grid,
                                     f,
                                     total_xs,
-                                    photon_prod_xs,
                                     particle_bank,
                                     rng,
                                     inherit,
                                 );
                             }
+                        }
+                    } else {
+                        // Prompt mode: sample from nuclear data
+                        let photon_prod_xs = fast_grid.lookup_photon_prod(i_grid, f);
+                        if photon_prod_xs > 0.0 {
+                            let (total_xs, _, _, _) = fast_grid.lookup(incoming_energy);
+                            yamc_physics::photon::photon_production::sample_secondary_photons(
+                                particle,
+                                incoming_energy,
+                                incoming_direction,
+                                nuclide,
+                                fast_grid,
+                                i_grid,
+                                f,
+                                total_xs,
+                                photon_prod_xs,
+                                particle_bank,
+                                rng,
+                                inherit,
+                            );
                         }
                     }
                 }
@@ -2392,8 +2384,11 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
                     let count = DEBUG_HISTORY_COUNT.fetch_add(1, Ordering::Relaxed);
                     if count < 20 {
                         // Print first 20 particles
-                        eprintln!("\n*** PARTICLE IN PROBLEMATIC RANGE (2000-4300 eV) WITH {} COLLISIONS, weight={} ***",
-                            particle.history.len(), particle.weight);
+                        eprintln!(
+                            "\n*** PARTICLE IN PROBLEMATIC RANGE (2000-4300 eV) WITH {} COLLISIONS, weight={} ***",
+                            particle.history.len(),
+                            particle.weight
+                        );
                         particle.print_history();
                     }
                 }

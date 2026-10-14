@@ -693,7 +693,7 @@ impl Model {
                         "DeGVR requires materials with an explicit density; sum-mode / \
                          transmuted materials are not yet supported"
                             .to_string(),
-                    )
+                    );
                 }
             }
             mat.invalidate_density_caches();
@@ -2284,7 +2284,7 @@ impl Model {
                 let cell_mean_chords_ref = cell_mean_chords.as_slice();
                 let tracking_mode = self.tracking_mode;
                 let parallel_batch = || {
-                    let storage = (0..local_particles)
+                    (0..local_particles)
                         .into_par_iter()
                         .fold(
                             || {
@@ -2548,8 +2548,7 @@ impl Model {
                         .reduce(TrackStorage::new, |mut a, b| {
                             a.tracks.extend(b.tracks);
                             a
-                        });
-                    storage
+                        })
                 };
 
                 // Execute the parallel batch either within the local pool (if provided) or default pool
@@ -2581,9 +2580,17 @@ impl Model {
                     let ttb = photon_diag::TTB_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
                     let pe = photon_diag::PE_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
                     println!(
-                    "  Batch {} done in {:.3}s | particles: {} ({:.1}/source) | collisions: {} | D1S: {} | fluor: {} | TTB: {} | PE: {}",
-                    batch + 1, batch_secs, n_secondary, per_source, n_collisions, decay_photons, fluor, ttb, pe
-                );
+                        "  Batch {} done in {:.3}s | particles: {} ({:.1}/source) | collisions: {} | D1S: {} | fluor: {} | TTB: {} | PE: {}",
+                        batch + 1,
+                        batch_secs,
+                        n_secondary,
+                        per_source,
+                        n_collisions,
+                        decay_photons,
+                        fluor,
+                        ttb,
+                        pe
+                    );
                 }
 
                 if let Some(dep_tallies) = &transmutation_tallies {

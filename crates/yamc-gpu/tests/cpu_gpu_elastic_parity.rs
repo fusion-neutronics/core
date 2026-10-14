@@ -34,7 +34,9 @@ fn assert_same_mu_distribution(prod: &[f64], flat: &[f64], label: &str) {
     let (mf, sf) = mean_std(flat);
     let mean_abs = (mp - mf).abs();
     let std_rel = (sp - sf).abs() / sp.abs().max(1e-30);
-    eprintln!("{label}: prod mean={mp:.5} std={sp:.5} | flat mean={mf:.5} std={sf:.5} | dmean={mean_abs:.4} dstd_rel={std_rel:.4}");
+    eprintln!(
+        "{label}: prod mean={mp:.5} std={sp:.5} | flat mean={mf:.5} std={sf:.5} | dmean={mean_abs:.4} dstd_rel={std_rel:.4}"
+    );
     assert!(
         mean_abs < 0.01,
         "{label}: mu mean differs by {mean_abs:.4} (prod {mp:.5} vs flat {mf:.5})"

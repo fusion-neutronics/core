@@ -284,18 +284,18 @@ impl IncidentPhoton {
     /// Compton profiles already read from an ACE table are left alone, since
     /// those came from the file being read and are specific to it.
     pub fn add_photon_data(&mut self, data: &crate::PhotonData) {
-        if let Some(profile) = data.compton.get(&self.atomic_number) {
-            if self.compton_profiles.is_none() {
-                self.compton_profiles = Some(ComptonProfiles {
-                    num_electrons: profile.num_electrons.clone(),
-                    binding_energy: profile.binding_energy.clone(),
-                    j: profile
-                        .j
-                        .iter()
-                        .map(|row| Tabulated1D::new(data.pz.clone(), row.clone()))
-                        .collect(),
-                });
-            }
+        if let Some(profile) = data.compton.get(&self.atomic_number)
+            && self.compton_profiles.is_none()
+        {
+            self.compton_profiles = Some(ComptonProfiles {
+                num_electrons: profile.num_electrons.clone(),
+                binding_energy: profile.binding_energy.clone(),
+                j: profile
+                    .j
+                    .iter()
+                    .map(|row| Tabulated1D::new(data.pz.clone(), row.clone()))
+                    .collect(),
+            });
         }
         if let Some(brem) = data.bremsstrahlung.get(&self.atomic_number) {
             self.bremsstrahlung = Some(Bremsstrahlung {

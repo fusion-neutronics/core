@@ -57,10 +57,10 @@ fn code(interp: Interpolation) -> i32 {
 /// the sampler was built against, and it need not agree bit for bit with the
 /// integral of the density beside it.
 fn cdf(stored: &Option<Vec<f64>>, x: &[f64], p: &[f64], interp: Interpolation) -> Vec<f64> {
-    if let Some(c) = stored {
-        if c.len() == x.len() {
-            return c.clone();
-        }
+    if let Some(c) = stored
+        && c.len() == x.len()
+    {
+        return c.clone();
     }
     let mut c = Vec::with_capacity(x.len());
     let mut acc = 0.0;

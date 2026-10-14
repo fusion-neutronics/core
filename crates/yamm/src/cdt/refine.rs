@@ -126,14 +126,13 @@ pub fn refine(cdt: &mut CDT, input: &CDTInput) {
                         && cc[1] <= bb_max[1]
                     {
                         // Reject circumcenters near periodic seam edges
-                        if let Some((u0, u1, v0, v1, mu, mv)) = seam_margin {
-                            if (cc[0] - u0).abs() < mu
+                        if let Some((u0, u1, v0, v1, mu, mv)) = seam_margin
+                            && ((cc[0] - u0).abs() < mu
                                 || (cc[0] - u1).abs() < mu
                                 || (cc[1] - v0).abs() < mv
-                                || (cc[1] - v1).abs() < mv
-                            {
-                                continue;
-                            }
+                                || (cc[1] - v1).abs() < mv)
+                        {
+                            continue;
                         }
                         worst_score = score;
                         worst_cc = Some(cc);
@@ -154,14 +153,13 @@ pub fn refine(cdt: &mut CDT, input: &CDTInput) {
                         && cc[1] <= bb_max[1]
                     {
                         // Reject circumcenters near periodic seam edges
-                        if let Some((u0, u1, v0, v1, mu, mv)) = seam_margin {
-                            if (cc[0] - u0).abs() < mu
+                        if let Some((u0, u1, v0, v1, mu, mv)) = seam_margin
+                            && ((cc[0] - u0).abs() < mu
                                 || (cc[0] - u1).abs() < mu
                                 || (cc[1] - v0).abs() < mv
-                                || (cc[1] - v1).abs() < mv
-                            {
-                                continue;
-                            }
+                                || (cc[1] - v1).abs() < mv)
+                        {
+                            continue;
                         }
                         worst_score = score;
                         worst_cc = Some(cc);
@@ -425,10 +423,10 @@ pub fn swap_edges(
             // Skip edges touching any seam vertex - modifying connectivity
             // near the UV domain boundary can create asymmetric topology
             // that breaks periodic seam stitching.
-            if let Some(seam) = seam_verts {
-                if seam.contains(&ea) || seam.contains(&eb) {
-                    continue;
-                }
+            if let Some(seam) = seam_verts
+                && (seam.contains(&ea) || seam.contains(&eb))
+            {
+                continue;
             }
             let tri_indices = &edge_to_tris[&(ea, eb)];
             let ti0 = tri_indices[0];
@@ -568,10 +566,10 @@ pub fn swap_for_valence(output: &mut CDTOutput, seam_verts: Option<&HashSet<usiz
             // Skip edges touching any seam vertex - modifying connectivity
             // near the UV domain boundary can create asymmetric topology
             // that breaks periodic seam stitching.
-            if let Some(seam) = seam_verts {
-                if seam.contains(&ea) || seam.contains(&eb) {
-                    continue;
-                }
+            if let Some(seam) = seam_verts
+                && (seam.contains(&ea) || seam.contains(&eb))
+            {
+                continue;
             }
             let tri_indices = &edge_to_tris[&(ea, eb)];
             let ti0 = tri_indices[0];
@@ -726,10 +724,10 @@ pub fn split_long_edges(
             // Skip edges touching any seam vertex - modifying connectivity
             // near the UV domain boundary can create asymmetric topology
             // that breaks periodic seam stitching.
-            if let Some(seam) = seam_verts {
-                if seam.contains(&ea) || seam.contains(&eb) {
-                    continue;
-                }
+            if let Some(seam) = seam_verts
+                && (seam.contains(&ea) || seam.contains(&eb))
+            {
+                continue;
             }
             let pa = output.vertices[ea];
             let pb = output.vertices[eb];

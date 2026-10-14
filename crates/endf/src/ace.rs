@@ -348,10 +348,10 @@ pub fn tables_from_str(text: &str, wanted: Option<&[String]>) -> Result<Vec<Tabl
         at = body + ACE_HEADER_SIZE + n_lines;
 
         // Stop once every requested table has been found.
-        if let Some(names) = wanted {
-            if tables.len() == names.len() {
-                break;
-            }
+        if let Some(names) = wanted
+            && tables.len() == names.len()
+        {
+            break;
         }
     }
 

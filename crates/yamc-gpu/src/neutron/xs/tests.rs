@@ -432,8 +432,8 @@ fn extract_and_run_multi_step() {
     let total_tally: f64 = r.absorption_per_bin.iter().sum();
     let mean_steps: f64 = r.n_steps.iter().map(|&s| s as f64).sum::<f64>() / n as f64;
     println!(
-            "ENDF-style run: alive at cap = {alive_count} of {n}, mean steps = {mean_steps}, total tally = {total_tally}"
-        );
+        "ENDF-style run: alive at cap = {alive_count} of {n}, mean steps = {mean_steps}, total tally = {total_tally}"
+    );
 
     assert!(
         alive_count < n / 100,
@@ -634,8 +634,8 @@ fn multi_material_runs_on_gpu() {
     let mean_steps = r.n_steps.iter().map(|&s| s as f64).sum::<f64>() / n as f64;
 
     println!(
-            "multi-material run: alive at cap = {alive_count} of {n}, mean steps = {mean_steps}, total tally = {total_tally}"
-        );
+        "multi-material run: alive at cap = {alive_count} of {n}, mean steps = {mean_steps}, total tally = {total_tally}"
+    );
 
     assert!(alive_count < n / 50, "too many alive at cap");
     assert!(total_tally > 0.0, "tally must be positive");
@@ -947,10 +947,10 @@ fn slice_f_mt_xs_subtracted_from_absorption_derivation() {
     let n_grid = xs_after.log_energy_grid.len();
     for i in 0..n_grid {
         assert!(
-                (xs_after.xs_absorption[i] - xs_before.xs_absorption[i]).abs() < 1e-12,
-                "absorption[{i}] changed by {} -- slice-F MT should be in xs_inelastic, not xs_absorption",
-                xs_after.xs_absorption[i] - xs_before.xs_absorption[i]
-            );
+            (xs_after.xs_absorption[i] - xs_before.xs_absorption[i]).abs() < 1e-12,
+            "absorption[{i}] changed by {} -- slice-F MT should be in xs_inelastic, not xs_absorption",
+            xs_after.xs_absorption[i] - xs_before.xs_absorption[i]
+        );
         // And the 0.5 b shows up in xs_inelastic at slot 43.
         assert!(
             (xs_after.xs_inelastic[i] - xs_before.xs_inelastic[i] - 0.5).abs() < 1e-12,

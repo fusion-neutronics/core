@@ -416,7 +416,7 @@ pub fn resolve_level(
     let Some(isomers) = table.get(&(z, a)) else {
         return resolved(0, LevelRoute::NoIsomers);
     };
-    let metastable: Vec<(&i64, &Isomer)> = isomers.iter().filter(|(&liso, _)| liso > 0).collect();
+    let metastable: Vec<(&i64, &Isomer)> = isomers.iter().filter(|&(&liso, _)| liso > 0).collect();
     if metastable.is_empty() {
         return resolved(0, LevelRoute::NoIsomers);
     }
@@ -432,13 +432,13 @@ pub fn resolve_level(
     let by_index = metastable
         .iter()
         .find(|(_, isomer)| isomer.lis == lfs)
-        .map(|(&liso, _)| liso);
+        .map(|&(&liso, _)| liso);
     let conflict = |liso: i64| by_index.filter(|&other| other != liso);
 
     if let Some(excitation_energy) = excitation_energy {
         // 1. The energy match against the decay isomer energies.
         let mut best: Option<(i64, f64)> = None;
-        for (&liso, isomer) in &metastable {
+        for &(&liso, isomer) in &metastable {
             if let Some(e_iso) = isomer.e_iso {
                 let residual = (excitation_energy - e_iso).abs();
                 match best {
@@ -447,14 +447,14 @@ pub fn resolve_level(
                 }
             }
         }
-        if let Some((liso, residual)) = best {
-            if residual <= tol_ev {
-                return ResolvedLevel {
-                    liso,
-                    route: LevelRoute::Energy,
-                    conflicting_liso: conflict(liso),
-                };
-            }
+        if let Some((liso, residual)) = best
+            && residual <= tol_ev
+        {
+            return ResolvedLevel {
+                liso,
+                route: LevelRoute::Energy,
+                conflicting_liso: conflict(liso),
+            };
         }
 
         // 1b. The looser pass: one isomer, and only one, within a tenth of
@@ -466,7 +466,7 @@ pub fn resolve_level(
                     (excitation_energy - e_iso).abs() <= ISOMER_ENERGY_RELATIVE_TOLERANCE * e_iso
                 })
             })
-            .map(|(&liso, _)| liso)
+            .map(|&(&liso, _)| liso)
             .collect();
         if let [liso] = near[..] {
             return ResolvedLevel {

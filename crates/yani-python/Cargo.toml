@@ -9,7 +9,7 @@ name = "yani-python"
 # `cargo set-version -p yani-python <version>`.
 # See .github/workflows/ci-python.yml and docs/developer_info.md.
 version = "0.21.0"
-edition = "2021"
+edition = "2024"
 rust-version.workspace = true
 license = "MIT OR Apache-2.0"
 description = "Python bindings for the transmutation stack: materials, nuclides, chains, irradiation schedules and inventories. Shared by the yamc and yani wheels."

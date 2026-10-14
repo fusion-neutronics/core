@@ -102,20 +102,20 @@ fn bank_ttb_photons<R: rand::Rng + ?Sized>(
     particle_bank: &mut ParticleBank,
     rng: &mut R,
 ) -> f64 {
-    if let Some(ref ttb_data) = material.ttb {
-        if energy > photon_cutoff {
-            return yamc_physics::photon::bremsstrahlung::thick_target_bremsstrahlung(
-                energy,
-                is_positron,
-                ttb_data,
-                position,
-                direction,
-                weight,
-                photon_cutoff,
-                particle_bank,
-                rng,
-            );
-        }
+    if let Some(ref ttb_data) = material.ttb
+        && energy > photon_cutoff
+    {
+        return yamc_physics::photon::bremsstrahlung::thick_target_bremsstrahlung(
+            energy,
+            is_positron,
+            ttb_data,
+            position,
+            direction,
+            weight,
+            photon_cutoff,
+            particle_bank,
+            rng,
+        );
     }
     0.0
 }

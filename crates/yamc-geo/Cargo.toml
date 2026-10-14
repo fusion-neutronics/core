@@ -1,7 +1,7 @@
 [package]
 name = "yamc-geo"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 rust-version.workspace = true
 description = "Geometry primitives for yamc (CSG surfaces, regions, bounding boxes) -- compiles to native and wasm32"
 license = "MIT OR Apache-2.0"

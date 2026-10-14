@@ -232,15 +232,14 @@ pub fn read_simulation_results_arrow(path: &Path) -> Result<SimulationResults, S
     if let Some(declared) = meta
         .get(META_N_TALLIES)
         .and_then(|s| s.parse::<usize>().ok())
+        && declared != batches.len()
     {
-        if declared != batches.len() {
-            return Err(format!(
-                "results file {} declares {declared} tallies but contains {} record batch(es); \
+        return Err(format!(
+            "results file {} declares {declared} tallies but contains {} record batch(es); \
                  the file is truncated or corrupt",
-                path.display(),
-                batches.len()
-            ));
-        }
+            path.display(),
+            batches.len()
+        ));
     }
 
     let elapsed_secs: f64 = meta
@@ -324,22 +323,22 @@ pub fn read_simulation_results_arrow(path: &Path) -> Result<SimulationResults, S
         // where externally-produced data could smuggle duplicates past
         // the `from_tallies` validation (combine_results would then
         // silently overwrite one of them in its key index).
-        if let Some(name) = &tally_arc.name {
-            if by_name.insert(name.clone(), i).is_some() {
-                return Err(format!(
-                    "results file {} contains duplicate tally name {name:?}; names must be \
+        if let Some(name) = &tally_arc.name
+            && by_name.insert(name.clone(), i).is_some()
+        {
+            return Err(format!(
+                "results file {} contains duplicate tally name {name:?}; names must be \
                      unique",
-                    path.display()
-                ));
-            }
+                path.display()
+            ));
         }
-        if let Some(id) = tally_arc.tally_id {
-            if by_id.insert(id, i).is_some() {
-                return Err(format!(
-                    "results file {} contains duplicate tally id {id}; ids must be unique",
-                    path.display()
-                ));
-            }
+        if let Some(id) = tally_arc.tally_id
+            && by_id.insert(id, i).is_some()
+        {
+            return Err(format!(
+                "results file {} contains duplicate tally id {id}; ids must be unique",
+                path.display()
+            ));
         }
         by_ptr.insert(Arc::as_ptr(&tally_arc) as usize, i);
 

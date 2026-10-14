@@ -50,31 +50,31 @@ pub fn reduce_mesh_tally_block(
             block_std.len()
         )));
     }
-    if let Some(v) = &vol {
-        if v.len() != n_mesh {
-            return Err(PyValueError::new_err(format!(
-                "vol length {} does not match n_mesh {n_mesh}",
-                v.len()
-            )));
-        }
+    if let Some(v) = &vol
+        && v.len() != n_mesh
+    {
+        return Err(PyValueError::new_err(format!(
+            "vol length {} does not match n_mesh {n_mesh}",
+            v.len()
+        )));
     }
 
     let mut out = Vec::with_capacity(parent_iter.len() * energy_iter.len());
     for &p_idx in &parent_iter {
-        if let Some(p) = p_idx {
-            if p >= n_parent {
-                return Err(PyValueError::new_err(format!(
-                    "parent index {p} out of range (n_parent={n_parent})"
-                )));
-            }
+        if let Some(p) = p_idx
+            && p >= n_parent
+        {
+            return Err(PyValueError::new_err(format!(
+                "parent index {p} out of range (n_parent={n_parent})"
+            )));
         }
         for &e_idx in &energy_iter {
-            if let Some(e) = e_idx {
-                if e >= n_energy {
-                    return Err(PyValueError::new_err(format!(
-                        "energy index {e} out of range (n_energy={n_energy})"
-                    )));
-                }
+            if let Some(e) = e_idx
+                && e >= n_energy
+            {
+                return Err(PyValueError::new_err(format!(
+                    "energy index {e} out of range (n_energy={n_energy})"
+                )));
             }
             let p_range = match p_idx {
                 Some(p) => p..p + 1,

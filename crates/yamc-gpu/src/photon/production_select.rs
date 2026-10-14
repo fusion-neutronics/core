@@ -574,7 +574,7 @@ mod tests {
         // Dead/zero-weight products must never be picked.
         assert_eq!(hist[3], 0, "dead-row product 3 picked {} times", hist[3]);
         assert_eq!(hist[5], 0, "zero-yield product 5 picked {} times", hist[5]);
-        let dominant = hist.iter().enumerate().max_by_key(|(_, &c)| c).unwrap().0;
+        let dominant = hist.iter().enumerate().max_by_key(|&(_, &c)| c).unwrap().0;
         assert_eq!(
             dominant, 1,
             "highest-weight product (1) should dominate at i_grid 0, got hist {hist:?}"

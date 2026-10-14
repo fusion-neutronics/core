@@ -661,7 +661,7 @@ fn run_on_gpu_dispatch(
         (Some(0), _) => {
             return Err(GpuDispatchError::Translate(
                 super::error::GpuTranslateError::NoParticles,
-            ))
+            ));
         }
         (None, None) if !has_targets => return Err(GpuDispatchError::UncappedWithoutRuntime),
         _ => {}
@@ -1062,10 +1062,9 @@ fn validate_tallies(
         if let Some(ef) = t.filters.iter().find_map(|f| match f {
             Filter::Energy(ef) => Some(ef),
             _ => None,
-        }) {
-            if ef.bins.len() < 2 {
-                return Err(GpuDispatchError::EnergyBinsTooFew { tally_index: idx });
-            }
+        }) && ef.bins.len() < 2
+        {
+            return Err(GpuDispatchError::EnergyBinsTooFew { tally_index: idx });
         }
         // One entry per score, in score order, so the kernel only ever sees
         // single-score tallies.
@@ -1107,7 +1106,7 @@ fn classify_score(
                              flux, heating, total, or the PhotonXS components \
                              coherent/incoherent/photoelectric/pair"
                     .to_string(),
-            })
+            });
         }
         Score::ReactionRate(rr) => (SCORE_PER_MT, Some(rr.mt.as_i32())),
         // KERMA-shape scores (heating, heating-local,
@@ -1137,7 +1136,7 @@ fn classify_score(
                          DamageEnergy, or Production; got {:?}",
                     other
                 ),
-            })
+            });
         }
     })
 }

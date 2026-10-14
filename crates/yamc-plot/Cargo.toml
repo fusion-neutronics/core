@@ -1,7 +1,7 @@
 [package]
 name = "yamc-plot"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 rust-version.workspace = true
 description = "Shared interactive-plot HTML/JS templating for yamc -- used by both Python's Model.plot() and the browser-side editor"
 license = "MIT OR Apache-2.0"

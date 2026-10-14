@@ -115,7 +115,7 @@ impl WasmMaterial {
             _ => {
                 return Err(JsValue::from_str(
                     "enrichment and enrichment_target must both be provided or both omitted",
-                ))
+                ));
             }
         };
         yamc_nuclide::composition::merge_nuclides(&mut self.nuclides, &new_nuclides);

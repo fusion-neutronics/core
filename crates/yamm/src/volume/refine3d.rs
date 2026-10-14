@@ -226,6 +226,9 @@ mod tests {
 
         let after = dt.extract_tets().len();
         // Should produce more tets (refinement inserted points)
-        assert!(after >= before, "Should have at least as many tets after refinement (before={before}, after={after}, inserted={inserted})");
+        assert!(
+            after >= before,
+            "Should have at least as many tets after refinement (before={before}, after={after}, inserted={inserted})"
+        );
     }
 }

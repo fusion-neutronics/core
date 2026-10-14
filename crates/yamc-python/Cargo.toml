@@ -13,7 +13,7 @@ name = "yamc-python"
 # same step -- and `verify-versions` refuses a number already on PyPI.
 # See .github/workflows/ci-python.yml and docs/developer_info.md.
 version = "0.16.0"
-edition = "2021"
+edition = "2024"
 rust-version.workspace = true
 license = "MIT OR Apache-2.0"
 description = "Python bindings for yamc"

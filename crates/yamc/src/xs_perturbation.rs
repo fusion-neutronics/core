@@ -511,15 +511,15 @@ pub fn perturbed_nuclide(
                     change[i] += c * (a[i] - b[i]);
                 }
             }
-            if let (Some(b5), Some(a5)) = (reactions.get(&5), new.get(&5)) {
-                if !b5.redundant {
-                    let (b, a) = (on_full_grid(b5, n), on_full_grid(a5, n));
-                    let row = on_full_grid(&stored, n);
-                    for i in 0..n {
-                        if b[i] > 0.0 {
-                            let residual = (row[i] - explained[i]).max(0.0);
-                            change[i] += residual * (a[i] / b[i] - 1.0);
-                        }
+            if let (Some(b5), Some(a5)) = (reactions.get(&5), new.get(&5))
+                && !b5.redundant
+            {
+                let (b, a) = (on_full_grid(b5, n), on_full_grid(a5, n));
+                let row = on_full_grid(&stored, n);
+                for i in 0..n {
+                    if b[i] > 0.0 {
+                        let residual = (row[i] - explained[i]).max(0.0);
+                        change[i] += residual * (a[i] / b[i] - 1.0);
                     }
                 }
             }
@@ -541,22 +541,21 @@ pub fn perturbed_nuclide(
         }
 
         // 3. The lookup, by the loader's builder.
-        if let Some(fast) = nuclide.fast_xs.get(t) {
-            if !fast.energy.is_empty() {
-                out.fast_xs[t] = FastXSGrid::build(
-                    grid,
-                    &new,
-                    nuclide.fission_photon_release.as_ref(),
-                    &format!("{name} at {temperature} K (perturbed)"),
-                )?;
-            }
+        if let Some(fast) = nuclide.fast_xs.get(t)
+            && !fast.energy.is_empty()
+        {
+            out.fast_xs[t] = FastXSGrid::build(
+                grid,
+                &new,
+                nuclide.fission_photon_release.as_ref(),
+                &format!("{name} at {temperature} K (perturbed)"),
+            )?;
         }
         out.reactions[t] = new;
         if let (Some(Some(urr)), Some(nominal)) = (out.urr_data.get_mut(t), nuclide.fast_xs.get(t))
+            && !urr.multiply_smooth
         {
-            if !urr.multiply_smooth {
-                urr.nominal_smooth = Some(Arc::new(nominal.clone()));
-            }
+            urr.nominal_smooth = Some(Arc::new(nominal.clone()));
         }
     }
     Ok((out, floored))

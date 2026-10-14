@@ -79,7 +79,9 @@ fn gpu_pe_subshell_matches_cpu_distribution() {
             .iter()
             .map(|&h| format!("{:.3}", h as f64 / n as f64))
             .collect();
-        println!("E={e_ev:.2e}: shell fractions\n  GPU {gfrac:?}\n  CPU {cfrac:?}\n  max |Δ| = {max_dev:.4}");
+        println!(
+            "E={e_ev:.2e}: shell fractions\n  GPU {gfrac:?}\n  CPU {cfrac:?}\n  max |Δ| = {max_dev:.4}"
+        );
         assert!(
             max_dev < 0.02,
             "E={e_ev:.2e}: PE subshell distribution differs by {max_dev:.4} (> 0.02)"

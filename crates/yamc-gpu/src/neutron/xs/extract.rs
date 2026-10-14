@@ -147,11 +147,11 @@ pub fn extract_score_xs_per_mt(
 use yamc_nuclide::temperature::label_to_kelvin_or_default as parse_temperature_k;
 
 fn total_xs_at(nuclide: &Nuclide, temp_idx: usize, energy: f64) -> f64 {
-    if let Some(fast_grid) = nuclide.fast_xs.get(temp_idx) {
-        if !fast_grid.energy.is_empty() {
-            let (total, _abs, _scat, _fis) = fast_grid.lookup(energy);
-            return total;
-        }
+    if let Some(fast_grid) = nuclide.fast_xs.get(temp_idx)
+        && !fast_grid.energy.is_empty()
+    {
+        let (total, _abs, _scat, _fis) = fast_grid.lookup(energy);
+        return total;
     }
     nuclide.reactions[temp_idx]
         .values()
@@ -855,17 +855,17 @@ pub fn extract_material_xs(
                 // First neutron product's yield curve, sampled at every
                 // grid point. Reaction-rate weighted across nuclides.
                 let mut nuclide_yield: Option<&Reaction> = Some(rxn.as_ref());
-                if let Some(rxn_ref) = nuclide_yield {
-                    if let Some(neutron_product) = rxn_ref.products.iter().find(|p| {
+                if let Some(rxn_ref) = nuclide_yield
+                    && let Some(neutron_product) = rxn_ref.products.iter().find(|p| {
                         p.is_particle_type(&yamc_nuclide::particle_type::ParticleType::Neutron)
-                    }) {
-                        let yield_curve = neutron_product.product_yield.as_ref();
-                        for (i, &e) in coarse_grid.iter().enumerate() {
-                            let y = yield_curve.map(|c| c.evaluate(e)).unwrap_or(1.0);
-                            let xs = rxn_ref.cross_section_at(e).unwrap_or(0.0);
-                            yield_sigma_per_mt[off + i] += density * xs * y;
-                            yield_weight_per_mt[off + i] += density * xs;
-                        }
+                    })
+                {
+                    let yield_curve = neutron_product.product_yield.as_ref();
+                    for (i, &e) in coarse_grid.iter().enumerate() {
+                        let y = yield_curve.map(|c| c.evaluate(e)).unwrap_or(1.0);
+                        let xs = rxn_ref.cross_section_at(e).unwrap_or(0.0);
+                        yield_sigma_per_mt[off + i] += density * xs * y;
+                        yield_weight_per_mt[off + i] += density * xs;
                     }
                 }
                 let _ = nuclide_yield.take();

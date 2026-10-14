@@ -253,7 +253,7 @@ impl Material {
             other => {
                 return Err(format!(
                     "fraction must be 'atom', 'mass', or 'volume', got '{other}'"
-                ))
+                ));
             }
         };
 

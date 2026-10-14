@@ -403,7 +403,7 @@ pub fn convert_neutron_xs(
         other => {
             return Err(PyValueError::new_err(format!(
                 "unknown source_format {other:?}; expected \"endf\" or \"ace\""
-            )))
+            )));
         }
     };
 
@@ -571,7 +571,7 @@ pub fn convert_photon(
                 "compton_profiles, density_effect and bremsstrahlung must be given \
                  together or not at all: the three are read as one set, and a \
                  partial set would silently drop a section",
-            ))
+            ));
         }
     };
     let tabulations =

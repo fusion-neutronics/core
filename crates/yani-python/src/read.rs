@@ -112,7 +112,7 @@ pub fn read_nuclide_from_arrow(py: Python, path: &str, scope: &str) -> PyResult<
         other => {
             return Err(PyValueError::new_err(format!(
                 "unknown scope {other:?}; expected \"full\" or \"xs\""
-            )))
+            )));
         }
     };
 

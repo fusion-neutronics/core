@@ -885,7 +885,7 @@ fn two_distinct_materials() {
         .alive
         .iter()
         .zip(r.n_steps.iter())
-        .filter(|(&a, &s)| a == 0 && s < 500)
+        .filter(|&(&a, &s)| a == 0 && s < 500)
         .count();
     let mean_steps = r.n_steps.iter().map(|&s| s as f64).sum::<f64>() / n as f64;
 

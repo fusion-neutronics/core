@@ -190,10 +190,11 @@ pub(super) fn woodcock_flight_exit(
         // particles born within epsilon of a boundary.
         let mut nearest: Option<f64> = None;
         for surface in vacuum_surfaces {
-            if let Some(t) = surface.distance_to_surface(pos, direction) {
-                if t > SURFACE_TOLERANCE && nearest.is_none_or(|n| t < n) {
-                    nearest = Some(t);
-                }
+            if let Some(t) = surface.distance_to_surface(pos, direction)
+                && t > SURFACE_TOLERANCE
+                && nearest.is_none_or(|n| t < n)
+            {
+                nearest = Some(t);
             }
         }
         let t = nearest?;

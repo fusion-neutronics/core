@@ -301,12 +301,11 @@ impl ResonanceSampler {
                     };
                 }
             }
-            if cholesky(&stated, m).is_none() {
-                if let Some((repaired, record)) = repaired(&stated, m) {
-                    report.stated_repair =
-                        Some(CorrelationRepair::merge(report.stated_repair, record));
-                    stated = repaired;
-                }
+            if cholesky(&stated, m).is_none()
+                && let Some((repaired, record)) = repaired(&stated, m)
+            {
+                report.stated_repair = Some(CorrelationRepair::merge(report.stated_repair, record));
+                stated = repaired;
             }
             // `Σ`, as its diagonal and correlation.
             let log_variance: Vec<f64> = members

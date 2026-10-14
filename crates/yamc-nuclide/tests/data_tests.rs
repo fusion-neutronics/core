@@ -65,11 +65,11 @@ fn test_reaction_mt_is_invertible() {
     let mut seen_mts = std::collections::HashMap::new();
     let mut unexpected_duplicates: Vec<i32> = Vec::new();
     for (name, mt) in REACTION_MT.iter() {
-        if let Some(prev) = seen_mts.insert(mt, name) {
-            if !allowed_duplicates.contains(mt) {
-                eprintln!("Unexpected duplicate MT {mt}: '{prev}' and '{name}'");
-                unexpected_duplicates.push(*mt);
-            }
+        if let Some(prev) = seen_mts.insert(mt, name)
+            && !allowed_duplicates.contains(mt)
+        {
+            eprintln!("Unexpected duplicate MT {mt}: '{prev}' and '{name}'");
+            unexpected_duplicates.push(*mt);
         }
     }
     assert!(

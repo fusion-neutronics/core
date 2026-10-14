@@ -183,7 +183,9 @@ fn every_transport_partial_is_classified_and_reads_cells_that_exist() {
         eprintln!(
             "{library} {nuclide}: {} partials, {own} own, {parent} via a sum, {nominal} nominal, {} cells",
             t.reads.len(),
-            t.field.as_ref().map_or(0, |f| f.relative_cells.len() + f.absolute_cells.len())
+            t.field
+                .as_ref()
+                .map_or(0, |f| f.relative_cells.len() + f.absolute_cells.len())
         );
         checked += 1;
     }

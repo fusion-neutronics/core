@@ -189,7 +189,7 @@ impl PyWeightWindowBounds {
             other => {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "particle must be 'neutron' or 'photon' (got {other:?})"
-                )))
+                )));
             }
         };
         let upper_bounds = match upper_bounds {
@@ -417,12 +417,7 @@ impl PyWeightWindowGeneratorDeGVR {
         };
         format!(
             "WeightWindowGeneratorDeGVR(particle={:?}, density_reduction={}, ratio={}, survival_factor={}, max_split={}, photon_energy={})",
-            particles,
-            dr,
-            self.inner.ratio,
-            self.inner.survival_factor,
-            self.inner.max_split,
-            pe,
+            particles, dr, self.inner.ratio, self.inner.survival_factor, self.inner.max_split, pe,
         )
     }
 }

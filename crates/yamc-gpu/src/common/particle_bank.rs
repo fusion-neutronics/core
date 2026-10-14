@@ -317,9 +317,9 @@ mod spill_count_tests {
     use super::*;
 
     /// One row of the u32 side of the bank.
-    fn row(ptype: u32, gen: u32) -> [u32; BANK_U32_STRIDE] {
+    fn row(ptype: u32, generator: u32) -> [u32; BANK_U32_STRIDE] {
         // [ptype, cell, seed, gen]
-        [ptype, 7, 0xDEAD_BEEF, gen]
+        [ptype, 7, 0xDEAD_BEEF, generator]
     }
 
     fn bank(rows: &[[u32; BANK_U32_STRIDE]]) -> Vec<u32> {

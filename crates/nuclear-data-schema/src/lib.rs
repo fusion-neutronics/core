@@ -142,15 +142,15 @@ pub fn check_batch(section: &str, batch: &Schema) -> Result<(), String> {
         ));
     }
     for field in batch.fields() {
-        if let Ok(want) = declared.field_with_name(field.name()) {
-            if want.data_type() != field.data_type() {
-                return Err(format!(
-                    "{section} column {:?} is {:?}, the schema declares {:?}",
-                    field.name(),
-                    field.data_type(),
-                    want.data_type()
-                ));
-            }
+        if let Ok(want) = declared.field_with_name(field.name())
+            && want.data_type() != field.data_type()
+        {
+            return Err(format!(
+                "{section} column {:?} is {:?}, the schema declares {:?}",
+                field.name(),
+                field.data_type(),
+                want.data_type()
+            ));
         }
     }
     Ok(())

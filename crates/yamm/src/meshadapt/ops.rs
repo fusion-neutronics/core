@@ -1556,10 +1556,10 @@ mod tests {
             &[[0, 1, 2], [1, 0, 3]], // note: (1,0,3) so 3 is below
         );
 
-        if let Some(he) = find_he(&m, 0, 1).or_else(|| find_he(&m, 1, 0)) {
-            if m.half_edges[he].twin != NONE {
-                assert!(!swap_edge(&mut m, he), "should reject non-convex swap");
-            }
+        if let Some(he) = find_he(&m, 0, 1).or_else(|| find_he(&m, 1, 0))
+            && m.half_edges[he].twin != NONE
+        {
+            assert!(!swap_edge(&mut m, he), "should reject non-convex swap");
         }
     }
 

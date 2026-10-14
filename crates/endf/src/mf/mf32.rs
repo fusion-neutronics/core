@@ -883,23 +883,23 @@ pub fn parse_mf32(reader: &mut Reader) -> Result<Mf32> {
                 (1, 1) => {
                     return Err(Error::Unsupported {
                         what: "single-level Breit-Wigner covariances in MF=32 (LRF=1)",
-                    })
+                    });
                 }
                 (1, 4) => {
                     return Err(Error::Unsupported {
                         what: "Adler-Adler covariances in MF=32 (LRF=4)",
-                    })
+                    });
                 }
                 (2, 1) => parse_unresolved(reader, site, &mut data.defects)?,
                 (2, _) => {
                     return Err(Error::Unsupported {
                         what: "an MF=32 unresolved range with LRF other than 1",
-                    })
+                    });
                 }
                 _ => {
                     return Err(Error::Unsupported {
                         what: "an MF=32 range with an unrecognised LRU or LRF",
-                    })
+                    });
                 }
             };
             iso.ranges.push(Range {

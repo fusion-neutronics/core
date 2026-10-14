@@ -661,7 +661,7 @@ impl TransmutationResults {
         let mut found: Vec<ProductionRoute> = Vec::new();
         let mut stack: Vec<Partial> = densities
             .iter()
-            .filter(|(_, &n)| n > 0.0)
+            .filter(|&(_, &n)| n > 0.0)
             .map(|(name, &n)| Partial {
                 here: name.clone(),
                 steps: Vec::new(),

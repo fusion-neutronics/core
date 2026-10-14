@@ -41,7 +41,7 @@ impl PyConvergenceTarget {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "unknown convergence metric {other:?}; expected \"relative_error\", \
                      \"std_dev\", or \"variance_of_variance\""
-                )))
+                )));
             }
         };
         let tally = match (tally, tally_id) {

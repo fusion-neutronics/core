@@ -130,7 +130,7 @@ impl Tally {
             _ => {
                 return Err(format!(
                     "Invalid value_type '{value_type}', must be 'mean', 'standard_deviation', or 'relative_error'"
-                ))
+                ));
             }
         };
 

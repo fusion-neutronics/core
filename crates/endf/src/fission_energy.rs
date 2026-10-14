@@ -129,12 +129,11 @@ impl FissionEnergyRelease {
             // mistake. A 5 MeV neutron cannot change the release by more than
             // 100 MeV, so a term that large is the units error rather than
             // physics.
-            if npoly == 2 {
-                if let Some(c2) = coeffs.get_mut(2) {
-                    if c2.abs() * (5.0e6f64).powi(2) > 1.0e8 {
-                        *c2 /= EV_PER_MEV;
-                    }
-                }
+            if npoly == 2
+                && let Some(c2) = coeffs.get_mut(2)
+                && c2.abs() * (5.0e6f64).powi(2) > 1.0e8
+            {
+                *c2 /= EV_PER_MEV;
             }
 
             if npoly > 0 {
@@ -216,7 +215,7 @@ fn sher_beck_prompt_neutrons(zeroth: f64, nu: Option<&Nu>) -> Result<Component> 
         Nu::Absent => {
             return Err(Error::Unsupported {
                 what: "the Sher-Beck fission energy release without a nu-bar to build it from",
-            })
+            });
         }
     })
 }

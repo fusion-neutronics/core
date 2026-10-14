@@ -522,10 +522,10 @@ impl Material {
         let density_units = DensityUnits::parse(density_unit)?;
         let density = match density_units {
             DensityUnits::Sum => {
-                if let Some(v) = density_value {
-                    if v <= 0.0 {
-                        return Err("Density must be positive".into());
-                    }
+                if let Some(v) = density_value
+                    && v <= 0.0
+                {
+                    return Err("Density must be positive".into());
                 }
                 density_value
             }
@@ -835,13 +835,17 @@ impl Material {
                 panic!("sample_distance_to_collision: macroscopic_xs_neutron[1] missing. Did you call calculate_macroscopic_xs?");
             });
             if self.unified_energy_grid_neutron.is_empty() || xs_vec.is_empty() {
-                panic!("sample_distance_to_collision: energy grid or cross section vector is empty. Did you call calculate_macroscopic_xs?");
+                panic!(
+                    "sample_distance_to_collision: energy grid or cross section vector is empty. Did you call calculate_macroscopic_xs?"
+                );
             }
             crate::interpolate_linear(&self.unified_energy_grid_neutron, xs_vec, energy)
         };
 
         if sigma_t <= 0.0 {
-            panic!("sample_distance_to_collision: total cross section is zero or negative at energy {energy}. Check your nuclear data and energy grid.");
+            panic!(
+                "sample_distance_to_collision: total cross section is zero or negative at energy {energy}. Check your nuclear data and energy grid."
+            );
         }
         let xi: f64 = rng.random_range(0.0..1.0);
         Some(-xi.ln() / sigma_t)
@@ -1526,10 +1530,10 @@ impl Material {
             let Some(temp_idx) = nuclide.get_temp_idx(&self.temperature) else {
                 continue;
             };
-            if let Some(urr) = nuclide.urr_data.get(temp_idx).and_then(|opt| opt.as_ref()) {
-                if urr.energy_in_bounds(energy) {
-                    return true;
-                }
+            if let Some(urr) = nuclide.urr_data.get(temp_idx).and_then(|opt| opt.as_ref())
+                && urr.energy_in_bounds(energy)
+            {
+                return true;
             }
         }
         false
@@ -1547,72 +1551,72 @@ impl Material {
         // Use nuclide microscopic XS from fast_xs if available
         if let Some(nuclide) = self.nuclide_data.get(name) {
             let temp_idx = nuclide.get_temp_idx(&self.temperature);
-            if let Some(idx) = temp_idx {
-                if let Some(fast_grid) = nuclide.fast_xs.get(idx) {
-                    let (total, absorption, scattering, fission) = fast_grid.lookup(energy);
-                    let micro = match mt {
-                        1 => total,
-                        2 => {
-                            // Elastic from scatter_mt_xs via elastic_idx
-                            let (i_grid, f) = fast_grid.lookup_grid_index(energy);
-                            fast_grid
-                                .elastic_idx
-                                .map(|idx| fast_grid.scatter_xs_interp(i_grid, f, idx))
-                                .unwrap_or(0.0)
+            if let Some(idx) = temp_idx
+                && let Some(fast_grid) = nuclide.fast_xs.get(idx)
+            {
+                let (total, absorption, scattering, fission) = fast_grid.lookup(energy);
+                let micro = match mt {
+                    1 => total,
+                    2 => {
+                        // Elastic from scatter_mt_xs via elastic_idx
+                        let (i_grid, f) = fast_grid.lookup_grid_index(energy);
+                        fast_grid
+                            .elastic_idx
+                            .map(|idx| fast_grid.scatter_xs_interp(i_grid, f, idx))
+                            .unwrap_or(0.0)
+                    }
+                    18 => fission,
+                    // MT 27 is ENDF absorption = MT 18 + MT 101, so it
+                    // INCLUDES fission, and that is what OpenMC's
+                    // `"absorption"` score reports: `nuclide.cpp` sets
+                    // `micro.absorption = capture + fission` and the tally
+                    // scores `macro_xs().absorption * flux`. `absorption`
+                    // from `lookup` is the disappearance PARTIAL (its four
+                    // partials sum to the total), so fission is added back
+                    // here.
+                    27 => absorption + fission,
+                    // MT 101, neutron disappearance: the partial as stored.
+                    101 => absorption,
+                    // MT 102 is RADIATIVE CAPTURE specifically, which the
+                    // library carries as its own column. It used to be
+                    // derived as `(absorption - fission).max(0.0)`, which is
+                    // OpenMC's expression but not OpenMC's input: OpenMC
+                    // subtracts fission from an absorption that includes it,
+                    // while this one excludes it. That read ZERO for every
+                    // fissile nuclide (U235 at 10 keV: absorption 1.06 b
+                    // against fission 2.91 b) and, where fission is absent,
+                    // still conflated capture with the charged-particle
+                    // channels the partial also holds -- 149x high for Fe56
+                    // at 14 MeV, 5x for W184.
+                    102 => {
+                        let (i_grid, f) = fast_grid.lookup_grid_index(energy);
+                        if fast_grid.xs_ngamma.is_empty() {
+                            // No MT 102 column in this library: the
+                            // disappearance partial is the closest stand-in,
+                            // and equals capture wherever the
+                            // charged-particle channels are closed.
+                            absorption
+                        } else {
+                            fast_grid.lookup_ngamma(i_grid, f)
                         }
-                        18 => fission,
-                        // MT 27 is ENDF absorption = MT 18 + MT 101, so it
-                        // INCLUDES fission, and that is what OpenMC's
-                        // `"absorption"` score reports: `nuclide.cpp` sets
-                        // `micro.absorption = capture + fission` and the tally
-                        // scores `macro_xs().absorption * flux`. `absorption`
-                        // from `lookup` is the disappearance PARTIAL (its four
-                        // partials sum to the total), so fission is added back
-                        // here.
-                        27 => absorption + fission,
-                        // MT 101, neutron disappearance: the partial as stored.
-                        101 => absorption,
-                        // MT 102 is RADIATIVE CAPTURE specifically, which the
-                        // library carries as its own column. It used to be
-                        // derived as `(absorption - fission).max(0.0)`, which is
-                        // OpenMC's expression but not OpenMC's input: OpenMC
-                        // subtracts fission from an absorption that includes it,
-                        // while this one excludes it. That read ZERO for every
-                        // fissile nuclide (U235 at 10 keV: absorption 1.06 b
-                        // against fission 2.91 b) and, where fission is absent,
-                        // still conflated capture with the charged-particle
-                        // channels the partial also holds -- 149x high for Fe56
-                        // at 14 MeV, 5x for W184.
-                        102 => {
-                            let (i_grid, f) = fast_grid.lookup_grid_index(energy);
-                            if fast_grid.xs_ngamma.is_empty() {
-                                // No MT 102 column in this library: the
-                                // disappearance partial is the closest stand-in,
-                                // and equals capture wherever the
-                                // charged-particle channels are closed.
-                                absorption
-                            } else {
-                                fast_grid.lookup_ngamma(i_grid, f)
-                            }
+                    }
+                    _ => {
+                        // For other MTs, fall back to scattering or 0
+                        if mt == 4 {
+                            let elastic = {
+                                let (i_grid, f) = fast_grid.lookup_grid_index(energy);
+                                fast_grid
+                                    .elastic_idx
+                                    .map(|idx| fast_grid.scatter_xs_interp(i_grid, f, idx))
+                                    .unwrap_or(0.0)
+                            };
+                            (scattering - elastic).max(0.0)
+                        } else {
+                            return 0.0;
                         }
-                        _ => {
-                            // For other MTs, fall back to scattering or 0
-                            if mt == 4 {
-                                let elastic = {
-                                    let (i_grid, f) = fast_grid.lookup_grid_index(energy);
-                                    fast_grid
-                                        .elastic_idx
-                                        .map(|idx| fast_grid.scatter_xs_interp(i_grid, f, idx))
-                                        .unwrap_or(0.0)
-                                };
-                                (scattering - elastic).max(0.0)
-                            } else {
-                                return 0.0;
-                            }
-                        }
-                    };
-                    return n_density * micro;
-                }
+                    }
+                };
+                return n_density * micro;
             }
         }
         0.0
@@ -1713,10 +1717,10 @@ impl Material {
             // with no mention of temperature.
             // Skipped when there is no nuclide data at all, so the photon-only
             // path below still works.
-            if !sorted_all.is_empty() {
-                if let Err(e) = yamc_nuclide::temperature::resolve(label, &sorted_all) {
-                    panic!("{e}");
-                }
+            if !sorted_all.is_empty()
+                && let Err(e) = yamc_nuclide::temperature::resolve(label, &sorted_all)
+            {
+                panic!("{e}");
             }
             return label.to_string();
         }

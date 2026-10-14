@@ -95,7 +95,7 @@ pub fn mesh_faces(faces: Vec<Bound<'_, PyAny>>, scheduler: String) -> PyResult<V
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "Invalid scheduler: '{}'. Use 'dag', 'parallel', or 'sequential'",
                 scheduler
-            )))
+            )));
         }
     }
     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;

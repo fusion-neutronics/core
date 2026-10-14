@@ -179,7 +179,9 @@ fn gpu_cpu_distant_photon_flux_through_nested_cells() {
 
     assert!(cpu > 0.0, "CPU distant photon flux is zero -- setup wrong");
     let ratio = gpu / cpu;
-    eprintln!("distant (r=95-98) photon flux through nested cells: CPU={cpu:.5e} GPU={gpu:.5e} ratio={ratio:.4}");
+    eprintln!(
+        "distant (r=95-98) photon flux through nested cells: CPU={cpu:.5e} GPU={gpu:.5e} ratio={ratio:.4}"
+    );
     // Without the region_contains fix the GPU collapses to ~0.06x; the exact
     // membership test restores parity. Band covers the approximate GPU photon
     // kernel systematic.

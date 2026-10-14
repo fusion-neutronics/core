@@ -262,7 +262,9 @@ mod tests {
                 max_mu_abs = dm;
             }
         }
-        println!("elastic_scatter: max E' ULP drift = {max_e_ulps}, max |µ_lab GPU − CPU| = {max_mu_abs:e}");
+        println!(
+            "elastic_scatter: max E' ULP drift = {max_e_ulps}, max |µ_lab GPU − CPU| = {max_mu_abs:e}"
+        );
         assert!(max_e_ulps <= 16, "E' drift {max_e_ulps} > 16 ulps");
         assert!(
             max_mu_abs < 1e-10,

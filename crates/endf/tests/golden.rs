@@ -2418,17 +2418,17 @@ fn compare(name: &str, ours: &BTreeMap<String, Value>, theirs: &BTreeMap<String,
 
     for (path, want) in theirs {
         let got = &ours[path];
-        if let (Value::Floats(a), Value::Floats(b)) = (got, want) {
-            if is_log_law_cdf(path, theirs) {
-                assert_eq!(a.len(), b.len(), "{name}: {path} length");
-                for (i, (&got, &want)) in a.iter().zip(b).enumerate() {
-                    assert!(
-                        (got - want).abs() <= EVAL_TOL * want.abs(),
-                        "{name}: {path}[{i}]: reader {got} != golden {want}"
-                    );
-                }
-                continue;
+        if let (Value::Floats(a), Value::Floats(b)) = (got, want)
+            && is_log_law_cdf(path, theirs)
+        {
+            assert_eq!(a.len(), b.len(), "{name}: {path} length");
+            for (i, (&got, &want)) in a.iter().zip(b).enumerate() {
+                assert!(
+                    (got - want).abs() <= EVAL_TOL * want.abs(),
+                    "{name}: {path}[{i}]: reader {got} != golden {want}"
+                );
             }
+            continue;
         }
         assert_eq!(
             got.kind(),
