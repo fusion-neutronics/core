@@ -436,6 +436,107 @@ pub enum SharedVolume {
     Estimate { volume: f64, std_err: f64 },
 }
 
+/// Points where two solids' closed surface meshes come within `tolerance` of
+/// each other.
+///
+/// For every pair of solids whose meshes come that close, up to `samples`
+/// mesh vertices of one of them that lie within `tolerance` of the other's
+/// surface, as `(solid_a, solid_b, points on solid_a)`. A pair whose meshes
+/// come close only between vertices is returned with no points. Ordered by
+/// pair, whatever the thread scheduling.
+///
+/// The CAD layer uses these to tell solids that touch (each sample lies on
+/// the other CAD solid) from solids separated by a real gap that faceting has
+/// brought within the tolerance.
+#[allow(clippy::type_complexity)]
+pub fn contact_samples(
+    vertices: &[[f64; 3]],
+    solids: &[SolidBoundary],
+    tolerance: f64,
+    samples: usize,
+) -> Vec<(usize, usize, Vec<[f64; 3]>)> {
+    struct Solid {
+        id: usize,
+        bvh: TriangleBvh,
+        verts: Vec<usize>,
+        lo: [f64; 3],
+        hi: [f64; 3],
+    }
+    let prepared: Vec<Solid> = solids
+        .par_iter()
+        .map(|(id, tris)| {
+            let t: Vec<([f64; 3], [f64; 3], [f64; 3])> = tris
+                .iter()
+                .map(|t| (vertices[t[0]], vertices[t[1]], vertices[t[2]]))
+                .collect();
+            let mut verts: Vec<usize> = tris.iter().flatten().copied().collect();
+            verts.sort_unstable();
+            verts.dedup();
+            let mut lo = [f64::MAX; 3];
+            let mut hi = [f64::MIN; 3];
+            for &v in &verts {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(vertices[v][k]);
+                    hi[k] = hi[k].max(vertices[v][k]);
+                }
+            }
+            Solid {
+                id: *id,
+                bvh: TriangleBvh::new(&t),
+                verts,
+                lo,
+                hi,
+            }
+        })
+        .collect();
+    let mut pairs = Vec::new();
+    for i in 0..prepared.len() {
+        for j in (i + 1)..prepared.len() {
+            let (a, b) = (&prepared[i], &prepared[j]);
+            if (0..3).any(|k| a.hi[k] + tolerance < b.lo[k] || b.hi[k] + tolerance < a.lo[k]) {
+                continue;
+            }
+            pairs.push((i, j));
+        }
+    }
+    let near = |a: &Solid, b: &Solid| -> Vec<[f64; 3]> {
+        let mut out = Vec::new();
+        for &v in &a.verts {
+            let p = vertices[v];
+            if (0..3).any(|k| p[k] < b.lo[k] - tolerance || p[k] > b.hi[k] + tolerance) {
+                continue;
+            }
+            if dist(&p, &b.bvh.nearest_point_on_surface(&p)) <= tolerance {
+                out.push(p);
+                if out.len() >= samples {
+                    break;
+                }
+            }
+        }
+        out
+    };
+    let mut found: Vec<(usize, usize, Vec<[f64; 3]>)> = pairs
+        .par_iter()
+        .filter_map(|&(i, j)| {
+            let (a, b) = (&prepared[i], &prepared[j]);
+            if !a.bvh.boxes_within(&b.bvh, tolerance) {
+                return None;
+            }
+            let from_a = near(a, b);
+            if !from_a.is_empty() {
+                return Some((a.id, b.id, from_a));
+            }
+            let from_b = near(b, a);
+            if !from_b.is_empty() {
+                return Some((b.id, a.id, from_b));
+            }
+            Some((a.id, b.id, Vec::new()))
+        })
+        .collect();
+    found.sort_by_key(|&(a, b, _)| (a.min(b), a.max(b)));
+    found
+}
+
 /// Test `a`'s features against `b`'s closed surface.
 ///
 /// Returns `((max_depth, inside_vertices, crossing_edges, inside_faces), lens_area)`.
@@ -710,6 +811,21 @@ mod tests {
             shared_volume(&v, &inner, &outer, 1e-9, 1000, 7),
             SharedVolume::Embedded(0)
         );
+    }
+
+    #[test]
+    fn contact_samples_find_touching_and_near_pairs_only() {
+        // Face to face: samples on the shared plane. 0.05 apart within a 0.1
+        // tolerance: samples too (the caller decides whether the CAD
+        // touches). 5 apart: no pair.
+        for (offset, expect) in [(10.0, true), (10.05, true), (15.0, false)] {
+            let (v, s) = two_boxes(offset);
+            let found = contact_samples(&v, &s, 0.1, 4);
+            assert_eq!(!found.is_empty(), expect, "offset {offset}: {found:?}");
+            if let Some((_, _, points)) = found.first() {
+                assert!(!points.is_empty() && points.len() <= 4);
+            }
+        }
     }
 
     #[test]

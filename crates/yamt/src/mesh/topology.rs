@@ -127,6 +127,10 @@ pub struct MeshTopology {
     /// where the two overlap, the cell is `high`. Free of cycles (checked
     /// when the topology is built).
     pub overlaps: Vec<(VolumeId, VolumeId)>,
+    /// Solid pairs `(a, b)`, `a < b`, that come within the contact tolerance
+    /// in the mesh although the CAD solids do not touch: a real gap, which
+    /// relocation must not fill.
+    pub separated: Vec<(VolumeId, VolumeId)>,
 }
 
 /// Rank every volume so that, for each `(low, high)` overlap pair, `high`

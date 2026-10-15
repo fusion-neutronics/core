@@ -37,9 +37,10 @@ use yamc::geometry::mesh::MeshGeometry;
 /// whichever touching solid contains it. Solids closer than the contact
 /// tolerance count as touching, so an overlap or a gap thinner than it is
 /// crossed straight into the next solid (an overlap stays with the solid the
-/// particle was already in); a wider gap is the implicit complement. The file
-/// records all this; *contact_tolerance* forces it on for a mesh from another
-/// writer, or overrides the tolerance the file records.
+/// particle was already in); a wider gap, or one the file records as being in
+/// the CAD, is the implicit complement. The file records all this;
+/// *contact_tolerance* forces it on for a mesh from another writer, or
+/// overrides the tolerance the file records.
 ///
 /// Args:
 ///     filename: Path to an Arrow IPC mesh file (``.arrow``).
@@ -52,7 +53,9 @@ use yamc::geometry::mesh::MeshGeometry;
 ///         surfaces count as touching. Setting it tracks the mesh
 ///         discontinuously. It must be at least the deepest overlap between
 ///         touching solids, and gaps narrower than it are filled by the solid
-///         on the far side.
+///         on the far side, except between solids the file records as apart
+///         in the CAD (``CadToYamc`` checks this when meshing without
+///         imprinting).
 ///
 /// Raises:
 ///     ValueError: If the file is not an Arrow IPC mesh, or if it contains a
@@ -205,18 +208,31 @@ impl PyMeshGeometry {
         if contact_tolerance.is_some() {
             mesh.set_contact_tolerance(contact_tolerance);
         }
-        if mesh.looks_unimprinted(4096) {
-            materials.py().import("warnings")?.call_method1(
-                "warn",
-                (format!(
+        if mesh.touches_without_shared_surface(4096) {
+            let message = if mesh.topology.imprinted == Some(true) {
+                format!(
+                    "'{filename}': the file says its solids were imprinted, but some of them \
+                     touch without sharing a surface, so the imprint did not join them. A \
+                     particle leaving one of these solids is not placed in the solid it \
+                     enters, so tallies come out wrong. Mesh the CAD with imprint=False \
+                     instead, or pass contact_tolerance=<distance in cm> to track this file \
+                     discontinuously, which crosses these contacts but cannot repair anything \
+                     else the imprint got wrong."
+                )
+            } else {
+                format!(
                     "'{filename}': some solids touch without sharing a surface, as in a mesh \
                      made without imprinting, but the file does not say it was made that way. \
                      Tracked as an imprinted mesh, a particle leaving one of these solids is \
                      not placed in the solid it enters, so tallies come out wrong without any \
                      lost particles. Pass contact_tolerance=<distance in cm> to track it \
                      discontinuously."
-                ),),
-            )?;
+                )
+            };
+            materials
+                .py()
+                .import("warnings")?
+                .call_method1("warn", (message,))?;
         }
 
         let inner = MeshGeometry::new(mesh, &mat_map, ic_mat.clone())

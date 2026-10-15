@@ -190,6 +190,7 @@ class CadToYamc:
         self._contact_tolerance = None
         self._overlaps = []  # (low, high) 1-based solid pairs, high takes the overlap
         self._volume_measures = None  # per-solid volumes when overlaps are resolved
+        self._separated = []  # (a, b) 1-based solid pairs a real gap apart
 
     def add_cadquery_object(
         self,
@@ -250,7 +251,10 @@ class CadToYamc:
                 particle crosses an overlap or a gap thinner than this
                 straight into the next solid. Defaults to twice *tolerance*,
                 which covers the slivers two facetings of one CAD surface
-                leave between them; raise it to accept sloppier CAD.
+                leave between them; raise it to accept sloppier CAD. A gap
+                that is in the CAD stays a gap whatever the tolerance: the
+                solids either side are checked against the CAD and recorded
+                as separated.
             overlaps: Only with ``imprint=False``: what to do when two solids
                 overlap deeper than *contact_tolerance*, for instance a part
                 embedded in a body that was never cut. ``"error"`` (default)
@@ -428,6 +432,7 @@ class CadToYamc:
         self._contact_tolerance = None if imprint else float(contact_tolerance)
         self._overlaps = []
         self._volume_measures = None
+        self._separated = []
         pa = self._processed
 
         brep_fids, scene_fids = _route_faces(pa)
@@ -509,6 +514,13 @@ class CadToYamc:
                     + "\n  ".join(lines),
                     stacklevel=3,
                 )
+
+        if not imprint:
+            from ._contact import find_separated
+
+            self._separated = find_separated(
+                self._surface_mesh, pa.solid_shapes, contact_tolerance
+            )
 
         return self._surface_mesh
 
@@ -665,6 +677,7 @@ class CadToYamc:
             contact_tolerance=self._contact_tolerance,
             overlaps=self._overlaps,
             volume_measures=self._volume_measures,
+            separated=self._separated,
         )
 
     def exterior_surface_ids(self) -> list[int]:

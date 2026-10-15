@@ -16,6 +16,9 @@
 //! - "yamc.overlaps" (optional): for such a mesh, `[[low, high], ...]` pairs of
 //!   0-based volume ids whose solids overlap, where `high` takes the shared
 //!   region
+//! - "yamc.separated" (optional): for such a mesh, `[[a, b], ...]` pairs of
+//!   0-based volume ids whose meshes come within the contact tolerance although
+//!   the CAD solids do not touch, so the gap between them is never filled
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -57,6 +60,9 @@ pub struct ArrowMeshData {
     /// Overlapping solid pairs `[low, high]` (0-based volume ids) of a
     /// non-imprinted mesh: `high` takes the region the two share.
     pub overlaps: Vec<[u32; 2]>,
+    /// Solid pairs (0-based volume ids) of a non-imprinted mesh that are
+    /// within the contact tolerance in the mesh but do not touch in the CAD.
+    pub separated: Vec<[u32; 2]>,
 }
 
 /// Flat mesh data for writing to Arrow IPC files.
@@ -86,6 +92,8 @@ pub struct MeshData {
     pub contact_tolerance: Option<f64>,
     /// Written as `yamc.overlaps` when not empty.
     pub overlaps: Vec<[u32; 2]>,
+    /// Written as `yamc.separated` when not empty.
+    pub separated: Vec<[u32; 2]>,
 }
 
 /// Write mesh data to an Arrow IPC file.
@@ -127,6 +135,17 @@ pub fn write_arrow_mesh(data: &MeshData, path: &Path) -> Result<(), Box<dyn std:
             .collect();
         metadata.insert(
             "yamc.overlaps".to_string(),
+            format!("[{}]", pairs.join(", ")),
+        );
+    }
+    if !data.separated.is_empty() {
+        let pairs: Vec<String> = data
+            .separated
+            .iter()
+            .map(|[a, b]| format!("[{a}, {b}]"))
+            .collect();
+        metadata.insert(
+            "yamc.separated".to_string(),
             format!("[{}]", pairs.join(", ")),
         );
     }
@@ -369,6 +388,18 @@ pub fn read_arrow_mesh(path: &Path) -> Result<ArrowMeshData, MeshError> {
             })
             .collect::<Result<Vec<_>, _>>()?,
     };
+    let separated = match metadata.get("yamc.separated") {
+        None => Vec::new(),
+        Some(json) => parse_surface_volumes_json(json)
+            .into_iter()
+            .map(|pair| match pair {
+                [Some(a), Some(b)] if a != b => Ok([a, b]),
+                _ => Err(MeshError::Parse(format!(
+                    "yamc.separated must be [[a, b], ...] pairs of distinct volume ids, got {json:?}"
+                ))),
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    };
     let contact_tolerance = match metadata.get("yamc.contact_tolerance") {
         None => None,
         Some(v) => match v.trim().parse::<f64>() {
@@ -605,6 +636,7 @@ pub fn read_arrow_mesh(path: &Path) -> Result<ArrowMeshData, MeshError> {
         imprinted,
         contact_tolerance,
         overlaps,
+        separated,
     })
 }
 
@@ -924,6 +956,12 @@ pub fn build_topology(data: ArrowMeshData) -> Result<MeshTopology, MeshError> {
         imprinted: data.imprinted,
         contact_tolerance: data.contact_tolerance,
         overlaps,
+        separated: data
+            .separated
+            .iter()
+            .filter(|&&[a, b]| a < num_volumes && b < num_volumes)
+            .map(|&[a, b]| (a.min(b), a.max(b)))
+            .collect(),
     })
 }
 
@@ -1343,6 +1381,7 @@ mod tests {
             imprinted: None,
             contact_tolerance: None,
             overlaps: vec![],
+            separated: vec![],
         };
 
         add_vacuum_boundary(&mut data, 5.0);
