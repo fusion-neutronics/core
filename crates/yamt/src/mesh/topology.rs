@@ -114,6 +114,15 @@ pub struct MeshTopology {
     // -- Implicit complement --
     /// Volume ID of the implicit complement (virtual "outside" volume).
     pub implicit_complement: VolumeId,
+
+    // -- Provenance --
+    /// `Some(false)` when the writer meshed every solid on its own (no
+    /// imprinting), so touching solids each have their own surface where they
+    /// meet. Selects discontinuous tracking in
+    /// [`crate::geometry::MeshGeometry::from_topology`].
+    pub imprinted: Option<bool>,
+    /// Contact tolerance (cm) the writer recorded for a non-imprinted mesh.
+    pub contact_tolerance: Option<f64>,
 }
 
 // ---------------------------------------------------------------------------

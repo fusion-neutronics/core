@@ -1,8 +1,9 @@
 """Main CadToYamc class -- end-to-end surface meshing pipeline.
 
-Takes a CadQuery assembly, imprints it, meshes each face with the
-``cad-to-dagmc-mesher`` scene mesher (see :mod:`yamc.cad._scene_extract`), and
-produces a global vertex + triangle mesh with per-face and per-volume metadata.
+Takes a CadQuery assembly, imprints it (unless ``imprint=False``), meshes each
+face with the ``cad-to-dagmc-mesher`` scene mesher (see
+:mod:`yamc.cad._scene_extract`), and produces a global vertex + triangle mesh
+with per-face and per-volume metadata.
 """
 
 from __future__ import annotations
@@ -183,6 +184,8 @@ class CadToYamc:
         self._surface_mesh = None
         self._tet_data = {}  # solid_id -> (tet_vertices, tet_connectivity)
         self._tet_index_maps = {}  # solid_id -> local vertex -> index in mesh.vertices
+        self._imprint = True
+        self._tolerance = None
 
     def add_cadquery_object(
         self,
@@ -211,6 +214,7 @@ class CadToYamc:
         tolerance: float = 0.1,
         angular_tolerance: float = 0.1,
         fidelity_check: bool = True,
+        imprint: bool = True,
     ) -> SurfaceMesh:
         """Mesh the assembly: surfaces + optional tet volumes.
 
@@ -227,6 +231,14 @@ class CadToYamc:
                 curved surfaces.  Default 0.1.
             angular_tolerance: Angular deflection tolerance for surface
                 meshing (radians).  Default 0.1 (~5.7 degrees).
+            imprint: Imprint the assembly first, so solids that touch share
+                one surface where they meet (a conformal mesh). ``False``
+                skips the imprint and meshes every solid on its own: much
+                faster on a large assembly, and it accepts CAD that will not
+                imprint cleanly. Touching solids then meet along two separately
+                faceted surfaces that may overlap or leave a thin gap, and
+                :class:`yamc.MeshGeometry` tracks the exported mesh
+                discontinuously to suit. Default True.
 
         Returns:
             SurfaceMesh with global vertex/triangle arrays.
@@ -243,6 +255,7 @@ class CadToYamc:
             tolerance=tolerance,
             angular_tolerance=angular_tolerance,
             fidelity_check=fidelity_check,
+            imprint=imprint,
         )
 
         if tet_volumes:
@@ -267,6 +280,7 @@ class CadToYamc:
         tolerance: float = 0.1,
         angular_tolerance: float = 0.1,
         fidelity_check: bool = True,
+        imprint: bool = True,
     ) -> SurfaceMesh:
         """Mesh all surfaces of the assembly.
 
@@ -274,6 +288,7 @@ class CadToYamc:
             tolerance: Chordal deflection tolerance for surface meshing
                 (3D units).
             angular_tolerance: Angular deflection tolerance (radians).
+            imprint: Imprint the assembly first; see :meth:`mesh`.
 
         Returns:
             SurfaceMesh with global vertex/triangle arrays.
@@ -285,6 +300,7 @@ class CadToYamc:
             tolerance=tolerance,
             angular_tolerance=angular_tolerance,
             fidelity_check=fidelity_check,
+            imprint=imprint,
         )
 
     def mesh_volumes(
@@ -328,7 +344,9 @@ class CadToYamc:
     # Internal implementation
     # ------------------------------------------------------------------
 
-    def _mesh_surfaces(self, tolerance=0.1, angular_tolerance=0.1, fidelity_check=True):
+    def _mesh_surfaces(
+        self, tolerance=0.1, angular_tolerance=0.1, fidelity_check=True, imprint=True
+    ):
         """Mesh surfaces with a hybrid backend, mirroring cad-to-dagmc-mesher.
 
         Solids whose faces are all primitive OCC surfaces (plane / cylinder /
@@ -343,7 +361,11 @@ class CadToYamc:
         from ._brepmesh import brepmesh_face_meshes
         from ._scene_extract import assemble_surface_mesh, scene_face_meshes
 
-        self._processed = process_assembly(self._assembly, self._material_tags)
+        self._processed = process_assembly(
+            self._assembly, self._material_tags, imprint=imprint
+        )
+        self._imprint = imprint
+        self._tolerance = tolerance
         pa = self._processed
 
         brep_fids, scene_fids = _route_faces(pa)
@@ -523,7 +545,10 @@ class CadToYamc:
         ]
 
         # Physical-group assignment, tet offsetting, surface-to-volume topology
-        # and the Arrow write all run in the Rust core in one call.
+        # and the Arrow write all run in the Rust core in one call. A mesh made
+        # without imprinting records that, with a contact tolerance of twice
+        # the chordal deflection: two facetings of one CAD surface each stay
+        # within the deflection of it, so they sit at most twice that apart.
         _cad_mesh_to_arrow(
             path=str(path),
             vertices=mesh.vertices,
@@ -536,6 +561,8 @@ class CadToYamc:
             face_solid_reversed=mesh.face_solid_reversed,
             tet_blocks=self._tet_blocks(),
             boundary_tags=tags,
+            imprinted=self._imprint,
+            contact_tolerance=None if self._imprint else 2.0 * self._tolerance,
         )
 
     def exterior_surface_ids(self) -> list[int]:

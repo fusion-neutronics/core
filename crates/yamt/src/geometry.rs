@@ -2,6 +2,7 @@
 //! geometric queries. Analogous to DAGMC's `DagMC` class.
 
 use crate::accel::bvh::Bvh;
+use crate::mesh::contacts::Contacts;
 use crate::mesh::topology::MeshTopology;
 use crate::query::{
     closest, element_walk, intersect, point_in_volume, ray_fire, ray_history::RayHistory,
@@ -70,6 +71,51 @@ pub(crate) struct SurfaceBvhData {
     pub(crate) tri_ids: Vec<TriangleId>,
     pub(crate) surf_ids: Vec<SurfaceId>,
     pub(crate) precomputed: PrecomputedTriData,
+    /// Per primitive: `+1` when the stored winding (edge1 x edge2) points out
+    /// of this BVH's volume, `-1` when it points in, `0` for a facet with no
+    /// real volume on either side (the graveyard), which is always accepted.
+    /// Lets discontinuous tracking cull facets the ray would ENTER the volume
+    /// through.
+    pub(crate) exit_sign: Vec<i8>,
+}
+
+impl SurfaceBvhData {
+    /// True when a ray along `direction` crossing primitive `i` leaves this
+    /// BVH's volume there. Graveyard facets (sign 0) always count.
+    #[inline]
+    fn leaves(&self, i: usize, direction: [f64; 3]) -> bool {
+        let sign = self.exit_sign[i];
+        if sign == 0 {
+            return true;
+        }
+        let n = intersect::cross(self.precomputed.edge1[i], self.precomputed.edge2[i]);
+        f64::from(sign) * intersect::dot(direction, n) > 0.0
+    }
+}
+
+/// Minimum hit distance (cm) for discontinuous tracking's ray fire, as in
+/// [`ray_fire`].
+const RAY_FIRE_MIN_T: f64 = 1e-10;
+
+/// How far (cm) relocation looks behind a crossing point, so that a facet
+/// coincident with the one just crossed is found. Far above the round-off in
+/// a hit point (about 1e-12 cm at metre-scale coordinates) and far below any
+/// modelled feature.
+const LOOKBACK: f64 = 1e-7;
+
+/// Contact tolerance for a non-imprinted mesh whose file does not record one:
+/// a thousandth of the model's bounding-box diagonal. Generous on purpose. It
+/// only decides which solids relocation asks, never which gaps are filled, so
+/// erring large costs a few extra ray queries and erring small loses overlap
+/// slivers deeper than it.
+fn default_contact_tolerance(topo: &MeshTopology) -> f64 {
+    let b = topo.global_aabb;
+    let d = ((b[3] - b[0]).powi(2) + (b[4] - b[1]).powi(2) + (b[5] - b[2]).powi(2)).sqrt();
+    if d.is_finite() && d > 0.0 {
+        1e-3 * d
+    } else {
+        1e-3
+    }
 }
 
 /// Complete mesh geometry with acceleration structures, ready for queries.
@@ -87,6 +133,16 @@ pub struct MeshGeometry {
     /// Per-volume element BVH + mapping arrays.
     /// `element_bvhs[vol_id] = (bvh, tet_ids)`
     element_bvhs: Vec<(Bvh, Vec<TetrahedronId>)>,
+
+    /// Discontinuous tracking, for a mesh whose solids were meshed one by one
+    /// without imprinting (see [`MeshGeometry::next_crossing`]).
+    discontinuous: bool,
+    /// Distance (cm) within which two solids' surfaces count as touching.
+    /// Meaningful only when `discontinuous` is set.
+    contact_tolerance: f64,
+    /// Per triangle, the other solids within `contact_tolerance` of it.
+    /// Empty unless `discontinuous` is set.
+    contacts: Contacts,
 }
 
 impl MeshGeometry {
@@ -138,11 +194,176 @@ impl MeshGeometry {
             topo.volume_measures = measures;
         }
 
-        Self {
+        let mut geometry = Self {
             topology: topo,
             surface_bvhs,
             element_bvhs,
+            discontinuous: false,
+            contact_tolerance: 0.0,
+            contacts: Contacts::default(),
+        };
+        if geometry.topology.imprinted == Some(false) {
+            let tol = geometry
+                .topology
+                .contact_tolerance
+                .unwrap_or_else(|| default_contact_tolerance(&geometry.topology));
+            geometry.set_contact_tolerance(Some(tol));
         }
+        geometry
+    }
+
+    /// Switch discontinuous tracking on with the given contact tolerance (cm),
+    /// or off with `None`.
+    ///
+    /// On is right for any mesh whose touching solids do not share a surface,
+    /// which is what meshing without imprinting produces; the file written by
+    /// such a mesher selects it on its own. Off is the imprinted (conformal)
+    /// tracking, where the surface topology alone says what is across every
+    /// surface. A partly imprinted mesh is fine on: shared surfaces still hand
+    /// over by topology.
+    pub fn set_contact_tolerance(&mut self, tolerance: Option<f64>) {
+        match tolerance {
+            Some(tol) => {
+                self.discontinuous = true;
+                self.contact_tolerance = tol;
+                self.contacts = Contacts::build(&self.topology, tol);
+            }
+            None => {
+                self.discontinuous = false;
+                self.contact_tolerance = 0.0;
+                self.contacts = Contacts::default();
+            }
+        }
+    }
+
+    /// The contact tolerance (cm) when tracking is discontinuous, `None` for
+    /// imprinted (conformal) tracking.
+    pub fn contact_tolerance(&self) -> Option<f64> {
+        self.discontinuous.then_some(self.contact_tolerance)
+    }
+
+    /// True when tracking is discontinuous (see [`MeshGeometry::next_crossing`]).
+    pub fn is_discontinuous(&self) -> bool {
+        self.discontinuous
+    }
+
+    /// The per-triangle contact lists discontinuous tracking relocates with.
+    pub fn contacts(&self) -> &Contacts {
+        &self.contacts
+    }
+
+    /// Next boundary crossing for discontinuous tracking, with the volume on
+    /// the other side: `(distance, surface, next volume)`.
+    ///
+    /// Only facets the ray LEAVES the current cell through count. From inside
+    /// a solid, a facet the ray would enter it through can only be the far
+    /// side of a coincident or gap sliver the particle is standing in; from
+    /// the implicit complement, a facet the ray would leave a solid through
+    /// belongs to a solid it already overlaps. Neither is a boundary of the
+    /// cell being tracked.
+    ///
+    /// A shared (imprinted) surface hands over by topology, as conformal
+    /// tracking does. A surface facing the implicit complement relocates (see
+    /// [`MeshGeometry::relocate`]), and the implicit complement enters the
+    /// solid whose facet it crossed.
+    ///
+    /// When the current solid has no facet ahead to leave through, the
+    /// particle is not inside it: it collided in a sliver absorbed into the
+    /// solid and is now heading away. It is re-located on the spot (a crossing
+    /// at distance 0 into wherever it is) rather than lost.
+    pub fn next_crossing(
+        &self,
+        volume: VolumeId,
+        origin: [f64; 3],
+        direction: [f64; 3],
+    ) -> Option<(f64, SurfaceId, Option<VolumeId>)> {
+        let sd = self.surface_bvhs.get(volume as usize)?;
+        let ic = self.topology.implicit_complement;
+        let hit = sd.bvh.ray_traverse_tris(
+            origin,
+            direction,
+            &sd.precomputed.v0,
+            &sd.precomputed.edge1,
+            &sd.precomputed.edge2,
+            RAY_FIRE_MIN_T,
+            |prim, _t| sd.leaves(prim as usize, direction),
+        );
+        let Some((prim, t)) = hit else {
+            if volume != ic {
+                let here = self.find_volume(origin);
+                if here != volume {
+                    return Some((0.0, SurfaceId::MAX, Some(here)));
+                }
+            }
+            return None;
+        };
+        let surf = sd.surf_ids[prim as usize];
+        let (fwd, rev) = self.topology.surface_volumes[surf as usize];
+        let other = if fwd == Some(volume) { rev } else { fwd };
+        let next = if volume == ic || other != Some(ic) {
+            other
+        } else {
+            let x = [
+                origin[0] + t * direction[0],
+                origin[1] + t * direction[1],
+                origin[2] + t * direction[2],
+            ];
+            Some(self.relocate(volume, sd.tri_ids[prim as usize], x, direction))
+        };
+        Some((t, surf, next))
+    }
+
+    /// The cell a particle is in after leaving solid `from` through triangle
+    /// `tri` at `x`, travelling along `u`.
+    ///
+    /// Only the solids touching `tri` (its contacts) can contain `x`, and each
+    /// is asked separately, on its own facets: `x` is inside it when the first
+    /// of its facets the ray from `x` meets is one the ray LEAVES it through.
+    /// That holds for an overlap sliver of any depth, and a third solid
+    /// overlapping the candidate further along the ray cannot confuse it (the
+    /// first facet of ANY solid ahead can be that third solid's entry, which
+    /// would read as "in a gap"). A candidate whose first facet is an entry
+    /// coincident with `x` takes the particle too. Otherwise `x` is in a gap,
+    /// and the gap is the implicit complement, as meshed.
+    ///
+    /// When several candidates contain `x` (a sliver claimed by more than one
+    /// solid), the lowest volume id wins.
+    fn relocate(&self, from: VolumeId, tri: TriangleId, x: [f64; 3], u: [f64; 3]) -> VolumeId {
+        for &k in self.contacts.of(tri) {
+            if k == from {
+                continue;
+            }
+            match self.first_facet(k, x, u) {
+                Some((_, true)) => return k,
+                Some((t, false)) if t <= LOOKBACK => return k,
+                _ => {}
+            }
+        }
+        self.topology.implicit_complement
+    }
+
+    /// First facet of `volume` met by a ray from `x` along `u`, looking
+    /// [`LOOKBACK`] behind `x` so a facet coincident with `x` is not missed:
+    /// `(distance from x, whether the ray leaves the volume there)`. A facet
+    /// the ray leaves through within [`LOOKBACK`] of `x` is skipped, as that
+    /// is the volume ending exactly where the particle is.
+    fn first_facet(&self, volume: VolumeId, x: [f64; 3], u: [f64; 3]) -> Option<(f64, bool)> {
+        let sd = &self.surface_bvhs[volume as usize];
+        let o = [
+            x[0] - LOOKBACK * u[0],
+            x[1] - LOOKBACK * u[1],
+            x[2] - LOOKBACK * u[2],
+        ];
+        let (prim, tp) = sd.bvh.ray_traverse_tris(
+            o,
+            u,
+            &sd.precomputed.v0,
+            &sd.precomputed.edge1,
+            &sd.precomputed.edge2,
+            0.0,
+            |prim, tp| !(sd.leaves(prim as usize, u) && tp <= 2.0 * LOOKBACK),
+        )?;
+        Some((tp - LOOKBACK, sd.leaves(prim as usize, u)))
     }
 
     /// Fire a ray within a volume. Returns `(distance, surface_id)` of
@@ -213,6 +434,11 @@ impl MeshGeometry {
         direction: [f64; 3],
         t_max: f64,
     ) -> Option<(f64, SurfaceId)> {
+        // Overlap slivers between independently meshed solids put foreign
+        // facets inside a volume by construction; the check does not apply.
+        if self.discontinuous {
+            return None;
+        }
         let eps = 1e-6_f64.max(t_max * 1e-9);
         let t_hi = t_max - eps;
         for w in 0..self.topology.num_volumes {
@@ -519,14 +745,27 @@ fn build_surface_bvhs(topo: &MeshTopology) -> Vec<SurfaceBvhData> {
         let mut tri_ids: Vec<TriangleId> = Vec::new();
         let mut surf_ids: Vec<SurfaceId> = Vec::new();
         let mut aabbs: Vec<[f64; 6]> = Vec::new();
+        let mut exit_sign: Vec<i8> = Vec::new();
+        let ic = topo.implicit_complement;
+        let real = |v: Option<VolumeId>| matches!(v, Some(v) if v != ic);
 
-        for &(surf_id, _sense) in &topo.volume_surfaces[vol_id as usize] {
+        for &(surf_id, sense) in &topo.volume_surfaces[vol_id as usize] {
+            let (fwd, rev) = topo.surface_volumes[surf_id as usize];
+            let sign: i8 = if !real(fwd) && !real(rev) {
+                0
+            } else {
+                match sense {
+                    Sense::Forward => 1,
+                    Sense::Reverse => -1,
+                }
+            };
             let range = &topo.surface_tri_ranges[surf_id as usize];
             for i in range.start..range.end {
                 let tri_id = topo.surface_tri_indices[i as usize];
                 tri_ids.push(tri_id);
                 surf_ids.push(surf_id);
                 aabbs.push(topo.triangle_aabbs[tri_id as usize]);
+                exit_sign.push(sign);
             }
         }
 
@@ -555,6 +794,7 @@ fn build_surface_bvhs(topo: &MeshTopology) -> Vec<SurfaceBvhData> {
                 edge1: edge1s,
                 edge2: edge2s,
             },
+            exit_sign,
         }
     };
 

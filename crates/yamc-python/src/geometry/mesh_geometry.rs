@@ -30,6 +30,15 @@ use yamc::geometry::mesh::MeshGeometry;
 /// the given offset (cm) around the geometry, with vacuum boundary
 /// conditions on all 6 faces.  Particles reaching this boundary are killed.
 ///
+/// A mesh written without imprinting (``CadToYamc.mesh(imprint=False)``)
+/// gives each solid its own surface, so touching solids meet along two
+/// independently faceted surfaces that may overlap or leave thin gaps. Such a
+/// mesh is tracked discontinuously: a particle leaving a solid is placed in
+/// whichever touching solid contains it, an overlap belongs to the solid the
+/// particle was already in, and a gap is the implicit complement, as meshed.
+/// The file records this; *contact_tolerance* forces it on for a mesh from
+/// another writer, or overrides the tolerance the file records.
+///
 /// Args:
 ///     filename: Path to an Arrow IPC mesh file (``.arrow``).
 ///     materials: Mapping of material name to :class:`Material`.
@@ -37,6 +46,10 @@ use yamc::geometry::mesh::MeshGeometry;
 ///         space between volumes.  Default ``None`` means void (free-streaming).
 ///     graveyard_offset: Optional offset (cm) for automatic vacuum boundary
 ///         box generation.
+///     contact_tolerance: Optional distance (cm) within which two solids'
+///         surfaces count as touching. Setting it tracks the mesh
+///         discontinuously. It must be at least the deepest overlap between
+///         touching solids; a larger value only costs speed.
 ///
 /// Raises:
 ///     ValueError: If the file is not an Arrow IPC mesh, or if it contains a
@@ -70,19 +83,29 @@ pub struct PyMeshGeometry {
     ic_mat: Option<Arc<yamc_materials::material::Material>>,
     /// Current graveyard offset.
     graveyard_offset: Option<f64>,
+    /// Contact tolerance passed by the caller, re-applied on rebuild.
+    contact_tolerance: Option<f64>,
 }
 
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyMeshGeometry {
     #[new]
-    #[pyo3(signature = (filename, materials, implicit_complement_material=None, graveyard_offset=None))]
+    #[pyo3(signature = (filename, materials, implicit_complement_material=None, graveyard_offset=None, contact_tolerance=None))]
     pub fn new<'py>(
         filename: &str,
         materials: &Bound<'py, PyDict>,
         implicit_complement_material: Option<&Bound<'py, PyMaterial>>,
         graveyard_offset: Option<f64>,
+        contact_tolerance: Option<f64>,
     ) -> PyResult<Self> {
+        if let Some(tol) = contact_tolerance
+            && !(tol.is_finite() && tol >= 0.0)
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "contact_tolerance must be a non-negative number of cm, got {tol}"
+            )));
+        }
         // Mirror PyGeometry::new: auto-assign material IDs to any Material
         // that doesn't have one yet, mutating the user's Python objects in
         // place. This means subsequent calls like
@@ -175,7 +198,10 @@ impl PyMeshGeometry {
         let topo = yamt::build_topology(data).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("Invalid mesh '{filename}': {e}"))
         })?;
-        let mesh = yamt::MeshGeometry::from_topology(topo);
+        let mut mesh = yamt::MeshGeometry::from_topology(topo);
+        if contact_tolerance.is_some() {
+            mesh.set_contact_tolerance(contact_tolerance);
+        }
 
         let inner = MeshGeometry::new(mesh, &mat_map, ic_mat.clone())
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
@@ -186,7 +212,24 @@ impl PyMeshGeometry {
             mat_map,
             ic_mat,
             graveyard_offset,
+            contact_tolerance,
         })
+    }
+
+    /// True when the mesh is tracked discontinuously: its solids were meshed
+    /// one by one without imprinting, so a particle leaving one is placed in
+    /// whichever touching solid contains it rather than read off a shared
+    /// surface.
+    #[getter]
+    pub fn discontinuous(&self) -> bool {
+        self.inner.mesh.is_discontinuous()
+    }
+
+    /// Distance (cm) within which two solids' surfaces count as touching, for
+    /// a discontinuously tracked mesh; ``None`` for an imprinted one.
+    #[getter]
+    pub fn contact_tolerance(&self) -> Option<f64> {
+        self.inner.mesh.contact_tolerance()
     }
 
     /// Number of volumes (cells) in the mesh (excluding implicit complement).
@@ -356,7 +399,10 @@ impl PyMeshGeometry {
         }
         let topo = yamt::build_topology(data)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid mesh: {e}")))?;
-        let mesh = yamt::MeshGeometry::from_topology(topo);
+        let mut mesh = yamt::MeshGeometry::from_topology(topo);
+        if self.contact_tolerance.is_some() {
+            mesh.set_contact_tolerance(self.contact_tolerance);
+        }
 
         self.inner = MeshGeometry::new(mesh, &self.mat_map, self.ic_mat.clone())
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;

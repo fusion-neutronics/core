@@ -260,6 +260,29 @@ impl MeshGeometry {
         let vol_id = self.volume_ids[cell_index];
         let ic_cell_index = self.cells.len() - 1;
 
+        if self.mesh.is_discontinuous() {
+            let ic = self.mesh.topology.implicit_complement;
+            return self.mesh.next_crossing(vol_id, position, direction).map(
+                |(distance, surface_id, next)| {
+                    let boundary = match self.mesh.boundary_condition(surface_id) {
+                        yamt::BoundaryCondition::Vacuum => BoundaryType::Vacuum,
+                        _ => BoundaryType::Transmission,
+                    };
+                    let next_cell_index = if boundary == BoundaryType::Vacuum {
+                        None
+                    } else {
+                        next.map(|v| if v == ic { ic_cell_index } else { v as usize })
+                    };
+                    BoundaryHit {
+                        distance,
+                        boundary,
+                        next_cell_index,
+                        surface_id: None,
+                    }
+                },
+            );
+        }
+
         self.mesh
             .ray_fire(vol_id, position, direction, None)
             .map(|(distance, surface_id)| {

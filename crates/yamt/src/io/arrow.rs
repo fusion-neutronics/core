@@ -9,6 +9,10 @@
 //! - "yamc.version": format version
 //! - "yamc.physical_groups": JSON physical group definitions
 //! - "yamc.surface_volumes": JSON surface→volume topology
+//! - "yamc.imprinted" (optional): "false" when every solid was meshed on its
+//!   own, without imprinting, so touching solids do not share surfaces
+//! - "yamc.contact_tolerance" (optional): for such a mesh, the distance (cm)
+//!   within which two solids' surfaces count as touching
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -42,6 +46,11 @@ pub struct ArrowMeshData {
     pub surface_volumes_json: String,
     /// Precomputed volume measures (cm³), one per volume. Empty if not in file.
     pub volume_measures: Vec<f64>,
+    /// `Some(false)` for a mesh whose solids were meshed independently
+    /// (not imprinted). `None` when the file does not say.
+    pub imprinted: Option<bool>,
+    /// Contact tolerance (cm) recorded for a non-imprinted mesh.
+    pub contact_tolerance: Option<f64>,
 }
 
 /// Flat mesh data for writing to Arrow IPC files.
@@ -65,6 +74,10 @@ pub struct MeshData {
     /// Optional JSON array of precomputed volume measures (cm³).
     /// Format: `"[1.0, 2.5, ...]"`. Empty string means not provided.
     pub volume_measures_json: String,
+    /// Written as `yamc.imprinted` when set.
+    pub imprinted: Option<bool>,
+    /// Written as `yamc.contact_tolerance` when set.
+    pub contact_tolerance: Option<f64>,
 }
 
 /// Write mesh data to an Arrow IPC file.
@@ -91,6 +104,12 @@ pub fn write_arrow_mesh(data: &MeshData, path: &Path) -> Result<(), Box<dyn std:
             "yamc.volume_measures".to_string(),
             data.volume_measures_json.clone(),
         );
+    }
+    if let Some(imprinted) = data.imprinted {
+        metadata.insert("yamc.imprinted".to_string(), imprinted.to_string());
+    }
+    if let Some(tol) = data.contact_tolerance {
+        metadata.insert("yamc.contact_tolerance".to_string(), format!("{tol:e}"));
     }
 
     let schema = Schema::new_with_metadata(
@@ -308,6 +327,27 @@ pub fn read_arrow_mesh(path: &Path) -> Result<ArrowMeshData, MeshError> {
         .get("yamc.volume_measures")
         .cloned()
         .unwrap_or_default();
+    let imprinted = match metadata.get("yamc.imprinted").map(|v| v.trim()) {
+        None => None,
+        Some("true") => Some(true),
+        Some("false") => Some(false),
+        Some(other) => {
+            return Err(MeshError::Parse(format!(
+                "yamc.imprinted must be \"true\" or \"false\", got {other:?}"
+            )));
+        }
+    };
+    let contact_tolerance = match metadata.get("yamc.contact_tolerance") {
+        None => None,
+        Some(v) => match v.trim().parse::<f64>() {
+            Ok(t) if t.is_finite() && t >= 0.0 => Some(t),
+            _ => {
+                return Err(MeshError::Parse(format!(
+                    "yamc.contact_tolerance must be a non-negative number of cm, got {v:?}"
+                )));
+            }
+        },
+    };
 
     let mut flat_vertices = Vec::new();
     let mut flat_triangles = Vec::new();
@@ -530,6 +570,8 @@ pub fn read_arrow_mesh(path: &Path) -> Result<ArrowMeshData, MeshError> {
         physical_groups_json,
         surface_volumes_json,
         volume_measures,
+        imprinted,
+        contact_tolerance,
     })
 }
 
@@ -845,6 +887,8 @@ pub fn build_topology(data: ArrowMeshData) -> Result<MeshTopology, MeshError> {
         volume_measures: data.volume_measures,
         physical_data,
         implicit_complement,
+        imprinted: data.imprinted,
+        contact_tolerance: data.contact_tolerance,
     })
 }
 
@@ -1236,6 +1280,8 @@ mod tests {
             physical_groups_json: r#"{"1": {"name": "mat:water", "dim": 3}}"#.to_string(),
             surface_volumes_json: "[[0, null]]".to_string(),
             volume_measures: vec![],
+            imprinted: None,
+            contact_tolerance: None,
         };
 
         add_vacuum_boundary(&mut data, 5.0);

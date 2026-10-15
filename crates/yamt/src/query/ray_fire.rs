@@ -47,7 +47,7 @@ pub fn ray_fire(
         tri_edge1,
         tri_edge2,
         RAY_FIRE_MIN_T,
-        |bvh_prim_idx| {
+        |bvh_prim_idx, _t| {
             if let Some(hist) = history {
                 !hist.contains(surface_bvh_tri_ids[bvh_prim_idx as usize])
             } else {

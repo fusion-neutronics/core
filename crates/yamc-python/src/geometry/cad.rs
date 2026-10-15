@@ -194,8 +194,25 @@ fn write_mesh_file(
     physical_groups_json: String,
     surface_volumes_json: String,
     volume_measures_json: String,
+    imprinted: Option<bool>,
+    contact_tolerance: Option<f64>,
 ) -> PyResult<()> {
     use yamt::mesh::cad_build::{tet_aabbs_flat, tet_adjacency_flat, tri_aabbs_flat};
+
+    if let Some(tol) = contact_tolerance {
+        if !(tol.is_finite() && tol >= 0.0) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "contact_tolerance must be a non-negative number of cm, got {tol}"
+            )));
+        }
+        if imprinted != Some(false) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "contact_tolerance only applies to a mesh written with imprinted=False: an \
+                 imprinted mesh shares the surface between touching solids, so there is no \
+                 contact to resolve",
+            ));
+        }
+    }
 
     let tet_adjacency = tet_adjacency_flat(&tetrahedra);
     let tri_aabbs = tri_aabbs_flat(&vertices, &triangles);
@@ -215,6 +232,8 @@ fn write_mesh_file(
         physical_groups_json,
         surface_volumes_json,
         volume_measures_json,
+        imprinted,
+        contact_tolerance,
     };
 
     write_arrow_mesh(&data, &PathBuf::from(path)).map_err(|e| {
@@ -227,6 +246,12 @@ fn write_mesh_file(
 /// Tet adjacency and triangle/tet AABBs are computed here from the flat
 /// connectivity (previously per-element Python loops), so the caller no longer
 /// supplies them.
+///
+/// ``imprinted=False`` records that the solids were meshed one by one, so
+/// touching solids each have their own surface where they meet;
+/// :class:`MeshGeometry` then tracks the mesh discontinuously, with
+/// ``contact_tolerance`` (cm) as the distance within which two solids'
+/// surfaces count as touching. Both are left out of the file when ``None``.
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (
@@ -241,6 +266,8 @@ fn write_mesh_file(
     physical_groups_json="{}".to_string(),
     surface_volumes_json="[]".to_string(),
     volume_measures_json="".to_string(),
+    imprinted=None,
+    contact_tolerance=None,
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn mesh_to_arrow(
@@ -255,6 +282,8 @@ pub fn mesh_to_arrow(
     physical_groups_json: String,
     surface_volumes_json: String,
     volume_measures_json: String,
+    imprinted: Option<bool>,
+    contact_tolerance: Option<f64>,
 ) -> PyResult<()> {
     write_mesh_file(
         &path,
@@ -268,6 +297,8 @@ pub fn mesh_to_arrow(
         physical_groups_json,
         surface_volumes_json,
         volume_measures_json,
+        imprinted,
+        contact_tolerance,
     )
 }
 
@@ -330,6 +361,10 @@ fn physical_groups_json(material_tags: &[String], boundary_tags: &[(String, Vec<
 ///     tet_blocks: ``(solid_id, vertex_offset, tets)`` per tetrahedralized solid.
 ///     boundary_tags: ``(boundary_name, surface_ids)`` pairs written as
 ///         ``dim=2`` ``boundary:<name>`` physical groups (surface ids 1-based).
+///     imprinted: Whether the assembly was imprinted before meshing. ``False``
+///         makes :class:`MeshGeometry` track the mesh discontinuously.
+///     contact_tolerance: For a mesh that was not imprinted, the distance
+///         (cm) within which two solids' surfaces count as touching.
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (
@@ -344,6 +379,8 @@ fn physical_groups_json(material_tags: &[String], boundary_tags: &[(String, Vec<
     face_solid_reversed,
     tet_blocks=vec![],
     boundary_tags=vec![],
+    imprinted=true,
+    contact_tolerance=None,
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn cad_mesh_to_arrow(
@@ -358,6 +395,8 @@ pub fn cad_mesh_to_arrow(
     face_solid_reversed: HashMap<(u32, i64), bool>,
     tet_blocks: Vec<(u32, usize, Vec<[u32; 4]>)>,
     boundary_tags: Vec<(String, Vec<u32>)>,
+    imprinted: bool,
+    contact_tolerance: Option<f64>,
 ) -> PyResult<()> {
     use yamt::mesh::cad_build::{
         face_owners, flatten_tet_blocks, surface_volume_pairs, triangle_owner_ids,
@@ -388,6 +427,8 @@ pub fn cad_mesh_to_arrow(
         physical_groups_json(&material_tags, &boundary_tags),
         serde_json::to_string(&surface_volumes).expect("serializing surface_volumes"),
         String::new(),
+        Some(imprinted),
+        contact_tolerance,
     )
 }
 
