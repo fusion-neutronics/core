@@ -484,22 +484,35 @@ impl MeshGeometry {
                 _ => first_facet(true),
             },
         };
-        // A higher-ranked solid overlapping this one takes over where the
-        // ray enters it, if that comes before this solid's own exit.
-        if let Some(Some(ob)) = self.overlap_bvhs.get(volume as usize) {
-            let limit = hit.map_or(f64::INFINITY, |(_, t)| t);
+        // A higher-ranked solid overlapping this one takes over where the ray
+        // enters it, if that comes before this solid's own exit. The query
+        // starts LOOKBACK behind the particle: an entry coincident with the
+        // crossing just taken (a part flush with its host's face, entered from
+        // outside; a part touching the one just left) is then just behind the
+        // particle, and is taken at distance 0. Only from inside this solid
+        // (an exit ahead): a particle outside it is re-located below.
+        if let (Some(Some(ob)), Some((_, limit))) = (self.overlap_bvhs.get(volume as usize), hit) {
+            let o = [
+                origin[0] - LOOKBACK * direction[0],
+                origin[1] - LOOKBACK * direction[1],
+                origin[2] - LOOKBACK * direction[2],
+            ];
             let entry = ob.data.bvh.ray_traverse_tris(
-                origin,
+                o,
                 direction,
                 &ob.data.precomputed.v0,
                 &ob.data.precomputed.edge1,
                 &ob.data.precomputed.edge2,
-                RAY_FIRE_MIN_T,
-                |prim, t| t < limit && ob.data.leaves(prim as usize, direction),
+                0.0,
+                |prim, t| t - LOOKBACK < limit && ob.data.leaves(prim as usize, direction),
             );
             if let Some((prim, t)) = entry {
                 let p = prim as usize;
-                return Some((t, ob.data.surf_ids[p], Beyond::Volume(Some(ob.enters[p]))));
+                return Some((
+                    (t - LOOKBACK).max(0.0),
+                    ob.data.surf_ids[p],
+                    Beyond::Volume(Some(ob.enters[p])),
+                ));
             }
         }
         let Some((prim, t)) = hit else {

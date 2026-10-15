@@ -594,3 +594,81 @@ fn the_default_contact_tolerance_ignores_a_graveyard() {
         assert!((tol - expected).abs() < 1e-15, "{graveyard:?}: {tol}");
     }
 }
+
+/// The cells a ray passes through, stepping 1e-8 past each crossing as the
+/// transport does. Zero-length visits (a hand-over at the point of arrival)
+/// are left out.
+fn walk(geom: &MeshGeometry, mut vol: u32, mut pos: [f64; 3], dir: [f64; 3]) -> Vec<u32> {
+    let mut cells = Vec::new();
+    for _ in 0..12 {
+        let Some((t, _, beyond)) = geom.next_crossing(vol, pos, dir) else {
+            break;
+        };
+        let x = [
+            pos[0] + t * dir[0],
+            pos[1] + t * dir[1],
+            pos[2] + t * dir[2],
+        ];
+        let next = match beyond {
+            Beyond::Volume(v) => v,
+            Beyond::Relocate(tri) => Some(geom.relocate(vol, tri, x, dir)),
+        };
+        if t > 1e-6 {
+            cells.push(vol);
+        }
+        pos = [
+            x[0] + 1e-8 * dir[0],
+            x[1] + 1e-8 * dir[1],
+            x[2] + 1e-8 * dir[2],
+        ];
+        match next {
+            Some(v) => vol = v,
+            None => break,
+        }
+    }
+    cells
+}
+
+#[test]
+fn touching_parts_inside_a_host_hand_over_to_each_other() {
+    // Host L = [0,10]^3 holds parts P and C, which touch at x = 5; both take
+    // their overlap with L. Crossing from P into C enters C: L contains the
+    // crossing point, but C's coincident entry is taken at once.
+    let l = ([0.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
+    let p = ([2.0, 2.0, 2.0], [5.0, 8.0, 8.0]);
+    let c = ([5.0, 2.0, 2.0], [8.0, 8.0, 8.0]);
+    let geom = boxes(&[l, p, c], vec![[0, 1], [0, 2]]).unwrap();
+    let cells = walk(&geom, 1, [3.0, 5.0, 5.0], [1.0, 0.0, 0.0]);
+    assert_eq!(&cells[..3], &[1, 2, 0], "{cells:?}");
+    let back = walk(&geom, 2, [7.0, 5.0, 5.0], [-1.0, 0.0, 0.0]);
+    assert_eq!(&back[..3], &[2, 1, 0], "{back:?}");
+}
+
+#[test]
+fn a_part_flush_with_its_hosts_face_is_entered_from_outside() {
+    // H = [1,2]^2 x [1,3] reaches the top face of L = [0,3]^3 and takes its
+    // overlap with L. Coming down through that face, whichever of the two
+    // coplanar facets the ray meets first, the particle is in H.
+    let l = ([0.0, 0.0, 0.0], [3.0, 3.0, 3.0]);
+    let h = ([1.0, 1.0, 1.0], [2.0, 2.0, 3.0]);
+    let geom = boxes(&[l, h], vec![[0, 1]]).unwrap();
+    let ic = geom.implicit_complement();
+    for (x, y) in [(1.5, 1.5), (1.2, 1.7), (1.9, 1.1), (1.25, 1.25)] {
+        let cells = walk(&geom, ic, [x, y, 4.0], [0.0, 0.0, -1.0]);
+        assert_eq!(&cells[..3], &[ic, 1, 0], "at ({x}, {y}): {cells:?}");
+    }
+}
+
+#[test]
+fn a_particle_outside_its_solid_is_not_carried_to_a_far_overlap() {
+    // L = [0,3]^3, with H = [-3,0.5]x[1,2]^2 taking its overlap. A particle
+    // tracked in L but standing just outside it (as after a collision in a
+    // gap given to L), heading away, has no exit of L ahead: it is re-located
+    // where it stands, not carried to where the ray would enter H.
+    let l = ([0.0, 0.0, 0.0], [3.0, 3.0, 3.0]);
+    let h = ([-3.0, 1.0, 1.0], [0.5, 2.0, 2.0]);
+    let geom = boxes(&[l, h], vec![[0, 1]]).unwrap();
+    let d = 0.5f64.sqrt();
+    let (t, cell) = next(&geom, 0, [-0.001, 2.5, 1.5], [-d, -d, 0.0]);
+    assert_eq!((t, cell), (0.0, Some(geom.implicit_complement())));
+}
