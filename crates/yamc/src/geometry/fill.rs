@@ -346,6 +346,19 @@ pub(crate) fn expand_fills(
                 host_label(cells)
             ));
         }
+        // Fill tracking hands a particle from one mesh volume to the next by
+        // the surfaces they share. A mesh made without imprinting shares
+        // none, so inside a fill every crossing between its solids would be
+        // read as leaving into the host: wrong material, no lost particles.
+        if mesh.is_discontinuous() {
+            return Err(format!(
+                "the MeshGeometry filling {} was meshed without imprinting, and a \
+                 mesh fill can only track a mesh whose touching solids share their \
+                 surfaces. Mesh it with imprint=True to use it as a fill, or use it \
+                 as the whole geometry of the Model",
+                host_label(cells)
+            ));
+        }
         // The host cell's material IS the complement; an implicit
         // complement material on the fill mesh would be silently ignored.
         if mesh_cells

@@ -260,3 +260,12 @@ def test_model_saves_fingerprint_but_does_not_load():
     assert "fills" in text
     with pytest.raises(ValueError, match="cannot be deserialized"):
         yamc.Model.load(text)
+
+
+def test_a_mesh_made_without_imprinting_cannot_be_a_fill():
+    """Fill tracking follows shared surfaces, which a discontinuously tracked
+    mesh does not have: refused at construction instead of mis-tracked."""
+    mesh = _mesh(contact_tolerance=1e-3)
+    assert mesh.discontinuous
+    with pytest.raises(ValueError, match="without imprinting"):
+        yamc.Geometry([_filled_cell(mesh)])
