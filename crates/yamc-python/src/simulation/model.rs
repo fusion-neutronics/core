@@ -1882,16 +1882,10 @@ impl PyModel {
     ) -> PyResult<crate::simulation::PySimulationResults> {
         use yamc::gpu::{run_on_gpu_with_device, GpuDispatchError};
 
-        // CPU path runs `init_photon_data` on every material as part
-        // of `run_internal`'s prep; the GPU dispatch goes straight to
-        // `run_on_gpu` and would otherwise see materials with empty
-        // `cached_elements`. Run the same prep here so a fresh model
-        // built for a `compute='gpu'` run works without first calling
-        // `compute='cpu'`.
-        self.inner
-            .ensure_photon_data_for_gpu()
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
-
+        // `run_on_gpu_with_device` prepares the materials itself (nuclide
+        // data from the global settings, temperature widening, photon data),
+        // the same prep `run_internal` runs on the CPU, so a fresh model works
+        // on `compute='gpu'` without a prior `read_nuclear_data` or CPU run.
         let start = std::time::Instant::now();
         let device = device.as_deref();
         let gpu_result = py.detach(|| run_on_gpu_with_device(&mut self.inner, device, settings));

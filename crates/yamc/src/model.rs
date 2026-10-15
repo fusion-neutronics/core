@@ -1253,6 +1253,38 @@ impl Model {
         Ok(())
     }
 
+    /// Load every material's missing nuclide data, from the source each
+    /// nuclide was read from or, failing that, the global configuration
+    /// (`yamc.cross_section_data`). This is the data-loading step both the CPU
+    /// (`run_internal`) and the GPU dispatch run before transport, so a model
+    /// whose materials never had `read_nuclear_data` called works on either.
+    ///
+    /// The downloads behind the loads go out together first; with `photons`
+    /// that includes the photon data of each material's elements. Materials
+    /// that already carry transport cross sections (`fast_xs`, e.g. from a
+    /// transmutation step) are left alone.
+    pub fn ensure_nuclear_data_loaded(&mut self, photons: bool) -> Result<(), String> {
+        yamc_materials::Material::prefetch_nuclear_data(
+            self.geometry
+                .materials()
+                .iter()
+                .filter(|m| m.fast_xs.is_none())
+                .map(|m| m.as_ref()),
+            photons,
+        );
+        for (i, material_arc) in self.geometry.materials_mut().iter_mut().enumerate() {
+            if material_arc.fast_xs.is_some() {
+                continue;
+            }
+            let mut material = (**material_arc).clone();
+            material
+                .ensure_nuclides_loaded()
+                .map_err(|e| format!("{}: {e}", material_label(&material, i)))?;
+            *material_arc = Arc::new(material);
+        }
+        Ok(())
+    }
+
     /// Run the simulation with particle tracking enabled.
     ///
     /// This captures detailed event-by-event data during transport for debugging
@@ -1333,16 +1365,7 @@ impl Model {
         // `calculate_macroscopic_xs` borrows a `&Vec<i32>`; own the slice
         // once here so the per-material loop borrows it without reallocating.
         let mt_filter = mt_filter.to_vec();
-        // The loop below loads one material, and one nuclide, at a time. The
-        // downloads behind those loads go out together first.
-        yamc_materials::Material::prefetch_nuclear_data(
-            self.geometry
-                .materials()
-                .iter()
-                .filter(|m| m.fast_xs.is_none())
-                .map(|m| m.as_ref()),
-            transport_secondary_photons,
-        );
+        self.ensure_nuclear_data_loaded(transport_secondary_photons)?;
         for (i, material_arc) in self.geometry.materials_mut().iter_mut().enumerate() {
             // Skip materials that already have transport XS computed (e.g., from transmutation step)
             if material_arc.fast_xs.is_some() {
@@ -1355,9 +1378,6 @@ impl Model {
                 eprintln!("[DEBUG] Material slot {i} calculating macroscopic XS...");
             }
             let mut material = (**material_arc).clone();
-            material
-                .ensure_nuclides_loaded()
-                .map_err(|e| format!("{}: {e}", material_label(&material, i)))?;
             material.calculate_macroscopic_xs(&mt_filter, true);
             if has_nuclide_tallies {
                 material.populate_per_nuclide_xs();
