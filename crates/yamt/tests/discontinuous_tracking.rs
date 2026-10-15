@@ -379,3 +379,15 @@ fn cyclic_overlaps_are_refused() {
     let err = boxes(&[OUTER, INNER], vec![[0, 1], [1, 0]]).err().unwrap();
     assert!(err.contains("cyclic"), "{err}");
 }
+
+#[test]
+fn a_mesh_without_provenance_whose_solids_touch_is_flagged() {
+    // Touching boxes with separate surfaces and nothing in the file to say
+    // so: tracked conformally, which cannot cross the interface.
+    assert!(two_boxes(0.0, false, None).looks_unimprinted(1000));
+    assert!(two_boxes(-0.01, true, None).looks_unimprinted(1000));
+    // Separated by a real gap: nothing to cross, nothing to flag.
+    assert!(!two_boxes(0.5, false, None).looks_unimprinted(1000));
+    // Recorded as non-imprinted: already tracked discontinuously.
+    assert!(!two_boxes(0.0, false, Some(false)).looks_unimprinted(1000));
+}

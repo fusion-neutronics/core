@@ -205,6 +205,19 @@ impl PyMeshGeometry {
         if contact_tolerance.is_some() {
             mesh.set_contact_tolerance(contact_tolerance);
         }
+        if mesh.looks_unimprinted(4096) {
+            materials.py().import("warnings")?.call_method1(
+                "warn",
+                (format!(
+                    "'{filename}': some solids touch without sharing a surface, as in a mesh \
+                     made without imprinting, but the file does not say it was made that way. \
+                     Tracked as an imprinted mesh, a particle leaving one of these solids is \
+                     not placed in the solid it enters, so tallies come out wrong without any \
+                     lost particles. Pass contact_tolerance=<distance in cm> to track it \
+                     discontinuously."
+                ),),
+            )?;
+        }
 
         let inner = MeshGeometry::new(mesh, &mat_map, ic_mat.clone())
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
