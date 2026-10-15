@@ -35,6 +35,7 @@ smoke test (see [Exercised by CI / pre-commit](#exercised-by-ci--pre-commit)).
 - [`two_cubes_with_gap.py`](two_cubes_with_gap.py) -- two separated cubes; transport through the implicit complement / graveyard.
 - [`lost_particle.py`](lost_particle.py) -- how lost particles (geometry gaps) are reported and debugged.
 - [`surface_mesh_simulation.py`](surface_mesh_simulation.py) -- **(mesh)** surface-mesh geometry from CadQuery for transport.
+- [`mesh_without_imprinting.py`](mesh_without_imprinting.py) -- **(mesh)** mesh each solid on its own (`imprint=False`) and transport the discontinuous mesh; compares with the imprinted mesh.
 - [`yamt_mixed_mesh_adjacent_cubes.py`](yamt_mixed_mesh_adjacent_cubes.py) -- **(mesh)** mixed tet + surface-only adjacent cubes.
 - [`yamt_mixed_mesh_hollow_spheres.py`](yamt_mixed_mesh_hollow_spheres.py) -- **(mesh)** mixed tet + surface-only nested hollow spheres.
 
