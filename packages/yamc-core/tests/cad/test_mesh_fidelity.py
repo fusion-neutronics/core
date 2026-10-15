@@ -83,3 +83,31 @@ def test_locally_collapsed_solid_flagged():
     flagged = " ".join(problems)
     assert "solid 1:" in flagged
     assert "solid 2:" not in flagged
+
+
+def test_a_revolved_spline_profile_meshes_faithfully():
+    """A D-shaped profile (spline outboard, straight inboard) revolved half a
+    turn about the z axis, the way paramak builds tokamak components. Its
+    surface of revolution used to go to the scene CDT, which meshed the solid
+    49% short in volume; it now goes to BRepMesh with the rest of the solid,
+    and the default fidelity gate passes."""
+    from OCP.BRepAdaptor import BRepAdaptor_Surface
+    from OCP.GeomAbs import GeomAbs_SurfaceOfRevolution
+
+    profile = (
+        cq.Workplane("XZ")
+        .moveTo(300, -200)
+        .spline([(450, -120), (520, 0), (450, 120)], includeCurrent=True)
+        .lineTo(300, 200)
+        .close()
+    )
+    solid = profile.revolve(180, (0, 0, 0), (0, 1, 0))
+    assert any(
+        BRepAdaptor_Surface(f.wrapped).GetType() == GeomAbs_SurfaceOfRevolution
+        for f in solid.val().Faces()
+    )
+    assy = cq.Assembly()
+    assy.add(solid, name="blanket")
+    c2y = CadToYamc()
+    c2y.add_cadquery_object(assy, material_tags=["blanket"])
+    c2y.mesh(tolerance=0.5)

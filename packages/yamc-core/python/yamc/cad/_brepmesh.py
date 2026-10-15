@@ -1,7 +1,8 @@
 """BRepMesh surface meshing for all-primitive solids.
 
 Mirrors cad-to-dagmc-mesher's routing: solids whose faces are all primitive OCC
-surfaces (plane / cylinder / cone / sphere / torus) are meshed with OCC
+surfaces (plane / cylinder / cone / sphere / torus, plus surfaces of
+revolution, which the scene CDT meshes short) are meshed with OCC
 ``BRepMesh``. BRepMesh uses the *harmonized OCC edge discretization*, so
 adjacent faces share boundary vertices and closed curved surfaces (sphere,
 torus) come out watertight -- whereas the scene CDT struggles to close them

@@ -103,10 +103,18 @@ def _route_faces(pa):
 
     A face goes to BRepMesh iff every solid owning it is "all-primitive" -- all
     of that solid's faces are primitive OCC surfaces (plane / cylinder / cone /
-    sphere / torus) -- or the face is a closed doubly-periodic surface (see
-    ``_is_closed_doubly_periodic``). Faces of solids with any b-spline /
-    imported surface otherwise go to the scene CDT. Returns
-    ``(brep_face_ids, scene_face_ids)``.
+    sphere / torus) or surfaces of revolution -- or the face is a closed
+    doubly-periodic surface (see ``_is_closed_doubly_periodic``). Faces of
+    solids with any other b-spline / imported surface go to the scene CDT.
+    Returns ``(brep_face_ids, scene_face_ids)``.
+
+    Surfaces of revolution count as primitive because the scene CDT meshes
+    them short: a profile revolved about an axis is u-periodic, and the CDT
+    closes its seam on itself (it logs "self-touching face boundary"), leaving
+    paramak tokamaks 40% short in face area and up to 99.9% short in solid
+    volume. BRepMesh meshes them to the requested deflection. Routing is per
+    solid, so the edges a solid's faces share are still discretized by one
+    mesher.
     """
     from OCP.BRepAdaptor import BRepAdaptor_Surface
     from OCP.GeomAbs import (
@@ -115,10 +123,12 @@ def _route_faces(pa):
         GeomAbs_Cone,
         GeomAbs_Sphere,
         GeomAbs_Torus,
+        GeomAbs_SurfaceOfRevolution,
     )
 
     primitive_types = {
         GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Cone, GeomAbs_Sphere, GeomAbs_Torus,
+        GeomAbs_SurfaceOfRevolution,
     }
     solid_all_primitive = {
         sid: all(
