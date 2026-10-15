@@ -147,16 +147,23 @@ const RAY_FIRE_MIN_T: f64 = 1e-10;
 const LOOKBACK: f64 = 1e-7;
 
 /// Contact tolerance for a non-imprinted mesh whose file does not record one:
-/// a ten-thousandth of the model's bounding-box diagonal, enough to cover
-/// facetings that agree to a few significant figures without filling a gap
-/// anyone modelled on purpose.
+/// a ten-thousandth of the diagonal of the box around its solids (a graveyard
+/// added around them does not count), enough to cover facetings that agree to
+/// a few significant figures without filling a gap anyone modelled on purpose.
 fn default_contact_tolerance(topo: &MeshTopology) -> f64 {
-    let b = topo.global_aabb;
-    let d = ((b[3] - b[0]).powi(2) + (b[4] - b[1]).powi(2) + (b[5] - b[2]).powi(2)).sqrt();
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for b in topo.volume_aabbs.iter().take(topo.num_volumes as usize) {
+        for k in 0..3 {
+            lo[k] = lo[k].min(b[k]);
+            hi[k] = hi[k].max(b[k + 3]);
+        }
+    }
+    let d = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt();
     if d.is_finite() && d > 0.0 {
-        1e-3 * d
+        1e-4 * d
     } else {
-        1e-3
+        1e-4
     }
 }
 
@@ -396,10 +403,14 @@ impl MeshGeometry {
     /// left to the caller to do once the crossing is taken. The implicit
     /// complement enters the solid whose facet it crossed.
     ///
-    /// When the current solid has no facet ahead to leave through, the
-    /// particle is not inside it: it collided in a sliver absorbed into the
-    /// solid and is now heading away. It is re-located on the spot (a crossing
-    /// at distance 0 into wherever it is) rather than lost.
+    /// A particle can be outside the solid it is tracked in: relocation gives a
+    /// gap thinner than the contact tolerance to the solid ahead, and the
+    /// particle may collide in that gap. Then the solid's first facet ahead is
+    /// one the ray would enter it through. Within the contact tolerance that is
+    /// the far side of the gap, and the particle carries on into the solid.
+    /// Beyond it, or with no facet ahead at all, the particle has left the gap
+    /// heading away from the solid (across a hole in it, say), and is
+    /// re-located on the spot: a crossing at distance 0 into wherever it is.
     pub fn next_crossing(
         &self,
         volume: VolumeId,
@@ -408,7 +419,7 @@ impl MeshGeometry {
     ) -> Option<(f64, SurfaceId, Beyond)> {
         let sd = self.surface_bvhs.get(volume as usize)?;
         let ic = self.topology.implicit_complement;
-        let hit = self.exit_ahead(volume, origin, direction).or_else(|| {
+        let first_facet = |exits_only: bool| {
             sd.bvh.ray_traverse_tris(
                 origin,
                 direction,
@@ -416,9 +427,25 @@ impl MeshGeometry {
                 &sd.precomputed.edge1,
                 &sd.precomputed.edge2,
                 RAY_FIRE_MIN_T,
-                |prim, _t| sd.leaves(prim as usize, direction),
+                |prim, _t| !exits_only || sd.leaves(prim as usize, direction),
             )
-        });
+        };
+        let hit = match self.exit_ahead(volume, origin, direction) {
+            Some(hit) => Some(hit),
+            None if volume == ic => first_facet(true),
+            // Inside the solid, the nearest of its facets is an exit: one query.
+            None => match first_facet(false) {
+                Some((prim, t)) if sd.leaves(prim as usize, direction) => Some((prim, t)),
+                Some((_, t)) if t > self.contact_tolerance => {
+                    let here = self.find_volume(origin);
+                    if here != volume {
+                        return Some((0.0, SurfaceId::MAX, Beyond::Volume(Some(here))));
+                    }
+                    first_facet(true)
+                }
+                _ => first_facet(true),
+            },
+        };
         let Some((prim, t)) = hit else {
             if volume != ic {
                 let here = self.find_volume(origin);
@@ -452,10 +479,11 @@ impl MeshGeometry {
     /// facet is the nearest entry within the contact tolerance takes the
     /// particle: the two solids count as touching there, and the thin gap
     /// between their facetings goes to the solid ahead rather than to the
-    /// implicit complement. A pair the writer recorded as separated in the
-    /// CAD (see [`MeshTopology::separated`]) never counts as touching, so a
-    /// modelled gap narrower than the tolerance stays a gap. Otherwise `x` is
-    /// in a real gap, which is the implicit complement.
+    /// implicit complement. When that nearest solid is one the writer recorded
+    /// as separated from `from` in the CAD (see [`MeshTopology::separated`]),
+    /// the gap is real and stays the implicit complement, even if a solid that
+    /// does touch `from` lies just beyond it. With no solid near, `x` is in a
+    /// real gap too.
     ///
     /// When several candidates contain `x` (a sliver claimed by more than one
     /// solid), the lowest volume id wins.
@@ -483,8 +511,7 @@ impl MeshGeometry {
                     return k;
                 }
                 Some((t, false, _))
-                    if (t <= LOOKBACK
-                        || (t <= self.contact_tolerance && !self.separated(from, k)))
+                    if t <= LOOKBACK.max(self.contact_tolerance)
                         && nearest.is_none_or(|(best, _)| t < best) =>
                 {
                     nearest = Some((t, k));
@@ -492,7 +519,15 @@ impl MeshGeometry {
                 _ => {}
             }
         }
-        nearest.map_or(self.topology.implicit_complement, |(_, k)| k)
+        match nearest {
+            // The nearest solid ahead is apart from this one in the CAD: the
+            // gap in front of the particle is real, whatever touches beyond.
+            Some((t, k)) if t > LOOKBACK && self.separated(from, k) => {
+                self.topology.implicit_complement
+            }
+            Some((_, k)) => k,
+            None => self.topology.implicit_complement,
+        }
     }
 
     /// The exit facet the last relocation on this thread found, if this query

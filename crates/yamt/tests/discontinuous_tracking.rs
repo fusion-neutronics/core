@@ -7,7 +7,7 @@
 //! complement when there is a gap, and never a box it is not inside.
 
 use yamt::mesh::topology::{build_tet_aabbs, build_triangle_aabbs};
-use yamt::{build_topology, ArrowMeshData, Beyond, MeshGeometry};
+use yamt::{add_vacuum_boundary, build_topology, ArrowMeshData, Beyond, MeshGeometry};
 
 /// Closed axis-aligned box with outward winding. `split` picks which diagonal
 /// splits the +x face, so two boxes can mesh a shared plane differently.
@@ -58,6 +58,16 @@ fn push_box(
 /// solid with its own surface (no imprint). B's -x face is split along the
 /// other diagonal from A's +x face when `cross_split` is set.
 fn two_boxes(shift: f64, cross_split: bool, imprinted: Option<bool>) -> MeshGeometry {
+    let data = two_boxes_data(shift, cross_split, imprinted, imprinted.map(|_| 0.05));
+    MeshGeometry::from_topology(build_topology(data).unwrap())
+}
+
+fn two_boxes_data(
+    shift: f64,
+    cross_split: bool,
+    imprinted: Option<bool>,
+    contact_tolerance: Option<f64>,
+) -> ArrowMeshData {
     let mut vertices = Vec::new();
     let mut triangles = Vec::new();
     let na = push_box(
@@ -80,7 +90,7 @@ fn two_boxes(shift: f64, cross_split: bool, imprinted: Option<bool>) -> MeshGeom
     triangle_surface_ids.extend(vec![2u32; nb]);
     let mut triangle_physical_groups = vec![1i32; na];
     triangle_physical_groups.extend(vec![2i32; nb]);
-    let data = ArrowMeshData {
+    ArrowMeshData {
         triangle_aabbs: build_triangle_aabbs(&triangles, &vertices),
         tet_aabbs: build_tet_aabbs(&[], &vertices),
         tet_adjacency: vec![],
@@ -98,10 +108,9 @@ fn two_boxes(shift: f64, cross_split: bool, imprinted: Option<bool>) -> MeshGeom
         surface_volumes_json: "[[0, null], [1, null]]".to_string(),
         volume_measures: vec![],
         imprinted,
-        contact_tolerance: imprinted.map(|_| 0.05),
+        contact_tolerance,
         separated: vec![],
-    };
-    MeshGeometry::from_topology(build_topology(data).unwrap())
+    }
 }
 
 const A: u32 = 0;
@@ -309,12 +318,27 @@ fn layered(
 ) -> MeshGeometry {
     let mut vertices = Vec::new();
     let mut triangles = Vec::new();
+    let counts: Vec<usize> = spec
+        .iter()
+        .map(|&(lo, hi)| push_box(&mut vertices, &mut triangles, lo, hi, false, false))
+        .collect();
+    solids(vertices, triangles, &counts, tolerance, separated)
+}
+
+/// Solids pushed one after another (`counts` triangles each), each its own
+/// surface with the implicit complement outside, meshed without imprinting.
+fn solids(
+    vertices: Vec<[f64; 3]>,
+    triangles: Vec<[u32; 3]>,
+    counts: &[usize],
+    tolerance: f64,
+    separated: Vec<[u32; 2]>,
+) -> MeshGeometry {
     let mut triangle_surface_ids = Vec::new();
     let mut triangle_physical_groups = Vec::new();
     let mut groups = Vec::new();
     let mut sv = Vec::new();
-    for (i, &(lo, hi)) in spec.iter().enumerate() {
-        let n = push_box(&mut vertices, &mut triangles, lo, hi, false, false);
+    for (i, &n) in counts.iter().enumerate() {
         triangle_surface_ids.extend(vec![i as u32 + 1; n]);
         triangle_physical_groups.extend(vec![i as i32 + 1; n]);
         groups.push(format!(r#""{}": {{"name": "mat:m{i}", "dim": 3}}"#, i + 1));
@@ -339,6 +363,38 @@ fn layered(
         separated,
     };
     MeshGeometry::from_topology(build_topology(data).unwrap())
+}
+
+/// Square tube along z: outer [-1, 2]^2, a square hole [-g, 1 + g]^2 around
+/// the unit box, z in [0, 1], wound outward (into the hole on its inner wall).
+fn push_tube(vertices: &mut Vec<[f64; 3]>, triangles: &mut Vec<[u32; 3]>, g: f64) -> usize {
+    let o = vertices.len() as u32;
+    let outer = [(-1.0, -1.0), (2.0, -1.0), (2.0, 2.0), (-1.0, 2.0)];
+    let inner = [(-g, -g), (1.0 + g, -g), (1.0 + g, 1.0 + g), (-g, 1.0 + g)];
+    for z in [0.0, 1.0] {
+        for &(x, y) in &outer {
+            vertices.push([x, y, z]);
+        }
+    }
+    for z in [0.0, 1.0] {
+        for &(x, y) in &inner {
+            vertices.push([x, y, z]);
+        }
+    }
+    let oi = |i: u32, z: u32| o + (i % 4) + 4 * z;
+    let ii = |i: u32, z: u32| o + 8 + (i % 4) + 4 * z;
+    let before = triangles.len();
+    for i in 0..4u32 {
+        triangles.push([oi(i, 1), oi(i + 1, 1), ii(i + 1, 1)]);
+        triangles.push([oi(i, 1), ii(i + 1, 1), ii(i, 1)]);
+        triangles.push([oi(i, 0), ii(i, 0), ii(i + 1, 0)]);
+        triangles.push([oi(i, 0), ii(i + 1, 0), oi(i + 1, 0)]);
+        triangles.push([oi(i, 0), oi(i + 1, 0), oi(i + 1, 1)]);
+        triangles.push([oi(i, 0), oi(i + 1, 1), oi(i, 1)]);
+        triangles.push([ii(i, 0), ii(i, 1), ii(i + 1, 1)]);
+        triangles.push([ii(i, 0), ii(i + 1, 1), ii(i + 1, 0)]);
+    }
+    triangles.len() - before
 }
 
 #[test]
@@ -379,4 +435,65 @@ fn a_gap_the_cad_has_is_not_filled() {
     let (t, n) = next(&separated, 2, [1.0 + 1e-8, 0.5, 0.5], [1.0, 0.0, 0.0]);
     assert!((t - 0.03).abs() < 1e-7, "t = {t}");
     assert_eq!(n, Some(1));
+}
+
+#[test]
+fn a_particle_heading_back_across_a_hole_leaves_the_solid_it_was_given() {
+    // Block A in the square hole of tube B, with a 0.01 gap all round and a
+    // 0.05 contact tolerance: leaving A, the particle is given B in the gap.
+    let mut vertices = Vec::new();
+    let mut triangles = Vec::new();
+    let na = push_box(
+        &mut vertices,
+        &mut triangles,
+        [0.0; 3],
+        [1.0; 3],
+        false,
+        false,
+    );
+    let nb = push_tube(&mut vertices, &mut triangles, 0.01);
+    let geom = solids(vertices, triangles, &[na, nb], 0.05, vec![]);
+    assert_eq!(next(&geom, A, [0.5, 0.5, 0.5], [1.0, 0.0, 0.0]).1, Some(B));
+    // Carrying on, it crosses the gap and the tube to the tube's outer wall.
+    let (t, _) = next(&geom, B, [1.005, 0.5, 0.5], [1.0, 0.0, 0.0]);
+    assert!((t - 0.995).abs() < 1e-9, "t = {t}");
+    // Scattered back in the gap, its next facet of B is the far wall of the
+    // hole, an entry: it has left B's side and is re-located where it is (in
+    // the gap), rather than crossing A and the hole as B.
+    let (t, cell) = next(&geom, B, [1.005, 0.5, 0.5], [-1.0, 0.0, 0.0]);
+    assert_eq!((t, cell), (0.0, Some(IC)));
+}
+
+#[test]
+fn a_separated_layer_in_front_of_a_touching_solid_keeps_its_gap() {
+    // Block A, a foil C 0.02 off it that the CAD says is apart from A, and
+    // block B 0.06 off it that the CAD does not (they touch elsewhere, say),
+    // all within the 0.1 contact tolerance. The gap to C is real: leaving A
+    // goes to the implicit complement, and from there into C, not past it.
+    let a = ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+    let b = ([1.06, 0.0, 0.0], [2.0, 1.0, 1.0]);
+    let c = ([1.02, 0.0, 0.0], [1.04, 1.0, 1.0]);
+    let geom = layered(&[a, b, c], 0.1, vec![[0, 2]]);
+    let ic = geom.implicit_complement();
+    assert_eq!(next(&geom, 0, [0.5, 0.5, 0.5], [1.0, 0.0, 0.0]).1, Some(ic));
+    let (t, cell) = next(&geom, ic, [1.0 + 1e-8, 0.5, 0.5], [1.0, 0.0, 0.0]);
+    assert!((t - 0.02).abs() < 1e-6, "t = {t}");
+    assert_eq!(cell, Some(2));
+}
+
+#[test]
+fn the_default_contact_tolerance_ignores_a_graveyard() {
+    // A file that says it was not imprinted but records no tolerance gets a
+    // ten-thousandth of its solids' bounding-box diagonal ([0,2]x[0,1]^2
+    // here), whatever box a graveyard adds around them.
+    let expected = 1e-4 * 6f64.sqrt();
+    for graveyard in [None, Some(10.0)] {
+        let mut data = two_boxes_data(0.0, false, Some(false), None);
+        if let Some(offset) = graveyard {
+            add_vacuum_boundary(&mut data, offset);
+        }
+        let geom = MeshGeometry::from_topology(build_topology(data).unwrap());
+        let tol = geom.contact_tolerance().unwrap();
+        assert!((tol - expected).abs() < 1e-15, "{graveyard:?}: {tol}");
+    }
 }
