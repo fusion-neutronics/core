@@ -295,21 +295,22 @@ impl MeshGeometry {
         self.discontinuous
     }
 
-    /// True when the mesh looks as if its solids were meshed without
-    /// imprinting although nothing says so: some solid's surface, facing the
-    /// implicit complement, has another solid right behind it. Conformal
-    /// tracking reads the far side of such a surface as the implicit
-    /// complement and skips the other solid, without losing particles.
+    /// True when some solids touch without sharing a surface, while the mesh
+    /// is tracked conformally: some solid's surface, facing the implicit
+    /// complement, has another solid right behind it. Conformal tracking
+    /// reads the far side of such a surface as the implicit complement and
+    /// skips the other solid, without losing particles. A mesh made without
+    /// imprinting is like that throughout; an imprinted one where the imprint
+    /// failed to share some faces is like that in places.
     ///
-    /// Checked only for a mesh that is tracked conformally and does not
-    /// record its provenance. Probes, for up to `max_probes` triangles
-    /// spread over every surface facing the implicit complement, a point just
-    /// outside the solid along the outward normal, and asks whether any other
-    /// solid contains it. Edge-only contact (two solids meeting along a line,
-    /// as imprinted solids do at a shared edge) does not trigger it.
-    pub fn looks_unimprinted(&self, max_probes: usize) -> bool {
+    /// Probes, for up to `max_probes` triangles spread over every surface
+    /// facing the implicit complement, a point just outside the solid along
+    /// the outward normal, and asks whether any other solid contains it.
+    /// Edge-only contact (two solids meeting along a line, as imprinted solids
+    /// do at a shared edge) does not trigger it.
+    pub fn touches_without_shared_surface(&self, max_probes: usize) -> bool {
         let topo = &self.topology;
-        if self.discontinuous || topo.imprinted.is_some() || topo.num_volumes < 2 {
+        if self.discontinuous || topo.num_volumes < 2 {
             return false;
         }
         let ic = topo.implicit_complement;

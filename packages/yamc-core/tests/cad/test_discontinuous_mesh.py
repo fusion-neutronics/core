@@ -293,6 +293,16 @@ def test_a_mesh_from_another_writer_whose_solids_touch_is_flagged(tmp_path):
         _two_box_fluxes(path, contact_tolerance=1e-3)
 
 
+def test_an_imprint_that_left_touching_solids_unshared_is_flagged(tmp_path):
+    """A file that says it was imprinted, but whose touching solids still have
+    separate surfaces, is an imprint that went wrong: warn, naming the imprint
+    and the way out."""
+    path = str(tmp_path / "boxes.arrow")
+    _write_touching_boxes(path, imprinted=True)
+    with pytest.warns(UserWarning, match="imprint did not join them"):
+        _two_box_fluxes(path)
+
+
 def test_a_gap_in_the_cad_is_recorded_and_kept(tmp_path):
     """Two cubes 0.05 apart, meshed at a 0.1 deflection: the gap is within
     the 0.2 contact tolerance, but the CAD says the cubes do not touch, so the

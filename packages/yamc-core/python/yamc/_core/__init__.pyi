@@ -2350,9 +2350,10 @@ class MeshGeometry:
     whichever touching solid contains it. Solids closer than the contact
     tolerance count as touching, so an overlap or a gap thinner than it is
     crossed straight into the next solid (an overlap stays with the solid the
-    particle was already in); a wider gap is the implicit complement. The file
-    records all this; *contact_tolerance* forces it on for a mesh from another
-    writer, or overrides the tolerance the file records.
+    particle was already in); a wider gap, or one the file records as being in
+    the CAD, is the implicit complement. The file records all this;
+    *contact_tolerance* forces it on for a mesh from another writer, or
+    overrides the tolerance the file records.
     
     Args:
         filename: Path to an Arrow IPC mesh file (``.arrow``).
@@ -2365,7 +2366,9 @@ class MeshGeometry:
             surfaces count as touching. Setting it tracks the mesh
             discontinuously. It must be at least the deepest overlap between
             touching solids, and gaps narrower than it are filled by the solid
-            on the far side.
+            on the far side, except between solids the file records as apart
+            in the CAD (``CadToYamc`` checks this when meshing without
+            imprinting).
     
     Raises:
         ValueError: If the file is not an Arrow IPC mesh, or if it contains a
