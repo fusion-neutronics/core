@@ -84,3 +84,18 @@ def test_face_solid_reversed_tracked():
     for solid_id, face_ids in result.solid_faces.items():
         for fid in face_ids:
             assert (solid_id, fid) in result.face_solid_reversed
+
+
+def test_a_solid_inside_another_is_refused():
+    """A cylinder inside a box that was never cut: the imprint returns the
+    cylinder's region as a piece of the box, so the cylinder's material
+    vanished (zero flux, no lost particles). Refused, naming it."""
+    from yamc.cad import OverlappingSolidsError
+
+    box = cq.Workplane("XY").box(30, 30, 30)
+    cylinder = cq.Workplane("XY").circle(4).extrude(20).translate((0, 0, -10))
+    assy = cq.Assembly()
+    assy.add(cylinder, name="cylinder")
+    assy.add(box, name="box")
+    with pytest.raises(OverlappingSolidsError, match="'cylinder' was absorbed"):
+        process_assembly(assy, material_tags=["a", "b"])

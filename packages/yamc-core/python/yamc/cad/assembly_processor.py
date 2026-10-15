@@ -18,6 +18,10 @@ from OCP.GProp import GProp_GProps
 from OCP.TopoDS import TopoDS
 
 
+class OverlappingSolidsError(ValueError):
+    """Two input solids claim the same region of space."""
+
+
 @dataclass
 class FaceInfo:
     """Information about a single BRep face."""
@@ -72,6 +76,47 @@ def _imprint_assembly(assembly):
     return imprint(assembly)
 
 
+def _refuse_lost_or_shared_inputs(assembly, imprinted_solids_with_ids):
+    """Raise unless every input solid comes out of the imprint as its own.
+
+    Two ways an overlap between inputs goes wrong, both silently: an imprinted
+    solid with more than one input as its origin (tagging it with the first
+    origin's material removes it from the others), and an input that is the
+    origin of no imprinted solid at all (a part sitting inside a body that was
+    never cut comes back as a piece of the body, so its material vanishes).
+    Either way transport loses no particles to show it. cad-to-dagmc-mesher
+    refuses the same things.
+    """
+    def short(name):
+        return name.rsplit("/", 1)[-1]
+
+    inputs = list(dict.fromkeys(name for _obj, name, _loc, _c in assembly))
+    claimed = {name for origins in imprinted_solids_with_ids.values() for name in origins}
+    lost = [short(name) for name in inputs if name not in claimed]
+    shared = [
+        (solid, list(dict.fromkeys(short(name) for name in origins)))
+        for solid, origins in imprinted_solids_with_ids.items()
+        if len(set(origins)) > 1
+    ]
+    if not lost and not shared:
+        return
+    lines = [f"{name!r} was absorbed into another solid" for name in lost]
+    lines += [
+        f"{' and '.join(repr(n) for n in names)} share {solid.Volume():.6g}"
+        for solid, names in shared
+    ]
+    raise OverlappingSolidsError(
+        "The imprint did not give every input solid a region of its own:\n  "
+        + "\n  ".join(lines)
+        + "\nSuch a region gets only one of its solids' materials, so the other "
+        "solid comes out smaller than the CAD says or disappears altogether, "
+        "and transport loses no particles to show it. Usually the solids "
+        "overlap in the CAD: cut one from the other (for instance "
+        "b = b.cut(a)) so every point belongs to exactly one solid. If they "
+        "only touch, the imprint itself has failed on them."
+    )
+
+
 def process_assembly(
     assembly: cq.Assembly, material_tags: list[str]
 ) -> ProcessedAssembly:
@@ -90,6 +135,7 @@ def process_assembly(
     """
     # Step 1: Imprint the assembly
     imprinted_compound, imprinted_solids_with_ids = _imprint_assembly(assembly)
+    _refuse_lost_or_shared_inputs(assembly, imprinted_solids_with_ids)
 
     # Get the OCC compound shape
     if hasattr(imprinted_compound, 'wrapped'):
