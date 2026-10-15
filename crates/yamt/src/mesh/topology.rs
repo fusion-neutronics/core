@@ -123,6 +123,10 @@ pub struct MeshTopology {
     pub imprinted: Option<bool>,
     /// Contact tolerance (cm) the writer recorded for a non-imprinted mesh.
     pub contact_tolerance: Option<f64>,
+    /// Solid pairs `(a, b)`, `a < b`, that come within the contact tolerance
+    /// in the mesh although the CAD solids do not touch: a real gap, which
+    /// relocation must not fill.
+    pub separated: Vec<(VolumeId, VolumeId)>,
 }
 
 // ---------------------------------------------------------------------------

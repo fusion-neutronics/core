@@ -18,6 +18,17 @@ class OverlappingSolidsError(ValueError):
     """Two solids overlap deeper than the contact tolerance."""
 
 
+def _solid_triangles(mesh):
+    """Each solid's closed boundary, as ``{solid_id: [tri, ...]}``."""
+    face_tris = {}
+    for tri, fid in zip(mesh.triangles, mesh.triangle_face_ids):
+        face_tris.setdefault(fid, []).append(tri)
+    return {
+        sid: [tri for fid in fids for tri in face_tris.get(fid, [])]
+        for sid, fids in mesh.solid_faces.items()
+    }
+
+
 def check_solid_overlaps(mesh, contact_tolerance):
     """Solid pairs of *mesh* that overlap deeper than *contact_tolerance*.
 
@@ -30,13 +41,7 @@ def check_solid_overlaps(mesh, contact_tolerance):
         List of human-readable problem strings (empty when no two solids
         overlap deeper than the tolerance).
     """
-    face_tris = {}
-    for tri, fid in zip(mesh.triangles, mesh.triangle_face_ids):
-        face_tris.setdefault(fid, []).append(tri)
-    solids = [
-        (sid, [tri for fid in fids for tri in face_tris.get(fid, [])])
-        for sid, fids in mesh.solid_faces.items()
-    ]
+    solids = sorted(_solid_triangles(mesh).items())
 
     def name(sid):
         if 0 < sid <= len(mesh.material_tags):

@@ -99,6 +99,7 @@ fn two_boxes(shift: f64, cross_split: bool, imprinted: Option<bool>) -> MeshGeom
         volume_measures: vec![],
         imprinted,
         contact_tolerance: imprinted.map(|_| 0.05),
+        separated: vec![],
     };
     MeshGeometry::from_topology(build_topology(data).unwrap())
 }
@@ -299,7 +300,11 @@ fn a_mesh_without_provenance_whose_solids_touch_is_flagged() {
 
 /// Boxes `[lo, hi]`, each its own solid and surface (no imprint), tracked
 /// discontinuously with the given contact tolerance.
-fn layered(spec: &[([f64; 3], [f64; 3])], tolerance: f64) -> MeshGeometry {
+fn layered(
+    spec: &[([f64; 3], [f64; 3])],
+    tolerance: f64,
+    separated: Vec<[u32; 2]>,
+) -> MeshGeometry {
     let mut vertices = Vec::new();
     let mut triangles = Vec::new();
     let mut triangle_surface_ids = Vec::new();
@@ -329,6 +334,7 @@ fn layered(spec: &[([f64; 3], [f64; 3])], tolerance: f64) -> MeshGeometry {
         volume_measures: vec![],
         imprinted: Some(false),
         contact_tolerance: Some(tolerance),
+        separated,
     };
     MeshGeometry::from_topology(build_topology(data).unwrap())
 }
@@ -342,7 +348,7 @@ fn a_layer_thinner_than_the_contact_tolerance_is_not_skipped() {
     let a = ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
     let b = ([1.05, 0.0, 0.0], [2.0, 1.0, 1.0]);
     let foil = ([1.0, 0.0, 0.0], [1.05, 1.0, 1.0]);
-    let geom = layered(&[a, b, foil], 0.1);
+    let geom = layered(&[a, b, foil], 0.1, vec![]);
     let (t, n) = next(&geom, 0, [0.5, 0.5, 0.5], [1.0, 0.0, 0.0]);
     assert!((t - 0.5).abs() < 1e-12);
     assert_eq!(
@@ -352,5 +358,23 @@ fn a_layer_thinner_than_the_contact_tolerance_is_not_skipped() {
     );
     let (t, n) = next(&geom, 2, [1.0 + 1e-8, 0.5, 0.5], [1.0, 0.0, 0.0]);
     assert!((t - 0.05).abs() < 1e-7, "t = {t}");
+    assert_eq!(n, Some(1));
+}
+
+#[test]
+fn a_gap_the_cad_has_is_not_filled() {
+    // Two blocks 0.03 apart, within the 0.05 contact tolerance. Unless the
+    // writer recorded them as separated in the CAD, the gap counts as a
+    // faceting gap and is given to the block ahead; recorded, it stays void.
+    let a = ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+    let b = ([1.03, 0.0, 0.0], [2.0, 1.0, 1.0]);
+    let touching = layered(&[a, b], 0.05, vec![]);
+    let (_, n) = next(&touching, 0, [0.5, 0.5, 0.5], [1.0, 0.0, 0.0]);
+    assert_eq!(n, Some(1));
+    let separated = layered(&[a, b], 0.05, vec![[1, 0]]);
+    let (_, n) = next(&separated, 0, [0.5, 0.5, 0.5], [1.0, 0.0, 0.0]);
+    assert_eq!(n, Some(2), "the modelled gap is the implicit complement");
+    let (t, n) = next(&separated, 2, [1.0 + 1e-8, 0.5, 0.5], [1.0, 0.0, 0.0]);
+    assert!((t - 0.03).abs() < 1e-7, "t = {t}");
     assert_eq!(n, Some(1));
 }

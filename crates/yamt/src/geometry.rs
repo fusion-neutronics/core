@@ -451,8 +451,10 @@ impl MeshGeometry {
     /// facet is the nearest entry within the contact tolerance takes the
     /// particle: the two solids count as touching there, and the thin gap
     /// between their facetings goes to the solid ahead rather than to the
-    /// implicit complement. Otherwise `x` is in a real gap, which is the
-    /// implicit complement.
+    /// implicit complement. A pair the writer recorded as separated in the
+    /// CAD (see [`MeshTopology::separated`]) never counts as touching, so a
+    /// modelled gap narrower than the tolerance stays a gap. Otherwise `x` is
+    /// in a real gap, which is the implicit complement.
     ///
     /// When several candidates contain `x` (a sliver claimed by more than one
     /// solid), the lowest volume id wins.
@@ -480,7 +482,8 @@ impl MeshGeometry {
                     return k;
                 }
                 Some((t, false, _))
-                    if t <= LOOKBACK.max(self.contact_tolerance)
+                    if (t <= LOOKBACK
+                        || (t <= self.contact_tolerance && !self.separated(from, k)))
                         && nearest.is_none_or(|(best, _)| t < best) =>
                 {
                     nearest = Some((t, k));
@@ -518,6 +521,14 @@ impl MeshGeometry {
             return None;
         }
         Some((e.prim, t))
+    }
+
+    /// True when solids `a` and `b` come within the contact tolerance in the
+    /// mesh but do not touch in the CAD (recorded by the writer): the gap
+    /// between them is real, and relocation does not fill it.
+    fn separated(&self, a: VolumeId, b: VolumeId) -> bool {
+        let pair = (a.min(b), a.max(b));
+        !self.topology.separated.is_empty() && self.topology.separated.contains(&pair)
     }
 
     /// First facet of `volume` met by a ray from `x` along `u`, looking

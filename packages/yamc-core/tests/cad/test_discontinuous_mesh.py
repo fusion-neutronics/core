@@ -291,3 +291,45 @@ def test_a_mesh_from_another_writer_whose_solids_touch_is_flagged(tmp_path):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         _two_box_fluxes(path, contact_tolerance=1e-3)
+
+
+def test_a_gap_in_the_cad_is_recorded_and_kept(tmp_path):
+    """Two cubes 0.05 apart, meshed at a 0.1 deflection: the gap is within
+    the 0.2 contact tolerance, but the CAD says the cubes do not touch, so the
+    pair is recorded as separated and the gap is not filled. Touching cubes
+    and the nested cylinders (touching, faceted differently) are not."""
+    def cubes(gap):
+        return _assembly(
+            a=cq.Workplane().box(10, 10, 10),
+            b=cq.Workplane().box(10, 10, 10).translate((10 + gap, 0, 0)),
+        )
+
+    c2y = CadToYamc()
+    c2y.add_cadquery_object(cubes(0.05), material_tags=["a", "b"])
+    c2y.mesh(tolerance=TOLERANCE, imprint=False)
+    assert c2y._separated == [(1, 2)]
+    path = str(tmp_path / "gap.arrow")
+    c2y.to_arrow(path)
+    geometry, model, _ = _fluxes_two(path)
+    assert geometry.discontinuous
+    assert len(model.lost_particles) == 0
+
+    for assembly, tags in ((cubes(0.0), ["a", "b"]), (_nested_cylinders(), ["a", "b", "c"])):
+        c2y = CadToYamc()
+        c2y.add_cadquery_object(assembly, material_tags=tags)
+        c2y.mesh(tolerance=TOLERANCE, imprint=False)
+        assert c2y._separated == []
+
+
+def _fluxes_two(path):
+    mats = {t: _materials()[t] for t in ("a", "b")}
+    geometry = yamc.MeshGeometry(path, mats, graveyard_offset=1.0)
+    model = yamc.Model(
+        geometry=geometry,
+        tallies=[],
+        source=yamc.NeutronSource(
+            energy=yamc.sources.Discrete([14.06e6], [1.0]), position=(0.0, 0.0, 0.0)
+        ),
+    )
+    model.simulate_transport(total_particles=2_000, seed=1)
+    return geometry, model, None

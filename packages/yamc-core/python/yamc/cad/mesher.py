@@ -187,6 +187,7 @@ class CadToYamc:
         self._tet_index_maps = {}  # solid_id -> local vertex -> index in mesh.vertices
         self._imprint = True
         self._contact_tolerance = None
+        self._separated = []  # (a, b) 1-based solid pairs a real gap apart
 
     def add_cadquery_object(
         self,
@@ -248,10 +249,9 @@ class CadToYamc:
                 straight into the next solid. Defaults to twice *tolerance*,
                 which covers the slivers two facetings of one CAD surface
                 leave between them; raise it to accept sloppier CAD. A gap
-                you modelled on purpose that is narrower than this is filled
-                too, so keep *tolerance* well below the narrowest such gap
-                (an imprinted mesh that coarse fails the other way, its
-                facets crossing inside the gap).
+                that is in the CAD stays a gap whatever the tolerance: the
+                solids either side are checked against the CAD and recorded
+                as separated.
             overlap_check: Only with ``imprint=False``: raise
                 :class:`OverlappingSolidsError` when two solids overlap deeper
                 than *contact_tolerance*, for instance a part embedded in a
@@ -413,6 +413,7 @@ class CadToYamc:
         )
         self._imprint = imprint
         self._contact_tolerance = None if imprint else float(contact_tolerance)
+        self._separated = []
         pa = self._processed
 
         brep_fids, scene_fids = _route_faces(pa)
@@ -476,6 +477,13 @@ class CadToYamc:
                     "slack you accept, pass a contact_tolerance above its depth. "
                     "Pass overlap_check=False to bypass this gate."
                 )
+
+        if not imprint:
+            from ._contact import find_separated
+
+            self._separated = find_separated(
+                self._surface_mesh, pa.solid_shapes, contact_tolerance
+            )
 
         return self._surface_mesh
 
@@ -630,6 +638,7 @@ class CadToYamc:
             boundary_tags=tags,
             imprinted=self._imprint,
             contact_tolerance=self._contact_tolerance,
+            separated=self._separated,
         )
 
     def exterior_surface_ids(self) -> list[int]:

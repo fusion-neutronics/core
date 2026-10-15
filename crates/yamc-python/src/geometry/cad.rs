@@ -196,9 +196,15 @@ fn write_mesh_file(
     volume_measures_json: String,
     imprinted: Option<bool>,
     contact_tolerance: Option<f64>,
+    separated: Vec<[u32; 2]>,
 ) -> PyResult<()> {
     use yamt::mesh::cad_build::{tet_aabbs_flat, tet_adjacency_flat, tri_aabbs_flat};
 
+    if !separated.is_empty() && imprinted != Some(false) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "separated only applies to a mesh written with imprinted=False",
+        ));
+    }
     if let Some(tol) = contact_tolerance {
         if !(tol.is_finite() && tol >= 0.0) {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -234,6 +240,7 @@ fn write_mesh_file(
         volume_measures_json,
         imprinted,
         contact_tolerance,
+        separated,
     };
 
     write_arrow_mesh(&data, &PathBuf::from(path)).map_err(|e| {
@@ -252,6 +259,9 @@ fn write_mesh_file(
 /// :class:`MeshGeometry` then tracks the mesh discontinuously, with
 /// ``contact_tolerance`` (cm) as the distance within which two solids'
 /// surfaces count as touching. Both are left out of the file when ``None``.
+/// ``separated`` lists ``(a, b)`` pairs of 0-based volume ids whose surfaces
+/// come within the contact tolerance although the solids do not touch, so the
+/// gap between them is kept rather than filled.
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (
@@ -268,6 +278,7 @@ fn write_mesh_file(
     volume_measures_json="".to_string(),
     imprinted=None,
     contact_tolerance=None,
+    separated=vec![],
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn mesh_to_arrow(
@@ -284,6 +295,7 @@ pub fn mesh_to_arrow(
     volume_measures_json: String,
     imprinted: Option<bool>,
     contact_tolerance: Option<f64>,
+    separated: Vec<(u32, u32)>,
 ) -> PyResult<()> {
     write_mesh_file(
         &path,
@@ -299,6 +311,7 @@ pub fn mesh_to_arrow(
         volume_measures_json,
         imprinted,
         contact_tolerance,
+        separated.into_iter().map(|(a, b)| [a, b]).collect(),
     )
 }
 
@@ -365,6 +378,9 @@ fn physical_groups_json(material_tags: &[String], boundary_tags: &[(String, Vec<
 ///         makes :class:`MeshGeometry` track the mesh discontinuously.
 ///     contact_tolerance: For a mesh that was not imprinted, the distance
 ///         (cm) within which two solids' surfaces count as touching.
+///     separated: For a mesh that was not imprinted, ``(a, b)`` solid pairs
+///         (1-based solid ids) within the contact tolerance in the mesh that
+///         do not touch in the CAD, so the gap between them is kept.
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (
@@ -381,6 +397,7 @@ fn physical_groups_json(material_tags: &[String], boundary_tags: &[(String, Vec<
     boundary_tags=vec![],
     imprinted=true,
     contact_tolerance=None,
+    separated=vec![],
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn cad_mesh_to_arrow(
@@ -397,6 +414,7 @@ pub fn cad_mesh_to_arrow(
     boundary_tags: Vec<(String, Vec<u32>)>,
     imprinted: bool,
     contact_tolerance: Option<f64>,
+    separated: Vec<(u32, u32)>,
 ) -> PyResult<()> {
     use yamt::mesh::cad_build::{
         face_owners, flatten_tet_blocks, surface_volume_pairs, triangle_owner_ids,
@@ -429,6 +447,17 @@ pub fn cad_mesh_to_arrow(
         String::new(),
         Some(imprinted),
         contact_tolerance,
+        separated
+            .into_iter()
+            .map(|(a, b)| {
+                if a == 0 || b == 0 {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "separated takes 1-based solid ids",
+                    ));
+                }
+                Ok([a - 1, b - 1])
+            })
+            .collect::<PyResult<_>>()?,
     )
 }
 
@@ -495,6 +524,37 @@ pub fn solid_overlaps(
         .into_iter()
         .map(|o| (o.solid_a, o.solid_b, o.max_depth, o.exposure))
         .collect()
+}
+
+/// Points where two solids' surface meshes come within ``tolerance``.
+///
+/// For every pair of solids whose meshes come that close, up to ``samples``
+/// mesh vertices of one of them lying within ``tolerance`` of the other's
+/// surface. A mesh vertex lies on its solid's CAD surface, so its exact
+/// distance to the other CAD solid says whether the two touch there or are
+/// separated by a real gap that faceting has narrowed.
+///
+/// Args:
+///     vertices: Global ``[x, y, z]`` vertex array.
+///     solids: ``(solid_id, triangles)`` per solid.
+///     tolerance: The contact tolerance (3D units).
+///     samples: Points to return per pair at most.
+///
+/// Returns:
+///     ``[(solid_a, solid_b, [[x, y, z], ...]), ...]``, the points on
+///     ``solid_a``'s surface. A pair whose meshes come close only between
+///     vertices returns no points.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (vertices, solids, tolerance, samples=8))]
+#[allow(clippy::type_complexity)]
+pub fn solid_contact_samples(
+    vertices: Vec<[f64; 3]>,
+    solids: Vec<(usize, Vec<[usize; 3]>)>,
+    tolerance: f64,
+    samples: usize,
+) -> Vec<(usize, usize, Vec<[f64; 3]>)> {
+    yamm::overlap::contact_samples(&vertices, &solids, tolerance, samples)
 }
 
 /// Weld coincident vertices of a triangle mesh into a watertight, index-shared
