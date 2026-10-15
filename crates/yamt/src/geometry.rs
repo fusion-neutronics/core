@@ -106,6 +106,36 @@ pub enum Beyond {
     Relocate(TriangleId),
 }
 
+/// The exit facet relocation found for the solid it placed a particle in.
+///
+/// Relocation asks a candidate solid for the first of its facets ahead of the
+/// crossing point; when that facet is one the ray leaves through, it is also
+/// exactly what the next [`MeshGeometry::next_crossing`] in that solid, from a
+/// point a little further along the same ray, would find. Keeping it saves
+/// that query on every crossing between touching solids.
+#[derive(Clone, Copy)]
+struct ExitAhead {
+    /// Address of the geometry it belongs to.
+    geometry: usize,
+    volume: VolumeId,
+    /// The relocation point and direction the facet was found from.
+    from: [f64; 3],
+    direction: [f64; 3],
+    /// Distance from `from` to the facet, and the facet's primitive index in
+    /// `volume`'s BVH.
+    distance: f64,
+    prim: u32,
+}
+
+thread_local! {
+    /// One per transport thread: a thread tracks one particle at a time, so
+    /// the next query after a relocation on this thread is that particle's.
+    /// The entry is only ever used for a query that provably asks the same
+    /// question (same geometry, volume and direction, origin on the same ray
+    /// short of the facet), so a stale entry can only be ignored, not misused.
+    static EXIT_AHEAD: std::cell::Cell<Option<ExitAhead>> = const { std::cell::Cell::new(None) };
+}
+
 /// Minimum hit distance (cm) for discontinuous tracking's ray fire, as in
 /// [`ray_fire`].
 const RAY_FIRE_MIN_T: f64 = 1e-10;
@@ -298,15 +328,17 @@ impl MeshGeometry {
     ) -> Option<(f64, SurfaceId, Beyond)> {
         let sd = self.surface_bvhs.get(volume as usize)?;
         let ic = self.topology.implicit_complement;
-        let hit = sd.bvh.ray_traverse_tris(
-            origin,
-            direction,
-            &sd.precomputed.v0,
-            &sd.precomputed.edge1,
-            &sd.precomputed.edge2,
-            RAY_FIRE_MIN_T,
-            |prim, _t| sd.leaves(prim as usize, direction),
-        );
+        let hit = self.exit_ahead(volume, origin, direction).or_else(|| {
+            sd.bvh.ray_traverse_tris(
+                origin,
+                direction,
+                &sd.precomputed.v0,
+                &sd.precomputed.edge1,
+                &sd.precomputed.edge2,
+                RAY_FIRE_MIN_T,
+                |prim, _t| sd.leaves(prim as usize, direction),
+            )
+        });
         let Some((prim, t)) = hit else {
             if volume != ic {
                 let here = self.find_volume(origin);
@@ -350,20 +382,60 @@ impl MeshGeometry {
                 continue;
             }
             match self.first_facet(k, x, u) {
-                Some((_, true)) => return k,
-                Some((t, false)) if t <= LOOKBACK.max(self.contact_tolerance) => return k,
+                Some((t, true, prim)) => {
+                    EXIT_AHEAD.set(Some(ExitAhead {
+                        geometry: self as *const Self as usize,
+                        volume: k,
+                        from: x,
+                        direction: u,
+                        distance: t,
+                        prim,
+                    }));
+                    return k;
+                }
+                Some((t, false, _)) if t <= LOOKBACK.max(self.contact_tolerance) => return k,
                 _ => {}
             }
         }
         self.topology.implicit_complement
     }
 
+    /// The exit facet the last relocation on this thread found, if this query
+    /// asks for it: same geometry, volume and direction, and an origin on the
+    /// same ray, past the relocation point but short of the facet. Taken, so
+    /// it answers one query at most.
+    fn exit_ahead(
+        &self,
+        volume: VolumeId,
+        origin: [f64; 3],
+        direction: [f64; 3],
+    ) -> Option<(u32, f64)> {
+        let e = EXIT_AHEAD.take()?;
+        if e.geometry != self as *const Self as usize
+            || e.volume != volume
+            || e.direction != direction
+        {
+            return None;
+        }
+        let d = intersect::sub(origin, e.from);
+        let s = intersect::dot(d, direction);
+        let off = intersect::sub(d, intersect::scale(direction, s));
+        let t = e.distance - s;
+        // The transport steps 1e-8 past a crossing; anything else is a
+        // different query (a collision moved the particle, say).
+        if !(0.0..=1e-6).contains(&s) || intersect::dot(off, off) > 1e-24 || t <= RAY_FIRE_MIN_T {
+            return None;
+        }
+        Some((e.prim, t))
+    }
+
     /// First facet of `volume` met by a ray from `x` along `u`, looking
     /// [`LOOKBACK`] behind `x` so a facet coincident with `x` is not missed:
-    /// `(distance from x, whether the ray leaves the volume there)`. A facet
+    /// `(distance from x, whether the ray leaves the volume there, primitive
+    /// index in the volume's BVH)`. A facet
     /// the ray leaves through within [`LOOKBACK`] of `x` is skipped, as that
     /// is the volume ending exactly where the particle is.
-    fn first_facet(&self, volume: VolumeId, x: [f64; 3], u: [f64; 3]) -> Option<(f64, bool)> {
+    fn first_facet(&self, volume: VolumeId, x: [f64; 3], u: [f64; 3]) -> Option<(f64, bool, u32)> {
         let sd = &self.surface_bvhs[volume as usize];
         let o = [
             x[0] - LOOKBACK * u[0],
@@ -379,7 +451,7 @@ impl MeshGeometry {
             0.0,
             |prim, tp| !(sd.leaves(prim as usize, u) && tp <= 2.0 * LOOKBACK),
         )?;
-        Some((tp - LOOKBACK, sd.leaves(prim as usize, u)))
+        Some((tp - LOOKBACK, sd.leaves(prim as usize, u), prim))
     }
 
     /// Fire a ray within a volume. Returns `(distance, surface_id)` of

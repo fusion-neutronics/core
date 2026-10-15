@@ -260,3 +260,27 @@ fn foreign_surface_verification_is_off() {
         .segment_blocked(A, [0.5, 0.5, 0.5], [1.0, 0.0, 0.0], 0.5)
         .is_some());
 }
+
+#[test]
+fn the_exit_found_by_relocation_answers_the_next_query() {
+    // Relocating from A into B finds B's far face; the ray-fire that follows
+    // in B, from just past the crossing, reuses it. Its answer must be what a
+    // fresh query gives (the cache is one-shot, so asking again is fresh).
+    let geom = two_boxes(0.0, true, Some(false));
+    let dir = [0.8, 0.36, 0.48];
+    let start = [0.5, 0.3, 0.2];
+    let (t, n) = next(&geom, A, start, dir);
+    assert_eq!(n, Some(B));
+    let past = [
+        start[0] + (t + 1e-8) * dir[0],
+        start[1] + (t + 1e-8) * dir[1],
+        start[2] + (t + 1e-8) * dir[2],
+    ];
+    let (t_cached, s_cached, b_cached) = geom.next_crossing(B, past, dir).unwrap();
+    let (t_fresh, s_fresh, b_fresh) = geom.next_crossing(B, past, dir).unwrap();
+    assert!(
+        (t_cached - t_fresh).abs() < 1e-12,
+        "{t_cached} vs {t_fresh}"
+    );
+    assert_eq!((s_cached, b_cached), (s_fresh, b_fresh));
+}
