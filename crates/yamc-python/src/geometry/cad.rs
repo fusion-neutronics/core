@@ -543,7 +543,8 @@ pub fn solid_overlaps(
 /// Returns:
 ///     ``[(solid_a, solid_b, [[x, y, z], ...]), ...]``, the points on
 ///     ``solid_a``'s surface. A pair whose meshes come close only between
-///     vertices returns no points.
+///     vertices returns no points, and so does a pair whose meshes share a
+///     vertex (which lies on both CAD surfaces, so the two touch).
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (vertices, solids, tolerance, samples=8))]
