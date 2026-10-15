@@ -11,7 +11,6 @@ the transported answer matches the imprinted mesh of the same CAD.
 """
 
 import math
-import os
 
 import pytest
 import yamc

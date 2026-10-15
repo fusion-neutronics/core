@@ -97,7 +97,7 @@ fn main() {
         *seqs.entry(seq).or_default() += 1;
     }
     let mut v: Vec<_> = seqs.into_iter().collect();
-    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     for (seq, c) in v.iter().take(15) {
         let s: Vec<String> = seq
             .iter()

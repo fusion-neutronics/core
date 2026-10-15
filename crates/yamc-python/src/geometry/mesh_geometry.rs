@@ -34,10 +34,12 @@ use yamc::geometry::mesh::MeshGeometry;
 /// gives each solid its own surface, so touching solids meet along two
 /// independently faceted surfaces that may overlap or leave thin gaps. Such a
 /// mesh is tracked discontinuously: a particle leaving a solid is placed in
-/// whichever touching solid contains it, an overlap belongs to the solid the
-/// particle was already in, and a gap is the implicit complement, as meshed.
-/// The file records this; *contact_tolerance* forces it on for a mesh from
-/// another writer, or overrides the tolerance the file records.
+/// whichever touching solid contains it. Solids closer than the contact
+/// tolerance count as touching, so an overlap or a gap thinner than it is
+/// crossed straight into the next solid (an overlap stays with the solid the
+/// particle was already in); a wider gap is the implicit complement. The file
+/// records all this; *contact_tolerance* forces it on for a mesh from another
+/// writer, or overrides the tolerance the file records.
 ///
 /// Args:
 ///     filename: Path to an Arrow IPC mesh file (``.arrow``).
@@ -49,7 +51,8 @@ use yamc::geometry::mesh::MeshGeometry;
 ///     contact_tolerance: Optional distance (cm) within which two solids'
 ///         surfaces count as touching. Setting it tracks the mesh
 ///         discontinuously. It must be at least the deepest overlap between
-///         touching solids; a larger value only costs speed.
+///         touching solids, and gaps narrower than it are filled by the solid
+///         on the far side.
 ///
 /// Raises:
 ///     ValueError: If the file is not an Arrow IPC mesh, or if it contains a
