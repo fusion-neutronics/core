@@ -296,3 +296,61 @@ fn a_mesh_without_provenance_whose_solids_touch_is_flagged() {
     // Recorded as non-imprinted: already tracked discontinuously.
     assert!(!two_boxes(0.0, false, Some(false)).looks_unimprinted(1000));
 }
+
+/// Boxes `[lo, hi]`, each its own solid and surface (no imprint), tracked
+/// discontinuously with the given contact tolerance.
+fn layered(spec: &[([f64; 3], [f64; 3])], tolerance: f64) -> MeshGeometry {
+    let mut vertices = Vec::new();
+    let mut triangles = Vec::new();
+    let mut triangle_surface_ids = Vec::new();
+    let mut triangle_physical_groups = Vec::new();
+    let mut groups = Vec::new();
+    let mut sv = Vec::new();
+    for (i, &(lo, hi)) in spec.iter().enumerate() {
+        let n = push_box(&mut vertices, &mut triangles, lo, hi, false, false);
+        triangle_surface_ids.extend(vec![i as u32 + 1; n]);
+        triangle_physical_groups.extend(vec![i as i32 + 1; n]);
+        groups.push(format!(r#""{}": {{"name": "mat:m{i}", "dim": 3}}"#, i + 1));
+        sv.push(format!("[{i}, null]"));
+    }
+    let data = ArrowMeshData {
+        triangle_aabbs: build_triangle_aabbs(&triangles, &vertices),
+        tet_aabbs: build_tet_aabbs(&[], &vertices),
+        tet_adjacency: vec![],
+        tetrahedra: vec![],
+        tet_volume_ids: vec![],
+        tet_physical_groups: vec![],
+        triangles,
+        triangle_surface_ids,
+        triangle_physical_groups,
+        vertices,
+        physical_groups_json: format!("{{{}}}", groups.join(", ")),
+        surface_volumes_json: format!("[{}]", sv.join(", ")),
+        volume_measures: vec![],
+        imprinted: Some(false),
+        contact_tolerance: Some(tolerance),
+    };
+    MeshGeometry::from_topology(build_topology(data).unwrap())
+}
+
+#[test]
+fn a_layer_thinner_than_the_contact_tolerance_is_not_skipped() {
+    // Block A, a 0.05 thick foil F against it, block B against the foil,
+    // with a 0.1 contact tolerance: B is within the tolerance of A's face
+    // too. Volume ids put B before F, so a first-come choice would snap from
+    // A straight into B and lose the foil.
+    let a = ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+    let b = ([1.05, 0.0, 0.0], [2.0, 1.0, 1.0]);
+    let foil = ([1.0, 0.0, 0.0], [1.05, 1.0, 1.0]);
+    let geom = layered(&[a, b, foil], 0.1);
+    let (t, n) = next(&geom, 0, [0.5, 0.5, 0.5], [1.0, 0.0, 0.0]);
+    assert!((t - 0.5).abs() < 1e-12);
+    assert_eq!(
+        n,
+        Some(2),
+        "leaving A enters the foil, not the block beyond it"
+    );
+    let (t, n) = next(&geom, 2, [1.0 + 1e-8, 0.5, 0.5], [1.0, 0.0, 0.0]);
+    assert!((t - 0.05).abs() < 1e-7, "t = {t}");
+    assert_eq!(n, Some(1));
+}
