@@ -11,6 +11,10 @@ pub struct GeoMeshVolume {
     pub material_name: Option<String>,
     /// Pre-expanded triangle vertex coordinates: each entry is [[x0,y0,z0],[x1,y1,z1],[x2,y2,z2]]
     pub triangles: Vec<[[f64; 3]; 3]>,
+    /// Where volumes overlap, a point belongs to the highest rank (the
+    /// overlaps recorded for a mesh made without imprinting); 0 otherwise.
+    #[serde(default)]
+    pub rank: u32,
 }
 
 /// Lightweight mesh geometry for visualization -- serializable, no BVH.
@@ -47,7 +51,8 @@ impl GeoMesh {
         crossings % 2 == 1
     }
 
-    /// Find the first volume containing the point, or None.
+    /// The highest-ranked volume containing the point (the first such, when
+    /// ranks tie), or None.
     pub fn find_volume(&self, point: [f64; 3]) -> Option<usize> {
         // Quick AABB check
         for (p, (mn, mx)) in point
@@ -58,12 +63,16 @@ impl GeoMesh {
                 return None;
             }
         }
+        let mut best: Option<usize> = None;
         for (idx, vol) in self.volumes.iter().enumerate() {
+            if best.is_some_and(|b| self.volumes[b].rank >= vol.rank) {
+                continue;
+            }
             if Self::point_in_volume(vol, point) {
-                return Some(idx);
+                best = Some(idx);
             }
         }
-        None
+        best
     }
 
     /// Sample a 2D plot grid of cell/material IDs
@@ -170,9 +179,30 @@ mod tests {
             material_id: 1,
             material_name: Some("test".to_string()),
             triangles,
+            rank: 0,
         };
         assert!(GeoMesh::point_in_volume(&vol, [0.5, 0.5, 0.5]));
         assert!(!GeoMesh::point_in_volume(&vol, [2.0, 0.5, 0.5]));
+    }
+
+    #[test]
+    fn overlapping_volumes_resolve_to_the_higher_rank() {
+        let volume = |cell_id: i32, lo: f64, hi: f64, rank: u32| GeoMeshVolume {
+            cell_id,
+            material_id: cell_id,
+            material_name: None,
+            triangles: cube_triangles(lo, lo, lo, hi, hi, hi),
+            rank,
+        };
+        let mesh = |inner_rank: u32| GeoMesh {
+            volumes: vec![volume(1, 0.0, 3.0, 0), volume(2, 1.0, 2.0, inner_rank)],
+            global_min: [0.0; 3],
+            global_max: [3.0; 3],
+        };
+        // Without ranks the first volume containing the point wins.
+        assert_eq!(mesh(0).find_volume([1.5; 3]), Some(0));
+        assert_eq!(mesh(1).find_volume([1.5; 3]), Some(1));
+        assert_eq!(mesh(1).find_volume([0.5; 3]), Some(0));
     }
 
     /// Helper: build 12 triangles for an axis-aligned box.

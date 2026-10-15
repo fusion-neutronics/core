@@ -801,6 +801,12 @@ impl MeshGeometry {
         )
     }
 
+    /// Rank of a volume among recorded overlaps: where two overlap, the point
+    /// is the higher-ranked one's. 0 when the mesh records no overlaps.
+    pub fn rank(&self, volume: VolumeId) -> u32 {
+        self.ranks.get(volume as usize).copied().unwrap_or(0)
+    }
+
     /// Find which volume contains a point. Where recorded overlaps make
     /// several contain it, the highest-ranked one.
     pub fn find_volume(&self, point: [f64; 3]) -> VolumeId {
