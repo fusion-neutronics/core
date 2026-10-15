@@ -200,13 +200,26 @@ fn an_overlap_sliver_belongs_to_the_solid_left() {
 }
 
 #[test]
-fn a_gap_is_the_implicit_complement_until_the_next_solid() {
+fn a_gap_within_the_contact_tolerance_goes_to_the_solid_ahead() {
+    // 0.01 apart with a 0.05 contact tolerance: touching, so the particle
+    // leaving A is in B, and from B the gap is B's until B's own facet.
     let geom = two_boxes(0.01, false, Some(false));
+    let (t, n) = next(&geom, A, [0.5, 0.5, 0.5], [1.0, 0.0, 0.0]);
+    assert!((t - 0.5).abs() < 1e-12);
+    assert_eq!(n, Some(B));
+    let (t, n) = next(&geom, B, [1.0 + 1e-8, 0.5, 0.5], [1.0, 0.0, 0.0]);
+    assert!((t - 1.01).abs() < 1e-7, "B's far face, t = {t}");
+    assert_eq!(n, Some(IC));
+}
+
+#[test]
+fn a_gap_wider_than_the_contact_tolerance_is_the_implicit_complement() {
+    let geom = two_boxes(0.1, false, Some(false));
     let (t, n) = next(&geom, A, [0.5, 0.5, 0.5], [1.0, 0.0, 0.0]);
     assert!((t - 0.5).abs() < 1e-12);
     assert_eq!(n, Some(IC));
     let (t, n) = next(&geom, IC, [1.0 + 1e-8, 0.5, 0.5], [1.0, 0.0, 0.0]);
-    assert!((t - 0.01).abs() < 1e-7, "B starts 0.01 on, t = {t}");
+    assert!((t - 0.1).abs() < 1e-7, "B starts 0.1 on, t = {t}");
     assert_eq!(n, Some(B));
 }
 
@@ -224,9 +237,10 @@ fn leaving_the_model_goes_to_the_implicit_complement() {
 
 #[test]
 fn a_particle_outside_its_solid_is_relocated_in_place() {
-    // Tracked in B but standing in the gap in front of it and heading away:
-    // B has no facet ahead to leave through, so the particle is re-located
-    // where it stands (a zero-distance crossing) instead of being lost.
+    // Tracked in B but standing in the gap in front of it (given to B as
+    // touching) and heading away, after a collision there: B has no facet
+    // ahead to leave through, so the particle is re-located where it stands
+    // (a zero-distance crossing) instead of being lost.
     let geom = two_boxes(0.01, false, Some(false));
     let (t, n) = next(&geom, B, [1.005, 0.5, 0.5], [-1.0, 0.0, 0.0]);
     assert_eq!(t, 0.0);

@@ -464,6 +464,39 @@ pub fn cad_mesh_labels(
     (tri_volume_ids, tri_material_ids, tets, tet_volume_ids)
 }
 
+/// Pairs of solids whose surface meshes overlap deeper than ``depth_tolerance``.
+///
+/// Every vertex, edge and face interior of each solid's closed boundary is
+/// tested against every other solid whose bounding box it reaches (the
+/// compiled mesh-level overlap check). Contact is not overlap: a point within
+/// ``depth_tolerance`` of the other surface counts as touching it.
+///
+/// Args:
+///     vertices: Global ``[x, y, z]`` vertex array.
+///     solids: ``(solid_id, triangles)`` per solid, each its full closed
+///         boundary as ``[i, j, k]`` indices into ``vertices``.
+///     depth_tolerance: Penetration (3D units) at or below which a feature
+///         counts as touching rather than inside.
+///
+/// Returns:
+///     ``[(solid_a, solid_b, max_depth, exposure), ...]`` for every
+///     overlapping pair, ``max_depth`` the deepest penetration found and
+///     ``exposure`` an order-of-magnitude estimate of the fraction of
+///     isotropic tracks through the model that cross the overlap.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (vertices, solids, depth_tolerance))]
+pub fn solid_overlaps(
+    vertices: Vec<[f64; 3]>,
+    solids: Vec<(usize, Vec<[usize; 3]>)>,
+    depth_tolerance: f64,
+) -> Vec<(usize, usize, f64, f64)> {
+    yamm::overlap::find_solid_overlaps(&vertices, &solids, &[], depth_tolerance)
+        .into_iter()
+        .map(|o| (o.solid_a, o.solid_b, o.max_depth, o.exposure))
+        .collect()
+}
+
 /// Weld coincident vertices of a triangle mesh into a watertight, index-shared
 /// boundary (the compiled core of the CAD pipeline's vertex welding).
 ///

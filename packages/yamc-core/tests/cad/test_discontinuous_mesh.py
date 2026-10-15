@@ -212,3 +212,66 @@ def test_contact_tolerance_needs_a_non_imprinted_mesh(tmp_path):
         _write_touching_boxes(
             str(tmp_path / "y.arrow"), imprinted=False, contact_tolerance=-1.0
         )
+
+
+def _assembly(**parts):
+    assembly = cq.Assembly()
+    for name, shape in parts.items():
+        assembly.add(shape, name=name)
+    return assembly
+
+
+def test_an_embedded_solid_is_refused():
+    """A cylinder inside a box that was never cut touches the box nowhere, so
+    a particle reaching it from the box would never enter it. Refused at
+    meshing time, unless the gate is switched off."""
+    from yamc.cad import OverlappingSolidsError
+
+    def embedded():
+        return _assembly(
+            a=cq.Workplane().circle(4).extrude(20).translate((0, 0, -10)),
+            b=cq.Workplane().box(30, 30, 30),
+        )
+
+    c2y = CadToYamc()
+    c2y.add_cadquery_object(embedded(), material_tags=["a", "b"])
+    with pytest.raises(OverlappingSolidsError, match="'a'.*'b'"):
+        c2y.mesh(imprint=False)
+
+    c2y = CadToYamc()
+    c2y.add_cadquery_object(embedded(), material_tags=["a", "b"])
+    c2y.mesh(imprint=False, overlap_check=False)
+
+
+def test_contact_tolerance_admits_interference_and_is_recorded(tmp_path):
+    """Two cubes interfering by 0.5: an overlap at the default contact
+    tolerance (twice the 0.1 deflection), modelling slack once the tolerance
+    covers it, and the tolerance travels to the transport in the file."""
+    from yamc.cad import OverlappingSolidsError
+
+    def interfering():
+        return _assembly(
+            a=cq.Workplane().box(10, 10, 10),
+            b=cq.Workplane().box(10, 10, 10).translate((9.5, 0, 0)),
+        )
+
+    c2y = CadToYamc()
+    c2y.add_cadquery_object(interfering(), material_tags=["a", "b"])
+    with pytest.raises(OverlappingSolidsError, match="0.5"):
+        c2y.mesh(imprint=False)
+
+    c2y = CadToYamc()
+    c2y.add_cadquery_object(interfering(), material_tags=["a", "b"])
+    c2y.mesh(imprint=False, contact_tolerance=0.6)
+    path = str(tmp_path / "interfering.arrow")
+    c2y.to_arrow(path)
+    geometry = yamc.MeshGeometry(path, _materials(), graveyard_offset=1.0)
+    assert geometry.discontinuous
+    assert geometry.contact_tolerance == pytest.approx(0.6)
+
+
+def test_contact_tolerance_needs_imprint_false():
+    c2y = CadToYamc()
+    c2y.add_cadquery_object(_nested_cylinders(), material_tags=["a", "b", "c"])
+    with pytest.raises(ValueError, match="imprint=False"):
+        c2y.mesh(contact_tolerance=0.1)

@@ -117,10 +117,9 @@ const RAY_FIRE_MIN_T: f64 = 1e-10;
 const LOOKBACK: f64 = 1e-7;
 
 /// Contact tolerance for a non-imprinted mesh whose file does not record one:
-/// a thousandth of the model's bounding-box diagonal. Generous on purpose. It
-/// only decides which solids relocation asks, never which gaps are filled, so
-/// erring large costs a few extra ray queries and erring small loses overlap
-/// slivers deeper than it.
+/// a ten-thousandth of the model's bounding-box diagonal, enough to cover
+/// facetings that agree to a few significant figures without filling a gap
+/// anyone modelled on purpose.
 fn default_contact_tolerance(topo: &MeshTopology) -> f64 {
     let b = topo.global_aabb;
     let d = ((b[3] - b[0]).powi(2) + (b[4] - b[1]).powi(2) + (b[5] - b[2]).powi(2)).sqrt();
@@ -156,10 +155,6 @@ pub struct MeshGeometry {
     /// Per triangle, the other solids within `contact_tolerance` of it.
     /// Empty unless `discontinuous` is set.
     contacts: Contacts,
-    /// Research knob (YAMT_SNAP, cm): a gap up to this wide, met on leaving a
-    /// solid, is absorbed into the solid ahead instead of left as implicit
-    /// complement. 0 keeps every gap as meshed.
-    snap_tolerance: f64,
 }
 
 impl MeshGeometry {
@@ -218,10 +213,6 @@ impl MeshGeometry {
             discontinuous: false,
             contact_tolerance: 0.0,
             contacts: Contacts::default(),
-            snap_tolerance: std::env::var("YAMT_SNAP")
-                .ok()
-                .and_then(|v| v.parse::<f64>().ok())
-                .unwrap_or(0.0),
         };
         if geometry.topology.imprinted == Some(false) {
             let tol = geometry
@@ -235,6 +226,12 @@ impl MeshGeometry {
 
     /// Switch discontinuous tracking on with the given contact tolerance (cm),
     /// or off with `None`.
+    ///
+    /// Two solids whose surfaces come within the contact tolerance of each
+    /// other count as touching there: a particle leaving one crosses an
+    /// overlap or a gap thinner than the tolerance straight into the other.
+    /// It has to be at least the deepest overlap between touching solids
+    /// (deeper overlaps are not found), and gaps narrower than it are filled.
     ///
     /// On is right for any mesh whose touching solids do not share a surface,
     /// which is what meshing without imprinting produces; the file written by
@@ -340,8 +337,10 @@ impl MeshGeometry {
     /// overlapping the candidate further along the ray cannot confuse it (the
     /// first facet of ANY solid ahead can be that third solid's entry, which
     /// would read as "in a gap"). A candidate whose first facet is an entry
-    /// coincident with `x` takes the particle too. Otherwise `x` is in a gap,
-    /// and the gap is the implicit complement, as meshed.
+    /// within the contact tolerance takes the particle too: the two solids
+    /// count as touching there, and the thin gap between their facetings goes
+    /// to the solid ahead rather than to the implicit complement. Otherwise
+    /// `x` is in a real gap, which is the implicit complement.
     ///
     /// When several candidates contain `x` (a sliver claimed by more than one
     /// solid), the lowest volume id wins.
@@ -352,7 +351,7 @@ impl MeshGeometry {
             }
             match self.first_facet(k, x, u) {
                 Some((_, true)) => return k,
-                Some((t, false)) if t <= LOOKBACK.max(self.snap_tolerance) => return k,
+                Some((t, false)) if t <= LOOKBACK.max(self.contact_tolerance) => return k,
                 _ => {}
             }
         }
@@ -453,7 +452,7 @@ impl MeshGeometry {
     ) -> Option<(f64, SurfaceId)> {
         // Overlap slivers between independently meshed solids put foreign
         // facets inside a volume by construction; the check does not apply.
-        if self.discontinuous || std::env::var_os("YAMT_NOVERIFY").is_some() {
+        if self.discontinuous {
             return None;
         }
         let eps = 1e-6_f64.max(t_max * 1e-9);
