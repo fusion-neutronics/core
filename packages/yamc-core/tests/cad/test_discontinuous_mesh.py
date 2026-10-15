@@ -352,6 +352,32 @@ def test_smaller_wins_takes_a_partial_overlap_off_the_larger_volume(tmp_path):
     assert volume_a == pytest.approx(1000.0 - 192.0, abs=2.0)
 
 
+def test_smaller_wins_takes_a_nested_chain_off_once(tmp_path):
+    """Three uncut nested cubes (10, 6 and 2 cm): each gives up the next one
+    in, and the outermost loses the middle one only, not the innermost again."""
+    import warnings
+
+    c2y = CadToYamc()
+    c2y.add_cadquery_object(
+        _assembly(
+            a=cq.Workplane().box(10, 10, 10),
+            b=cq.Workplane().box(6, 6, 6),
+            c=cq.Workplane().box(2, 2, 2),
+        ),
+        material_tags=["a", "b", "c"],
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        mesh = c2y.mesh(imprint=False, overlaps="smaller_wins")
+    assert not [w for w in caught if "twice" in str(w.message)]
+    path = str(tmp_path / "nested.arrow")
+    c2y.to_arrow(path)
+    names = {"a", "b", "c"}
+    assert set(mesh.material_tags) == names
+    geometry = yamc.MeshGeometry(path, {}, graveyard_offset=1.0)
+    assert geometry.volume_measures == pytest.approx([1000.0 - 216.0, 216.0 - 8.0, 8.0], rel=1e-9)
+
+
 def test_overlaps_option_is_checked():
     c2y = CadToYamc()
     c2y.add_cadquery_object(_embedded(cut=False), material_tags=["a", "b"])

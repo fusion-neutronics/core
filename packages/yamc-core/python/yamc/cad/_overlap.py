@@ -95,6 +95,8 @@ def resolve_smaller_wins(mesh, found, contact_tolerance, samples=200_000):
     pairs = []
     lines = []
     given_up = {sid: 0.0 for sid in volumes}
+    shared_with = {}  # (low, high) -> volume high takes from low
+    inside = set()  # (outer, inner): inner lies wholly inside outer
     for a, b, depth, _exposure in found:
         low, high = sorted((a, b), key=lambda s: (-volumes[s], s))
         shared, err, embedded = solid_shared_volume(
@@ -102,25 +104,33 @@ def resolve_smaller_wins(mesh, found, contact_tolerance, samples=200_000):
         )
         if embedded is not None:
             inner = (low, high)[embedded]
+            inside.add(((low, high)[1 - embedded], inner))
             shared, err = volumes[inner], 0.0
             how = f"{_name(mesh, inner)} lies wholly inside"
         else:
             how = f"shared {shared:.4g} +- {err:.2g} (sampled)"
         given_up[low] += shared
+        shared_with[(low, high)] = shared
         pairs.append((low, high))
         lines.append(
             f"{_name(mesh, high)} takes its overlap with {_name(mesh, low)} "
             f"({depth:.4g} deep; {how}; volume of {_name(mesh, low)} "
             f"{volumes[low]:.6g} -> {volumes[low] - given_up[low]:.6g})"
         )
-    # A solid giving up overlaps to two solids that overlap each other has the
-    # triple region taken off twice.
+    # A solid giving up overlaps to two solids that overlap each other would
+    # have their common region taken off twice. When one lies wholly inside
+    # the other (a nested chain: a bolt in a sleeve in a block), its share is
+    # all within the outer one's and is not taken off again. Partial overlaps
+    # between them are not resolved and are reported.
     winners = {}
     for low, high in pairs:
         winners.setdefault(low, set()).add(high)
     paired = {frozenset(p) for p in pairs}
     for low, highs in winners.items():
-        highs = sorted(highs)
+        nested = {h for h in highs if any((o, h) in inside for o in highs if o != h)}
+        for h in nested:
+            given_up[low] -= shared_with[(low, h)]
+        highs = sorted(highs - nested)
         for i, h1 in enumerate(highs):
             for h2 in highs[i + 1:]:
                 if frozenset((h1, h2)) in paired:
