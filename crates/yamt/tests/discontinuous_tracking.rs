@@ -424,6 +424,7 @@ fn layered(spec: &[([f64; 3], [f64; 3])], tolerance: f64) -> MeshGeometry {
         volume_measures: vec![],
         imprinted: Some(false),
         contact_tolerance: Some(tolerance),
+        overlaps: vec![],
     };
     MeshGeometry::from_topology(build_topology(data).unwrap())
 }
