@@ -77,6 +77,8 @@ pub(crate) struct SurfaceBvhData {
 #[derive(Clone)]
 struct VacuumBvh {
     bvh: Bvh,
+    tri_ids: Vec<TriangleId>,
+    surf_ids: Vec<SurfaceId>,
     precomputed: PrecomputedTriData,
 }
 
@@ -321,18 +323,19 @@ impl MeshGeometry {
             .vacuum_bvh
             .get_or_init(|| build_vacuum_bvh(&self.topology))
             .as_ref()?;
-        sd.bvh
-            .ray_traverse_tris(
-                origin,
-                direction,
-                &sd.precomputed.v0,
-                &sd.precomputed.edge1,
-                &sd.precomputed.edge2,
-                ray_fire::RAY_FIRE_MIN_T,
-                |_| true,
-            )
-            .map(|(_, t)| t)
-            .filter(|&t| t <= max_distance)
+        ray_fire::ray_fire(
+            &sd.bvh,
+            &sd.tri_ids,
+            &sd.surf_ids,
+            &sd.precomputed.v0,
+            &sd.precomputed.edge1,
+            &sd.precomputed.edge2,
+            origin,
+            direction,
+            None,
+        )
+        .map(|hit| hit.distance)
+        .filter(|&t| t <= max_distance)
     }
 
     /// Get the volume on the other side of a surface.
@@ -639,6 +642,8 @@ fn build_vacuum_bvh(topo: &MeshTopology) -> Option<VacuumBvh> {
     }
     // Map order is arbitrary; a fixed one keeps the BVH reproducible.
     surfaces.sort_unstable();
+    let mut tri_ids = Vec::new();
+    let mut surf_ids = Vec::new();
     let mut aabbs = Vec::new();
     let mut v0 = Vec::new();
     let mut edge1 = Vec::new();
@@ -649,6 +654,8 @@ fn build_vacuum_bvh(topo: &MeshTopology) -> Option<VacuumBvh> {
             let tri_id = topo.surface_tri_indices[i as usize];
             let tri = &topo.triangles[tri_id as usize];
             let a = topo.vertices[tri[0] as usize];
+            tri_ids.push(tri_id);
+            surf_ids.push(surf_id);
             aabbs.push(topo.triangle_aabbs[tri_id as usize]);
             v0.push(a);
             edge1.push(intersect::sub(topo.vertices[tri[1] as usize], a));
@@ -657,6 +664,8 @@ fn build_vacuum_bvh(topo: &MeshTopology) -> Option<VacuumBvh> {
     }
     Some(VacuumBvh {
         bvh: Bvh::build(&aabbs),
+        tri_ids,
+        surf_ids,
         precomputed: PrecomputedTriData { v0, edge1, edge2 },
     })
 }
