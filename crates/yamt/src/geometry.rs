@@ -503,15 +503,22 @@ impl MeshGeometry {
     /// That holds for an overlap sliver of any depth, and a third solid
     /// overlapping the candidate further along the ray cannot confuse it (the
     /// first facet of ANY solid ahead can be that third solid's entry, which
-    /// would read as "in a gap"). A candidate whose first facet is an entry
-    /// within the contact tolerance takes the particle too: the two solids
-    /// count as touching there, and the thin gap between their facetings goes
-    /// to the solid ahead rather than to the implicit complement. Otherwise
-    /// `x` is in a real gap, which is the implicit complement.
+    /// would read as "in a gap"). Failing that, the candidate whose first
+    /// facet is the nearest entry within the contact tolerance takes the
+    /// particle: the two solids count as touching there, and the thin gap
+    /// between their facetings goes to the solid ahead rather than to the
+    /// implicit complement. Otherwise `x` is in a real gap, which is the
+    /// implicit complement.
     ///
     /// When several candidates contain `x` (a sliver claimed by more than one
     /// solid), the lowest volume id wins.
     pub fn relocate(&self, from: VolumeId, tri: TriangleId, x: [f64; 3], u: [f64; 3]) -> VolumeId {
+        // A candidate containing `x` wins outright. Failing that, the touching
+        // solid whose entry is NEAREST: with a layer thinner than the contact
+        // tolerance (a foil, an armour tile), the solid beyond it is within
+        // the tolerance too, and taking the first candidate found would skip
+        // the layer.
+        let mut nearest: Option<(f64, VolumeId)> = None;
         for &k in self.contacts.of(tri) {
             if k == from {
                 continue;
@@ -528,11 +535,16 @@ impl MeshGeometry {
                     }));
                     return k;
                 }
-                Some((t, false, _)) if t <= LOOKBACK.max(self.contact_tolerance) => return k,
+                Some((t, false, _))
+                    if t <= LOOKBACK.max(self.contact_tolerance)
+                        && nearest.is_none_or(|(best, _)| t < best) =>
+                {
+                    nearest = Some((t, k));
+                }
                 _ => {}
             }
         }
-        self.topology.implicit_complement
+        nearest.map_or(self.topology.implicit_complement, |(_, k)| k)
     }
 
     /// The exit facet the last relocation on this thread found, if this query
