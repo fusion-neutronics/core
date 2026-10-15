@@ -241,12 +241,44 @@ impl MeshGeometry {
     /// complement cell (last cell).
     pub fn find_cell_index(&self, point: (f64, f64, f64)) -> Option<usize> {
         let vol = self.mesh.find_volume([point.0, point.1, point.2]);
+        Some(self.cell_of_volume(vol))
+    }
+
+    /// The cell containing `point`, asking `hint` (the cell the particle was
+    /// last in) first, or `None` outside the mesh's bounding box. Every
+    /// vacuum boundary, a graveyard included, lies inside that box, so a
+    /// point outside it has left the geometry; inside it, a point in no
+    /// volume is in the implicit complement.
+    pub fn locate_cell(&self, point: (f64, f64, f64), hint: usize) -> Option<usize> {
+        let p = [point.0, point.1, point.2];
+        let bb = &self.mesh.topology.global_aabb;
+        if (0..3).any(|k| p[k] < bb[k] || p[k] > bb[k + 3]) {
+            return None;
+        }
+        let hint = self.volume_ids.get(hint).copied().unwrap_or(u32::MAX);
+        Some(self.cell_of_volume(self.mesh.find_volume_from(hint, p)))
+    }
+
+    /// Distance along a ray to the first vacuum-boundary triangle, if one
+    /// lies within `max_distance` (see
+    /// [`yamt::MeshGeometry::distance_to_vacuum`]).
+    pub(crate) fn distance_to_vacuum(
+        &self,
+        origin: [f64; 3],
+        direction: [f64; 3],
+        max_distance: f64,
+    ) -> Option<f64> {
+        self.mesh
+            .distance_to_vacuum(origin, direction, max_distance)
+    }
+
+    fn cell_of_volume(&self, vol: u32) -> usize {
         if vol == self.mesh.topology.implicit_complement {
-            // Return the complement cell (last cell)
-            Some(self.cells.len() - 1)
+            // The complement cell is the last cell.
+            self.cells.len() - 1
         } else {
             // volume_ids[i] == i for 0..num_volumes, so vol == cell_index
-            Some(vol as usize)
+            vol as usize
         }
     }
 

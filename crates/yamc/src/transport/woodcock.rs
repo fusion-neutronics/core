@@ -96,10 +96,10 @@ pub(super) fn score_woodcock_mesh_track_length(
 /// delta flight can cross several cells before exiting, so a single
 /// boundary query from the pre-flight cell is not enough).
 ///
-/// Fallback path only: CSG vacuum exits are caught
-/// pre-flight by [`woodcock_flight_exit`], so this fires just for mesh
-/// backends (no precomputed vacuum surfaces) and numerical corner
-/// cases, on leaking flights with eligible mesh tallies present.
+/// Fallback path only: vacuum exits, CSG and mesh alike, are caught
+/// pre-flight by [`woodcock_flight_exit`], so this fires just in
+/// numerical corner cases, on leaking flights with eligible mesh tallies
+/// present.
 pub(super) fn distance_to_geometry_exit(
     geometry: &GeometryKind,
     neighbor_lists: &mut NeighborLists,
@@ -135,7 +135,7 @@ pub(super) fn distance_to_geometry_exit(
             start[1] + direction[1] * traveled,
             start[2] + direction[2] * traveled,
         ];
-        match neighbor_lists.find_cell(geometry.cells(), (next[0], next[1], next[2]), cell_index) {
+        match geometry.locate_cell(neighbor_lists, (next[0], next[1], next[2]), cell_index) {
             Some(idx) => cell_index = idx,
             None => return traveled.min(max_distance),
         }
@@ -157,9 +157,11 @@ pub(super) fn distance_to_geometry_exit(
 /// -- e.g. another body's infinite vacuum-plane extension slicing
 /// through the current body must not kill the flight -- so each
 /// candidate is confirmed with one `find_cell` probe just past the
-/// crossing. Draws no RNG and allocates nothing: non-leaking flight
-/// histories are bit-identical with the check on, and this CPU
-/// function is the source of truth for a future GPU port.
+/// crossing. On a mesh the vacuum boundaries are triangles, one BVH
+/// query over them per flight, and the first one met is the exit. Draws
+/// no RNG and allocates nothing: non-leaking flight histories are
+/// bit-identical with the check on, and this CPU function is the source
+/// of truth for a future GPU port.
 pub(super) fn woodcock_flight_exit(
     geometry: &GeometryKind,
     neighbor_lists: &mut NeighborLists,
@@ -169,6 +171,12 @@ pub(super) fn woodcock_flight_exit(
     direction: [f64; 3],
     d_flight: f64,
 ) -> Option<f64> {
+    // A mesh's vacuum boundaries are triangles, not analytic surfaces, and
+    // nothing lies beyond them: the first one the flight meets is its exit.
+    #[cfg(feature = "mesh")]
+    if let GeometryKind::Mesh(mesh) = geometry {
+        return mesh.distance_to_vacuum(start, direction, d_flight);
+    }
     if vacuum_surfaces.is_empty() {
         return None;
     }
@@ -213,8 +221,7 @@ pub(super) fn woodcock_flight_exit(
             start[1] + direction[1] * probe_dist,
             start[2] + direction[2] * probe_dist,
         ];
-        match neighbor_lists.find_cell(geometry.cells(), (probe[0], probe[1], probe[2]), cell_hint)
-        {
+        match geometry.locate_cell(neighbor_lists, (probe[0], probe[1], probe[2]), cell_hint) {
             None => return Some(hit),
             Some(idx) => {
                 cell_hint = idx;

@@ -20,7 +20,7 @@ pub struct RayFireResult {
 /// Small positive value to avoid self-intersection when a particle sits
 /// exactly on a triangle face. The transport tolerance (1e-8) pushes
 /// particles past the surface after crossing.
-const RAY_FIRE_MIN_T: f64 = 1e-10;
+pub(crate) const RAY_FIRE_MIN_T: f64 = 1e-10;
 
 /// Fire a ray within a volume and find the nearest surface crossing.
 ///
