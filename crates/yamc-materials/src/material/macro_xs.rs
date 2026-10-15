@@ -648,7 +648,7 @@ impl Material {
     /// # Arguments
     /// * `reaction` - Either an integer MT number or a string reaction name
     /// * `temperature` - Optional temperature string. If not provided, uses fallback chain:
-    ///   material.temperature -> single available temperature -> error
+    ///   material.temperature -> single available temperature -> 294 K -> error
     ///
     /// # Returns
     /// * A tuple of (cross_section_values, energy_grid)

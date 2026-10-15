@@ -156,3 +156,59 @@ def test_correct_temperature_works_with_explicit_file():
     xs, energy = material.macroscopic_cross_section(reaction="(n,total)")
     assert len(xs) > 0
     assert len(energy) > 0
+
+
+def _sphere_model(material):
+    """A 10 cm vacuum sphere of ``material``, a 14.06 MeV source and a flux tally."""
+    sphere = yamc.Sphere(radius=10.0, boundary="vacuum")
+    cell = yamc.Cell(region=sphere.below, material=material)
+    geometry = yamc.Geometry([cell])
+    tally = yamc.Tally(name="flux", scores=["flux"], cells=cell)
+    return yamc.Model(
+        geometry=geometry,
+        source=yamc.NeutronSource(energy=14.06e6),
+        tallies=[tally],
+    )
+
+
+@requires_keywords
+@pytest.mark.parametrize(
+    "make_material",
+    [
+        lambda: yamc.Material(composition={"Fe56": 1.0}, density=7.8),
+        lambda: yamc.Material(composition={"Fe": 1.0}, density=7.8),
+        lambda: yamc.Material(composition={"Li4SiO4": 1.0}, density=2.4),
+        lambda: yamc.materials.pnnl.material("Steel, Stainless 316"),
+    ],
+    ids=["nuclide", "element", "formula", "pnnl"],
+)
+def test_a_material_without_a_temperature_transports_at_the_294_k_default(
+    make_material,
+):
+    """No temperature must run at the documented 294 K default, not panic.
+
+    endf-b8.1 carries several temperatures, so the single-temperature
+    auto-detect cannot answer and the default has to.
+    """
+    yamc.cross_section_data = "endf-b8.1"
+
+    model = _sphere_model(make_material())
+    results = model.simulate_transport(total_particles=500, seed=1)
+    assert results["flux"].mean[0] > 0.0
+
+
+@requires_keywords
+def test_an_unservable_temperature_is_a_value_error_before_transport():
+    """A temperature the data cannot serve raises ``ValueError``, not a panic.
+
+    Relabelled after loading, so the loader never sees 3000 K and the check
+    falls to transport setup, which used to panic from inside the grid builder.
+    """
+    yamc.cross_section_data = "endf-b8.1"
+
+    fe = yamc.Material(composition={"Fe56": 1.0}, density=7.8, temperature=294)
+    fe.read_nuclear_data("endf-b8.1")
+    fe.temperature = 3000
+
+    with pytest.raises(ValueError, match="3000"):
+        _sphere_model(fe).simulate_transport(total_particles=500, seed=1)

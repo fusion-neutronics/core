@@ -869,17 +869,23 @@ def test_material_path_normalization_in_cache():
 
 
 def test_macroscopic_cross_section_without_temperature():
+    """An unset temperature resolves to the 294 K default, not an error."""
     mat = Material(
         composition={"Li6": 1.0}, density=1.0
     )
     mat.read_nuclear_data({"Li6": "tests/Li6.arrow"})
-    with pytest.raises(BaseException):
-        mat.macroscopic_cross_section(reaction="(n,total)")
-    mat.temperature = 294
     xs, energy = mat.macroscopic_cross_section(reaction="(n,total)")
     assert len(xs) > 0
-    assert len(energy) > 0
     assert len(xs) == len(energy)
+    assert mat.temperature == "294"
+
+    explicit = Material(
+        composition={"Li6": 1.0}, density=1.0, temperature=294
+    )
+    explicit.read_nuclear_data({"Li6": "tests/Li6.arrow"})
+    xs_294, energy_294 = explicit.macroscopic_cross_section(reaction="(n,total)")
+    assert xs == xs_294
+    assert energy == energy_294
 
 
 # ---------------------------------------------------------------------------
