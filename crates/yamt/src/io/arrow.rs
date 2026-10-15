@@ -13,6 +13,9 @@
 //!   own, without imprinting, so touching solids do not share surfaces
 //! - "yamc.contact_tolerance" (optional): for such a mesh, the distance (cm)
 //!   within which two solids' surfaces count as touching
+//! - "yamc.overlaps" (optional): for such a mesh, `[[low, high], ...]` pairs of
+//!   0-based volume ids whose solids overlap, where `high` takes the shared
+//!   region
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -51,6 +54,9 @@ pub struct ArrowMeshData {
     pub imprinted: Option<bool>,
     /// Contact tolerance (cm) recorded for a non-imprinted mesh.
     pub contact_tolerance: Option<f64>,
+    /// Overlapping solid pairs `[low, high]` (0-based volume ids) of a
+    /// non-imprinted mesh: `high` takes the region the two share.
+    pub overlaps: Vec<[u32; 2]>,
 }
 
 /// Flat mesh data for writing to Arrow IPC files.
@@ -78,6 +84,8 @@ pub struct MeshData {
     pub imprinted: Option<bool>,
     /// Written as `yamc.contact_tolerance` when set.
     pub contact_tolerance: Option<f64>,
+    /// Written as `yamc.overlaps` when not empty.
+    pub overlaps: Vec<[u32; 2]>,
 }
 
 /// Write mesh data to an Arrow IPC file.
@@ -110,6 +118,17 @@ pub fn write_arrow_mesh(data: &MeshData, path: &Path) -> Result<(), Box<dyn std:
     }
     if let Some(tol) = data.contact_tolerance {
         metadata.insert("yamc.contact_tolerance".to_string(), format!("{tol:e}"));
+    }
+    if !data.overlaps.is_empty() {
+        let pairs: Vec<String> = data
+            .overlaps
+            .iter()
+            .map(|[low, high]| format!("[{low}, {high}]"))
+            .collect();
+        metadata.insert(
+            "yamc.overlaps".to_string(),
+            format!("[{}]", pairs.join(", ")),
+        );
     }
 
     let schema = Schema::new_with_metadata(
@@ -336,6 +355,19 @@ pub fn read_arrow_mesh(path: &Path) -> Result<ArrowMeshData, MeshError> {
                 "yamc.imprinted must be \"true\" or \"false\", got {other:?}"
             )));
         }
+    };
+    let overlaps = match metadata.get("yamc.overlaps") {
+        None => Vec::new(),
+        Some(json) => parse_surface_volumes_json(json)
+            .into_iter()
+            .map(|pair| match pair {
+                [Some(low), Some(high)] if low != high => Ok([low, high]),
+                _ => Err(MeshError::Parse(format!(
+                    "yamc.overlaps must be [[low, high], ...] pairs of distinct volume ids, \
+                     got {json:?}"
+                ))),
+            })
+            .collect::<Result<Vec<_>, _>>()?,
     };
     let contact_tolerance = match metadata.get("yamc.contact_tolerance") {
         None => None,
@@ -572,6 +604,7 @@ pub fn read_arrow_mesh(path: &Path) -> Result<ArrowMeshData, MeshError> {
         volume_measures,
         imprinted,
         contact_tolerance,
+        overlaps,
     })
 }
 
@@ -860,6 +893,7 @@ pub fn build_topology(data: ArrowMeshData) -> Result<MeshTopology, MeshError> {
         }
     }
     let global_aabb = compute_global_aabb(&data.vertices);
+    let overlaps = overlap_pairs(&data.overlaps, num_volumes)?;
 
     // Build physical group data from JSON
     let physical_data =
@@ -889,7 +923,33 @@ pub fn build_topology(data: ArrowMeshData) -> Result<MeshTopology, MeshError> {
         implicit_complement,
         imprinted: data.imprinted,
         contact_tolerance: data.contact_tolerance,
+        overlaps,
     })
+}
+
+/// Check the recorded overlap pairs: ids in range, and the "takes the shared
+/// region from" relation free of cycles, so the solids can be ranked.
+fn overlap_pairs(
+    pairs: &[[u32; 2]],
+    num_volumes: u32,
+) -> Result<Vec<(VolumeId, VolumeId)>, MeshError> {
+    for &[low, high] in pairs {
+        if low >= num_volumes || high >= num_volumes {
+            return Err(MeshError::Parse(format!(
+                "yamc.overlaps names volume {} but the mesh has {num_volumes} volumes",
+                low.max(high)
+            )));
+        }
+    }
+    let pairs: Vec<(VolumeId, VolumeId)> = pairs.iter().map(|&[l, h]| (l, h)).collect();
+    if crate::mesh::topology::overlap_ranks(num_volumes, &pairs).is_none() {
+        return Err(MeshError::Parse(
+            "yamc.overlaps is cyclic: some solid both takes and gives up the same \
+             shared region, so there is no order to resolve overlaps in"
+                .to_string(),
+        ));
+    }
+    Ok(pairs)
 }
 
 // ---------------------------------------------------------------------------
@@ -1282,6 +1342,7 @@ mod tests {
             volume_measures: vec![],
             imprinted: None,
             contact_tolerance: None,
+            overlaps: vec![],
         };
 
         add_vacuum_boundary(&mut data, 5.0);

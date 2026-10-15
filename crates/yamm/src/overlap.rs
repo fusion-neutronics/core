@@ -330,6 +330,112 @@ pub fn find_solid_overlaps(
     found
 }
 
+/// Volume shared by two closed triangle meshes.
+///
+/// When the surfaces never come within `tol` of each other and one lies
+/// inside the other, the shared volume is all of the inner solid, which the
+/// caller knows exactly; that case returns `SharedVolume::Embedded` with the
+/// inner solid's index (0 for `a`, 1 for `b`). Otherwise the shared volume is
+/// estimated by sampling `samples` points uniformly in the intersection of
+/// the two bounding boxes (deterministic for a given `seed`).
+pub fn shared_volume(
+    vertices: &[[f64; 3]],
+    a: &[[usize; 3]],
+    b: &[[usize; 3]],
+    tol: f64,
+    samples: usize,
+    seed: u64,
+) -> SharedVolume {
+    let bvh = |tris: &[[usize; 3]]| {
+        let t: Vec<([f64; 3], [f64; 3], [f64; 3])> = tris
+            .iter()
+            .map(|t| (vertices[t[0]], vertices[t[1]], vertices[t[2]]))
+            .collect();
+        TriangleBvh::new(&t)
+    };
+    let (ba, bb) = (bvh(a), bvh(b));
+    if !ba.boxes_within(&bb, tol) {
+        if b.first()
+            .is_some_and(|t| ba.is_point_inside(&vertices[t[0]]))
+        {
+            return SharedVolume::Embedded(1);
+        }
+        if a.first()
+            .is_some_and(|t| bb.is_point_inside(&vertices[t[0]]))
+        {
+            return SharedVolume::Embedded(0);
+        }
+        return SharedVolume::Estimate {
+            volume: 0.0,
+            std_err: 0.0,
+        };
+    }
+    let bounds = |tris: &[[usize; 3]]| {
+        let mut lo = [f64::MAX; 3];
+        let mut hi = [f64::MIN; 3];
+        for t in tris {
+            for &v in t {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(vertices[v][k]);
+                    hi[k] = hi[k].max(vertices[v][k]);
+                }
+            }
+        }
+        (lo, hi)
+    };
+    let ((la, ha), (lb, hb)) = (bounds(a), bounds(b));
+    let lo = [la[0].max(lb[0]), la[1].max(lb[1]), la[2].max(lb[2])];
+    let hi = [ha[0].min(hb[0]), ha[1].min(hb[1]), ha[2].min(hb[2])];
+    if (0..3).any(|k| hi[k] <= lo[k]) || samples == 0 {
+        return SharedVolume::Estimate {
+            volume: 0.0,
+            std_err: 0.0,
+        };
+    }
+    let box_volume = (hi[0] - lo[0]) * (hi[1] - lo[1]) * (hi[2] - lo[2]);
+    const CHUNK: usize = 4096;
+    let chunks = samples.div_ceil(CHUNK);
+    let hits: usize = (0..chunks)
+        .into_par_iter()
+        .map(|c| {
+            // splitmix64 seeded per chunk: deterministic whatever the threads.
+            let mut state = seed ^ (c as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let mut next = || {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+            };
+            let n = CHUNK.min(samples - c * CHUNK);
+            (0..n)
+                .filter(|_| {
+                    let p = [
+                        lo[0] + (hi[0] - lo[0]) * next(),
+                        lo[1] + (hi[1] - lo[1]) * next(),
+                        lo[2] + (hi[2] - lo[2]) * next(),
+                    ];
+                    ba.is_point_inside(&p) && bb.is_point_inside(&p)
+                })
+                .count()
+        })
+        .sum();
+    let p = hits as f64 / samples as f64;
+    SharedVolume::Estimate {
+        volume: box_volume * p,
+        std_err: box_volume * (p * (1.0 - p) / samples as f64).sqrt(),
+    }
+}
+
+/// Result of [`shared_volume`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SharedVolume {
+    /// One solid (0 = `a`, 1 = `b`) lies wholly inside the other.
+    Embedded(usize),
+    /// Monte Carlo estimate, with its standard error.
+    Estimate { volume: f64, std_err: f64 },
+}
+
 /// Test `a`'s features against `b`'s closed surface.
 ///
 /// Returns `((max_depth, inside_vertices, crossing_edges, inside_faces), lens_area)`.
@@ -574,6 +680,36 @@ mod tests {
         assert_eq!(a[0].max_depth, b[0].max_depth);
         assert_eq!(a[0].inside_vertices, b[0].inside_vertices);
         assert_eq!(a[0].lens_area, b[0].lens_area);
+    }
+
+    #[test]
+    fn shared_volume_of_two_offset_boxes() {
+        // Two 10 cm cubes offset by 5 along x share a 5 x 10 x 10 block.
+        let (v, s) = two_boxes(5.0);
+        match shared_volume(&v, &s[0].1, &s[1].1, 1e-9, 200_000, 7) {
+            SharedVolume::Estimate { volume, std_err } => {
+                assert!(
+                    (volume - 500.0).abs() < 4.0 * std_err + 1.0,
+                    "{volume} +- {std_err}"
+                );
+            }
+            other => panic!("expected an estimate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shared_volume_of_an_embedded_box_is_the_whole_box() {
+        let mut v = Vec::new();
+        let outer = push_box(&mut v, [0.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
+        let inner = push_box(&mut v, [3.0, 3.0, 3.0], [7.0, 7.0, 7.0]);
+        assert_eq!(
+            shared_volume(&v, &outer, &inner, 1e-9, 1000, 7),
+            SharedVolume::Embedded(1)
+        );
+        assert_eq!(
+            shared_volume(&v, &inner, &outer, 1e-9, 1000, 7),
+            SharedVolume::Embedded(0)
+        );
     }
 
     #[test]

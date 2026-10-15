@@ -196,9 +196,16 @@ fn write_mesh_file(
     volume_measures_json: String,
     imprinted: Option<bool>,
     contact_tolerance: Option<f64>,
+    overlaps: Vec<[u32; 2]>,
 ) -> PyResult<()> {
     use yamt::mesh::cad_build::{tet_aabbs_flat, tet_adjacency_flat, tri_aabbs_flat};
 
+    if !overlaps.is_empty() && imprinted != Some(false) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "overlaps only apply to a mesh written with imprinted=False: an imprinted \
+             mesh has already split overlapping solids apart",
+        ));
+    }
     if let Some(tol) = contact_tolerance {
         if !(tol.is_finite() && tol >= 0.0) {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -234,6 +241,7 @@ fn write_mesh_file(
         volume_measures_json,
         imprinted,
         contact_tolerance,
+        overlaps,
     };
 
     write_arrow_mesh(&data, &PathBuf::from(path)).map_err(|e| {
@@ -252,6 +260,8 @@ fn write_mesh_file(
 /// :class:`MeshGeometry` then tracks the mesh discontinuously, with
 /// ``contact_tolerance`` (cm) as the distance within which two solids'
 /// surfaces count as touching. Both are left out of the file when ``None``.
+/// ``overlaps`` lists ``(low, high)`` pairs of 0-based volume ids whose
+/// solids overlap; where they do, the cell is ``high``.
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (
@@ -268,6 +278,7 @@ fn write_mesh_file(
     volume_measures_json="".to_string(),
     imprinted=None,
     contact_tolerance=None,
+    overlaps=vec![],
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn mesh_to_arrow(
@@ -284,6 +295,7 @@ pub fn mesh_to_arrow(
     volume_measures_json: String,
     imprinted: Option<bool>,
     contact_tolerance: Option<f64>,
+    overlaps: Vec<(u32, u32)>,
 ) -> PyResult<()> {
     write_mesh_file(
         &path,
@@ -299,6 +311,7 @@ pub fn mesh_to_arrow(
         volume_measures_json,
         imprinted,
         contact_tolerance,
+        overlaps.into_iter().map(|(l, h)| [l, h]).collect(),
     )
 }
 
@@ -365,6 +378,12 @@ fn physical_groups_json(material_tags: &[String], boundary_tags: &[(String, Vec<
 ///         makes :class:`MeshGeometry` track the mesh discontinuously.
 ///     contact_tolerance: For a mesh that was not imprinted, the distance
 ///         (cm) within which two solids' surfaces count as touching.
+///     overlaps: For a mesh that was not imprinted, ``(low, high)`` solid
+///         pairs (1-based solid ids) that overlap; where they do, the cell is
+///         ``high``.
+///     volume_measures: Optional volume (cm³) per solid, in solid order,
+///         written instead of the volumes the reader would compute from the
+///         surfaces (for solids that give up an overlap).
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (
@@ -381,6 +400,8 @@ fn physical_groups_json(material_tags: &[String], boundary_tags: &[(String, Vec<
     boundary_tags=vec![],
     imprinted=true,
     contact_tolerance=None,
+    overlaps=vec![],
+    volume_measures=None,
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn cad_mesh_to_arrow(
@@ -397,6 +418,8 @@ pub fn cad_mesh_to_arrow(
     boundary_tags: Vec<(String, Vec<u32>)>,
     imprinted: bool,
     contact_tolerance: Option<f64>,
+    overlaps: Vec<(u32, u32)>,
+    volume_measures: Option<Vec<f64>>,
 ) -> PyResult<()> {
     use yamt::mesh::cad_build::{
         face_owners, flatten_tet_blocks, surface_volume_pairs, triangle_owner_ids,
@@ -426,9 +449,22 @@ pub fn cad_mesh_to_arrow(
         tet_physical_groups,
         physical_groups_json(&material_tags, &boundary_tags),
         serde_json::to_string(&surface_volumes).expect("serializing surface_volumes"),
-        String::new(),
+        volume_measures
+            .map(|v| serde_json::to_string(&v).expect("serializing volume_measures"))
+            .unwrap_or_default(),
         Some(imprinted),
         contact_tolerance,
+        overlaps
+            .into_iter()
+            .map(|(low, high)| {
+                if low == 0 || high == 0 {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "overlaps take 1-based solid ids",
+                    ));
+                }
+                Ok([low - 1, high - 1])
+            })
+            .collect::<PyResult<_>>()?,
     )
 }
 
@@ -495,6 +531,48 @@ pub fn solid_overlaps(
         .into_iter()
         .map(|o| (o.solid_a, o.solid_b, o.max_depth, o.exposure))
         .collect()
+}
+
+/// Volume shared by two solids' closed surface meshes.
+///
+/// Args:
+///     vertices: Global ``[x, y, z]`` vertex array.
+///     triangles_a: Closed boundary of the first solid, as indices into
+///         ``vertices``.
+///     triangles_b: Closed boundary of the second solid.
+///     tolerance: Distance below which the two surfaces count as touching.
+///     samples: Points sampled when the volume has to be estimated.
+///     seed: Seed of the deterministic sampler.
+///
+/// Returns:
+///     ``(volume, std_err, embedded)``. When the surfaces never come within
+///     ``tolerance`` of each other and one solid lies inside the other,
+///     ``embedded`` is ``0`` or ``1`` (that solid is wholly shared; ``volume``
+///     is then 0 and the caller supplies the solid's own volume). Otherwise
+///     ``embedded`` is ``None`` and ``volume`` is a Monte Carlo estimate with
+///     standard error ``std_err``.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (vertices, triangles_a, triangles_b, tolerance, samples=200_000, seed=1))]
+pub fn solid_shared_volume(
+    vertices: Vec<[f64; 3]>,
+    triangles_a: Vec<[usize; 3]>,
+    triangles_b: Vec<[usize; 3]>,
+    tolerance: f64,
+    samples: usize,
+    seed: u64,
+) -> (f64, f64, Option<usize>) {
+    match yamm::overlap::shared_volume(
+        &vertices,
+        &triangles_a,
+        &triangles_b,
+        tolerance,
+        samples,
+        seed,
+    ) {
+        yamm::overlap::SharedVolume::Embedded(i) => (0.0, 0.0, Some(i)),
+        yamm::overlap::SharedVolume::Estimate { volume, std_err } => (volume, std_err, None),
+    }
 }
 
 /// Weld coincident vertices of a triangle mesh into a watertight, index-shared

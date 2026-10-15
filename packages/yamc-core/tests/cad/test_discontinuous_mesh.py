@@ -223,7 +223,7 @@ def _assembly(**parts):
 def test_an_embedded_solid_is_refused():
     """A cylinder inside a box that was never cut touches the box nowhere, so
     a particle reaching it from the box would never enter it. Refused at
-    meshing time, unless the gate is switched off."""
+    meshing time by default; overlaps="ignore" skips the check."""
     from yamc.cad import OverlappingSolidsError
 
     def embedded():
@@ -239,7 +239,7 @@ def test_an_embedded_solid_is_refused():
 
     c2y = CadToYamc()
     c2y.add_cadquery_object(embedded(), material_tags=["a", "b"])
-    c2y.mesh(imprint=False, overlap_check=False)
+    c2y.mesh(imprint=False, overlaps="ignore")
 
 
 def test_contact_tolerance_admits_interference_and_is_recorded(tmp_path):
@@ -274,3 +274,87 @@ def test_contact_tolerance_needs_imprint_false():
     c2y.add_cadquery_object(_nested_cylinders(), material_tags=["a", "b", "c"])
     with pytest.raises(ValueError, match="imprint=False"):
         c2y.mesh(contact_tolerance=0.1)
+
+
+def _embedded(cut):
+    box = cq.Workplane().box(30, 30, 30)
+    cyl = cq.Workplane().circle(4).extrude(20).translate((0, 0, -10))
+    return _assembly(a=cyl, b=box.cut(cyl) if cut else box)
+
+
+def _two_material_fluxes(path, position, seed, particles=20_000):
+    mats = {
+        tag: _materials()[tag] for tag in ("a", "b")
+    }
+    geometry = yamc.MeshGeometry(path, mats, graveyard_offset=1.0)
+    tallies = {t: yamc.Tally(scores=["flux"], materials=m, name=t) for t, m in mats.items()}
+    model = yamc.Model(
+        geometry=geometry,
+        tallies=list(tallies.values()),
+        source=yamc.NeutronSource(
+            energy=yamc.sources.Discrete([14.06e6], [1.0]), position=position
+        ),
+    )
+    results = model.simulate_transport(total_particles=particles, seed=seed)
+    return geometry, model, {t: float(results[x].mean[0]) for t, x in tallies.items()}
+
+
+def test_smaller_wins_matches_the_cut_cad(tmp_path):
+    """An uncut box around a cylinder, resolved with overlaps="smaller_wins",
+    transports exactly like the same CAD with the box cut and imprinted: the
+    cylinder is entered from the box, and the box's volume loses the
+    cylinder's."""
+    c2y = CadToYamc()
+    c2y.add_cadquery_object(_embedded(cut=False), material_tags=["a", "b"])
+    with pytest.warns(UserWarning, match="smaller solid wins"):
+        c2y.mesh(imprint=False, overlaps="smaller_wins")
+    resolved = str(tmp_path / "resolved.arrow")
+    c2y.to_arrow(resolved)
+
+    c2y = CadToYamc()
+    c2y.add_cadquery_object(_embedded(cut=True), material_tags=["a", "b"])
+    c2y.mesh()
+    cut = str(tmp_path / "cut.arrow")
+    c2y.to_arrow(cut)
+
+    # Source in the box, outside the cylinder: only entry from outside can
+    # put any flux in the cylinder.
+    geometry, model, flux = _two_material_fluxes(resolved, (10.0, 0.0, 0.0), seed=4)
+    reference_geometry, _, reference = _two_material_fluxes(cut, (10.0, 0.0, 0.0), seed=4)
+    assert geometry.discontinuous
+    assert len(model.lost_particles) == 0
+    for tag in ("a", "b"):
+        assert flux[tag] == pytest.approx(reference[tag], rel=1e-9), tag
+    assert geometry.volume_measures == pytest.approx(
+        reference_geometry.volume_measures, rel=1e-6
+    )
+
+
+def test_smaller_wins_takes_a_partial_overlap_off_the_larger_volume(tmp_path):
+    """Box b (8 cm) pokes 3 cm into box a (10 cm): a gives up 3 x 8 x 8."""
+    c2y = CadToYamc()
+    c2y.add_cadquery_object(
+        _assembly(
+            a=cq.Workplane().box(10, 10, 10),
+            b=cq.Workplane().box(8, 8, 8).translate((6, 0, 0)),
+        ),
+        material_tags=["a", "b"],
+    )
+    with pytest.warns(UserWarning, match="sampled"):
+        c2y.mesh(imprint=False, overlaps="smaller_wins")
+    path = str(tmp_path / "boxes.arrow")
+    c2y.to_arrow(path)
+    geometry = yamc.MeshGeometry(path, _materials(), graveyard_offset=1.0)
+    volume_a, volume_b = geometry.volume_measures
+    assert volume_b == pytest.approx(512.0, rel=1e-9)
+    # Sampled with 200k points: a few tenths of a cm^3.
+    assert volume_a == pytest.approx(1000.0 - 192.0, abs=2.0)
+
+
+def test_overlaps_option_is_checked():
+    c2y = CadToYamc()
+    c2y.add_cadquery_object(_embedded(cut=False), material_tags=["a", "b"])
+    with pytest.raises(ValueError, match="'error', 'smaller_wins' or 'ignore'"):
+        c2y.mesh(imprint=False, overlaps="largest")
+    with pytest.raises(ValueError, match="only applies with imprint=False"):
+        c2y.mesh(overlaps="smaller_wins")

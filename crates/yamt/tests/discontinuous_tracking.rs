@@ -99,6 +99,7 @@ fn two_boxes(shift: f64, cross_split: bool, imprinted: Option<bool>) -> MeshGeom
         volume_measures: vec![],
         imprinted,
         contact_tolerance: imprinted.map(|_| 0.05),
+        overlaps: vec![],
     };
     MeshGeometry::from_topology(build_topology(data).unwrap())
 }
@@ -283,4 +284,98 @@ fn the_exit_found_by_relocation_answers_the_next_query() {
         "{t_cached} vs {t_fresh}"
     );
     assert_eq!((s_cached, b_cached), (s_fresh, b_fresh));
+}
+
+/// Boxes `[lo, hi]`, each its own solid and surface (no imprint), with the
+/// given recorded overlaps `[low, high]`.
+fn boxes(spec: &[([f64; 3], [f64; 3])], overlaps: Vec<[u32; 2]>) -> Result<MeshGeometry, String> {
+    let mut vertices = Vec::new();
+    let mut triangles = Vec::new();
+    let mut triangle_surface_ids = Vec::new();
+    let mut triangle_physical_groups = Vec::new();
+    let mut groups = Vec::new();
+    let mut sv = Vec::new();
+    for (i, &(lo, hi)) in spec.iter().enumerate() {
+        let n = push_box(&mut vertices, &mut triangles, lo, hi, false, false);
+        triangle_surface_ids.extend(vec![i as u32 + 1; n]);
+        triangle_physical_groups.extend(vec![i as i32 + 1; n]);
+        groups.push(format!(r#""{}": {{"name": "mat:m{i}", "dim": 3}}"#, i + 1));
+        sv.push(format!("[{i}, null]"));
+    }
+    let data = ArrowMeshData {
+        triangle_aabbs: build_triangle_aabbs(&triangles, &vertices),
+        tet_aabbs: build_tet_aabbs(&[], &vertices),
+        tet_adjacency: vec![],
+        tetrahedra: vec![],
+        tet_volume_ids: vec![],
+        tet_physical_groups: vec![],
+        triangles,
+        triangle_surface_ids,
+        triangle_physical_groups,
+        vertices,
+        physical_groups_json: format!("{{{}}}", groups.join(", ")),
+        surface_volumes_json: format!("[{}]", sv.join(", ")),
+        volume_measures: vec![],
+        imprinted: Some(false),
+        contact_tolerance: Some(0.01),
+        overlaps,
+    };
+    build_topology(data)
+        .map(MeshGeometry::from_topology)
+        .map_err(|e| e.to_string())
+}
+
+const OUTER: ([f64; 3], [f64; 3]) = ([0.0, 0.0, 0.0], [3.0, 3.0, 3.0]);
+const INNER: ([f64; 3], [f64; 3]) = ([1.0, 1.0, 1.0], [2.0, 2.0, 2.0]);
+
+#[test]
+fn an_embedded_solid_is_invisible_without_a_recorded_overlap() {
+    // The behaviour the overlap ranking exists to fix: an overlap goes to the
+    // solid the particle is in, so from the outer box the inner one is never
+    // entered and the ray leaves at the outer box's far face.
+    let geom = boxes(&[OUTER, INNER], vec![]).unwrap();
+    let (t, n) = next(&geom, 0, [0.5, 1.5, 1.5], [1.0, 0.0, 0.0]);
+    assert!((t - 2.5).abs() < 1e-12, "t = {t}");
+    assert_eq!(n, Some(2), "out into the implicit complement");
+}
+
+#[test]
+fn a_recorded_overlap_gives_the_shared_region_to_the_higher_solid() {
+    let geom = boxes(&[OUTER, INNER], vec![[0, 1]]).unwrap();
+    // From the outer box, the inner one is entered at its face.
+    let (t, n) = next(&geom, 0, [0.5, 1.5, 1.5], [1.0, 0.0, 0.0]);
+    assert!((t - 0.5).abs() < 1e-12, "t = {t}");
+    assert_eq!(n, Some(1));
+    // Leaving the inner box lands back in the outer one, which touches it
+    // nowhere: the recorded overlap is what offers it to relocation.
+    let (t, n) = next(&geom, 1, [1.5, 1.5, 1.5], [1.0, 0.0, 0.0]);
+    assert!((t - 0.5).abs() < 1e-12, "t = {t}");
+    assert_eq!(n, Some(0));
+    // A point in both belongs to the higher-ranked solid.
+    assert_eq!(geom.find_volume([1.5, 1.5, 1.5]), 1);
+    assert_eq!(geom.find_volume([0.5, 0.5, 0.5]), 0);
+}
+
+#[test]
+fn a_partial_overlap_is_ranked_both_ways() {
+    // B pokes 0.5 into A: the shared slab x in [2.5, 3] is B's.
+    let a = ([0.0, 0.0, 0.0], [3.0, 3.0, 3.0]);
+    let b = ([2.5, 1.0, 1.0], [4.0, 2.0, 2.0]);
+    let geom = boxes(&[a, b], vec![[0, 1]]).unwrap();
+    let (t, n) = next(&geom, 0, [1.0, 1.5, 1.5], [1.0, 0.0, 0.0]);
+    assert!((t - 1.5).abs() < 1e-12, "A hands over at B's face, t = {t}");
+    assert_eq!(n, Some(1));
+    let (t, n) = next(&geom, 1, [3.5, 1.5, 1.5], [-1.0, 0.0, 0.0]);
+    assert!(
+        (t - 1.0).abs() < 1e-12,
+        "B keeps the slab until its own face, t = {t}"
+    );
+    assert_eq!(n, Some(0));
+    assert_eq!(geom.find_volume([2.75, 1.5, 1.5]), 1);
+}
+
+#[test]
+fn cyclic_overlaps_are_refused() {
+    let err = boxes(&[OUTER, INNER], vec![[0, 1], [1, 0]]).err().unwrap();
+    assert!(err.contains("cyclic"), "{err}");
 }

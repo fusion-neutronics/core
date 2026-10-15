@@ -182,9 +182,31 @@ pub struct MeshGeometry {
     /// Distance (cm) within which two solids' surfaces count as touching.
     /// Meaningful only when `discontinuous` is set.
     contact_tolerance: f64,
-    /// Per triangle, the other solids within `contact_tolerance` of it.
-    /// Empty unless `discontinuous` is set.
+    /// Per triangle, the other solids within `contact_tolerance` of it, plus,
+    /// for a solid that takes an overlap from another, that other solid.
+    /// Highest rank first. Empty unless `discontinuous` is set.
     contacts: Contacts,
+
+    /// Overlap resolution for a discontinuous mesh with recorded overlaps
+    /// (see [`MeshTopology::overlaps`]); empty otherwise. `ranks[v]` orders
+    /// the solids: where several contain a point, the highest rank's cell it
+    /// is.
+    ranks: Vec<u32>,
+    /// Per volume, the facets of the higher-ranked solids overlapping it,
+    /// through which a particle in it enters one of them. `None` for a solid
+    /// no higher-ranked solid overlaps.
+    overlap_bvhs: Vec<Option<OverlapBvh>>,
+}
+
+/// Facets of higher-ranked solids that a particle in a lower-ranked solid can
+/// enter them through, with the solid each belongs to.
+#[derive(Clone)]
+struct OverlapBvh {
+    /// `exit_sign` is set so that [`SurfaceBvhData::leaves`] is true when the
+    /// ray ENTERS the owning solid.
+    data: SurfaceBvhData,
+    /// The solid each primitive belongs to.
+    enters: Vec<VolumeId>,
 }
 
 impl MeshGeometry {
@@ -243,6 +265,8 @@ impl MeshGeometry {
             discontinuous: false,
             contact_tolerance: 0.0,
             contacts: Contacts::default(),
+            ranks: Vec::new(),
+            overlap_bvhs: Vec::new(),
         };
         if geometry.topology.imprinted == Some(false) {
             let tol = geometry
@@ -274,12 +298,26 @@ impl MeshGeometry {
             Some(tol) => {
                 self.discontinuous = true;
                 self.contact_tolerance = tol;
-                self.contacts = Contacts::build(&self.topology, tol);
+                let topo = &self.topology;
+                if topo.overlaps.is_empty() {
+                    self.contacts = Contacts::build(topo, tol);
+                    self.ranks = Vec::new();
+                    self.overlap_bvhs = Vec::new();
+                } else {
+                    let ranks =
+                        crate::mesh::topology::overlap_ranks(topo.num_volumes, &topo.overlaps)
+                            .expect("build_topology refuses cyclic overlaps");
+                    self.contacts = Contacts::build(topo, tol).with_overlaps(topo, &ranks);
+                    self.overlap_bvhs = build_overlap_bvhs(topo);
+                    self.ranks = ranks;
+                }
             }
             None => {
                 self.discontinuous = false;
                 self.contact_tolerance = 0.0;
                 self.contacts = Contacts::default();
+                self.ranks = Vec::new();
+                self.overlap_bvhs = Vec::new();
             }
         }
     }
@@ -339,6 +377,24 @@ impl MeshGeometry {
                 |prim, _t| sd.leaves(prim as usize, direction),
             )
         });
+        // A higher-ranked solid overlapping this one takes over where the
+        // ray enters it, if that comes before this solid's own exit.
+        if let Some(Some(ob)) = self.overlap_bvhs.get(volume as usize) {
+            let limit = hit.map_or(f64::INFINITY, |(_, t)| t);
+            let entry = ob.data.bvh.ray_traverse_tris(
+                origin,
+                direction,
+                &ob.data.precomputed.v0,
+                &ob.data.precomputed.edge1,
+                &ob.data.precomputed.edge2,
+                RAY_FIRE_MIN_T,
+                |prim, t| t < limit && ob.data.leaves(prim as usize, direction),
+            );
+            if let Some((prim, t)) = entry {
+                let p = prim as usize;
+                return Some((t, ob.data.surf_ids[p], Beyond::Volume(Some(ob.enters[p]))));
+            }
+        }
         let Some((prim, t)) = hit else {
             if volume != ic {
                 let here = self.find_volume(origin);
@@ -411,6 +467,11 @@ impl MeshGeometry {
         direction: [f64; 3],
     ) -> Option<(u32, f64)> {
         let e = EXIT_AHEAD.take()?;
+        // The cached exit is the first of this solid's OWN facets; a solid
+        // with overlap entries has more to check, so it always queries.
+        if matches!(self.overlap_bvhs.get(volume as usize), Some(Some(_))) {
+            return None;
+        }
         if e.geometry != self as *const Self as usize
             || e.volume != volume
             || e.direction != direction
@@ -589,9 +650,19 @@ impl MeshGeometry {
         )
     }
 
-    /// Find which volume contains a point.
+    /// Find which volume contains a point. Where recorded overlaps make
+    /// several contain it, the highest-ranked one.
     pub fn find_volume(&self, point: [f64; 3]) -> VolumeId {
-        point_in_volume::find_volume(&self.topology, &self.surface_bvhs, point)
+        if self.ranks.is_empty() {
+            point_in_volume::find_volume(&self.topology, &self.surface_bvhs, point)
+        } else {
+            point_in_volume::find_volume_ranked(
+                &self.topology,
+                &self.surface_bvhs,
+                point,
+                &self.ranks,
+            )
+        }
     }
 
     /// Get the volume on the other side of a surface.
@@ -895,6 +966,68 @@ fn build_surface_bvhs(topo: &MeshTopology) -> Vec<SurfaceBvhData> {
     {
         iter.map(mapper).collect()
     }
+}
+
+/// Per volume, the facets of the higher-ranked solids overlapping it (see
+/// [`MeshTopology::overlaps`]), oriented so that crossing one INTO its solid
+/// counts. `None` for a volume no higher-ranked solid overlaps.
+fn build_overlap_bvhs(topo: &MeshTopology) -> Vec<Option<OverlapBvh>> {
+    let n = topo.num_volumes as usize;
+    let mut higher: Vec<Vec<VolumeId>> = vec![Vec::new(); n];
+    for &(low, high) in &topo.overlaps {
+        if !higher[low as usize].contains(&high) {
+            higher[low as usize].push(high);
+        }
+    }
+    let mapper = |vol: usize| -> Option<OverlapBvh> {
+        if higher[vol].is_empty() {
+            return None;
+        }
+        let mut tri_ids = Vec::new();
+        let mut surf_ids = Vec::new();
+        let mut aabbs = Vec::new();
+        let mut exit_sign = Vec::new();
+        let mut enters = Vec::new();
+        for &j in &higher[vol] {
+            for &(surf_id, sense) in &topo.volume_surfaces[j as usize] {
+                // Inverted: `leaves` then means the ray enters `j`.
+                let sign: i8 = match sense {
+                    Sense::Forward => -1,
+                    Sense::Reverse => 1,
+                };
+                let range = &topo.surface_tri_ranges[surf_id as usize];
+                for i in range.start..range.end {
+                    let tri_id = topo.surface_tri_indices[i as usize];
+                    tri_ids.push(tri_id);
+                    surf_ids.push(surf_id);
+                    aabbs.push(topo.triangle_aabbs[tri_id as usize]);
+                    exit_sign.push(sign);
+                    enters.push(j);
+                }
+            }
+        }
+        let mut v0 = Vec::with_capacity(tri_ids.len());
+        let mut edge1 = Vec::with_capacity(tri_ids.len());
+        let mut edge2 = Vec::with_capacity(tri_ids.len());
+        for &tri_id in &tri_ids {
+            let tri = &topo.triangles[tri_id as usize];
+            let a = topo.vertices[tri[0] as usize];
+            v0.push(a);
+            edge1.push(intersect::sub(topo.vertices[tri[1] as usize], a));
+            edge2.push(intersect::sub(topo.vertices[tri[2] as usize], a));
+        }
+        Some(OverlapBvh {
+            data: SurfaceBvhData {
+                bvh: Bvh::build(&aabbs),
+                tri_ids,
+                surf_ids,
+                precomputed: PrecomputedTriData { v0, edge1, edge2 },
+                exit_sign,
+            },
+            enters,
+        })
+    };
+    (0..n).map(mapper).collect()
 }
 
 /// Build per-volume element BVHs (for point-in-tet queries).

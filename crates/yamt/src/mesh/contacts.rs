@@ -156,6 +156,40 @@ impl Contacts {
     }
 }
 
+impl Contacts {
+    /// Add, to every triangle of a solid that takes an overlap from another,
+    /// that other solid: a particle leaving the higher-ranked solid where the
+    /// two overlap is back inside the lower one, which touches it nowhere near
+    /// (it is embedded), so proximity alone would never offer it. Each list is
+    /// then ordered highest rank first, so relocation picks the cell the
+    /// ranking says a point in several solids belongs to.
+    pub fn with_overlaps(self, topo: &MeshTopology, ranks: &[u32]) -> Self {
+        let n_tri = topo.triangles.len();
+        let mut lists: Vec<Vec<VolumeId>> =
+            (0..n_tri as u32).map(|t| self.of(t).to_vec()).collect();
+        for &(low, high) in &topo.overlaps {
+            for &(surf, _) in &topo.volume_surfaces[high as usize] {
+                let range = &topo.surface_tri_ranges[surf as usize];
+                for i in range.start..range.end {
+                    let list = &mut lists[topo.surface_tri_indices[i as usize] as usize];
+                    if !list.contains(&low) {
+                        list.push(low);
+                    }
+                }
+            }
+        }
+        let mut offsets = Vec::with_capacity(n_tri + 1);
+        let mut volumes = Vec::new();
+        offsets.push(0u32);
+        for mut list in lists {
+            list.sort_unstable_by_key(|&v| (std::cmp::Reverse(ranks[v as usize]), v));
+            volumes.extend(list);
+            offsets.push(volumes.len() as u32);
+        }
+        Contacts { offsets, volumes }
+    }
+}
+
 /// True when triangles `a` and `b` come within `tol` of each other, including
 /// when they intersect. Exact: the closest pair of points of two disjoint
 /// triangles is a vertex against the other triangle or an edge against an

@@ -136,3 +136,50 @@ pub(crate) fn find_volume(
 
     topo.implicit_complement
 }
+
+/// Like [`find_volume`], but where several volumes contain the point (solids
+/// whose overlaps were recorded), the one with the highest `ranks` entry.
+pub(crate) fn find_volume_ranked(
+    topo: &MeshTopology,
+    surface_bvhs: &[crate::geometry::SurfaceBvhData],
+    point: [f64; 3],
+    ranks: &[u32],
+) -> VolumeId {
+    let bb = &topo.global_aabb;
+    if point[0] < bb[0]
+        || point[0] > bb[3]
+        || point[1] < bb[1]
+        || point[1] > bb[4]
+        || point[2] < bb[2]
+        || point[2] > bb[5]
+    {
+        return topo.implicit_complement;
+    }
+    let mut best: Option<VolumeId> = None;
+    for vol_id in 0..topo.num_volumes {
+        if best.is_some_and(|b| ranks[b as usize] >= ranks[vol_id as usize]) {
+            continue;
+        }
+        let vbb = &topo.volume_aabbs[vol_id as usize];
+        if point[0] < vbb[0]
+            || point[0] > vbb[3]
+            || point[1] < vbb[1]
+            || point[1] > vbb[4]
+            || point[2] < vbb[2]
+            || point[2] > vbb[5]
+        {
+            continue;
+        }
+        let sd = &surface_bvhs[vol_id as usize];
+        if point_in_volume(
+            &sd.bvh,
+            &sd.precomputed.v0,
+            &sd.precomputed.edge1,
+            &sd.precomputed.edge2,
+            point,
+        ) {
+            best = Some(vol_id);
+        }
+    }
+    best.unwrap_or(topo.implicit_complement)
+}

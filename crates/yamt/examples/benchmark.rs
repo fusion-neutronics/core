@@ -314,5 +314,6 @@ fn generate_cube_mesh(n: usize) -> ArrowMeshData {
         volume_measures: Vec::new(),
         imprinted: None,
         contact_tolerance: None,
+        overlaps: Vec::new(),
     }
 }
