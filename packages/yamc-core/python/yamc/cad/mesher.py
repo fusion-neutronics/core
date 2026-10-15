@@ -247,7 +247,11 @@ class CadToYamc:
                 particle crosses an overlap or a gap thinner than this
                 straight into the next solid. Defaults to twice *tolerance*,
                 which covers the slivers two facetings of one CAD surface
-                leave between them; raise it to accept sloppier CAD.
+                leave between them; raise it to accept sloppier CAD. A gap
+                you modelled on purpose that is narrower than this is filled
+                too, so keep *tolerance* well below the narrowest such gap
+                (an imprinted mesh that coarse fails the other way, its
+                facets crossing inside the gap).
             overlap_check: Only with ``imprint=False``: raise
                 :class:`OverlappingSolidsError` when two solids overlap deeper
                 than *contact_tolerance*, for instance a part embedded in a
