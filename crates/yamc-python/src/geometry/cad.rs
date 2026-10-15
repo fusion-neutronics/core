@@ -505,6 +505,11 @@ pub fn assemble_face_meshes(
         if kept.is_empty() {
             continue;
         }
+        if vertices.len() + verts.len() > u32::MAX as usize {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "the assembled mesh has more vertices than 32-bit indices can address",
+            ));
+        }
         let surface_id = face_surface_ids.len() as u32 + 1;
         face_surface_ids.push((face_id, surface_id));
         let base = vertices.len() as u32;
@@ -525,9 +530,11 @@ pub fn assemble_face_meshes(
     Ok((vertices, triangles, face_ids, surface_ids, face_surface_ids))
 }
 
-/// Two equal corners, or a squared cross product below `min_cross_sq`
-/// (evaluated in the same order as the Python meshers did, so the same
-/// triangles are dropped).
+/// Two equal corners, or a squared cross product below `min_cross_sq`,
+/// evaluated in the same order as the scene mesher's Python filter (so it
+/// drops exactly the triangles that one did). The BRepMesh path used to
+/// square with `**2`, which can differ from `x * x` in the last bit, so a
+/// triangle within an ulp of the threshold may now go the other way.
 fn degenerate_triangle(verts: &[[f64; 3]], t: &[u32; 3], min_cross_sq: f64) -> bool {
     if t[0] == t[1] || t[1] == t[2] || t[0] == t[2] {
         return true;
