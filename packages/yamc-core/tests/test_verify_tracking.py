@@ -12,7 +12,9 @@ coherent), which the adjacency tracker would otherwise follow silently.
 """
 import os
 import tempfile
+import warnings
 
+import pytest
 import yamc
 from yamc._core import mesh_to_arrow
 
@@ -98,8 +100,11 @@ def _run(overlap, particles=2000):
 
 def test_overlapping_volumes_lose_particles():
     """Flight segments through a foreign surface are refused and the
-    particle is lost at the start of the invalid segment."""
-    model = _run(overlap=True)
+    particle is lost at the start of the invalid segment. Loading the mesh
+    also warns: its volumes meet without sharing a surface, which only
+    discontinuous tracking can handle."""
+    with pytest.warns(UserWarning, match="contact_tolerance"):
+        model = _run(overlap=True)
     lost = model.lost_particles
     assert len(lost) > 0
     for lp in lost:
@@ -108,8 +113,11 @@ def test_overlapping_volumes_lose_particles():
 
 
 def test_separated_volumes_no_false_positives():
-    """The same two cubes without overlap transport cleanly."""
-    model = _run(overlap=False)
+    """The same two cubes without overlap transport cleanly, and load
+    without the touching-solids warning."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        model = _run(overlap=False)
     assert len(model.lost_particles) == 0
 
 

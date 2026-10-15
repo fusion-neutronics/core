@@ -187,7 +187,8 @@ def test_contact_tolerance_tracks_a_mesh_from_another_writer(tmp_path):
     path = str(tmp_path / "boxes.arrow")
     _write_touching_boxes(path)
 
-    conformal, (_, b_conformal) = _two_box_fluxes(path)
+    with pytest.warns(UserWarning, match="contact_tolerance"):
+        conformal, (_, b_conformal) = _two_box_fluxes(path)
     assert not conformal.discontinuous
 
     forced, (a, b) = _two_box_fluxes(path, contact_tolerance=1e-3)
@@ -274,3 +275,19 @@ def test_contact_tolerance_needs_imprint_false():
     c2y.add_cadquery_object(_nested_cylinders(), material_tags=["a", "b", "c"])
     with pytest.raises(ValueError, match="imprint=False"):
         c2y.mesh(contact_tolerance=0.1)
+
+
+def test_a_mesh_from_another_writer_whose_solids_touch_is_flagged(tmp_path):
+    """Touching solids with separate surfaces and no provenance in the file
+    are tracked conformally, which skips the solid on the far side without
+    losing a particle: warn, and say how to track it properly."""
+    path = str(tmp_path / "boxes.arrow")
+    _write_touching_boxes(path)
+    with pytest.warns(UserWarning, match="contact_tolerance"):
+        _two_box_fluxes(path)
+
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _two_box_fluxes(path, contact_tolerance=1e-3)
