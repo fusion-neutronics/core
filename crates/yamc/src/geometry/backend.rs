@@ -207,6 +207,9 @@ impl GeometryKind {
             return;
         }
         match self {
+            #[cfg(feature = "mesh")]
+            GeometryKind::Csg(g) => g.resolve_fill_crossing(cell_index, hit, position, direction),
+            #[cfg(not(feature = "mesh"))]
             GeometryKind::Csg(_) => {}
             #[cfg(feature = "mesh")]
             GeometryKind::Mesh(g) => g.resolve_crossing(cell_index, hit, position, direction),

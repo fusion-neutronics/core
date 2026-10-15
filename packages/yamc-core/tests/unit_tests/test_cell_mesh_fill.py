@@ -262,10 +262,11 @@ def test_model_saves_fingerprint_but_does_not_load():
         yamc.Model.load(text)
 
 
-def test_a_mesh_made_without_imprinting_cannot_be_a_fill():
-    """Fill tracking follows shared surfaces, which a discontinuously tracked
-    mesh does not have: refused at construction instead of mis-tracked."""
+def test_a_discontinuously_tracked_mesh_can_be_a_fill():
+    """A mesh tracked discontinuously (as one made without imprinting is)
+    fills a cell like any other; transport through it is checked in
+    tests/cad/test_discontinuous_mesh.py."""
     mesh = _mesh(contact_tolerance=1e-3)
     assert mesh.discontinuous
-    with pytest.raises(ValueError, match="without imprinting"):
-        yamc.Geometry([_filled_cell(mesh)])
+    cells = yamc.Geometry([_filled_cell(mesh)]).cells
+    assert len(cells) == 3, "host + two embedded mesh volumes"
