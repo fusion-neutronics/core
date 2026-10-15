@@ -572,9 +572,24 @@ class CadToYamc:
         the surfaces bounding two solids (imprinted internal interfaces) are
         excluded. These are the surfaces a standalone mesh model wants tagged
         with a boundary condition.
+
+        Raises:
+            RuntimeError: For a mesh made with ``imprint=False``. Every surface
+                of such a mesh belongs to one solid, including the surfaces
+                where solids touch, so tagging these vacuum would kill
+                particles inside the model. Bound it with
+                ``MeshGeometry(..., graveyard_offset=...)`` instead.
         """
         if self._surface_mesh is None:
             raise RuntimeError("No surface mesh. Call mesh() first.")
+        if not self._imprint:
+            raise RuntimeError(
+                "exterior_surface_ids() is not defined for a mesh made with "
+                "imprint=False: every surface there belongs to a single solid, "
+                "including the surfaces where solids touch, so tagging them "
+                "vacuum would kill particles inside the model. Bound the model "
+                "with yamc.MeshGeometry(..., graveyard_offset=...) instead."
+            )
 
         mesh = self._surface_mesh
         return sorted(
