@@ -8069,7 +8069,8 @@ def solid_contact_samples(vertices: typing.Sequence[typing.Sequence[builtins.flo
     Returns:
         ``[(solid_a, solid_b, [[x, y, z], ...]), ...]``, the points on
         ``solid_a``'s surface. A pair whose meshes come close only between
-        vertices returns no points.
+        vertices returns no points, and so does a pair whose meshes share a
+        vertex (which lies on both CAD surfaces, so the two touch).
     """
 
 def solid_overlaps(vertices: typing.Sequence[typing.Sequence[builtins.float]], solids: typing.Sequence[tuple[builtins.int, typing.Sequence[typing.Sequence[builtins.int]]]], depth_tolerance: builtins.float) -> builtins.list[tuple[builtins.int, builtins.int, builtins.float, builtins.float]]:

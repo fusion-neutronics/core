@@ -22,8 +22,8 @@ def find_separated(mesh, solid_shapes, contact_tolerance):
 
     A pair touches when any of its sample points (mesh vertices of one solid
     near the other) lies within a thousandth of the tolerance of the other CAD
-    solid, inside or on it. A pair whose meshes only come close between
-    vertices has no samples and counts as touching.
+    solid, inside or on it. A pair whose meshes share a vertex, or only come
+    close between vertices, has no samples and counts as touching.
     """
     from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeVertex
     from OCP.BRepExtrema import BRepExtrema_DistShapeShape

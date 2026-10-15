@@ -111,8 +111,38 @@ struct Prepared {
     verts: Vec<usize>,
     /// Testable edges, deduplicated, both endpoints testable.
     edges: Vec<(usize, usize)>,
+    /// One vertex of each connected piece of the boundary (a hollow solid's
+    /// outer surface and each of its voids).
+    shells: Vec<usize>,
     lo: [f64; 3],
     hi: [f64; 3],
+}
+
+/// One vertex of each connected piece (shell) of a triangle mesh.
+fn shell_representatives(tris: &[[usize; 3]]) -> Vec<usize> {
+    let mut ids: Vec<usize> = tris.iter().flatten().copied().collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let local = |v: usize| ids.binary_search(&v).expect("a vertex of these triangles");
+    let mut parent: Vec<usize> = (0..ids.len()).collect();
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    for t in tris {
+        let a = root(&mut parent, local(t[0]));
+        for &v in &t[1..] {
+            let b = root(&mut parent, local(v));
+            parent[b] = a;
+        }
+    }
+    (0..ids.len())
+        .filter(|&i| root(&mut parent, i) == i)
+        .map(|i| ids[i])
+        .collect()
 }
 
 fn aabbs_disjoint(a: &Prepared, b: &Prepared, pad: f64) -> bool {
@@ -137,18 +167,15 @@ fn segment_misses_box(p: &[f64; 3], q: &[f64; 3], b: &Prepared, pad: f64) -> boo
 
 /// How deep inside `bvh` the point is, or `None` if it is outside.
 fn depth_inside(bvh: &TriangleBvh, p: &[f64; 3], eps: f64) -> Option<f64> {
-    if !bvh.is_point_inside(p) {
+    // A point within eps of the surface is contact, whatever parity says: a
+    // point exactly on it (a touching contact, or a vertex of a face shared
+    // with a third solid) reads as "inside" about half the time. Asking that
+    // first is also the cheap question, and on touching solids it settles
+    // nearly every feature without the three parity rays.
+    if bvh.any_within(p, eps) || !bvh.is_point_inside(p) {
         return None;
     }
-    let d = dist(p, &bvh.nearest_point_on_surface(p));
-    // A point exactly on the surface -- a touching contact, or a vertex of a
-    // face shared with a third solid -- reads as "inside" from ray parity about
-    // half the time. Depth separates that from real penetration.
-    if d > eps {
-        Some(d)
-    } else {
-        None
-    }
+    Some(dist(p, &bvh.nearest_point_on_surface(p)))
 }
 
 /// Find pairs of solids whose meshes share volume.
@@ -197,7 +224,7 @@ pub fn find_solid_overlaps(
     let is_shared = |v: usize| shared.binary_search(&v).is_ok();
 
     let prepared: Vec<Prepared> = solids
-        .iter()
+        .par_iter()
         .map(|(id, tris)| {
             let tri_data: Vec<([f64; 3], [f64; 3], [f64; 3])> = tris
                 .iter()
@@ -235,6 +262,7 @@ pub fn find_solid_overlaps(
                 tris: tris.clone(),
                 verts,
                 edges,
+                shells: shell_representatives(tris),
                 lo,
                 hi,
             }
@@ -267,18 +295,20 @@ pub fn find_solid_overlaps(
         .filter_map(|&(i, j)| {
             let (a, b) = (&prepared[i], &prepared[j]);
             // Surfaces that never come within depth_eps of each other neither
-            // touch nor cross, so the solids are disjoint or one lies wholly
-            // inside the other, and a single vertex of each says which. Only
-            // that direction (if any) needs the per-feature pass. On nested
-            // shells this turns every non-adjacent pair from a ray cast per
-            // vertex into two ray casts.
-            let (run_ab, run_ba) = if a.bvh.boxes_within(&b.bvh, depth_eps) {
+            // touch nor cross, so each connected piece of one solid's boundary
+            // lies wholly inside or wholly outside the other, and one vertex
+            // of each piece says which. Only a direction with a piece inside
+            // needs the per-feature pass. On nested shells this turns every
+            // non-adjacent pair from a ray cast per vertex into a few. (One
+            // vertex per solid is not enough: a hollow solid's outer surface
+            // can be outside the other while its void's surface is inside.)
+            let (run_ab, run_ba) = if a.bvh.surfaces_within(&b.bvh, depth_eps) {
                 (true, true)
             } else {
                 let inside = |x: &Prepared, y: &Prepared| {
-                    x.tris
-                        .first()
-                        .is_some_and(|t| y.bvh.is_point_inside(&vertices[t[0]]))
+                    x.shells
+                        .iter()
+                        .any(|&v| y.bvh.is_point_inside(&vertices[v]))
                 };
                 (inside(a, b), inside(b, a))
             };
@@ -354,7 +384,7 @@ pub fn shared_volume(
         TriangleBvh::new(&t)
     };
     let (ba, bb) = (bvh(a), bvh(b));
-    if !ba.boxes_within(&bb, tol) {
+    if !ba.surfaces_within(&bb, tol) {
         if b.first()
             .is_some_and(|t| ba.is_point_inside(&vertices[t[0]]))
         {
@@ -442,8 +472,10 @@ pub enum SharedVolume {
 /// For every pair of solids whose meshes come that close, up to `samples`
 /// mesh vertices of one of them that lie within `tolerance` of the other's
 /// surface, as `(solid_a, solid_b, points on solid_a)`. A pair whose meshes
-/// come close only between vertices is returned with no points. Ordered by
-/// pair, whatever the thread scheduling.
+/// come close only between vertices is returned with no points, and so is a
+/// pair whose meshes share a vertex: a mesh vertex lies on its solid's CAD
+/// surface, so one that belongs to both lies on both and the two touch.
+/// Ordered by pair, whatever the thread scheduling.
 ///
 /// The CAD layer uses these to tell solids that touch (each sample lies on
 /// the other CAD solid) from solids separated by a real gap that faceting has
@@ -519,8 +551,20 @@ pub fn contact_samples(
         .par_iter()
         .filter_map(|&(i, j)| {
             let (a, b) = (&prepared[i], &prepared[j]);
-            if !a.bvh.boxes_within(&b.bvh, tolerance) {
+            if !a.bvh.surfaces_within(&b.bvh, tolerance) {
                 return None;
+            }
+            let (small, large) = if a.verts.len() <= b.verts.len() {
+                (a, b)
+            } else {
+                (b, a)
+            };
+            if small
+                .verts
+                .iter()
+                .any(|v| large.verts.binary_search(v).is_ok())
+            {
+                return Some((a.id, b.id, Vec::new()));
             }
             let from_a = near(a, b);
             if !from_a.is_empty() {
@@ -546,48 +590,65 @@ fn directional(
     vertices: &[[f64; 3]],
     eps: f64,
 ) -> ((f64, usize, usize, usize), f64) {
+    // Each pass runs over a's features in parallel (a pair of large touching
+    // solids is otherwise one core's work while the rest wait) and collects
+    // per-feature results in feature order, then reduces them serially, so
+    // the counts, depths and area sum do not depend on thread scheduling.
+    let vertex_depths: Vec<Option<f64>> = a
+        .verts
+        .par_iter()
+        .map(|&v| {
+            if outside_box(&vertices[v], b, eps) {
+                None
+            } else {
+                depth_inside(&b.bvh, &vertices[v], eps)
+            }
+        })
+        .collect();
     let mut max_depth = 0.0f64;
-    let mut n_inside = 0usize;
-
     let mut inside_vert: Vec<usize> = Vec::new();
-    for &v in &a.verts {
-        if outside_box(&vertices[v], b, eps) {
-            continue;
-        }
-        if let Some(d) = depth_inside(&b.bvh, &vertices[v], eps) {
+    for (&v, d) in a.verts.iter().zip(&vertex_depths) {
+        if let Some(d) = *d {
             max_depth = max_depth.max(d);
-            n_inside += 1;
             inside_vert.push(v);
         }
     }
-    inside_vert.sort_unstable();
+    let n_inside = inside_vert.len();
+    // a.verts is sorted, so inside_vert is too.
 
     // Shallow overlap can cross without putting any vertex inside (two thin
     // slabs meeting edge-on). `segment_crosses_boundary` finds those, but it
     // also fires on an edge lying in a contact plane, so confirm with sampled
     // depth along the edge -- which also yields a depth for a case the vertex
     // pass reports nothing for.
-    let mut n_crossing = 0usize;
-    for &(u, w) in &a.edges {
-        let (p, q) = (vertices[u], vertices[w]);
-        if segment_misses_box(&p, &q, b, eps) || !b.bvh.segment_crosses_boundary(&p, &q) {
-            continue;
-        }
-        let mut deepest = 0.0f64;
-        for s in 1..8 {
-            let t = s as f64 / 8.0;
-            let m = [
-                p[0] + (q[0] - p[0]) * t,
-                p[1] + (q[1] - p[1]) * t,
-                p[2] + (q[2] - p[2]) * t,
-            ];
-            if let Some(d) = depth_inside(&b.bvh, &m, eps) {
-                deepest = deepest.max(d);
+    let edge_depths: Vec<f64> = a
+        .edges
+        .par_iter()
+        .map(|&(u, w)| {
+            let (p, q) = (vertices[u], vertices[w]);
+            if segment_misses_box(&p, &q, b, eps) || !b.bvh.segment_crosses_boundary(&p, &q) {
+                return 0.0;
             }
-        }
-        if deepest > 0.0 {
+            let mut deepest = 0.0f64;
+            for s in 1..8 {
+                let t = s as f64 / 8.0;
+                let m = [
+                    p[0] + (q[0] - p[0]) * t,
+                    p[1] + (q[1] - p[1]) * t,
+                    p[2] + (q[2] - p[2]) * t,
+                ];
+                if let Some(d) = depth_inside(&b.bvh, &m, eps) {
+                    deepest = deepest.max(d);
+                }
+            }
+            deepest
+        })
+        .collect();
+    let mut n_crossing = 0usize;
+    for &d in &edge_depths {
+        if d > 0.0 {
             n_crossing += 1;
-            max_depth = max_depth.max(deepest);
+            max_depth = max_depth.max(d);
         }
     }
 
@@ -596,46 +657,52 @@ fn directional(
     // strictly inside and the two passes above both report nothing; the
     // centroid of a face lying inside the other solid still is. Also credits
     // the lens area, which the vertex pass alone would score as zero.
+    let faces: Vec<(Option<f64>, f64)> = a
+        .tris
+        .par_iter()
+        .map(|t| {
+            let (p0, p1, p2) = (vertices[t[0]], vertices[t[1]], vertices[t[2]]);
+            let k = t
+                .iter()
+                .filter(|v| inside_vert.binary_search(v).is_ok())
+                .count();
+            let centroid = [
+                (p0[0] + p1[0] + p2[0]) / 3.0,
+                (p0[1] + p1[1] + p2[1]) / 3.0,
+                (p0[2] + p1[2] + p2[2]) / 3.0,
+            ];
+            let centre_in = if outside_box(&centroid, b, eps) {
+                None
+            } else {
+                depth_inside(&b.bvh, &centroid, eps)
+            };
+            // A triangle is credited whole when its centre and all corners
+            // are inside, and by the fraction of corners inside otherwise --
+            // it is then clipped by the intersection curve. A triangle whose
+            // corners all sit exactly on the surface but whose interior is
+            // inside counts whole: that is the coincident-cross-section case,
+            // fully inside despite scoring zero corners.
+            let frac = if k == 3 || centre_in.is_some() {
+                1.0
+            } else {
+                k as f64 / 3.0
+            };
+            let area = if frac > 0.0 {
+                tri_area(&p0, &p1, &p2) * frac
+            } else {
+                0.0
+            };
+            (centre_in, area)
+        })
+        .collect();
     let mut lens_area = 0.0f64;
     let mut n_inside_faces = 0usize;
-    for t in &a.tris {
-        let (p0, p1, p2) = (vertices[t[0]], vertices[t[1]], vertices[t[2]]);
-        let k = t
-            .iter()
-            .filter(|v| inside_vert.binary_search(v).is_ok())
-            .count();
-        let centroid = [
-            (p0[0] + p1[0] + p2[0]) / 3.0,
-            (p0[1] + p1[1] + p2[1]) / 3.0,
-            (p0[2] + p1[2] + p2[2]) / 3.0,
-        ];
-        let centre_in = if outside_box(&centroid, b, eps) {
-            None
-        } else {
-            depth_inside(&b.bvh, &centroid, eps)
-        };
+    for &(centre_in, area) in &faces {
         if let Some(d) = centre_in {
             max_depth = max_depth.max(d);
             n_inside_faces += 1;
         }
-        // A triangle is credited whole when its centre and all corners are
-        // inside, and by the fraction of corners inside otherwise -- it is then
-        // clipped by the intersection curve. A triangle whose corners all sit
-        // exactly on the surface but whose interior is inside counts whole:
-        // that is the coincident-cross-section case, fully inside despite
-        // scoring zero corners.
-        let frac = if k == 3 || centre_in.is_some() {
-            // Whole. A triangle whose interior is inside counts fully even with
-            // no corner inside -- that is the coincident-cross-section case,
-            // where the corners sit exactly on the other surface.
-            1.0
-        } else {
-            // Clipped by the intersection curve; credit the corners inside.
-            k as f64 / 3.0
-        };
-        if frac > 0.0 {
-            lens_area += tri_area(&p0, &p1, &p2) * frac;
-        }
+        lens_area += area;
     }
     ((max_depth, n_inside, n_crossing, n_inside_faces), lens_area)
 }
@@ -826,6 +893,61 @@ mod tests {
                 assert!(!points.is_empty() && points.len() <= 4);
             }
         }
+    }
+
+    #[test]
+    fn contact_samples_need_no_points_for_solids_sharing_a_vertex() {
+        // The second box reuses the first one's corner at (10, 0, 0), as
+        // welding does where two meshes meet: the pair is listed, touching,
+        // with no points to check against the CAD.
+        let (v, mut s) = two_boxes(10.0);
+        let shared = s[0]
+            .1
+            .iter()
+            .flatten()
+            .copied()
+            .find(|&i| v[i] == [10.0, 0.0, 0.0]);
+        let own = s[1]
+            .1
+            .iter()
+            .flatten()
+            .copied()
+            .find(|&i| v[i] == [10.0, 0.0, 0.0]);
+        let (shared, own) = (shared.unwrap(), own.unwrap());
+        for tri in s[1].1.iter_mut() {
+            for i in tri.iter_mut() {
+                if *i == own {
+                    *i = shared;
+                }
+            }
+        }
+        let found = contact_samples(&v, &s, 0.1, 4);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].2.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn an_overlap_of_hollow_solids_whose_surfaces_stay_apart_is_found() {
+        // a: [0,10]^3 with a [2,8]^3 void; b: [1,9]^3 with a [3,7]^3 void,
+        // its void listed first. No surface of one comes near the other's,
+        // yet the bodies overlap (for 1 < x < 2, say): a's void surface is
+        // inside b, although a's outer surface and b's void surface are not.
+        let mut v = Vec::new();
+        let mut a = push_box(&mut v, [0.0; 3], [10.0; 3]);
+        a.extend(push_box(&mut v, [2.0; 3], [8.0; 3]));
+        let mut b = push_box(&mut v, [3.0; 3], [7.0; 3]);
+        b.extend(push_box(&mut v, [1.0; 3], [9.0; 3]));
+        let out = find_solid_overlaps(&v, &[(1, a), (2, b)], &[], 1e-6);
+        assert_eq!(out.len(), 1, "{out:?}");
+    }
+
+    #[test]
+    fn shell_representatives_find_each_connected_piece() {
+        let mut v = Vec::new();
+        let mut t = push_box(&mut v, [0.0; 3], [10.0; 3]);
+        t.extend(push_box(&mut v, [2.0; 3], [8.0; 3]));
+        assert_eq!(shell_representatives(&t).len(), 2);
+        assert_eq!(shell_representatives(&t[..12]).len(), 1);
     }
 
     #[test]
