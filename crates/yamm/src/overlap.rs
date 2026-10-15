@@ -111,8 +111,38 @@ struct Prepared {
     verts: Vec<usize>,
     /// Testable edges, deduplicated, both endpoints testable.
     edges: Vec<(usize, usize)>,
+    /// One vertex of each connected piece of the boundary (a hollow solid's
+    /// outer surface and each of its voids).
+    shells: Vec<usize>,
     lo: [f64; 3],
     hi: [f64; 3],
+}
+
+/// One vertex of each connected piece (shell) of a triangle mesh.
+fn shell_representatives(tris: &[[usize; 3]]) -> Vec<usize> {
+    let mut ids: Vec<usize> = tris.iter().flatten().copied().collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let local = |v: usize| ids.binary_search(&v).expect("a vertex of these triangles");
+    let mut parent: Vec<usize> = (0..ids.len()).collect();
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    for t in tris {
+        let a = root(&mut parent, local(t[0]));
+        for &v in &t[1..] {
+            let b = root(&mut parent, local(v));
+            parent[b] = a;
+        }
+    }
+    (0..ids.len())
+        .filter(|&i| root(&mut parent, i) == i)
+        .map(|i| ids[i])
+        .collect()
 }
 
 fn aabbs_disjoint(a: &Prepared, b: &Prepared, pad: f64) -> bool {
@@ -232,6 +262,7 @@ pub fn find_solid_overlaps(
                 tris: tris.clone(),
                 verts,
                 edges,
+                shells: shell_representatives(tris),
                 lo,
                 hi,
             }
@@ -264,18 +295,20 @@ pub fn find_solid_overlaps(
         .filter_map(|&(i, j)| {
             let (a, b) = (&prepared[i], &prepared[j]);
             // Surfaces that never come within depth_eps of each other neither
-            // touch nor cross, so the solids are disjoint or one lies wholly
-            // inside the other, and a single vertex of each says which. Only
-            // that direction (if any) needs the per-feature pass. On nested
-            // shells this turns every non-adjacent pair from a ray cast per
-            // vertex into two ray casts.
+            // touch nor cross, so each connected piece of one solid's boundary
+            // lies wholly inside or wholly outside the other, and one vertex
+            // of each piece says which. Only a direction with a piece inside
+            // needs the per-feature pass. On nested shells this turns every
+            // non-adjacent pair from a ray cast per vertex into a few. (One
+            // vertex per solid is not enough: a hollow solid's outer surface
+            // can be outside the other while its void's surface is inside.)
             let (run_ab, run_ba) = if a.bvh.surfaces_within(&b.bvh, depth_eps) {
                 (true, true)
             } else {
                 let inside = |x: &Prepared, y: &Prepared| {
-                    x.tris
-                        .first()
-                        .is_some_and(|t| y.bvh.is_point_inside(&vertices[t[0]]))
+                    x.shells
+                        .iter()
+                        .any(|&v| y.bvh.is_point_inside(&vertices[v]))
                 };
                 (inside(a, b), inside(b, a))
             };
@@ -755,6 +788,30 @@ mod tests {
         let found = contact_samples(&v, &s, 0.1, 4);
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(found[0].2.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn an_overlap_of_hollow_solids_whose_surfaces_stay_apart_is_found() {
+        // a: [0,10]^3 with a [2,8]^3 void; b: [1,9]^3 with a [3,7]^3 void,
+        // its void listed first. No surface of one comes near the other's,
+        // yet the bodies overlap (for 1 < x < 2, say): a's void surface is
+        // inside b, although a's outer surface and b's void surface are not.
+        let mut v = Vec::new();
+        let mut a = push_box(&mut v, [0.0; 3], [10.0; 3]);
+        a.extend(push_box(&mut v, [2.0; 3], [8.0; 3]));
+        let mut b = push_box(&mut v, [3.0; 3], [7.0; 3]);
+        b.extend(push_box(&mut v, [1.0; 3], [9.0; 3]));
+        let out = find_solid_overlaps(&v, &[(1, a), (2, b)], &[], 1e-6);
+        assert_eq!(out.len(), 1, "{out:?}");
+    }
+
+    #[test]
+    fn shell_representatives_find_each_connected_piece() {
+        let mut v = Vec::new();
+        let mut t = push_box(&mut v, [0.0; 3], [10.0; 3]);
+        t.extend(push_box(&mut v, [2.0; 3], [8.0; 3]));
+        assert_eq!(shell_representatives(&t).len(), 2);
+        assert_eq!(shell_representatives(&t[..12]).len(), 1);
     }
 
     #[test]
