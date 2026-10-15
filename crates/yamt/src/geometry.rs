@@ -93,6 +93,19 @@ impl SurfaceBvhData {
     }
 }
 
+/// What lies across a crossing found by [`MeshGeometry::next_crossing`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Beyond {
+    /// Known now: read off the surface topology, or found by re-locating
+    /// in place. `None` when the topology records no volume there.
+    Volume(Option<VolumeId>),
+    /// Left a solid through a triangle facing the implicit complement: what
+    /// is beyond is found by [`MeshGeometry::relocate`], and only if the
+    /// particle takes the crossing (a collision before it makes the query
+    /// wasted work).
+    Relocate(TriangleId),
+}
+
 /// Minimum hit distance (cm) for discontinuous tracking's ray fire, as in
 /// [`ray_fire`].
 const RAY_FIRE_MIN_T: f64 = 1e-10;
@@ -143,6 +156,10 @@ pub struct MeshGeometry {
     /// Per triangle, the other solids within `contact_tolerance` of it.
     /// Empty unless `discontinuous` is set.
     contacts: Contacts,
+    /// Research knob (YAMT_SNAP, cm): a gap up to this wide, met on leaving a
+    /// solid, is absorbed into the solid ahead instead of left as implicit
+    /// complement. 0 keeps every gap as meshed.
+    snap_tolerance: f64,
 }
 
 impl MeshGeometry {
@@ -201,6 +218,10 @@ impl MeshGeometry {
             discontinuous: false,
             contact_tolerance: 0.0,
             contacts: Contacts::default(),
+            snap_tolerance: std::env::var("YAMT_SNAP")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(0.0),
         };
         if geometry.topology.imprinted == Some(false) {
             let tol = geometry
@@ -252,8 +273,8 @@ impl MeshGeometry {
         &self.contacts
     }
 
-    /// Next boundary crossing for discontinuous tracking, with the volume on
-    /// the other side: `(distance, surface, next volume)`.
+    /// Next boundary crossing for discontinuous tracking, with what is on the
+    /// other side: `(distance, surface, beyond)`.
     ///
     /// Only facets the ray LEAVES the current cell through count. From inside
     /// a solid, a facet the ray would enter it through can only be the far
@@ -263,9 +284,10 @@ impl MeshGeometry {
     /// cell being tracked.
     ///
     /// A shared (imprinted) surface hands over by topology, as conformal
-    /// tracking does. A surface facing the implicit complement relocates (see
-    /// [`MeshGeometry::relocate`]), and the implicit complement enters the
-    /// solid whose facet it crossed.
+    /// tracking does. Leaving a solid through a surface facing the implicit
+    /// complement needs relocating (see [`MeshGeometry::relocate`]), which is
+    /// left to the caller to do once the crossing is taken. The implicit
+    /// complement enters the solid whose facet it crossed.
     ///
     /// When the current solid has no facet ahead to leave through, the
     /// particle is not inside it: it collided in a sliver absorbed into the
@@ -276,7 +298,7 @@ impl MeshGeometry {
         volume: VolumeId,
         origin: [f64; 3],
         direction: [f64; 3],
-    ) -> Option<(f64, SurfaceId, Option<VolumeId>)> {
+    ) -> Option<(f64, SurfaceId, Beyond)> {
         let sd = self.surface_bvhs.get(volume as usize)?;
         let ic = self.topology.implicit_complement;
         let hit = sd.bvh.ray_traverse_tris(
@@ -292,7 +314,7 @@ impl MeshGeometry {
             if volume != ic {
                 let here = self.find_volume(origin);
                 if here != volume {
-                    return Some((0.0, SurfaceId::MAX, Some(here)));
+                    return Some((0.0, SurfaceId::MAX, Beyond::Volume(Some(here))));
                 }
             }
             return None;
@@ -300,17 +322,12 @@ impl MeshGeometry {
         let surf = sd.surf_ids[prim as usize];
         let (fwd, rev) = self.topology.surface_volumes[surf as usize];
         let other = if fwd == Some(volume) { rev } else { fwd };
-        let next = if volume == ic || other != Some(ic) {
-            other
+        let beyond = if volume == ic || other != Some(ic) {
+            Beyond::Volume(other)
         } else {
-            let x = [
-                origin[0] + t * direction[0],
-                origin[1] + t * direction[1],
-                origin[2] + t * direction[2],
-            ];
-            Some(self.relocate(volume, sd.tri_ids[prim as usize], x, direction))
+            Beyond::Relocate(sd.tri_ids[prim as usize])
         };
-        Some((t, surf, next))
+        Some((t, surf, beyond))
     }
 
     /// The cell a particle is in after leaving solid `from` through triangle
@@ -328,14 +345,14 @@ impl MeshGeometry {
     ///
     /// When several candidates contain `x` (a sliver claimed by more than one
     /// solid), the lowest volume id wins.
-    fn relocate(&self, from: VolumeId, tri: TriangleId, x: [f64; 3], u: [f64; 3]) -> VolumeId {
+    pub fn relocate(&self, from: VolumeId, tri: TriangleId, x: [f64; 3], u: [f64; 3]) -> VolumeId {
         for &k in self.contacts.of(tri) {
             if k == from {
                 continue;
             }
             match self.first_facet(k, x, u) {
                 Some((_, true)) => return k,
-                Some((t, false)) if t <= LOOKBACK => return k,
+                Some((t, false)) if t <= LOOKBACK.max(self.snap_tolerance) => return k,
                 _ => {}
             }
         }
@@ -436,7 +453,7 @@ impl MeshGeometry {
     ) -> Option<(f64, SurfaceId)> {
         // Overlap slivers between independently meshed solids put foreign
         // facets inside a volume by construction; the check does not apply.
-        if self.discontinuous {
+        if self.discontinuous || std::env::var_os("YAMT_NOVERIFY").is_some() {
             return None;
         }
         let eps = 1e-6_f64.max(t_max * 1e-9);

@@ -49,7 +49,18 @@ fn main() {
                     seq.push(u32::MAX);
                     break;
                 }
-                Some((t, surf, next)) => {
+                Some((t, surf, beyond)) => {
+                    let next = match beyond {
+                        yamt::Beyond::Volume(v) => v,
+                        yamt::Beyond::Relocate(tri) => {
+                            let x = [
+                                pos[0] + t * dir[0],
+                                pos[1] + t * dir[1],
+                                pos[2] + t * dir[2],
+                            ];
+                            Some(geom.relocate(vol, tri, x, dir))
+                        }
+                    };
                     if verbose && k < 20 {
                         let x = [
                             pos[0] + t * dir[0],

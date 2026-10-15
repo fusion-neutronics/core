@@ -7,7 +7,7 @@
 //! complement when there is a gap, and never a box it is not inside.
 
 use yamt::mesh::topology::{build_tet_aabbs, build_triangle_aabbs};
-use yamt::{build_topology, ArrowMeshData, MeshGeometry};
+use yamt::{build_topology, ArrowMeshData, Beyond, MeshGeometry};
 
 /// Closed axis-aligned box with outward winding. `split` picks which diagonal
 /// splits the +x face, so two boxes can mesh a shared plane differently.
@@ -107,8 +107,21 @@ const A: u32 = 0;
 const B: u32 = 1;
 const IC: u32 = 2;
 
+/// The next crossing and the volume beyond it, relocating when the tracker
+/// defers that to the crossing being taken.
 fn next(geom: &MeshGeometry, vol: u32, origin: [f64; 3], dir: [f64; 3]) -> (f64, Option<u32>) {
-    let (t, _surf, next) = geom.next_crossing(vol, origin, dir).expect("a crossing");
+    let (t, _surf, beyond) = geom.next_crossing(vol, origin, dir).expect("a crossing");
+    let next = match beyond {
+        Beyond::Volume(v) => v,
+        Beyond::Relocate(tri) => {
+            let x = [
+                origin[0] + t * dir[0],
+                origin[1] + t * dir[1],
+                origin[2] + t * dir[2],
+            ];
+            Some(geom.relocate(vol, tri, x, dir))
+        }
+    };
     (t, next)
 }
 

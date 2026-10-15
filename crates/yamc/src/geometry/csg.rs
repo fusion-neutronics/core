@@ -373,6 +373,7 @@ impl Geometry {
                 boundary,
                 next_cell_index: None,
                 surface_id: surf_id,
+                relocate_triangle: None,
             });
         #[cfg(feature = "mesh")]
         if let Some(role) = cell.fill_role {
@@ -409,6 +410,7 @@ impl Geometry {
                         boundary: crate::geo::BoundaryType::Transmission,
                         next_cell_index,
                         surface_id: None,
+                        relocate_triangle: None,
                     });
                 }
             }
