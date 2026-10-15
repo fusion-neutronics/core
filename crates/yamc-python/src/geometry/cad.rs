@@ -446,6 +446,105 @@ pub fn weld_mesh(
     yamt::mesh::cad_build::weld_vertices(&vertices, &triangles, rel_tol)
 }
 
+/// Combine per-face triangulations into one welded surface mesh (the compiled
+/// core of the CAD pipeline's mesh assembly).
+///
+/// Faces are taken in the order given. A face's degenerate triangles (two
+/// equal corners, or ``|(b - a) x (c - a)|^2`` below ``min_cross_sq``) are
+/// dropped, and a face left with none gets no surface id; the others get
+/// 1-based surface ids in order. Their vertices are concatenated and welded as
+/// by :func:`weld_mesh`, which also drops the triangles that collapse.
+///
+/// Args:
+///     faces: ``(face_id, vertices, triangles)`` per face, the triangles as
+///         0-based indices into that face's vertices.
+///     rel_tol: Weld tolerance as a fraction of the mesh extent.
+///     min_cross_sq: Squared cross-product magnitude below which a triangle is
+///         degenerate.
+///
+/// Returns:
+///     ``(vertices, triangles, triangle_face_ids, triangle_surface_ids,
+///     face_surface_ids)``, the last as ``[(face_id, surface_id), ...]``.
+///
+/// Raises:
+///     ValueError: If a triangle indexes past its face's vertices.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (faces, rel_tol=1e-6, min_cross_sq=1e-24))]
+#[allow(clippy::type_complexity)]
+pub fn assemble_face_meshes(
+    faces: Vec<(u32, Vec<[f64; 3]>, Vec<[u32; 3]>)>,
+    rel_tol: f64,
+    min_cross_sq: f64,
+) -> PyResult<(
+    Vec<[f64; 3]>,
+    Vec<[u32; 3]>,
+    Vec<u32>,
+    Vec<u32>,
+    Vec<(u32, u32)>,
+)> {
+    let mut vertices: Vec<[f64; 3]> = Vec::new();
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let mut face_ids: Vec<u32> = Vec::new();
+    let mut surface_ids: Vec<u32> = Vec::new();
+    let mut face_surface_ids: Vec<(u32, u32)> = Vec::new();
+    for (face_id, verts, tris) in faces {
+        if let Some(t) = tris
+            .iter()
+            .find(|t| t.iter().any(|&i| i as usize >= verts.len()))
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "face {face_id}: triangle {t:?} indexes past its {} vertices",
+                verts.len()
+            )));
+        }
+        let kept: Vec<[u32; 3]> = tris
+            .into_iter()
+            .filter(|t| !degenerate_triangle(&verts, t, min_cross_sq))
+            .collect();
+        if kept.is_empty() {
+            continue;
+        }
+        let surface_id = face_surface_ids.len() as u32 + 1;
+        face_surface_ids.push((face_id, surface_id));
+        let base = vertices.len() as u32;
+        vertices.extend_from_slice(&verts);
+        for t in kept {
+            triangles.push([t[0] + base, t[1] + base, t[2] + base]);
+            face_ids.push(face_id);
+            surface_ids.push(surface_id);
+        }
+    }
+    if vertices.is_empty() {
+        return Ok((vertices, triangles, face_ids, surface_ids, face_surface_ids));
+    }
+    let (vertices, triangles, kept) =
+        yamt::mesh::cad_build::weld_vertices(&vertices, &triangles, rel_tol);
+    let face_ids = kept.iter().map(|&i| face_ids[i]).collect();
+    let surface_ids = kept.iter().map(|&i| surface_ids[i]).collect();
+    Ok((vertices, triangles, face_ids, surface_ids, face_surface_ids))
+}
+
+/// Two equal corners, or a squared cross product below `min_cross_sq`
+/// (evaluated in the same order as the Python meshers did, so the same
+/// triangles are dropped).
+fn degenerate_triangle(verts: &[[f64; 3]], t: &[u32; 3], min_cross_sq: f64) -> bool {
+    if t[0] == t[1] || t[1] == t[2] || t[0] == t[2] {
+        return true;
+    }
+    let (a, b, c) = (
+        verts[t[0] as usize],
+        verts[t[1] as usize],
+        verts[t[2] as usize],
+    );
+    let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    let cx = e1[1] * e2[2] - e1[2] * e2[1];
+    let cy = e1[2] * e2[0] - e1[0] * e2[2];
+    let cz = e1[0] * e2[1] - e1[1] * e2[0];
+    cx * cx + cy * cy + cz * cz < min_cross_sq
+}
+
 #[cfg(test)]
 mod tests {
     use super::physical_groups_json;
