@@ -415,7 +415,9 @@ class CadToYamc:
 
         per_face = {}
         per_face.update(
-            brepmesh_face_meshes(pa, brep_fids, tolerance, angular_tolerance)
+            brepmesh_face_meshes(
+                pa, brep_fids, tolerance, angular_tolerance, parallel=not imprint
+            )
         )
         per_face.update(
             scene_face_meshes(pa, tolerance, angular_tolerance, scene_fids)

@@ -119,6 +119,22 @@ fn aabbs_disjoint(a: &Prepared, b: &Prepared, pad: f64) -> bool {
     (0..3).any(|k| a.hi[k] + pad < b.lo[k] || b.hi[k] + pad < a.lo[k])
 }
 
+/// True when `p` lies outside `b`'s bounding box grown by `pad`, so it cannot
+/// be inside `b`. Lets the per-feature tests skip, without a ray cast, the
+/// features of a large solid that are nowhere near a small one it reaches.
+fn outside_box(p: &[f64; 3], b: &Prepared, pad: f64) -> bool {
+    (0..3).any(|k| p[k] < b.lo[k] - pad || p[k] > b.hi[k] + pad)
+}
+
+/// True when segment `p q` lies wholly to one side of `b`'s bounding box grown
+/// by `pad` along some axis, so it cannot cross `b`'s boundary.
+fn segment_misses_box(p: &[f64; 3], q: &[f64; 3], b: &Prepared, pad: f64) -> bool {
+    (0..3).any(|k| {
+        (p[k] < b.lo[k] - pad && q[k] < b.lo[k] - pad)
+            || (p[k] > b.hi[k] + pad && q[k] > b.hi[k] + pad)
+    })
+}
+
 /// How deep inside `bvh` the point is, or `None` if it is outside.
 fn depth_inside(bvh: &TriangleBvh, p: &[f64; 3], eps: f64) -> Option<f64> {
     if !bvh.is_point_inside(p) {
@@ -250,8 +266,36 @@ pub fn find_solid_overlaps(
         .par_iter()
         .filter_map(|&(i, j)| {
             let (a, b) = (&prepared[i], &prepared[j]);
-            let (da, la) = directional(a, b, vertices, depth_eps);
-            let (db, lb) = directional(b, a, vertices, depth_eps);
+            // Surfaces that never come within depth_eps of each other neither
+            // touch nor cross, so the solids are disjoint or one lies wholly
+            // inside the other, and a single vertex of each says which. Only
+            // that direction (if any) needs the per-feature pass. On nested
+            // shells this turns every non-adjacent pair from a ray cast per
+            // vertex into two ray casts.
+            let (run_ab, run_ba) = if a.bvh.boxes_within(&b.bvh, depth_eps) {
+                (true, true)
+            } else {
+                let inside = |x: &Prepared, y: &Prepared| {
+                    x.tris
+                        .first()
+                        .is_some_and(|t| y.bvh.is_point_inside(&vertices[t[0]]))
+                };
+                (inside(a, b), inside(b, a))
+            };
+            if !run_ab && !run_ba {
+                return None;
+            }
+            let none = ((0.0, 0, 0, 0), 0.0);
+            let (da, la) = if run_ab {
+                directional(a, b, vertices, depth_eps)
+            } else {
+                none
+            };
+            let (db, lb) = if run_ba {
+                directional(b, a, vertices, depth_eps)
+            } else {
+                none
+            };
             let max_depth = da.0.max(db.0);
             let inside_vertices = da.1 + db.1;
             let crossing_edges = da.2 + db.2;
@@ -300,6 +344,9 @@ fn directional(
 
     let mut inside_vert: Vec<usize> = Vec::new();
     for &v in &a.verts {
+        if outside_box(&vertices[v], b, eps) {
+            continue;
+        }
         if let Some(d) = depth_inside(&b.bvh, &vertices[v], eps) {
             max_depth = max_depth.max(d);
             n_inside += 1;
@@ -316,7 +363,7 @@ fn directional(
     let mut n_crossing = 0usize;
     for &(u, w) in &a.edges {
         let (p, q) = (vertices[u], vertices[w]);
-        if !b.bvh.segment_crosses_boundary(&p, &q) {
+        if segment_misses_box(&p, &q, b, eps) || !b.bvh.segment_crosses_boundary(&p, &q) {
             continue;
         }
         let mut deepest = 0.0f64;
@@ -355,7 +402,11 @@ fn directional(
             (p0[1] + p1[1] + p2[1]) / 3.0,
             (p0[2] + p1[2] + p2[2]) / 3.0,
         ];
-        let centre_in = depth_inside(&b.bvh, &centroid, eps);
+        let centre_in = if outside_box(&centroid, b, eps) {
+            None
+        } else {
+            depth_inside(&b.bvh, &centroid, eps)
+        };
         if let Some(d) = centre_in {
             max_depth = max_depth.max(d);
             n_inside_faces += 1;
