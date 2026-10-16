@@ -68,7 +68,20 @@ pub struct MeshGeometry {
     pub materials: Vec<Arc<Material>>,
     /// Volume ID for each cell index: `volume_ids[cell_index] = VolumeId`.
     volume_ids: Vec<yamt::VolumeId>,
+    /// Vacuum box `[xmin, ymin, zmin, xmax, ymax, zmax]` added around the
+    /// mesh by the model before transport (see [`Self::add_graveyard`]),
+    /// or `None`. Separate from a `graveyard_offset` box, which is part of
+    /// the mesh itself.
+    graveyard: Option<[f64; 6]>,
 }
+
+/// Offset (cm) of the vacuum box a model adds around a whole-model mesh
+/// geometry that has no vacuum boundary and a void implicit complement.
+/// The box is the mesh's bounding box grown by this on every side. In a
+/// void complement the offset changes no result; it only decides where
+/// escaping particles end, so it is a fixed margin that leaves room for
+/// sources and tally meshes that sit a little outside the meshed parts.
+pub const DEFAULT_GRAVEYARD_OFFSET: f64 = 10.0;
 
 impl MeshGeometry {
     /// Build a `MeshGeometry` from a loaded mesh and a material map.
@@ -200,7 +213,60 @@ impl MeshGeometry {
             cells,
             materials: flat_materials,
             volume_ids,
+            graveyard: None,
         })
+    }
+
+    /// True when the mesh has a surface with a vacuum boundary condition
+    /// (a `graveyard_offset` box or a `boundary:vacuum` group) or a vacuum
+    /// box added by [`Self::add_graveyard`].
+    pub fn has_vacuum_boundary(&self) -> bool {
+        self.graveyard.is_some()
+            || self
+                .mesh
+                .topology
+                .physical_data
+                .surface_bcs
+                .values()
+                .any(|&bc| bc == yamt::BoundaryCondition::Vacuum)
+    }
+
+    /// True when the implicit complement carries a material.
+    pub fn implicit_complement_has_material(&self) -> bool {
+        self.cells.last().is_some_and(|c| c.material_idx.is_some())
+    }
+
+    /// The vacuum box [`Self::add_graveyard`] would add with `offset`: the
+    /// mesh's bounding box grown by `offset` on every side, as
+    /// `[xmin, ymin, zmin, xmax, ymax, zmax]`.
+    pub fn graveyard_box(&self, offset: f64) -> [f64; 6] {
+        let bb = &self.mesh.topology.global_aabb;
+        [
+            bb[0] - offset,
+            bb[1] - offset,
+            bb[2] - offset,
+            bb[3] + offset,
+            bb[4] + offset,
+            bb[5] + offset,
+        ]
+    }
+
+    /// Close the geometry with a vacuum box `offset` cm outside the mesh's
+    /// bounding box, returning the box. The box bounds the implicit
+    /// complement as a `graveyard_offset` box of the same offset does: a
+    /// particle in the complement that reaches it leaks. It is added
+    /// analytically rather than as triangles, so the mesh is not rebuilt.
+    pub fn add_graveyard(&mut self, offset: f64) -> [f64; 6] {
+        let bb = self.graveyard_box(offset);
+        self.graveyard = Some(bb);
+        bb
+    }
+
+    /// The box particles are transported in: the vacuum box from
+    /// [`Self::add_graveyard`] when one was added, else the mesh's bounding
+    /// box (which holds a `graveyard_offset` box when there is one).
+    pub fn transport_extent(&self) -> [f64; 6] {
+        self.graveyard.unwrap_or(self.mesh.topology.global_aabb)
     }
 
     /// Build from an Arrow IPC file produced by cad_to_yamc.
@@ -262,8 +328,9 @@ impl MeshGeometry {
     /// Distance along a flight to where it leaves the geometry, if that is
     /// within `max_distance`: the first vacuum-boundary triangle it meets
     /// (see [`yamt::MeshGeometry::distance_to_vacuum`]), or where it leaves
-    /// the mesh's bounding box for good, beyond which there is nothing to
-    /// meet. Surface tracking likewise ends a particle with no surface ahead.
+    /// [`Self::transport_extent`] for good, beyond which there is nothing to
+    /// meet: the vacuum box added by [`Self::add_graveyard`], which surface
+    /// tracking stops at too, or else the mesh's bounding box.
     /// A flight from a point that is not a number leaves at once.
     pub(crate) fn distance_to_exit(
         &self,
@@ -274,7 +341,7 @@ impl MeshGeometry {
         if !origin.iter().chain(&direction).all(|v| v.is_finite()) {
             return Some(0.0);
         }
-        let leaves_box = box_exit(origin, direction, &self.mesh.topology.global_aabb);
+        let leaves_box = box_exit(origin, direction, &self.transport_extent());
         let vacuum = self
             .mesh
             .distance_to_vacuum(origin, direction, max_distance.min(leaves_box));
@@ -302,37 +369,53 @@ impl MeshGeometry {
         let vol_id = self.volume_ids[cell_index];
         let ic_cell_index = self.cells.len() - 1;
 
-        self.mesh
-            .ray_fire(vol_id, position, direction, None)
-            .map(|(distance, surface_id)| {
-                let bc = self.mesh.boundary_condition(surface_id);
-                let boundary = match bc {
-                    yamt::BoundaryCondition::Vacuum => BoundaryType::Vacuum,
-                    _ => BoundaryType::Transmission,
-                };
+        let hit =
+            self.mesh
+                .ray_fire(vol_id, position, direction, None)
+                .map(|(distance, surface_id)| {
+                    let bc = self.mesh.boundary_condition(surface_id);
+                    let boundary = match bc {
+                        yamt::BoundaryCondition::Vacuum => BoundaryType::Vacuum,
+                        _ => BoundaryType::Transmission,
+                    };
 
-                // Use topology to determine the next cell (O(1) lookup).
-                let next_cell_index = if boundary == BoundaryType::Vacuum {
-                    None // Particle dies at vacuum boundary
-                } else {
-                    self.mesh.next_volume(surface_id, vol_id).map(|next_vol| {
-                        if next_vol == self.mesh.topology.implicit_complement {
-                            // Entering the implicit complement -- particle
-                            // free-streams (void) or scatters (if material set).
-                            ic_cell_index
-                        } else {
-                            next_vol as usize
-                        }
-                    })
-                };
+                    // Use topology to determine the next cell (O(1) lookup).
+                    let next_cell_index = if boundary == BoundaryType::Vacuum {
+                        None // Particle dies at vacuum boundary
+                    } else {
+                        self.mesh.next_volume(surface_id, vol_id).map(|next_vol| {
+                            if next_vol == self.mesh.topology.implicit_complement {
+                                // Entering the implicit complement -- particle
+                                // free-streams (void) or scatters (if material set).
+                                ic_cell_index
+                            } else {
+                                next_vol as usize
+                            }
+                        })
+                    };
 
-                BoundaryHit {
-                    distance,
-                    boundary,
-                    next_cell_index,
-                    surface_id: None, // Mesh surfaces don't have user-facing IDs
-                }
-            })
+                    BoundaryHit {
+                        distance,
+                        boundary,
+                        next_cell_index,
+                        surface_id: None, // Mesh surfaces don't have user-facing IDs
+                    }
+                });
+        // The added vacuum box bounds the implicit complement: its first
+        // crossing ahead ends the particle unless a mesh surface is nearer.
+        if cell_index == ic_cell_index
+            && let Some(bb) = &self.graveyard
+            && let Some(distance) = box_crossing(position, direction, bb)
+            && hit.as_ref().is_none_or(|h| distance < h.distance)
+        {
+            return Some(BoundaryHit {
+                distance,
+                boundary: BoundaryType::Vacuum,
+                next_cell_index: None,
+                surface_id: None,
+            });
+        }
+        hit
     }
 
     /// Compute the bounding box of the mesh geometry.
@@ -396,6 +479,35 @@ fn box_exit(origin: [f64; 3], direction: [f64; 3], bb: &[f64; 6]) -> f64 {
         0.0
     } else {
         far
+    }
+}
+
+/// Distance along the ray to the first crossing of the box surface ahead:
+/// where it leaves the box from inside, where it enters from outside, or
+/// `None` when it never meets the box. The analytic twin of a ray fired at
+/// a `graveyard_offset` box's triangles.
+fn box_crossing(origin: [f64; 3], direction: [f64; 3], bb: &[f64; 6]) -> Option<f64> {
+    let (mut near, mut far) = (f64::NEG_INFINITY, f64::INFINITY);
+    for k in 0..3 {
+        if direction[k] == 0.0 {
+            if origin[k] < bb[k] || origin[k] > bb[k + 3] {
+                return None;
+            }
+            continue;
+        }
+        let (a, b) = (
+            (bb[k] - origin[k]) / direction[k],
+            (bb[k + 3] - origin[k]) / direction[k],
+        );
+        near = near.max(a.min(b));
+        far = far.min(a.max(b));
+    }
+    if far < near.max(0.0) {
+        None
+    } else if near > 0.0 {
+        Some(near)
+    } else {
+        Some(far)
     }
 }
 
