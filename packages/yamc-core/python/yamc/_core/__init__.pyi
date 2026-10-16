@@ -73,6 +73,7 @@ __all__ = [
     "VoxelData",
     "WeightWindowBounds",
     "WeightWindowGeneratorDeGVR",
+    "assemble_face_meshes",
     "cache_dir",
     "cad_mesh_labels",
     "cad_mesh_to_arrow",
@@ -7205,6 +7206,32 @@ def Torus(axis: typing.Any, x0: builtins.float = 0.0, y0: builtins.float = 0.0, 
     
     Returns:
         A Surface object representing the torus
+    """
+
+def assemble_face_meshes(faces: typing.Sequence[tuple[builtins.int, typing.Sequence[typing.Sequence[builtins.float]], typing.Sequence[typing.Sequence[builtins.int]]]], rel_tol: builtins.float = 1e-06, min_cross_sq: builtins.float = 1e-24) -> tuple[builtins.list[builtins.list[builtins.float]], builtins.list[builtins.list[builtins.int]], builtins.list[builtins.int], builtins.list[builtins.int], builtins.list[tuple[builtins.int, builtins.int]]]:
+    r"""
+    Combine per-face triangulations into one welded surface mesh (the compiled
+    core of the CAD pipeline's mesh assembly).
+    
+    Faces are taken in the order given. A face's degenerate triangles (two
+    equal corners, or ``|(b - a) x (c - a)|^2`` below ``min_cross_sq``) are
+    dropped, and a face left with none gets no surface id; the others get
+    1-based surface ids in order. Their vertices are concatenated and welded as
+    by :func:`weld_mesh`, which also drops the triangles that collapse.
+    
+    Args:
+        faces: ``(face_id, vertices, triangles)`` per face, the triangles as
+            0-based indices into that face's vertices.
+        rel_tol: Weld tolerance as a fraction of the mesh extent.
+        min_cross_sq: Squared cross-product magnitude below which a triangle is
+            degenerate.
+    
+    Returns:
+        ``(vertices, triangles, triangle_face_ids, triangle_surface_ids,
+        face_surface_ids)``, the last as ``[(face_id, surface_id), ...]``.
+    
+    Raises:
+        ValueError: If a triangle indexes past its face's vertices.
     """
 
 def cache_dir() -> builtins.str:
