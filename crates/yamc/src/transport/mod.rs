@@ -271,7 +271,7 @@ pub(crate) fn find_or_lose_cell(
             .locate_cell(neighbor_lists, pos, particle.previous_cell_index as usize)
             .map(|idx| geometry.resolve_fill_at(idx, pos))
     } else {
-        geometry.find_cell_index(pos)
+        geometry.find_cell_index_along(pos, particle.direction)
     };
     match found {
         Some(idx) => {

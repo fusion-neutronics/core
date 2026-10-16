@@ -38,6 +38,19 @@ pub enum GeometryKind {
     Mesh(Box<MeshGeometry>),
 }
 
+/// How far along its flight a particle with no cell yet is located (see
+/// [`GeometryKind::find_cell_index_along`]).
+///
+/// Equal to the distance below which mesh ray-fire ignores a hit, so that
+/// the cell found and the first crossing agree: a particle within it of a
+/// facet ahead is put past the facet, which ray-fire then ignores, and one
+/// farther away is put before it, where ray-fire sees the crossing. CSG
+/// re-locates spatially after every crossing, so any nudge this small does.
+pub const BIRTH_NUDGE: f64 = 1e-10;
+
+#[cfg(feature = "mesh")]
+const _: () = assert!(BIRTH_NUDGE == yamt::query::ray_fire::RAY_FIRE_MIN_T);
+
 impl GeometryKind {
     // ---- Cell access (both backends store Vec<Cell>) -------------------------
 
@@ -181,6 +194,31 @@ impl GeometryKind {
             #[cfg(feature = "mesh")]
             GeometryKind::Mesh(g) => g.locate_cell(point, hint),
         }
+    }
+
+    /// The cell a particle with no cell yet starts in, at `point` heading
+    /// along `direction`.
+    ///
+    /// A particle born exactly on a surface belongs to the cell it is
+    /// heading into, as in OpenMC, and the point alone does not say which:
+    /// a CSG point on a surface is in neither half-space, and a mesh point
+    /// on a facet is put on one side of it whatever the direction, while
+    /// the crossing it starts on is closer than mesh ray-fire looks. So the
+    /// cell is read [`BIRTH_NUDGE`] along the flight, falling back to the
+    /// point itself when nothing is found there. Away from surfaces the two
+    /// are the same cell.
+    pub fn find_cell_index_along(
+        &self,
+        point: (f64, f64, f64),
+        direction: [f64; 3],
+    ) -> Option<usize> {
+        let ahead = (
+            point.0 + BIRTH_NUDGE * direction[0],
+            point.1 + BIRTH_NUDGE * direction[1],
+            point.2 + BIRTH_NUDGE * direction[2],
+        );
+        self.find_cell_index(ahead)
+            .or_else(|| self.find_cell_index(point))
     }
 
     /// Find the first cell containing the given point.

@@ -764,7 +764,10 @@ impl Model {
         let mut pos = start;
         let mut remaining = max_distance;
         let mut tau = 0.0;
-        let mut cell_idx = match self.geometry.find_cell_index((pos[0], pos[1], pos[2])) {
+        let mut cell_idx = match self
+            .geometry
+            .find_cell_index_along((pos[0], pos[1], pos[2]), direction)
+        {
             Some(i) => i,
             None => return 0.0,
         };
@@ -2401,11 +2404,14 @@ impl Model {
                                 // Find initial cell for source birth tracking
                                 let initial_cell_id = self
                                     .geometry
-                                    .find_cell_index((
-                                        particle.position[0],
-                                        particle.position[1],
-                                        particle.position[2],
-                                    ))
+                                    .find_cell_index_along(
+                                        (
+                                            particle.position[0],
+                                            particle.position[1],
+                                            particle.position[2],
+                                        ),
+                                        particle.direction,
+                                    )
                                     .and_then(|idx| self.geometry.cells()[idx].cell_id);
 
                                 // Record source birth
