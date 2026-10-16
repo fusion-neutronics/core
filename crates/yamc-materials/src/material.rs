@@ -1679,12 +1679,28 @@ impl Material {
     /// 1. Use provided temperature if Some, once it resolves against the data
     /// 2. Fall back to material.temperature if set AND resolvable
     /// 3. Fall back to the only temperature if nuclide data has exactly one
-    /// 4. Otherwise panic with available temperatures listed
+    /// 4. Fall back to the default, 294 K, if material.temperature is unset and
+    ///    every nuclide can serve it
+    /// 5. Otherwise panic, naming the available temperatures
     ///
     /// "Resolvable" is wider than "listed": a temperature the data BRACKETS is
     /// served by blending its two neighbours, so only a request outside the
-    /// range the data covers reaches the panic in step 4.
+    /// range the data covers reaches the panic in step 5.
+    ///
+    /// The panicking form of [`Material::try_resolve_temperature`], for the
+    /// cross-section builders, which have no way to report an error.
     pub fn resolve_temperature(&mut self, provided: Option<&str>) -> String {
+        self.try_resolve_temperature(provided)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// [`Material::resolve_temperature`], returning the failure rather than
+    /// panicking.
+    ///
+    /// Transport setup calls this before building any cross section, so a
+    /// temperature the data cannot serve reaches the caller as an error (a
+    /// Python `ValueError`) instead of a panic from inside the grid builder.
+    pub fn try_resolve_temperature(&mut self, provided: Option<&str>) -> Result<String, String> {
         // Collect all available temperatures from nuclide data
         let mut all_temps: std::collections::HashSet<String> = std::collections::HashSet::new();
         for nuclide in self.nuclide_data.values() {
@@ -1720,14 +1736,14 @@ impl Material {
             if !sorted_all.is_empty()
                 && let Err(e) = yamc_nuclide::temperature::resolve(label, &sorted_all)
             {
-                panic!("{e}");
+                return Err(e.to_string());
             }
-            return label.to_string();
+            return Ok(label.to_string());
         }
 
         // Photon-only mode: no nuclide data loaded, return material temperature
         if self.nuclide_data.is_empty() && !self.temperature.is_empty() {
-            return self.temperature.clone();
+            return Ok(self.temperature.clone());
         }
 
         // 2. Fall back to material.temperature if set AND resolvable against
@@ -1735,7 +1751,7 @@ impl Material {
         if !self.temperature.is_empty()
             && yamc_nuclide::temperature::resolve(&self.temperature, &sorted_all).is_ok()
         {
-            return self.temperature.clone();
+            return Ok(self.temperature.clone());
         }
 
         // 3. If material.temperature is empty and there's only one temp, auto-detect and set it
@@ -1750,28 +1766,55 @@ impl Material {
             // throw away, and invalidating here would drop a grid the caller is
             // part-way through building.
             self.assign_temperature(&detected_temp);
-            return detected_temp;
+            return Ok(detected_temp);
         }
 
-        // 4. If material.temperature is explicitly set but cannot be resolved,
-        // error. Step 2 already tried, so this only re-runs it to get the
-        // message, which carries the requested value, the range and the
-        // available list from one place rather than being rebuilt here.
-        if !self.temperature.is_empty() {
-            match yamc_nuclide::temperature::resolve(&self.temperature, &sorted_all) {
-                Ok(_) => unreachable!("step 2 returns for every temperature that resolves"),
-                Err(e) => panic!("{e}"),
-            }
+        // 4. An unset temperature means the documented default, 294 K, when
+        // the data can serve it (exactly, or by blending the two temperatures
+        // either side). After step 3, so a single-temperature library still
+        // runs at its one temperature rather than being refused because 294 K
+        // lies outside it. Checked per nuclide rather than against the union,
+        // so a nuclide whose evaluation ships a shorter ladder is named here
+        // instead of failing later in the grid builder. `assign_temperature`
+        // for the same reason as step 3.
+        if self.temperature.is_empty() {
+            let default = yamc_nuclide::temperature::DEFAULT_TEMPERATURE_K.to_string();
+            let mut names: Vec<&String> = self.nuclide_data.keys().collect();
+            names.sort();
+            let unservable = names.into_iter().find_map(|name| {
+                yamc_nuclide::temperature::resolve(
+                    &default,
+                    &self.nuclide_data[name].available_temperatures,
+                )
+                .err()
+                .map(|e| format!("nuclide '{name}': {e}"))
+            });
+            return match unservable {
+                None if !sorted_all.is_empty() => {
+                    self.assign_temperature(&default);
+                    Ok(default)
+                }
+                None => Err(format!(
+                    "No temperature was set, and the nuclear data carries no \
+                     temperatures to use the default of {default} K from"
+                )),
+                Some(reason) => Err(format!(
+                    "No temperature was set, and the default of {default} K cannot \
+                     be used ({reason}). Set the material temperature to one the \
+                     nuclear data covers. Available temperatures: [{}]",
+                    sorted_all.join(", ")
+                )),
+            };
         }
 
-        // 5. Panic with helpful error (multiple temps available, none specified)
-        let mut temps_list: Vec<String> = all_temps.into_iter().collect();
-        temps_list.sort();
-        panic!(
-            "Temperature not specified or not available. Please provide a temperature argument, \
-             set material.temperature to an available value, or ensure nuclide data has only one temperature. \
-             Available temperatures: {temps_list:?}"
-        );
+        // 5. material.temperature is explicitly set but cannot be resolved.
+        // Step 2 already tried, so this only re-runs it to get the message,
+        // which carries the requested value, the range and the available list
+        // from one place rather than being rebuilt here.
+        match yamc_nuclide::temperature::resolve(&self.temperature, &sorted_all) {
+            Ok(_) => unreachable!("step 2 returns for every temperature that resolves"),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     /// Validate that all loaded nuclides have compatible temperatures

@@ -1190,11 +1190,13 @@ impl Model {
     /// block, so it reaches `extract_material_xs` with the narrow data and fails
     /// with `TemperatureNotLoaded`.
     ///
-    /// An empty label is resolved rather than skipped. The CPU resolves it in
-    /// `calculate_macroscopic_xs` via `resolve_temperature`, which adopts the
-    /// single available temperature; nothing on the GPU path calls that, so
-    /// skipping here would leave `extract_material_xs` looking up the empty
-    /// string and failing in exactly the way this function exists to prevent.
+    /// An empty label is resolved rather than skipped, through the same
+    /// `try_resolve_temperature` the CPU setup uses (the single available
+    /// temperature, else the 294 K default). Nothing else on the GPU path
+    /// resolves it, so skipping here would leave `extract_material_xs` looking
+    /// up the empty string and failing in exactly the way this function exists
+    /// to prevent. A temperature that cannot be resolved is returned as an
+    /// error, before any dispatch.
     ///
     /// Runs before the photon prep, matching the CPU's order, and returns
     /// without cloning when nothing needs widening.
@@ -1204,24 +1206,18 @@ impl Model {
                 continue;
             }
             let labelled = !material_arc.temperature().is_empty();
+            // An unlabelled material is resolved on a clone, since resolving
+            // adopts the temperature it picks.
+            let mut resolved = None;
             let temperature = if labelled {
                 material_arc.temperature().to_string()
             } else {
-                // Same fallback `resolve_temperature` uses: the single
-                // temperature every nuclide agrees on. Left alone when there is
-                // no single answer, so the existing error still names the
-                // problem rather than this function guessing.
-                let mut all: Vec<String> = material_arc
-                    .nuclide_data
-                    .values()
-                    .flat_map(|n| n.available_temperatures.iter().cloned())
-                    .collect();
-                all.sort();
-                all.dedup();
-                match all.len() {
-                    1 => all.remove(0),
-                    _ => continue,
-                }
+                let mut material = (**material_arc).clone();
+                let temperature = material
+                    .try_resolve_temperature(None)
+                    .map_err(|e| format!("Material slot {slot}: {e}"))?;
+                resolved = Some(material);
+                temperature
             };
 
             // Servable, not merely listed. The GPU cannot blend in-kernel: its
@@ -1239,10 +1235,7 @@ impl Model {
                 continue;
             }
 
-            let mut material = (**material_arc).clone();
-            if !labelled {
-                material.set_temperature(&temperature);
-            }
+            let mut material = resolved.unwrap_or_else(|| (**material_arc).clone());
             material
                 .ensure_temperature_loaded(&temperature)
                 .map_err(|e| {
@@ -1381,6 +1374,16 @@ impl Model {
                 eprintln!("[DEBUG] Material slot {i} calculating macroscopic XS...");
             }
             let mut material = (**material_arc).clone();
+            // Resolve the temperature here, where a failure can be returned,
+            // rather than leaving it to `calculate_macroscopic_xs`, which can
+            // only panic. This is also where an unset temperature becomes the
+            // 294 K default. Photon-only materials carry no nuclide data and
+            // have no neutron temperature to resolve.
+            if !material.nuclide_data.is_empty() {
+                material
+                    .try_resolve_temperature(None)
+                    .map_err(|e| format!("{}: {e}", material_label(&material, i)))?;
+            }
             material.calculate_macroscopic_xs(&mt_filter, true);
             if has_nuclide_tallies {
                 material.populate_per_nuclide_xs();

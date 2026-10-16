@@ -1749,7 +1749,9 @@ class Material:
                 ``Model.simulate_transmutation``. Not needed for
                 ``Material.transmute()``, which depletes whatever it is called on.
             volume (Optional[float]): Material volume in cm³.
-            temperature (Optional[float]): Temperature in Kelvin.
+            temperature (Optional[float]): Temperature in Kelvin. If omitted,
+                294 K is used, or the only temperature the nuclear data carries
+                when it carries just one.
         
         Returns:
             Material: A new material.
@@ -1772,7 +1774,9 @@ class Material:
                 ``Model.simulate_transmutation``. Not needed for
                 ``Material.transmute()``, which depletes whatever it is called on.
             volume (Optional[float]): Material volume in cm³.
-            temperature (Optional[float]): Temperature in Kelvin.
+            temperature (Optional[float]): Temperature in Kelvin. If omitted,
+                294 K is used, or the only temperature the nuclear data carries
+                when it carries just one.
         
         Returns:
             Material: A material whose composition is absolute atom densities.
@@ -2123,7 +2127,8 @@ class Material:
         Args:
             reaction (Union[int, str]): Either an MT number or reaction name.
             temperature (Optional[str]): Temperature key (e.g., "294"). If not provided,
-                uses material.temperature, or the only available temperature if there's just one.
+                uses material.temperature, else the only available temperature if
+                there is just one, else 294 K.
         
         Returns:
             Tuple[List[float], List[float]]: (cross_section_values, energy_grid)
