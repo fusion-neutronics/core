@@ -803,6 +803,15 @@ jobs:
           python -c "import yamc; print(f'MPI enabled: {yamc.parallel.has_mpi()}')"
           mpirun -np 2 python -c "import yamc; print(f'Rank {yamc.parallel.mpi_rank()} of {yamc.parallel.mpi_size()}')"
 
+      # The cache below is keyed on the release latest.json names, so
+      # a new release starts from a fresh cache rather than restoring
+      # the files of the old one.
+      - name: Resolve nuclear-data release
+        id: fixtures-release
+        shell: bash
+        run: |
+          release=$(python3 scripts/fetch_test_fixtures.py --print-release)
+          echo "release=$release" >> "$GITHUB_OUTPUT"
       - name: Cache nuclear-data test fixtures
         uses: actions/cache@v6
         with:
@@ -812,7 +821,7 @@ jobs:
             ~/.cache/yamc
             ~/Library/Caches/yamc
             ~/AppData/Local/yamc
-          key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs', 'crates/nuclear-data-schema/src/lib.rs') }}
+          key: yamc-test-fixtures-endf-b8.1-${{ steps.fixtures-release.outputs.release }}-${{ hashFiles('scripts/fetch_test_fixtures.py') }}
 
       - name: Fetch nuclear-data test fixtures
         run: python3 scripts/fetch_test_fixtures.py
@@ -914,10 +923,19 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest numpy pandas
+          python -m pip install pytest numpy pandas pyarrow
           # Install the abi3 wheel (works with any Python 3.9+)
           python -m pip install dist/*.whl
 
+      # The cache below is keyed on the release latest.json names, so
+      # a new release starts from a fresh cache rather than restoring
+      # the files of the old one.
+      - name: Resolve nuclear-data release
+        id: fixtures-release
+        shell: bash
+        run: |
+          release=$(python scripts/fetch_test_fixtures.py --print-release)
+          echo "release=$release" >> "$GITHUB_OUTPUT"
       - name: Cache nuclear-data test fixtures
         uses: actions/cache@v6
         with:
@@ -927,7 +945,7 @@ jobs:
             ~/.cache/yamc
             ~/Library/Caches/yamc
             ~/AppData/Local/yamc
-          key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs', 'crates/nuclear-data-schema/src/lib.rs') }}
+          key: yamc-test-fixtures-endf-b8.1-${{ steps.fixtures-release.outputs.release }}-${{ hashFiles('scripts/fetch_test_fixtures.py') }}
 
       - name: Fetch nuclear-data test fixtures
         shell: bash
@@ -1003,6 +1021,15 @@ jobs:
           # The two extension modules must coexist rather than merely install.
           python -c "import yamc, yani; assert yamc.Material is not yani.Material; print(yamc.__version__, yani.__version__)"
 
+      # The cache below is keyed on the release latest.json names, so
+      # a new release starts from a fresh cache rather than restoring
+      # the files of the old one.
+      - name: Resolve nuclear-data release
+        id: fixtures-release
+        shell: bash
+        run: |
+          release=$(python scripts/fetch_test_fixtures.py --print-release)
+          echo "release=$release" >> "$GITHUB_OUTPUT"
       - name: Cache nuclear-data test fixtures
         uses: actions/cache@v6
         with:
@@ -1012,7 +1039,7 @@ jobs:
             ~/.cache/yamc
             ~/Library/Caches/yamc
             ~/AppData/Local/yamc
-          key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs', 'crates/nuclear-data-schema/src/lib.rs') }}
+          key: yamc-test-fixtures-endf-b8.1-${{ steps.fixtures-release.outputs.release }}-${{ hashFiles('scripts/fetch_test_fixtures.py') }}
 
       # Runs on a cache hit too. The cache holds ~/.cache/yamc, and it is this
       # script that puts the tests/*.arrow symlinks into the working tree; the
