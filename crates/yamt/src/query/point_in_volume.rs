@@ -47,6 +47,9 @@ fn count_crossings_bvh(
 ) -> Option<usize> {
     let mut hit_buf = [0.0f64; MAX_INLINE_HITS];
     let mut hit_count = 0usize;
+    // Hits past the inline buffer (a ray through a volume made of many lumps
+    // or channels): dropping them would flip the parity.
+    let mut spill: Vec<f64> = Vec::new();
     let mut ambiguous = false;
 
     // Collect-all traversal: parity needs EVERY hit along the ray, so the
@@ -67,6 +70,8 @@ fn count_crossings_bvh(
             if hit_count < MAX_INLINE_HITS {
                 hit_buf[hit_count] = t;
                 hit_count += 1;
+            } else {
+                spill.push(t);
             }
         }
     });
@@ -76,7 +81,12 @@ fn count_crossings_bvh(
     }
 
     // Sort and deduplicate: hits at nearly the same distance are a single crossing
-    let hits = &mut hit_buf[..hit_count];
+    let hits: &mut [f64] = if spill.is_empty() {
+        &mut hit_buf[..hit_count]
+    } else {
+        spill.extend_from_slice(&hit_buf[..hit_count]);
+        &mut spill
+    };
     hits.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
     let mut crossings = 0usize;

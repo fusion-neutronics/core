@@ -1750,7 +1750,9 @@ class Material:
                 ``Model.simulate_transmutation``. Not needed for
                 ``Material.transmute()``, which depletes whatever it is called on.
             volume (Optional[float]): Material volume in cm³.
-            temperature (Optional[float]): Temperature in Kelvin.
+            temperature (Optional[float]): Temperature in Kelvin. If omitted,
+                294 K is used, or the only temperature the nuclear data carries
+                when it carries just one.
         
         Returns:
             Material: A new material.
@@ -1773,7 +1775,9 @@ class Material:
                 ``Model.simulate_transmutation``. Not needed for
                 ``Material.transmute()``, which depletes whatever it is called on.
             volume (Optional[float]): Material volume in cm³.
-            temperature (Optional[float]): Temperature in Kelvin.
+            temperature (Optional[float]): Temperature in Kelvin. If omitted,
+                294 K is used, or the only temperature the nuclear data carries
+                when it carries just one.
         
         Returns:
             Material: A material whose composition is absolute atom densities.
@@ -2124,7 +2128,8 @@ class Material:
         Args:
             reaction (Union[int, str]): Either an MT number or reaction name.
             temperature (Optional[str]): Temperature key (e.g., "294"). If not provided,
-                uses material.temperature, or the only available temperature if there's just one.
+                uses material.temperature, else the only available temperature if
+                there is just one, else 294 K.
         
         Returns:
             Tuple[List[float], List[float]]: (cross_section_values, energy_grid)
@@ -2986,7 +2991,8 @@ class Model:
                 run. Give each run a distinct seed when accumulating
                 statistics across runs with ``combine_results``.
             threads: Number of threads to use for parallel execution. Defaults to None,
-                which uses all available CPU threads. Ignored when ``compute='gpu'``.
+                which uses all available CPU threads. CPU only: passing it with
+                ``compute='gpu'`` raises ``ValueError``.
             capture_tracks: Which particle histories to record full event tracks
                 for (debugging/visualisation). Histories are addressed by their
                 global 0-based index, so the captured set is the same regardless
@@ -2998,17 +3004,15 @@ class Model:
                 - ``Sequence[int]`` e.g. ``[20, 30, 45]``: exactly those indices
                 - ``'all'``: every history (warns; high memory on large runs)
                 Only supported when ``compute='cpu'``.
-            compute: Where to run the transport. ``'cpu'`` (default) uses the
-                existing CPU implementation; ``'gpu'`` runs the cubecl/Vulkan
-                kernel via yamc-gpu. The GPU path handles neutron transport
-                (elastic, inelastic, and fission) over sphere/plane/cylinder/
-                torus surfaces with transmissive and vacuum boundaries, and
-                writes tally results back -- flux, reaction-rate, heating,
-                damage-energy, and production scores, including energy bins.
-                It does not support photon transport, particle tracking
-                (``capture_tracks``), or a custom ``threads`` count. Raises
+            compute: Where to run the transport: ``'cpu'`` (default), ``'gpu'``
+                (auto-selects an adapter, preferring a discrete GPU), or an
+                adapter name from ``yamc.parallel.list_gpu_adapters()`` to pin a
+                specific GPU. The GPU runs a subset of the model options, listed
+                per option in the "GPU transport" section of the
+                ``simulate_transport`` docs page. ``capture_tracks``,
+                ``threads`` and ``data_uncertainty`` are CPU only. Raises
                 ``RuntimeError`` if no GPU with f64 compute is available, or
-                ``ValueError`` if the model uses a feature the kernel doesn't
+                ``ValueError`` if the model uses an option the GPU does not
                 support.
             max_runtime: Optional wall-time budget. The run stops at the first
                 chunk checkpoint where elapsed wall time has reached the budget,
@@ -3079,10 +3083,6 @@ class Model:
                 (the under-counted tallies are never returned).
             RuntimeError: if ``compute='gpu'`` and no GPU with f64 compute is
                 available.
-        
-        ``compute`` selects the device: ``'cpu'``, ``'gpu'`` (auto-selects an
-        adapter, preferring a discrete GPU), or an adapter name from
-        ``yamc.parallel.list_gpu_adapters()`` to pin a specific GPU.
         
         Examples:
             >>> results = model.simulate_transport(total_particles=1000)

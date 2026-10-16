@@ -26,7 +26,7 @@ use crate::mesh::topology::MeshTopology;
 use crate::types::*;
 
 /// Raw data read from an Arrow IPC mesh file.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ArrowMeshData {
     pub vertices: Vec<[f64; 3]>,
     pub triangles: Vec<[VertexId; 3]>,

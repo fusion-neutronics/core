@@ -139,7 +139,9 @@ impl PyMaterialCollection {
     ///         geometry's material name.
     ///     density (Optional[float]): Mass density in g/cm3, replacing the
     ///         collection's reference density.
-    ///     temperature (Optional[float]): Temperature in Kelvin.
+    ///     temperature (Optional[float]): Temperature in Kelvin. If omitted,
+    ///         294 K is used, or the only temperature the nuclear data carries
+    ///         when it carries just one.
     ///     volume (Optional[float]): Volume in cm³.
     ///     transmutable (bool): Mark for depletion by
     ///         ``Model.simulate_transmutation``.

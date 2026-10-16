@@ -145,6 +145,53 @@ def test_simulate_transport_gpu_seeded_runs_are_deterministic():
     assert a == b, f"GPU runs not deterministic under fixed seed: {a} vs {b}"
 
 
+def _build_fe56_sphere_with_global_neutron_data(photon_data=None, **model_kwargs):
+    """Fe56 sphere at 14.06 MeV whose material is given no neutron data, so it
+    can only come from `yamc.cross_section_data`. `photon_data`, when given, is
+    passed to `read_nuclear_data` on its own."""
+    material = yamc.Material(composition={'Fe56': 1.0}, density=7.8, temperature=294)
+    if photon_data is not None:
+        material.read_nuclear_data(photon_data=photon_data)
+    sphere = yamc.Sphere(radius=20, boundary='vacuum')
+    cell = yamc.Cell(region=sphere.below, material=material)
+    geometry = yamc.Geometry(cells=[cell])
+    tally = yamc.Tally(scores=['flux'], cells=cell)
+    model = yamc.Model(
+        geometry=geometry,
+        source=yamc.NeutronSource(energy=14.06e6),
+        tallies=[tally],
+        **model_kwargs,
+    )
+    return tally, model
+
+
+def test_simulate_transport_gpu_loads_global_cross_section_data():
+    """With only the global `cross_section_data` set, `compute='gpu'` loads the
+    neutron data itself, as `compute='cpu'` does, and the two agree."""
+    yamc.cross_section_data = {'Fe56': FE56_DATA_PATH}
+    tally, model = _build_fe56_sphere_with_global_neutron_data()
+    gpu = model.simulate_transport(total_particles=2000, seed=3, compute='gpu')[tally]
+    assert gpu.mean[0] > 0.0
+
+    cpu_tally, cpu_model = _build_fe56_sphere_with_global_neutron_data()
+    cpu = cpu_model.simulate_transport(total_particles=2000, seed=3)[cpu_tally]
+    sigma = math.hypot(gpu.standard_deviation[0], cpu.standard_deviation[0])
+    assert abs(gpu.mean[0] - cpu.mean[0]) < 5 * sigma
+
+
+def test_simulate_transport_gpu_coupled_photons_with_global_neutron_data():
+    """Coupled photons on `compute='gpu'` with the neutron data from the global
+    `cross_section_data` and only the photon data given on the material, which
+    is the setup `compute='cpu'` accepts."""
+    yamc.cross_section_data = {'Fe56': FE56_DATA_PATH}
+    tally, model = _build_fe56_sphere_with_global_neutron_data(
+        photon_data={'Fe': os.path.join(TESTS_DIR, 'Fe.arrow')},
+        transport_secondary_photons=True,
+    )
+    results = model.simulate_transport(total_particles=2000, seed=3, compute='gpu')
+    assert results[tally].mean[0] > 0.0
+
+
 def test_simulate_transport_compute_default_is_cpu():
     """Omitting `compute=` should still run on CPU as before."""
     _, model, run = _build_model_with_flux_tally(total_particles=50)

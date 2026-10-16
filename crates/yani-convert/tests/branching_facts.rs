@@ -262,10 +262,22 @@ fn the_facts_round_trip_and_leave_the_curves_alone() {
     let with_nb = &with.curves()["Nb93"];
     let without_nb = &without.curves()["Nb93"];
     assert_eq!(with_nb.len(), without_nb.len());
+    // Only the curves the written file supplies. The chain's own reactions
+    // carry Nb93's (n,X) residuals too, with their states, and those come
+    // through both reads untouched by the facts columns.
+    let from_rows = |kind: &str, target: &str| {
+        rows.iter()
+            .any(|r| r.reaction == kind && r.target == target)
+    };
+    let mut compared = 0;
     for (kind, curves) in with_nb {
         let old = &without_nb[kind];
         assert_eq!(curves.len(), old.len(), "{kind}");
         for (new, old) in curves.iter().zip(old) {
+            if !from_rows(kind, &new.target) {
+                continue;
+            }
+            compared += 1;
             assert_eq!(new.target, old.target);
             assert_eq!(new.quantity, old.quantity);
             // Bit for bit, not within a tolerance.
@@ -287,6 +299,7 @@ fn the_facts_round_trip_and_leave_the_curves_alone() {
             assert_eq!(new.normalisation.as_deref(), Some(NB93_NORMALISATION));
         }
     }
+    assert_eq!(compared, rows.len(), "every written row is read back");
 
     let mf3 = nb93().mf3(16).expect("MT=16").sigma.clone();
     let curve = with_nb["(n,2n)"]
