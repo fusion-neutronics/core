@@ -30,6 +30,9 @@ use yamc::geometry::mesh::MeshGeometry;
 /// the given offset (cm) around the geometry, with vacuum boundary
 /// conditions on all 6 faces.  Particles reaching this boundary are killed.
 ///
+/// Loading warns when some solids touch without sharing a surface where they
+/// meet: a particle leaving one of them is not placed in the solid it enters.
+///
 /// Args:
 ///     filename: Path to an Arrow IPC mesh file (``.arrow``).
 ///     materials: Mapping of material name to :class:`Material`.
@@ -176,6 +179,21 @@ impl PyMeshGeometry {
             pyo3::exceptions::PyValueError::new_err(format!("Invalid mesh '{filename}': {e}"))
         })?;
         let mesh = yamt::MeshGeometry::from_topology(topo);
+        if mesh.touches_without_shared_surface(4096) {
+            let message = format!(
+                "'{filename}': some solids touch without sharing a surface where they meet. \
+                 A particle crosses from one solid into the next only through a shared \
+                 surface, so one leaving these solids is not placed in the solid it enters, \
+                 and tallies come out wrong without any lost particles. A mesh made without \
+                 imprinting is like this, and so is an imprinted one whose imprint did not \
+                 join these faces. Mesh the CAD so that touching solids share the surface \
+                 where they meet."
+            );
+            materials
+                .py()
+                .import("warnings")?
+                .call_method1("warn", (message,))?;
+        }
 
         let inner = MeshGeometry::new(mesh, &mat_map, ic_mat.clone())
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;

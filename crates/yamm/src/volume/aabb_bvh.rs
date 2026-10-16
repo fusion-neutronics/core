@@ -231,6 +231,36 @@ impl TriangleBvh {
         }
     }
 
+    /// True when some triangle lies within `tol` of `point`. Stops at the
+    /// first one, so it is far cheaper than [`TriangleBvh::nearest_point_on_surface`]
+    /// or a parity test for a point near the surface.
+    pub fn any_within(&self, point: &[f64; 3], tol: f64) -> bool {
+        let tol_sq = tol * tol;
+        let mut stack = SmallVec::<[usize; 64]>::new();
+        stack.push(0);
+        while let Some(ni) = stack.pop() {
+            match &self.nodes[ni] {
+                BvhNode::Leaf { start, count, aabb } => {
+                    if aabb_dist_sq(point, aabb) > tol_sq {
+                        continue;
+                    }
+                    for tri in &self.tris[*start..*start + *count] {
+                        if dist_sq(point, &closest_point_on_triangle(point, tri)) <= tol_sq {
+                            return true;
+                        }
+                    }
+                }
+                BvhNode::Internal { left, right, aabb } => {
+                    if aabb_dist_sq(point, aabb) <= tol_sq {
+                        stack.push(*left);
+                        stack.push(*right);
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Test if a point is inside using the full winding number (O(n) but robust).
     pub fn is_point_inside_winding(&self, point: &[f64; 3]) -> bool {
         let w = self.winding_number(point).abs();
@@ -271,6 +301,76 @@ impl TriangleBvh {
         }
         let _ = len_sq; // reserved for future use
         count
+    }
+
+    /// True when some triangle of `self` comes within `tol` of some triangle
+    /// of `other` (crossing included), so "false" proves the surfaces stay
+    /// more than `tol` apart everywhere (no contact and no crossing).
+    ///
+    /// Bounding boxes prune the search and the triangle pairs that survive are
+    /// measured exactly. The boxes alone are not enough: on curved surfaces a
+    /// tilted triangle's box reaches far off the surface, which made shells
+    /// several centimetres apart read as touching.
+    pub fn surfaces_within(&self, other: &TriangleBvh, tol: f64) -> bool {
+        if self.nodes.is_empty() || other.nodes.is_empty() {
+            return false;
+        }
+        let mut stack: Vec<(usize, usize)> = vec![(0, 0)];
+        while let Some((i, j)) = stack.pop() {
+            let (a, b) = (&self.nodes[i], &other.nodes[j]);
+            if aabb_gap(a.aabb(), b.aabb()) > tol {
+                continue;
+            }
+            match (a, b) {
+                (
+                    BvhNode::Leaf {
+                        start: sa,
+                        count: ca,
+                        ..
+                    },
+                    BvhNode::Leaf {
+                        start: sb,
+                        count: cb,
+                        ..
+                    },
+                ) => {
+                    for ta in &self.tris[*sa..*sa + *ca] {
+                        let ba = tri_box(ta);
+                        for tb in &other.tris[*sb..*sb + *cb] {
+                            if aabb_gap(&ba, &tri_box(tb)) <= tol && triangles_within(ta, tb, tol) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                (BvhNode::Internal { left, right, .. }, BvhNode::Leaf { .. }) => {
+                    stack.push((*left, j));
+                    stack.push((*right, j));
+                }
+                (BvhNode::Leaf { .. }, BvhNode::Internal { left, right, .. }) => {
+                    stack.push((i, *left));
+                    stack.push((i, *right));
+                }
+                (
+                    BvhNode::Internal {
+                        left: l1,
+                        right: r1,
+                        ..
+                    },
+                    BvhNode::Internal {
+                        left: l2,
+                        right: r2,
+                        ..
+                    },
+                ) => {
+                    stack.push((*l1, *l2));
+                    stack.push((*l1, *r2));
+                    stack.push((*r1, *l2));
+                    stack.push((*r1, *r2));
+                }
+            }
+        }
+        false
     }
 
     /// Test if a segment from `a` to `b` crosses the boundary surface.
@@ -381,6 +481,28 @@ fn solid_angle_triangle(p: &[f64; 3], v0: &[f64; 3], v1: &[f64; 3], v2: &[f64; 3
 }
 
 /// Squared distance from point to AABB (0 if inside).
+impl BvhNode {
+    fn aabb(&self) -> &Aabb {
+        match self {
+            BvhNode::Leaf { aabb, .. } | BvhNode::Internal { aabb, .. } => aabb,
+        }
+    }
+}
+
+fn tri_box(tri: &[[f64; 3]; 3]) -> Aabb {
+    let mut b = Aabb::empty();
+    b.expand_tri(tri);
+    b
+}
+
+/// Largest per-axis gap between two boxes (0 when they overlap): a lower
+/// bound on the distance between anything inside them, up to sqrt(3).
+fn aabb_gap(a: &Aabb, b: &Aabb) -> f64 {
+    (0..3)
+        .map(|k| (a.min[k] - b.max[k]).max(b.min[k] - a.max[k]).max(0.0))
+        .fold(0.0, f64::max)
+}
+
 fn aabb_dist_sq(p: &[f64; 3], aabb: &Aabb) -> f64 {
     let mut d = 0.0;
     for (i, &pi) in p.iter().enumerate() {
@@ -457,6 +579,71 @@ fn closest_point_on_triangle(p: &[f64; 3], tri: &[[f64; 3]; 3]) -> [f64; 3] {
         a[1] + ab[1] * v + ac[1] * w,
         a[2] + ab[2] * v + ac[2] * w,
     ]
+}
+
+/// True when triangles `a` and `b` come within `tol` of each other, crossing
+/// included. Exact: the closest points of two disjoint triangles are a vertex
+/// against the other triangle or an edge against an edge, and two crossing
+/// triangles have an edge of one through the other.
+fn triangles_within(a: &[[f64; 3]; 3], b: &[[f64; 3]; 3], tol: f64) -> bool {
+    let tol_sq = tol * tol;
+    for i in 0..3 {
+        if dist_sq(&a[i], &closest_point_on_triangle(&a[i], b)) <= tol_sq
+            || dist_sq(&b[i], &closest_point_on_triangle(&b[i], a)) <= tol_sq
+        {
+            return true;
+        }
+    }
+    for i in 0..3 {
+        for j in 0..3 {
+            if segment_distance_sq(&a[i], &a[(i + 1) % 3], &b[j], &b[(j + 1) % 3]) <= tol_sq {
+                return true;
+            }
+        }
+    }
+    let crosses = |p: &[f64; 3], q: &[f64; 3], tri: &[[f64; 3]; 3]| {
+        segment_triangle_intersect(p, &[q[0] - p[0], q[1] - p[1], q[2] - p[2]], tri)
+    };
+    (0..3).any(|i| crosses(&a[i], &a[(i + 1) % 3], b) || crosses(&b[i], &b[(i + 1) % 3], a))
+}
+
+/// Squared distance between segments `p1 q1` and `p2 q2` (Ericson,
+/// Real-Time Collision Detection, 5.1.9).
+fn segment_distance_sq(p1: &[f64; 3], q1: &[f64; 3], p2: &[f64; 3], q2: &[f64; 3]) -> f64 {
+    let sub = |a: &[f64; 3], b: &[f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let (d1, d2, r) = (sub(q1, p1), sub(q2, p2), sub(p1, p2));
+    let (a, e, f) = (dot3(&d1, &d1), dot3(&d2, &d2), dot3(&d2, &r));
+    const EPS: f64 = 1e-300;
+    let (s, t) = if a <= EPS && e <= EPS {
+        (0.0, 0.0)
+    } else if a <= EPS {
+        (0.0, (f / e).clamp(0.0, 1.0))
+    } else {
+        let c = dot3(&d1, &r);
+        if e <= EPS {
+            ((-c / a).clamp(0.0, 1.0), 0.0)
+        } else {
+            let b = dot3(&d1, &d2);
+            let denom = a * e - b * b;
+            let mut s = if denom > 0.0 {
+                ((b * f - c * e) / denom).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let mut t = (b * s + f) / e;
+            if t < 0.0 {
+                t = 0.0;
+                s = (-c / a).clamp(0.0, 1.0);
+            } else if t > 1.0 {
+                t = 1.0;
+                s = ((b - c) / a).clamp(0.0, 1.0);
+            }
+            (s, t)
+        }
+    };
+    let c1 = [p1[0] + d1[0] * s, p1[1] + d1[1] * s, p1[2] + d1[2] * s];
+    let c2 = [p2[0] + d2[0] * t, p2[1] + d2[1] * t, p2[2] + d2[2] * t];
+    dist_sq(&c1, &c2)
 }
 
 fn dot3(a: &[f64; 3], b: &[f64; 3]) -> f64 {
@@ -650,6 +837,69 @@ mod tests {
             count.is_multiple_of(2),
             "Outside point should have even crossings, got {count}"
         );
+    }
+
+    #[test]
+    fn any_within_finds_the_surface_only_within_the_tolerance() {
+        let bvh = TriangleBvh::new(&cube_triangles());
+        // On a face, just off it, and in the middle of the cube.
+        assert!(bvh.any_within(&[0.5, 0.5, 1.0], 1e-9));
+        assert!(bvh.any_within(&[0.5, 0.5, 1.05], 0.1));
+        assert!(!bvh.any_within(&[0.5, 0.5, 1.05], 0.01));
+        assert!(!bvh.any_within(&[0.5, 0.5, 0.5], 0.4));
+        assert!(bvh.any_within(&[0.5, 0.5, 0.5], 0.5));
+    }
+
+    #[test]
+    fn surfaces_within_measures_triangles_not_their_boxes() {
+        // Two parallel triangles tilted to the axes, 0.5 apart along their
+        // normal: their bounding boxes overlap, the triangles stay 0.5 apart.
+        let n = 1.0 / 3f64.sqrt();
+        let tri = |off: f64| {
+            let o = |p: [f64; 3]| [p[0] + n * off, p[1] + n * off, p[2] + n * off];
+            (
+                o([2.0, -1.0, -1.0]),
+                o([-1.0, 2.0, -1.0]),
+                o([-1.0, -1.0, 2.0]),
+            )
+        };
+        let a = TriangleBvh::new(&[tri(0.0)]);
+        let b = TriangleBvh::new(&[tri(0.5)]);
+        assert!(!a.surfaces_within(&b, 0.1));
+        assert!(a.surfaces_within(&b, 0.6));
+    }
+
+    #[test]
+    fn surfaces_within_tells_separated_from_touching_surfaces() {
+        let cube = TriangleBvh::new(&cube_triangles());
+        let shifted = |dx: f64, scale: f64| {
+            let t: Vec<_> = cube_triangles()
+                .into_iter()
+                .map(|(a, b, c)| {
+                    let f = |p: [f64; 3]| [p[0] * scale + dx, p[1] * scale, p[2] * scale];
+                    (f(a), f(b), f(c))
+                })
+                .collect();
+            TriangleBvh::new(&t)
+        };
+        // Face to face contact and a 0.05 gap are both within 0.1.
+        assert!(cube.surfaces_within(&shifted(1.0, 1.0), 0.1));
+        assert!(cube.surfaces_within(&shifted(1.05, 1.0), 0.1));
+        // A 0.5 gap is not.
+        assert!(!cube.surfaces_within(&shifted(1.5, 1.0), 0.1));
+        // A small cube floating in the middle of this one: nested, separated.
+        let inner = {
+            let t: Vec<_> = cube_triangles()
+                .into_iter()
+                .map(|(a, b, c)| {
+                    let f = |p: [f64; 3]| [0.4 + 0.2 * p[0], 0.4 + 0.2 * p[1], 0.4 + 0.2 * p[2]];
+                    (f(a), f(b), f(c))
+                })
+                .collect();
+            TriangleBvh::new(&t)
+        };
+        assert!(!cube.surfaces_within(&inner, 0.1));
+        assert!(!inner.surfaces_within(&cube, 0.1));
     }
 
     #[test]

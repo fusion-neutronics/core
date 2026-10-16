@@ -110,6 +110,7 @@ __all__ = [
     "set_transmutation_decay_data",
     "set_transmutation_fission_yields",
     "set_transmutation_reactions",
+    "solid_overlaps",
     "transmute",
     "weld_mesh",
 ]
@@ -2346,6 +2347,9 @@ class MeshGeometry:
     *graveyard_offset*.  This adds an axis-aligned bounding box expanded by
     the given offset (cm) around the geometry, with vacuum boundary
     conditions on all 6 faces.  Particles reaching this boundary are killed.
+    
+    Loading warns when some solids touch without sharing a surface where they
+    meet: a particle leaving one of them is not placed in the solid it enters.
     
     Args:
         filename: Path to an Arrow IPC mesh file (``.arrow``).
@@ -8015,6 +8019,29 @@ def set_transmutation_reactions(value: typing.Optional[builtins.str | typing.Lit
     a material with no reaction rates. A rate that then needs it is refused
     when the burnup matrix is built, naming the nuclide and the reaction,
     rather than being solved as though the reaction produced nothing.
+    """
+
+def solid_overlaps(vertices: typing.Sequence[typing.Sequence[builtins.float]], solids: typing.Sequence[tuple[builtins.int, typing.Sequence[typing.Sequence[builtins.int]]]], depth_tolerance: builtins.float) -> builtins.list[tuple[builtins.int, builtins.int, builtins.float, builtins.float]]:
+    r"""
+    Pairs of solids whose surface meshes overlap deeper than ``depth_tolerance``.
+    
+    Every vertex, edge and face interior of each solid's closed boundary is
+    tested against every other solid whose bounding box it reaches (the
+    compiled mesh-level overlap check). Contact is not overlap: a point within
+    ``depth_tolerance`` of the other surface counts as touching it.
+    
+    Args:
+        vertices: Global ``[x, y, z]`` vertex array.
+        solids: ``(solid_id, triangles)`` per solid, each its full closed
+            boundary as ``[i, j, k]`` indices into ``vertices``.
+        depth_tolerance: Penetration (3D units) at or below which a feature
+            counts as touching rather than inside.
+    
+    Returns:
+        ``[(solid_a, solid_b, max_depth, exposure), ...]`` for every
+        overlapping pair, ``max_depth`` the deepest penetration found and
+        ``exposure`` an order-of-magnitude estimate of the fraction of
+        isotropic tracks through the model that cross the overlap.
     """
 
 def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | typing.Sequence[PulseSchedule], data_uncertainty: typing.Optional[DataUncertainty] = None, self_shielding_chord: typing.Optional[builtins.float] = None, self_shielding_shape: shapes.SphereLump | shapes.CubeLump | shapes.FoilLump | shapes.CylinderLump | shapes.WireLump | None = None, displacement_damage: builtins.bool = False, displacement_energies: typing.Optional[typing.Mapping[builtins.str, builtins.float]] = None, product_threshold: builtins.float = 1e-12) -> TransmutationResults:

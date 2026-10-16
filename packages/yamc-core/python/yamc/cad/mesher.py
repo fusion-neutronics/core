@@ -246,6 +246,7 @@ class CadToYamc:
         tolerance: float = 0.1,
         angular_tolerance: float = 0.1,
         fidelity_check: bool = True,
+        overlaps: str = "error",
     ) -> SurfaceMesh:
         """Mesh the assembly: surfaces + optional tet volumes.
 
@@ -262,6 +263,14 @@ class CadToYamc:
                 curved surfaces.  Default 0.1.
             angular_tolerance: Angular deflection tolerance for surface
                 meshing (radians).  Default 0.1 (~5.7 degrees).
+            overlaps: What to do when two solids of the mesh overlap deeper
+                than twice *tolerance*. The imprint shares the surfaces where
+                solids coincide, but it does not split solids whose surfaces
+                cross (a rod poking out of a box), so both come out of it
+                whole and still overlap, and transport would give the overlap
+                to whichever solid a particle was already in. ``"error"``
+                (default) raises :class:`OverlappingSolidsError`.
+                ``"ignore"`` skips the check.
 
         Returns:
             SurfaceMesh with global vertex/triangle arrays.
@@ -278,6 +287,7 @@ class CadToYamc:
             tolerance=tolerance,
             angular_tolerance=angular_tolerance,
             fidelity_check=fidelity_check,
+            overlaps=overlaps,
         )
 
         if tet_volumes:
@@ -302,6 +312,7 @@ class CadToYamc:
         tolerance: float = 0.1,
         angular_tolerance: float = 0.1,
         fidelity_check: bool = True,
+        overlaps: str = "error",
     ) -> SurfaceMesh:
         """Mesh all surfaces of the assembly.
 
@@ -309,6 +320,7 @@ class CadToYamc:
             tolerance: Chordal deflection tolerance for surface meshing
                 (3D units).
             angular_tolerance: Angular deflection tolerance (radians).
+            overlaps: ``"error"`` or ``"ignore"``; see :meth:`mesh`.
 
         Returns:
             SurfaceMesh with global vertex/triangle arrays.
@@ -320,6 +332,7 @@ class CadToYamc:
             tolerance=tolerance,
             angular_tolerance=angular_tolerance,
             fidelity_check=fidelity_check,
+            overlaps=overlaps,
         )
 
     def mesh_volumes(
@@ -363,7 +376,9 @@ class CadToYamc:
     # Internal implementation
     # ------------------------------------------------------------------
 
-    def _mesh_surfaces(self, tolerance=0.1, angular_tolerance=0.1, fidelity_check=True):
+    def _mesh_surfaces(
+        self, tolerance=0.1, angular_tolerance=0.1, fidelity_check=True, overlaps="error"
+    ):
         """Mesh surfaces with a hybrid backend, mirroring cad-to-dagmc-mesher.
 
         Solids whose faces are all primitive OCC surfaces (plane / cylinder /
@@ -377,6 +392,9 @@ class CadToYamc:
         """
         from ._brepmesh import brepmesh_face_meshes
         from ._scene_extract import assemble_surface_mesh, scene_face_meshes
+
+        if overlaps not in ("error", "ignore"):
+            raise ValueError(f"overlaps must be 'error' or 'ignore', got {overlaps!r}")
 
         self._processed = process_assembly(self._assembly, self._material_tags)
         pa = self._processed
@@ -419,6 +437,28 @@ class CadToYamc:
                     "Transport on such a mesh runs without lost particles but "
                     "produces wrong physics. Problems:\n  " + detail + "\n"
                     "Pass fidelity_check=False to bypass this gate."
+                )
+
+        if overlaps == "error":
+            from ._overlap import describe, find_overlaps
+            from .assembly_processor import OverlappingSolidsError
+
+            # Two facetings of one CAD surface each stay within the chordal
+            # deflection of it, so they sit at most twice that apart.
+            depth_tolerance = 2.0 * tolerance
+            found = find_overlaps(self._surface_mesh, depth_tolerance)
+            if found:
+                detail = "\n  ".join(describe(self._surface_mesh, found))
+                raise OverlappingSolidsError(
+                    f"Solids overlap deeper than twice the deflection "
+                    f"({depth_tolerance:g}):\n  {detail}\n"
+                    "The imprint shares the surfaces where solids coincide, but "
+                    "does not split solids whose surfaces cross: both come out "
+                    "whole and still overlap. Transport then gives the overlap "
+                    "to whichever solid a particle was already in, which gives "
+                    "wrong tallies and no lost particles. Cut one solid from the "
+                    "other in the CAD (for instance b = b.cut(a)). Pass "
+                    "overlaps='ignore' to bypass this gate."
                 )
 
         return self._surface_mesh
