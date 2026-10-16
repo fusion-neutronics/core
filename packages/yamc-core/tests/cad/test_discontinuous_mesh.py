@@ -243,6 +243,30 @@ def test_an_embedded_solid_is_refused():
     c2y.mesh(imprint=False, overlaps="ignore")
 
 
+def test_an_imprinted_mesh_whose_solids_cross_is_refused():
+    """The imprint shares coinciding surfaces but does not split solids whose
+    surfaces cross: a rod poking out of a box comes back as the whole box and
+    the whole rod, overlapping. The overlap gate catches that on imprinted
+    meshes too; overlaps="ignore" skips it."""
+    from yamc.cad import OverlappingSolidsError
+
+    def poking():
+        return _assembly(
+            box=cq.Workplane().box(20, 20, 20),
+            rod=cq.Workplane().circle(4).extrude(30).translate((0, 0, -5)),
+        )
+
+    c2y = CadToYamc()
+    c2y.add_cadquery_object(poking(), material_tags=["box", "rod"])
+    with pytest.raises(OverlappingSolidsError, match="(?s)'box'.*'rod'.*does not split"):
+        c2y.mesh()
+
+    c2y = CadToYamc()
+    c2y.add_cadquery_object(poking(), material_tags=["box", "rod"])
+    mesh = c2y.mesh(overlaps="ignore")
+    assert mesh.num_solids == 2
+
+
 def test_contact_tolerance_admits_interference_and_is_recorded(tmp_path):
     """Two cubes interfering by 0.5: an overlap at the default contact
     tolerance (twice the 0.1 deflection), modelling slack once the tolerance
@@ -383,7 +407,7 @@ def test_overlaps_option_is_checked():
     c2y.add_cadquery_object(_embedded(cut=False), material_tags=["a", "b"])
     with pytest.raises(ValueError, match="'error', 'smaller_wins' or 'ignore'"):
         c2y.mesh(imprint=False, overlaps="largest")
-    with pytest.raises(ValueError, match="only applies with imprint=False"):
+    with pytest.raises(ValueError, match="needs imprint=False"):
         c2y.mesh(overlaps="smaller_wins")
 
 

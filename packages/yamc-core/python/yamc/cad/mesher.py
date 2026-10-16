@@ -255,15 +255,18 @@ class CadToYamc:
                 that is in the CAD stays a gap whatever the tolerance: the
                 solids either side are checked against the CAD and recorded
                 as separated.
-            overlaps: Only with ``imprint=False``: what to do when two solids
-                overlap deeper than *contact_tolerance*, for instance a part
-                embedded in a body that was never cut. ``"error"`` (default)
-                raises :class:`OverlappingSolidsError`. ``"smaller_wins"``
-                gives every such overlap to the smaller solid of the pair,
-                wherever a particle arrives from, and takes the shared volume
-                off the larger one; the pairs travel to the transport in the
-                mesh file. ``"ignore"`` skips the check, leaving each overlap
-                to whichever solid a particle was already in.
+            overlaps: What to do when two solids overlap deeper than
+                *contact_tolerance*, for instance a part embedded in a body
+                that was never cut. ``"error"`` (default) raises
+                :class:`OverlappingSolidsError`. ``"smaller_wins"``, only with
+                ``imprint=False``, gives every such overlap to the smaller
+                solid of the pair, wherever a particle arrives from, and takes
+                the shared volume off the larger one; the pairs travel to the
+                transport in the mesh file. ``"ignore"`` skips the check,
+                leaving each overlap to whichever solid a particle was already
+                in. The check runs on imprinted meshes too, at twice
+                *tolerance*: the imprint does not split solids whose surfaces
+                cross, so both come out of it whole and still overlap.
 
         Returns:
             SurfaceMesh with global vertex/triangle arrays.
@@ -410,10 +413,11 @@ class CadToYamc:
             raise ValueError(
                 f"overlaps must be 'error', 'smaller_wins' or 'ignore', got {overlaps!r}"
             )
-        if imprint and overlaps != "error":
+        if imprint and overlaps == "smaller_wins":
             raise ValueError(
-                "overlaps only applies with imprint=False: imprinting splits "
-                "overlapping solids apart itself"
+                "overlaps='smaller_wins' needs imprint=False: an imprinted mesh "
+                "is tracked across the surfaces its solids share, which cannot "
+                "give an overlap to one of them"
             )
         if contact_tolerance is None:
             # Two facetings of one CAD surface each stay within the chordal
@@ -477,7 +481,7 @@ class CadToYamc:
                     "Pass fidelity_check=False to bypass this gate."
                 )
 
-        if not imprint and overlaps != "ignore":
+        if overlaps != "ignore":
             from ._overlap import (
                 OverlappingSolidsError,
                 describe,
@@ -486,6 +490,21 @@ class CadToYamc:
             )
 
             found = find_overlaps(self._surface_mesh, contact_tolerance)
+            if found and imprint:
+                detail = "\n  ".join(describe(self._surface_mesh, found))
+                raise OverlappingSolidsError(
+                    f"Solids overlap deeper than twice the deflection "
+                    f"({contact_tolerance:g}):\n  {detail}\n"
+                    "The imprint shares the surfaces where solids coincide, but "
+                    "does not split solids whose surfaces cross: both come out "
+                    "whole and still overlap. Transport then gives the overlap "
+                    "to whichever solid a particle was already in, which gives "
+                    "wrong tallies and no lost particles. Cut one solid from the "
+                    "other in the CAD (for instance b = b.cut(a)), or mesh with "
+                    "imprint=False and overlaps='smaller_wins' to give each "
+                    "overlap to the smaller solid of the pair. Pass "
+                    "overlaps='ignore' to bypass this gate."
+                )
             if found and overlaps == "error":
                 detail = "\n  ".join(describe(self._surface_mesh, found))
                 raise OverlappingSolidsError(
