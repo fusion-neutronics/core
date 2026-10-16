@@ -362,12 +362,14 @@ pub fn find_solid_overlaps(
 
 /// Volume shared by two closed triangle meshes.
 ///
-/// When the surfaces never come within `tol` of each other and one lies
+/// When the surfaces never come within `tol` of each other and one lies wholly
 /// inside the other, the shared volume is all of the inner solid, which the
 /// caller knows exactly; that case returns `SharedVolume::Embedded` with the
-/// inner solid's index (0 for `a`, 1 for `b`). Otherwise the shared volume is
-/// estimated by sampling `samples` points uniformly in the intersection of
-/// the two bounding boxes (deterministic for a given `seed`).
+/// inner solid's index (0 for `a`, 1 for `b`). When they never come close and
+/// neither is inside the other, nothing is shared. Otherwise (the surfaces
+/// meet, or hollow solids interleave) the shared volume is estimated by
+/// sampling `samples` points uniformly in the intersection of the two
+/// bounding boxes (deterministic for a given `seed`).
 pub fn shared_volume(
     vertices: &[[f64; 3]],
     a: &[[usize; 3]],
@@ -385,20 +387,32 @@ pub fn shared_volume(
     };
     let (ba, bb) = (bvh(a), bvh(b));
     if !ba.surfaces_within(&bb, tol) {
-        if b.first()
-            .is_some_and(|t| ba.is_point_inside(&vertices[t[0]]))
-        {
+        // Each connected piece (shell) of either boundary then lies wholly
+        // inside or outside the other solid, and one vertex of it says which.
+        // `b` lies wholly inside `a` when all of `b`'s shells are inside `a`
+        // and none of `a`'s is inside `b` (a void of `a` inside `b` is a hole
+        // in what they share). With no shell of either inside the other they
+        // are apart; anything else (hollow solids interleaved) is sampled.
+        let inside = |shells: &[usize], other: &TriangleBvh| {
+            shells
+                .iter()
+                .filter(|&&v| other.is_point_inside(&vertices[v]))
+                .count()
+        };
+        let (shells_a, shells_b) = (shell_representatives(a), shell_representatives(b));
+        let (a_in_b, b_in_a) = (inside(&shells_a, &bb), inside(&shells_b, &ba));
+        if !shells_b.is_empty() && b_in_a == shells_b.len() && a_in_b == 0 {
             return SharedVolume::Embedded(1);
         }
-        if a.first()
-            .is_some_and(|t| bb.is_point_inside(&vertices[t[0]]))
-        {
+        if !shells_a.is_empty() && a_in_b == shells_a.len() && b_in_a == 0 {
             return SharedVolume::Embedded(0);
         }
-        return SharedVolume::Estimate {
-            volume: 0.0,
-            std_err: 0.0,
-        };
+        if a_in_b == 0 && b_in_a == 0 {
+            return SharedVolume::Estimate {
+                volume: 0.0,
+                std_err: 0.0,
+            };
+        }
     }
     let bounds = |tris: &[[usize; 3]]| {
         let mut lo = [f64::MAX; 3];
@@ -428,8 +442,16 @@ pub fn shared_volume(
     let hits: usize = (0..chunks)
         .into_par_iter()
         .map(|c| {
-            // splitmix64 seeded per chunk: deterministic whatever the threads.
-            let mut state = seed ^ (c as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            // splitmix64, each chunk starting from its own mixed state so that
+            // the chunks' streams do not overlap (seed ^ c * step shifted one
+            // chunk's stream by a few draws from another's): deterministic
+            // whatever the threads.
+            let mut state = {
+                let mut z = seed.wrapping_add((c as u64 + 1).wrapping_mul(0xD1B5_4A32_D192_ED03));
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^ (z >> 31)
+            };
             let mut next = || {
                 state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
                 let mut z = state;
@@ -862,6 +884,69 @@ mod tests {
                 );
             }
             other => panic!("expected an estimate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shared_volume_of_interleaved_hollow_solids_is_sampled() {
+        // a: [-5,5]^3 with a [-3,3]^3 void, b: [-6,6]^3 with a [-4,4]^3 void.
+        // No surface of one comes near the other's, neither lies inside the
+        // other, and they share the shell between 4 and 5: 1000 - 512 = 488.
+        // Whichever shell of each is listed first.
+        for (a_void_first, b_void_first) in [(false, false), (true, false), (false, true)] {
+            let mut v = Vec::new();
+            let hollow = |v: &mut Vec<[f64; 3]>, outer: f64, inner: f64, void_first: bool| {
+                let (o, i) = if void_first {
+                    let i = push_box(v, [-inner; 3], [inner; 3]);
+                    (push_box(v, [-outer; 3], [outer; 3]), i)
+                } else {
+                    let o = push_box(v, [-outer; 3], [outer; 3]);
+                    (o, push_box(v, [-inner; 3], [inner; 3]))
+                };
+                if void_first {
+                    [i, o].concat()
+                } else {
+                    [o, i].concat()
+                }
+            };
+            let a = hollow(&mut v, 5.0, 3.0, a_void_first);
+            let b = hollow(&mut v, 6.0, 4.0, b_void_first);
+            for (x, y) in [(&a, &b), (&b, &a)] {
+                match shared_volume(&v, x, y, 1e-6, 400_000, 3) {
+                    SharedVolume::Estimate { volume, std_err } => assert!(
+                        (volume - 488.0).abs() < 5.0 * std_err,
+                        "{volume} +- {std_err}"
+                    ),
+                    other => panic!("expected an estimate, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shared_volume_errors_are_honest_across_seeds() {
+        // The interleaved hollow cubes share 488 of the 1000 cm^3 box sampled.
+        // Each seed's estimate must sit within its own stated error: chunks
+        // drawing overlapping streams used to understate it several times over.
+        let mut v = Vec::new();
+        let a = [
+            push_box(&mut v, [-5.0; 3], [5.0; 3]),
+            push_box(&mut v, [-3.0; 3], [3.0; 3]),
+        ]
+        .concat();
+        let b = [
+            push_box(&mut v, [-6.0; 3], [6.0; 3]),
+            push_box(&mut v, [-4.0; 3], [4.0; 3]),
+        ]
+        .concat();
+        for seed in 1..=6 {
+            match shared_volume(&v, &a, &b, 1e-6, 1_000_000, seed) {
+                SharedVolume::Estimate { volume, std_err } => assert!(
+                    (volume - 488.0).abs() < 4.5 * std_err,
+                    "seed {seed}: {volume} +- {std_err}"
+                ),
+                other => panic!("expected an estimate, got {other:?}"),
+            }
         }
     }
 
