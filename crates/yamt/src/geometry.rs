@@ -161,6 +161,86 @@ impl MeshGeometry {
         }
     }
 
+    /// True when some solids touch without sharing a surface: some solid's
+    /// surface, facing the implicit complement, has another solid right
+    /// behind it. Tracking reads the far side of such a surface as the
+    /// implicit complement and skips the other solid, without losing
+    /// particles. A mesh made without imprinting is like that throughout; an
+    /// imprinted one where the imprint failed to share some faces is like
+    /// that in places.
+    ///
+    /// Probes, for up to `max_probes` triangles spread over every surface
+    /// facing the implicit complement, a point just outside the solid along
+    /// the outward normal, and asks whether any other solid contains it.
+    /// Edge-only contact (two solids meeting along a line, as imprinted solids
+    /// do at a shared edge) does not trigger it.
+    pub fn touches_without_shared_surface(&self, max_probes: usize) -> bool {
+        let topo = &self.topology;
+        if topo.num_volumes < 2 {
+            return false;
+        }
+        let ic = topo.implicit_complement;
+        let b = topo.global_aabb;
+        let diag = ((b[3] - b[0]).powi(2) + (b[4] - b[1]).powi(2) + (b[5] - b[2]).powi(2)).sqrt();
+        let eps = (1e-6 * diag).max(1e-9);
+        let candidates: Vec<(SurfaceId, VolumeId, Sense)> = (0..topo.num_surfaces)
+            .filter_map(|s| match topo.surface_volumes[s as usize] {
+                (Some(v), Some(o)) if o == ic && v != ic => Some((s, v, Sense::Forward)),
+                (Some(o), Some(v)) if o == ic && v != ic => Some((s, v, Sense::Reverse)),
+                _ => None,
+            })
+            .collect();
+        let total: usize = candidates
+            .iter()
+            .map(|&(s, _, _)| topo.surface_tri_ranges[s as usize].len())
+            .sum();
+        if total == 0 {
+            return false;
+        }
+        let stride = total.div_ceil(max_probes.max(1));
+        let mut k = 0usize;
+        for &(s, owner, sense) in &candidates {
+            for i in topo.surface_tri_ranges[s as usize].clone() {
+                k += 1;
+                if !k.is_multiple_of(stride) {
+                    continue;
+                }
+                let tri = topo.triangles[topo.surface_tri_indices[i as usize] as usize];
+                let (a, bb, c) = (
+                    topo.vertices[tri[0] as usize],
+                    topo.vertices[tri[1] as usize],
+                    topo.vertices[tri[2] as usize],
+                );
+                let n = intersect::normalize(intersect::cross(
+                    intersect::sub(bb, a),
+                    intersect::sub(c, a),
+                ));
+                let out = match sense {
+                    Sense::Forward => 1.0,
+                    Sense::Reverse => -1.0,
+                };
+                let p = [
+                    (a[0] + bb[0] + c[0]) / 3.0 + out * eps * n[0],
+                    (a[1] + bb[1] + c[1]) / 3.0 + out * eps * n[1],
+                    (a[2] + bb[2] + c[2]) / 3.0 + out * eps * n[2],
+                ];
+                for v in 0..topo.num_volumes {
+                    if v == owner {
+                        continue;
+                    }
+                    let vb = &topo.volume_aabbs[v as usize];
+                    if (0..3).any(|j| p[j] < vb[j] || p[j] > vb[j + 3]) {
+                        continue;
+                    }
+                    if self.point_in_volume(v, p) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Fire a ray within a volume. Returns `(distance, surface_id)` of
     /// the next surface crossing, or `None`.
     pub fn ray_fire(

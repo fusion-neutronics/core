@@ -11,6 +11,7 @@ from yamc._core import (
     mesh_to_arrow,
     mesh_faces_scene_resolved,
     mesh_volume_rs,
+    solid_overlaps,
     weld_mesh,
 )
 
@@ -21,6 +22,6 @@ from .assembly_processor import OverlappingSolidsError, ProcessedAssembly
 __all__ = [
     "cad_mesh_labels", "cad_mesh_to_arrow",
     "mesh_face", "mesh_faces", "mesh_to_arrow",
-    "mesh_faces_scene_resolved", "mesh_volume_rs", "weld_mesh",
+    "mesh_faces_scene_resolved", "mesh_volume_rs", "solid_overlaps", "weld_mesh",
     "CadToYamc", "SurfaceMesh", "ProcessedAssembly", "OverlappingSolidsError",
 ]
