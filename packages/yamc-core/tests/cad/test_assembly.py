@@ -133,3 +133,63 @@ def test_an_assembly_node_without_solids_is_not_an_input():
     assy.add(plane, name="tally_plane")
     result = process_assembly(assy, material_tags=["a", "b", "c"])
     assert len(result.solid_faces) == 2
+
+
+def test_imprinting_a_revolved_spline_solid_keeps_its_volume():
+    """A revolved spline solid inside an enclosure split at its midplane: the
+    imprint splits the solid's faces where the pieces meet, and OCC's default
+    volume integration of the result drifts by a fraction of a percent. The
+    volume check must not read that as part of the solid being absorbed."""
+    import math
+
+    def d_profile(scale, r0=600.0, n=12):
+        return [
+            (r0 + scale * math.cos(a) + 0.25 * scale * math.cos(2 * a),
+             1.7 * scale * math.sin(a))
+            for a in (2 * math.pi * i / n for i in range(n))
+        ]
+
+    plasma = (
+        cq.Workplane("XZ").spline(d_profile(200.0), periodic=True).close()
+        .revolve(90, (0, 0, 0), (0, 1, 0))
+    )
+    bb = plasma.val().BoundingBox()
+    enclosure = cq.Workplane("XY").box(bb.xlen + 100, bb.ylen + 100, bb.zlen + 100).translate(
+        (bb.center.x, bb.center.y, bb.center.z)
+    )
+    wall = enclosure.cut(plasma, clean=False)
+    half = cq.Workplane("XY").box(1e5, 1e5, 1e5, centered=(True, True, False)).translate(
+        (0, 0, bb.center.z)
+    )
+    assy = cq.Assembly()
+    assy.add(plasma, name="plasma")
+    assy.add(wall.intersect(half, clean=False), name="upper")
+    assy.add(wall.cut(half, clean=False), name="lower")
+    result = process_assembly(assy, material_tags=["a", "b", "c"])
+    assert len(result.solid_faces) == 3
+
+
+def test_a_mirrored_part_is_not_read_as_absorbed():
+    """A mirroring location turns OCC's integrated volume negative."""
+    from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt, gp_Trsf
+
+    mirror = gp_Trsf()
+    mirror.SetMirror(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(1, 0, 0)))
+    assy = cq.Assembly()
+    assy.add(cq.Workplane("XY").box(10, 20, 5).translate((10, 0, 0)), name="left",
+             loc=cq.Location(mirror))
+    result = process_assembly(assy, material_tags=["a"])
+    assert len(result.solid_faces) == 1
+
+
+def test_overlapping_solids_under_one_name_are_accepted():
+    """Two overlapping boxes in one child (one material): the imprint splits
+    them into three pieces, the shared one listing the child's name twice, and
+    nothing of either is lost."""
+    a = cq.Workplane("XY").box(10, 10, 10).val()
+    b = cq.Workplane("XY").box(10, 10, 10).translate((5, 0, 0)).val()
+    assy = cq.Assembly()
+    assy.add(cq.Workplane("XY").add(cq.Compound.makeCompound([a, b])), name="body")
+    assy.add(cq.Workplane("XY").box(4, 4, 4).translate((30, 0, 0)), name="other")
+    result = process_assembly(assy, material_tags=["a", "b"])
+    assert len(result.solid_faces) == 4

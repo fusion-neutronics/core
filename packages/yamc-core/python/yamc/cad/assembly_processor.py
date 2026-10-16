@@ -89,9 +89,14 @@ def _refuse_lost_or_shared_inputs(assembly, imprinted_solids_with_ids):
 
     Origins are assembly names, so the second is checked by volume: the
     imprinted solids an input name is an origin of must hold all the volume
-    its solids had. That also catches one of several solids under a name
-    being absorbed while the others survive. Assembly nodes without solids
-    (a face, a wire) are not inputs.
+    its solids had, a piece counted once per time the name is among its
+    origins (two overlapping solids under one name share a piece that lists
+    the name twice). That also catches one of several solids under a name
+    being absorbed while the others survive. Volumes are integrated to a
+    relative precision of 1e-7: OCC's default integration is off by up to a
+    few percent on revolved and spline solids, and differently once the
+    imprint splits their faces. Assembly nodes without solids (a face, a
+    wire) are not inputs.
 
     Overlaps whose surfaces cross without coinciding are not split by the
     imprint at all: both solids come back whole, each with its own origin,
@@ -100,17 +105,23 @@ def _refuse_lost_or_shared_inputs(assembly, imprinted_solids_with_ids):
     def short(name):
         return name.rsplit("/", 1)[-1]
 
+    def volume_of(solid):
+        # A mirroring location turns the integrated volume negative.
+        props = GProp_GProps()
+        BRepGProp.VolumeProperties_s(getattr(solid, "wrapped", solid), props, 1e-7)
+        return abs(props.Mass())
+
     volume_in = {}
     for obj, name, loc, _ in assembly:
         for solid in obj.moved(loc).Solids():
-            volume_in[name] = volume_in.get(name, 0.0) + solid.Volume()
+            volume_in[name] = volume_in.get(name, 0.0) + volume_of(solid)
     volume_out = {}
     shared = []
     for solid, origins in imprinted_solids_with_ids.items():
-        names = list(dict.fromkeys(origins))
-        volume = solid.Volume()
-        for name in names:
+        volume = volume_of(solid)
+        for name in origins:
             volume_out[name] = volume_out.get(name, 0.0) + volume
+        names = list(dict.fromkeys(origins))
         if len(names) > 1:
             shared.append((volume, [short(n) for n in names]))
     lost = []
