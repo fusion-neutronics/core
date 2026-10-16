@@ -123,8 +123,10 @@ pub enum GpuDispatchError {
     /// `Model::ensure_photon_data_for_gpu` failed -- a photon model's
     /// materials are missing photon data (`photon_data_paths` empty).
     PhotonDataPrep(String),
-    /// `Model::ensure_neutron_temperatures_for_gpu` failed -- a material is
-    /// labelled with a temperature its nuclide data cannot be widened to.
+    /// `Model::ensure_nuclear_data_loaded` or
+    /// `Model::ensure_neutron_temperatures_for_gpu` failed -- a nuclide has no
+    /// data source, or a material is labelled with a temperature its nuclide
+    /// data cannot be widened to.
     NeutronDataPrep(String),
     /// The device particle bank overflowed (`count > capacity`) -- the coupled
     /// secondary-photon bank or the fission-progeny bank (one shared bank).
@@ -690,6 +692,18 @@ fn run_on_gpu_dispatch(
     // since they share this entry. See `warn_if_tracking_mode_ignored`.
     warn_if_tracking_mode_ignored(model.tracking_mode);
     warn_if_ranks_share_one_device(device, model.verbose.summary);
+    // Load any nuclide data the materials do not hold yet, from the global
+    // `cross_section_data` setting when `read_nuclear_data` was never called:
+    // the same step `run_internal` runs before CPU transport. Logged like the
+    // CPU's data-load phase when verbose "nuclear_data" is set.
+    if model.verbose.nuclear_data {
+        yamc_nuclide::set_load_logging(true);
+    }
+    let loaded = model.ensure_nuclear_data_loaded(model.has_photons());
+    if model.verbose.nuclear_data {
+        yamc_nuclide::set_load_logging(false);
+    }
+    loaded.map_err(GpuDispatchError::NeutronDataPrep)?;
     // Photon models need the same photon prep the CPU runs inline in
     // `run_internal` (`init_photon_data` + `init_bremsstrahlung`).
     // Without it the GPU's TTB / Doppler / relaxation tables come up
