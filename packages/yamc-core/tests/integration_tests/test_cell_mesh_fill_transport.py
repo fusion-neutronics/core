@@ -153,3 +153,87 @@ def test_same_material_fill_is_invisible():
         f"filled {filled_mean} +/- {filled_std} vs plain {plain_mean} +/- "
         f"{plain_std} ({z:.2f} sigma)"
     )
+
+
+def _touching_boxes_arrow(path):
+    """Two 10 cm cubes meeting at x = 10, each with its own surface, written
+    as a mesh made without imprinting (tracked discontinuously)."""
+    from yamc._core import mesh_to_arrow
+
+    def box(x0, x1):
+        v = [
+            [x0, 0, 0], [x1, 0, 0], [x1, 10, 0], [x0, 10, 0],
+            [x0, 0, 10], [x1, 0, 10], [x1, 10, 10], [x0, 10, 10],
+        ]
+        quads = [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (2, 3, 7, 6), (0, 4, 7, 3), (1, 2, 6, 5)]
+        return v, [t for a, b, c, d in quads for t in ([a, b, c], [a, c, d])]
+
+    va, ta = box(0.0, 10.0)
+    vb, tb = box(10.0, 20.0)
+    n = len(ta)
+    mesh_to_arrow(
+        path,
+        [c for v in va + vb for c in v],
+        [i for t in ta for i in t] + [i + 8 for t in tb for i in t],
+        [1] * n + [2] * n,
+        [1] * n + [2] * n,
+        physical_groups_json='{"1": {"name": "mat:a", "dim": 3}, "2": {"name": "mat:b", "dim": 3}}',
+        surface_volumes_json="[[0, null], [1, null]]",
+        imprinted=False,
+        contact_tolerance=1e-3,
+    )
+
+
+def test_a_mesh_made_without_imprinting_fills_a_cell_like_its_csg_twin(tmp_path):
+    """Two touching cubes, each with its own surface, filling a CSG sphere,
+    give the same fluxes as the cubes built from planes: crossings between the
+    fill's solids are resolved as in a whole-model mesh."""
+    path = str(tmp_path / "boxes.arrow")
+    _touching_boxes_arrow(path)
+
+    def materials():
+        return {"a": _material("a", "Be9", 1.85), "b": _material("b", "Fe56", 7.874)}
+
+    def run(geometry, cells, seed):
+        tallies = [yamc.Tally(scores=["flux"], cells=c, name=c.name) for c in cells]
+        model = yamc.Model(
+            geometry=geometry,
+            tallies=tallies,
+            source=yamc.NeutronSource(
+                energy=yamc.sources.Discrete([14.06e6], [1.0]), position=(5.0, 5.0, 5.0)
+            ),
+        )
+        results = model.simulate_transport(total_particles=100_000, seed=seed)
+        assert not model.lost_particles
+        return [
+            (float(results[t].mean[0]), float(results[t].standard_deviation[0]))
+            for t in tallies
+        ]
+
+    def chamber():
+        return yamc.Sphere(x0=10.0, y0=5.0, z0=5.0, radius=30.0, boundary="vacuum").below
+
+    mesh = yamc.MeshGeometry(path, materials())
+    assert mesh.discontinuous
+    filled = yamc.Geometry([yamc.Cell(region=chamber(), name="chamber", fill=mesh)])
+    fill_cells = [next(c for c in filled.cells if c.name.endswith(f"_{t}")) for t in "ab"]
+    fill_flux = run(filled, fill_cells, 1)
+
+    mats = materials()
+    x = [yamc.Plane(axis="x", offset=v) for v in (0.0, 10.0, 20.0)]
+    y = [yamc.Plane(axis="y", offset=v) for v in (0.0, 10.0)]
+    z = [yamc.Plane(axis="z", offset=v) for v in (0.0, 10.0)]
+    yz = y[0].above & y[1].below & z[0].above & z[1].below
+    twin = [
+        yamc.Cell(region=chamber() & ~(x[0].above & x[2].below & yz), name="chamber"),
+        yamc.Cell(region=x[0].above & x[1].below & yz, material=mats["a"], name="a"),
+        yamc.Cell(region=x[1].above & x[2].below & yz, material=mats["b"], name="b"),
+    ]
+    twin_flux = run(yamc.Geometry(twin), twin[1:], 2)
+
+    for tag, (mean, sd), (ref, ref_sd) in zip("ab", fill_flux, twin_flux):
+        zscore = (mean - ref) / np.hypot(sd, ref_sd)
+        assert abs(zscore) < Z_MAX, (
+            f"{tag}: fill {mean} +- {sd}, CSG twin {ref} +- {ref_sd} ({zscore:.1f} sigma)"
+        )
+

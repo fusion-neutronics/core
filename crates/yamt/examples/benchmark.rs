@@ -312,5 +312,9 @@ fn generate_cube_mesh(n: usize) -> ArrowMeshData {
         surface_volumes_json: "[[0, null], [0, null], [0, null], [0, null], [0, null], [0, null]]"
             .to_string(),
         volume_measures: Vec::new(),
+        imprinted: None,
+        contact_tolerance: None,
+        overlaps: Vec::new(),
+        separated: Vec::new(),
     }
 }

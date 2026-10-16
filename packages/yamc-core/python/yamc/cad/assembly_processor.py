@@ -1,8 +1,8 @@
 """Assembly processing: imprinting and topology extraction.
 
-Takes a CadQuery assembly, imprints it, and extracts the face/solid topology
-needed for meshing: which faces belong to which solids, shared faces, and
-face orientation per solid.
+Takes a CadQuery assembly, imprints it (or, with ``imprint=False``, keeps every
+solid as it is), and extracts the face/solid topology needed for meshing: which
+faces belong to which solids, shared faces, and face orientation per solid.
 """
 
 from __future__ import annotations
@@ -47,6 +47,28 @@ class ProcessedAssembly:
     # (i.e. the UV surface normal points inward to the solid)
     imprinted_compound: object = None  # OCC compound (source of the global edge map)
     solid_shapes: dict = field(default_factory=dict)  # solid_id -> CadQuery Shape
+
+
+def _assembly_solids(assembly):
+    """Every solid of the assembly, placed, mapped to the name of its part."""
+    id_map = {}
+    for obj, name, loc, _ in assembly:
+        for solid in obj.moved(loc).Solids():
+            id_map[solid] = name
+    return id_map
+
+
+def _compound_without_imprint(assembly):
+    """The assembly's solids gathered into one compound, untouched.
+
+    Returns the same ``(compound, {solid: (name,)})`` pair as the imprint, so
+    the rest of the pipeline does not care which one ran. No face is shared
+    between solids: two solids that touch keep a face each where they meet.
+    """
+    id_map = _assembly_solids(assembly)
+    solids = list(id_map)
+    compound = cq.occ_impl.shapes.Compound.makeCompound(solids)
+    return compound, {s: (id_map[s],) for s in solids}
 
 
 def _signed_volume(shape):
@@ -126,14 +148,8 @@ def _imprint_assembly(assembly):
     """
     import inspect
 
-    id_map = {}
-    for obj, name, loc, _ in assembly:
-        for solid in obj.moved(loc).Solids():
-            id_map[solid] = name
-    if len(id_map) < 2:
-        solids = list(id_map)
-        compound = cq.occ_impl.shapes.Compound.makeCompound(solids)
-        return compound, {s: (id_map[s],) for s in solids}
+    if len(_assembly_solids(assembly)) < 2:
+        return _compound_without_imprint(assembly)
 
     imprint = cq.occ_impl.assembly.imprint
     if "glue" in inspect.signature(imprint).parameters:
@@ -219,7 +235,7 @@ def _refuse_lost_or_shared_inputs(assembly, imprinted_solids_with_ids):
 
 
 def process_assembly(
-    assembly: cq.Assembly, material_tags: list[str]
+    assembly: cq.Assembly, material_tags: list[str], imprint: bool = True
 ) -> ProcessedAssembly:
     """Process a CadQuery assembly for meshing.
 
@@ -230,6 +246,10 @@ def process_assembly(
     Args:
         assembly: CadQuery Assembly with named parts.
         material_tags: List of material tag strings, one per part.
+        imprint: Imprint the assembly so touching solids share the face where
+            they meet. ``False`` skips the imprint (the slow, serial step on a
+            large assembly) and keeps every solid whole, so each solid is
+            meshed on its own.
 
     Returns:
         ProcessedAssembly with topology data and imprinted compound.
@@ -238,9 +258,14 @@ def process_assembly(
     # reach any of it.
     assembly = _bake_mirrored_parts(assembly)
 
-    # Step 1: Imprint the assembly
-    imprinted_compound, imprinted_solids_with_ids = _imprint_assembly(assembly)
-    _refuse_lost_or_shared_inputs(assembly, imprinted_solids_with_ids)
+    # Step 1: Imprint the assembly (or gather its solids as they are)
+    if imprint:
+        imprinted_compound, imprinted_solids_with_ids = _imprint_assembly(assembly)
+        _refuse_lost_or_shared_inputs(assembly, imprinted_solids_with_ids)
+    else:
+        imprinted_compound, imprinted_solids_with_ids = _compound_without_imprint(
+            assembly
+        )
 
     # Get the OCC compound shape
     if hasattr(imprinted_compound, 'wrapped'):

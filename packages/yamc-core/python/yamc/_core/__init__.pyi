@@ -110,7 +110,9 @@ __all__ = [
     "set_transmutation_decay_data",
     "set_transmutation_fission_yields",
     "set_transmutation_reactions",
+    "solid_contact_samples",
     "solid_overlaps",
+    "solid_shared_volume",
     "transmute",
     "weld_mesh",
 ]
@@ -2348,8 +2350,21 @@ class MeshGeometry:
     the given offset (cm) around the geometry, with vacuum boundary
     conditions on all 6 faces.  Particles reaching this boundary are killed.
     
-    Loading warns when some solids touch without sharing a surface where they
-    meet: a particle leaving one of them is not placed in the solid it enters.
+    A mesh written without imprinting (``CadToYamc.mesh(imprint=False)``)
+    gives each solid its own surface, so touching solids meet along two
+    independently faceted surfaces that may overlap or leave thin gaps. Such a
+    mesh is tracked discontinuously: a particle leaving a solid is placed in
+    whichever touching solid contains it. Solids closer than the contact
+    tolerance count as touching, so an overlap or a gap thinner than it is
+    crossed straight into the next solid (an overlap stays with the solid the
+    particle was already in); a wider gap, or one the file records as being in
+    the CAD, is the implicit complement. The file records all this;
+    *contact_tolerance* forces it on for a mesh from another writer, or
+    overrides the tolerance the file records.
+    
+    Loading warns when a mesh tracked conformally has solids that touch
+    without sharing a surface where they meet: a particle leaving one of them
+    is not placed in the solid it enters.
     
     Args:
         filename: Path to an Arrow IPC mesh file (``.arrow``).
@@ -2358,6 +2373,13 @@ class MeshGeometry:
             space between volumes.  Default ``None`` means void (free-streaming).
         graveyard_offset: Optional offset (cm) for automatic vacuum boundary
             box generation.
+        contact_tolerance: Optional distance (cm) within which two solids'
+            surfaces count as touching. Setting it tracks the mesh
+            discontinuously. It must be at least the deepest overlap between
+            touching solids, and gaps narrower than it are filled by the solid
+            on the far side, except between solids the file records as apart
+            in the CAD (``CadToYamc`` checks this when meshing without
+            imprinting).
     
     Raises:
         ValueError: If the file is not an Arrow IPC mesh, or if it contains a
@@ -2374,6 +2396,20 @@ class MeshGeometry:
         ...                               graveyard_offset=5.0)
         >>> model = yamc.Model(geometry=mesh_geom, source=source)
     """
+    @property
+    def discontinuous(self) -> builtins.bool:
+        r"""
+        True when the mesh is tracked discontinuously: its solids were meshed
+        one by one without imprinting, so a particle leaving one is placed in
+        whichever touching solid contains it rather than read off a shared
+        surface.
+        """
+    @property
+    def contact_tolerance(self) -> typing.Optional[builtins.float]:
+        r"""
+        Distance (cm) within which two solids' surfaces count as touching, for
+        a discontinuously tracked mesh; ``None`` for an imprinted one.
+        """
     @property
     def num_volumes(self) -> builtins.int:
         r"""
@@ -2422,7 +2458,7 @@ class MeshGeometry:
         """
     @graveyard_offset.setter
     def graveyard_offset(self, value: typing.Optional[builtins.float]) -> None: ...
-    def __new__(cls, filename: builtins.str, materials: dict, implicit_complement_material: typing.Optional[Material] = None, graveyard_offset: typing.Optional[builtins.float] = None) -> MeshGeometry: ...
+    def __new__(cls, filename: builtins.str, materials: dict, implicit_complement_material: typing.Optional[Material] = None, graveyard_offset: typing.Optional[builtins.float] = None, contact_tolerance: typing.Optional[builtins.float] = None) -> MeshGeometry: ...
     def calculate_volume(self, samples: builtins.int = 0, bounding_box: typing.Optional[BoundingBox] = None, seed: typing.Optional[builtins.int] = None) -> builtins.dict[builtins.int, VolumeResult]:
         r"""
         Compute the volume of every mesh volume.
@@ -7273,7 +7309,7 @@ def cad_mesh_labels(triangle_face_ids: typing.Sequence[builtins.int], solid_face
         tet_blocks: ``(solid_id, vertex_offset, tets)`` per tetrahedralized solid.
     """
 
-def cad_mesh_to_arrow(path: builtins.str, vertices: typing.Sequence[typing.Sequence[builtins.float]], triangles: typing.Sequence[typing.Sequence[builtins.int]], triangle_surface_ids: typing.Sequence[builtins.int], triangle_face_ids: typing.Sequence[builtins.int], solid_faces: typing.Sequence[tuple[builtins.int, typing.Sequence[builtins.int]]], material_tags: typing.Sequence[builtins.str], face_to_surface_id: typing.Sequence[tuple[builtins.int, builtins.int]], face_solid_reversed: typing.Mapping[tuple[builtins.int, builtins.int], builtins.bool], tet_blocks: typing.Sequence[tuple[builtins.int, builtins.int, typing.Sequence[typing.Sequence[builtins.int]]]] = [], boundary_tags: typing.Sequence[tuple[builtins.str, typing.Sequence[builtins.int]]] = []) -> None:
+def cad_mesh_to_arrow(path: builtins.str, vertices: typing.Sequence[typing.Sequence[builtins.float]], triangles: typing.Sequence[typing.Sequence[builtins.int]], triangle_surface_ids: typing.Sequence[builtins.int], triangle_face_ids: typing.Sequence[builtins.int], solid_faces: typing.Sequence[tuple[builtins.int, typing.Sequence[builtins.int]]], material_tags: typing.Sequence[builtins.str], face_to_surface_id: typing.Sequence[tuple[builtins.int, builtins.int]], face_solid_reversed: typing.Mapping[tuple[builtins.int, builtins.int], builtins.bool], tet_blocks: typing.Sequence[tuple[builtins.int, builtins.int, typing.Sequence[typing.Sequence[builtins.int]]]] = [], boundary_tags: typing.Sequence[tuple[builtins.str, typing.Sequence[builtins.int]]] = [], imprinted: builtins.bool = True, contact_tolerance: typing.Optional[builtins.float] = None, overlaps: typing.Sequence[tuple[builtins.int, builtins.int]] = [], volume_measures: typing.Optional[typing.Sequence[builtins.float]] = None, separated: typing.Sequence[tuple[builtins.int, builtins.int]] = []) -> None:
     r"""
     Finalize the CAD pipeline's mesh and write it to an Arrow IPC file.
     
@@ -7296,6 +7332,19 @@ def cad_mesh_to_arrow(path: builtins.str, vertices: typing.Sequence[typing.Seque
         tet_blocks: ``(solid_id, vertex_offset, tets)`` per tetrahedralized solid.
         boundary_tags: ``(boundary_name, surface_ids)`` pairs written as
             ``dim=2`` ``boundary:<name>`` physical groups (surface ids 1-based).
+        imprinted: Whether the assembly was imprinted before meshing. ``False``
+            makes :class:`MeshGeometry` track the mesh discontinuously.
+        contact_tolerance: For a mesh that was not imprinted, the distance
+            (cm) within which two solids' surfaces count as touching.
+        overlaps: For a mesh that was not imprinted, ``(low, high)`` solid
+            pairs (1-based solid ids) that overlap; where they do, the cell is
+            ``high``.
+        volume_measures: Optional volume (cm³) per solid, in solid order,
+            written instead of the volumes the reader would compute from the
+            surfaces (for solids that give up an overlap).
+        separated: For a mesh that was not imprinted, ``(a, b)`` solid pairs
+            (1-based solid ids) within the contact tolerance in the mesh that
+            do not touch in the CAD, so the gap between them is kept.
     """
 
 def combine_results(*results: typing.Any) -> SimulationResults:
@@ -7758,13 +7807,24 @@ def mesh_faces_scene_resolved(faces: typing.Sequence[tuple[builtins.int, typing.
     edge discretization in OCP). Returns one output per input face, in order.
     """
 
-def mesh_to_arrow(path: builtins.str, vertices: typing.Sequence[builtins.float], triangles: typing.Sequence[builtins.int], triangle_surface_ids: typing.Sequence[builtins.int], triangle_physical_groups: typing.Sequence[builtins.int], tetrahedra: typing.Sequence[builtins.int] = [], tet_volume_ids: typing.Sequence[builtins.int] = [], tet_physical_groups: typing.Sequence[builtins.int] = [], physical_groups_json: builtins.str = '{}', surface_volumes_json: builtins.str = '[]', volume_measures_json: builtins.str = '') -> None:
+def mesh_to_arrow(path: builtins.str, vertices: typing.Sequence[builtins.float], triangles: typing.Sequence[builtins.int], triangle_surface_ids: typing.Sequence[builtins.int], triangle_physical_groups: typing.Sequence[builtins.int], tetrahedra: typing.Sequence[builtins.int] = [], tet_volume_ids: typing.Sequence[builtins.int] = [], tet_physical_groups: typing.Sequence[builtins.int] = [], physical_groups_json: builtins.str = '{}', surface_volumes_json: builtins.str = '[]', volume_measures_json: builtins.str = '', imprinted: typing.Optional[builtins.bool] = None, contact_tolerance: typing.Optional[builtins.float] = None, overlaps: typing.Sequence[tuple[builtins.int, builtins.int]] = [], separated: typing.Sequence[tuple[builtins.int, builtins.int]] = []) -> None:
     r"""
     Write mesh data to an Arrow IPC file.
     
     Tet adjacency and triangle/tet AABBs are computed here from the flat
     connectivity (previously per-element Python loops), so the caller no longer
     supplies them.
+    
+    ``imprinted=False`` records that the solids were meshed one by one, so
+    touching solids each have their own surface where they meet;
+    :class:`MeshGeometry` then tracks the mesh discontinuously, with
+    ``contact_tolerance`` (cm) as the distance within which two solids'
+    surfaces count as touching. Both are left out of the file when ``None``.
+    ``overlaps`` lists ``(low, high)`` pairs of 0-based volume ids whose
+    solids overlap; where they do, the cell is ``high``.
+    ``separated`` lists ``(a, b)`` pairs of 0-based volume ids whose surfaces
+    come within the contact tolerance although the solids do not touch, so the
+    gap between them is kept rather than filled.
     """
 
 def mesh_volume_rs(boundary_vertices: typing.Sequence[typing.Sequence[builtins.float]], boundary_triangles: typing.Sequence[typing.Sequence[builtins.int]], target_edge_length: builtins.float) -> tuple[builtins.list[builtins.list[builtins.float]], builtins.list[builtins.list[builtins.int]]]:
@@ -8021,6 +8081,29 @@ def set_transmutation_reactions(value: typing.Optional[builtins.str | typing.Lit
     rather than being solved as though the reaction produced nothing.
     """
 
+def solid_contact_samples(vertices: typing.Sequence[typing.Sequence[builtins.float]], solids: typing.Sequence[tuple[builtins.int, typing.Sequence[typing.Sequence[builtins.int]]]], tolerance: builtins.float, samples: builtins.int = 8) -> builtins.list[tuple[builtins.int, builtins.int, builtins.list[builtins.list[builtins.float]]]]:
+    r"""
+    Points where two solids' surface meshes come within ``tolerance``.
+    
+    For every pair of solids whose meshes come that close, up to ``samples``
+    mesh vertices of one of them lying within ``tolerance`` of the other's
+    surface. A mesh vertex lies on its solid's CAD surface, so its exact
+    distance to the other CAD solid says whether the two touch there or are
+    separated by a real gap that faceting has narrowed.
+    
+    Args:
+        vertices: Global ``[x, y, z]`` vertex array.
+        solids: ``(solid_id, triangles)`` per solid.
+        tolerance: The contact tolerance (3D units).
+        samples: Points to return per pair at most.
+    
+    Returns:
+        ``[(solid_a, solid_b, [[x, y, z], ...]), ...]``, the points on
+        ``solid_a``'s surface. A pair whose meshes come close only between
+        vertices returns no points, and so does a pair whose meshes share a
+        vertex (which lies on both CAD surfaces, so the two touch).
+    """
+
 def solid_overlaps(vertices: typing.Sequence[typing.Sequence[builtins.float]], solids: typing.Sequence[tuple[builtins.int, typing.Sequence[typing.Sequence[builtins.int]]]], depth_tolerance: builtins.float) -> builtins.list[tuple[builtins.int, builtins.int, builtins.float, builtins.float]]:
     r"""
     Pairs of solids whose surface meshes overlap deeper than ``depth_tolerance``.
@@ -8042,6 +8125,28 @@ def solid_overlaps(vertices: typing.Sequence[typing.Sequence[builtins.float]], s
         overlapping pair, ``max_depth`` the deepest penetration found and
         ``exposure`` an order-of-magnitude estimate of the fraction of
         isotropic tracks through the model that cross the overlap.
+    """
+
+def solid_shared_volume(vertices: typing.Sequence[typing.Sequence[builtins.float]], triangles_a: typing.Sequence[typing.Sequence[builtins.int]], triangles_b: typing.Sequence[typing.Sequence[builtins.int]], tolerance: builtins.float, samples: builtins.int = 200000, seed: builtins.int = 1) -> tuple[builtins.float, builtins.float, typing.Optional[builtins.int]]:
+    r"""
+    Volume shared by two solids' closed surface meshes.
+    
+    Args:
+        vertices: Global ``[x, y, z]`` vertex array.
+        triangles_a: Closed boundary of the first solid, as indices into
+            ``vertices``.
+        triangles_b: Closed boundary of the second solid.
+        tolerance: Distance below which the two surfaces count as touching.
+        samples: Points sampled when the volume has to be estimated.
+        seed: Seed of the deterministic sampler.
+    
+    Returns:
+        ``(volume, std_err, embedded)``. When the surfaces never come within
+        ``tolerance`` of each other and one solid lies inside the other,
+        ``embedded`` is ``0`` or ``1`` (that solid is wholly shared; ``volume``
+        is then 0 and the caller supplies the solid's own volume). Otherwise
+        ``embedded`` is ``None`` and ``volume`` is a Monte Carlo estimate with
+        standard error ``std_err``.
     """
 
 def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | typing.Sequence[PulseSchedule], data_uncertainty: typing.Optional[DataUncertainty] = None, self_shielding_chord: typing.Optional[builtins.float] = None, self_shielding_shape: shapes.SphereLump | shapes.CubeLump | shapes.FoilLump | shapes.CylinderLump | shapes.WireLump | None = None, displacement_damage: builtins.bool = False, displacement_energies: typing.Optional[typing.Mapping[builtins.str, builtins.float]] = None, product_threshold: builtins.float = 1e-12) -> TransmutationResults:

@@ -204,6 +204,8 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(geometry::cad_mesh_labels, m)?)?;
         m.add_function(wrap_pyfunction!(geometry::weld_mesh, m)?)?;
         m.add_function(wrap_pyfunction!(geometry::solid_overlaps, m)?)?;
+        m.add_function(wrap_pyfunction!(geometry::solid_shared_volume, m)?)?;
+        m.add_function(wrap_pyfunction!(geometry::solid_contact_samples, m)?)?;
         m.add_function(wrap_pyfunction!(geometry::assemble_face_meshes, m)?)?;
         m.add_class::<geometry::PyFaceOutput>()?;
         m.add_function(wrap_pyfunction!(geometry::mesh_faces_scene_resolved, m)?)?;

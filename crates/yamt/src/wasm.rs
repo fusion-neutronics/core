@@ -37,6 +37,9 @@ struct GeoMeshVolumeJson {
     cell_id: i32,
     material_id: i32,
     triangles: Vec<[[f64; 3]; 3]>,
+    /// Where volumes overlap, a point belongs to the highest rank.
+    #[serde(default)]
+    rank: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -51,6 +54,7 @@ struct VolumeBvhData {
     edge2: Vec<[f64; 3]>,
     cell_id: i32,
     material_id: i32,
+    rank: u32,
     aabb: [f64; 6], // [min_x, min_y, min_z, max_x, max_y, max_z]
 }
 
@@ -127,6 +131,7 @@ impl WasmMeshPlotter {
                 edge2: edge2s,
                 cell_id: vol.cell_id,
                 material_id: vol.material_id,
+                rank: vol.rank,
                 aabb: [min[0], min[1], min[2], max[0], max[1], max[2]],
             });
         }
@@ -182,7 +187,13 @@ impl WasmMeshPlotter {
 
                 let idx = ((i as usize) * (ph as usize) + (j as usize)) * 2;
 
+                // The highest-ranked volume containing the point (the first,
+                // when ranks tie).
+                let mut best_rank: Option<u32> = None;
                 for vol in &self.volumes {
+                    if best_rank.is_some_and(|r| r >= vol.rank) {
+                        continue;
+                    }
                     // Quick AABB rejection
                     if px < vol.aabb[0]
                         || px > vol.aabb[3]
@@ -199,7 +210,7 @@ impl WasmMeshPlotter {
                     ) {
                         data[idx] = vol.cell_id;
                         data[idx + 1] = vol.material_id;
-                        break;
+                        best_rank = Some(vol.rank);
                     }
                 }
             }
@@ -221,5 +232,47 @@ impl WasmMeshPlotter {
             mx[1] - mn[1],
             mx[2] - mn[2],
         ]
+    }
+}
+
+#[cfg(all(test, feature = "wasm"))]
+mod tests {
+    use super::*;
+
+    fn cube(lo: f64, hi: f64) -> Vec<[[f64; 3]; 3]> {
+        let c = |x: usize, y: usize, z: usize| [[lo, hi][x], [lo, hi][y], [lo, hi][z]];
+        let quads = [
+            [c(0, 0, 0), c(0, 1, 0), c(1, 1, 0), c(1, 0, 0)],
+            [c(0, 0, 1), c(1, 0, 1), c(1, 1, 1), c(0, 1, 1)],
+            [c(0, 0, 0), c(1, 0, 0), c(1, 0, 1), c(0, 0, 1)],
+            [c(0, 1, 0), c(0, 1, 1), c(1, 1, 1), c(1, 1, 0)],
+            [c(0, 0, 0), c(0, 0, 1), c(0, 1, 1), c(0, 1, 0)],
+            [c(1, 0, 0), c(1, 1, 0), c(1, 1, 1), c(1, 0, 1)],
+        ];
+        quads
+            .iter()
+            .flat_map(|q| [[q[0], q[1], q[2]], [q[0], q[2], q[3]]])
+            .collect()
+    }
+
+    #[test]
+    fn overlapping_volumes_sample_as_the_higher_rank() {
+        // A cube with a smaller one inside it; the inner one outranks the
+        // outer, as recorded overlaps resolved "smaller wins" do.
+        for (inner_rank, expect) in [(0, 1), (1, 2)] {
+            let json = serde_json::json!({
+                "volumes": [
+                    {"cell_id": 1, "material_id": 1, "triangles": cube(0.0, 3.0)},
+                    {"cell_id": 2, "material_id": 2, "triangles": cube(1.0, 2.0), "rank": inner_rank},
+                ],
+                "global_min": [0.0, 0.0, 0.0],
+                "global_max": [3.0, 3.0, 3.0],
+            })
+            .to_string();
+            let plotter = WasmMeshPlotter::new(&json).ok().unwrap();
+            // One pixel at the centre of the cubes.
+            let data = plotter.sample_grid("xy", 1.5, 1.5, 1.5, 0.1, 0.1, 1, 1);
+            assert_eq!(data[0], expect, "inner rank {inner_rank}");
+        }
     }
 }

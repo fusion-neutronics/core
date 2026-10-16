@@ -174,22 +174,59 @@ impl MeshFill {
         self.mesh.find_volume(self.world_to_mesh_point(p))
     }
 
-    /// Distance to the next mesh-surface crossing from a CSG-frame ray
-    /// inside `volume`. Distances are frame-independent (the transform is
-    /// rigid).
-    #[inline]
-    pub fn ray_fire_world(
+    /// The next mesh-surface crossing from a CSG-frame ray inside `volume`:
+    /// `(distance, cell beyond, triangle to relocate through)`. Distances are
+    /// frame-independent (the transform is rigid).
+    ///
+    /// An imprinted mesh hands over by the surfaces its volumes share. A mesh
+    /// made without imprinting is tracked discontinuously (see
+    /// [`yamt::MeshGeometry::next_crossing`]): leaving a solid into the
+    /// implicit complement returns the triangle, and
+    /// [`MeshFill::relocate_world`] finds the cell once the crossing is taken.
+    /// A cell of `None` with no triangle leaves the caller to re-locate
+    /// spatially.
+    pub fn next_crossing_world(
         &self,
         volume: yamt::VolumeId,
         position: [f64; 3],
         direction: [f64; 3],
-    ) -> Option<(f64, yamt::SurfaceId)> {
-        self.mesh.ray_fire(
-            volume,
+    ) -> Option<(f64, Option<usize>, Option<u32>)> {
+        let (p, d) = (
             self.world_to_mesh_point(position),
             self.world_to_mesh_dir(direction),
-            None,
-        )
+        );
+        if !self.mesh.is_discontinuous() {
+            let (dist, surface) = self.mesh.ray_fire(volume, p, d, None)?;
+            let next = self
+                .mesh
+                .next_volume(surface, volume)
+                .map(|v| self.cell_index_for_volume(v));
+            return Some((dist, next, None));
+        }
+        let (dist, _surface, beyond) = self.mesh.next_crossing(volume, p, d)?;
+        Some(match beyond {
+            yamt::Beyond::Volume(v) => (dist, v.map(|v| self.cell_index_for_volume(v)), None),
+            yamt::Beyond::Relocate(tri) => (dist, None, Some(tri)),
+        })
+    }
+
+    /// The cell a particle is in after leaving solid `from` through triangle
+    /// `tri` at the CSG-frame point `x`, travelling along `u` (see
+    /// [`yamt::MeshGeometry::relocate`]).
+    pub fn relocate_world(
+        &self,
+        from: yamt::VolumeId,
+        tri: u32,
+        x: [f64; 3],
+        u: [f64; 3],
+    ) -> usize {
+        let v = self.mesh.relocate(
+            from,
+            tri,
+            self.world_to_mesh_point(x),
+            self.world_to_mesh_dir(u),
+        );
+        self.cell_index_for_volume(v)
     }
 
     /// Spatial cross-check for adjacency tracking: does a

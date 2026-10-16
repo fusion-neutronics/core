@@ -302,6 +302,33 @@ impl MeshGeometry {
         let vol_id = self.volume_ids[cell_index];
         let ic_cell_index = self.cells.len() - 1;
 
+        if self.mesh.is_discontinuous() {
+            let ic = self.mesh.topology.implicit_complement;
+            return self.mesh.next_crossing(vol_id, position, direction).map(
+                |(distance, surface_id, beyond)| {
+                    let boundary = match self.mesh.boundary_condition(surface_id) {
+                        yamt::BoundaryCondition::Vacuum => BoundaryType::Vacuum,
+                        _ => BoundaryType::Transmission,
+                    };
+                    let (next_cell_index, relocate_triangle) = match beyond {
+                        _ if boundary == BoundaryType::Vacuum => (None, None),
+                        yamt::Beyond::Volume(v) => (
+                            v.map(|v| if v == ic { ic_cell_index } else { v as usize }),
+                            None,
+                        ),
+                        yamt::Beyond::Relocate(tri) => (None, Some(tri)),
+                    };
+                    BoundaryHit {
+                        distance,
+                        boundary,
+                        next_cell_index,
+                        surface_id: None,
+                        relocate_triangle,
+                    }
+                },
+            );
+        }
+
         self.mesh
             .ray_fire(vol_id, position, direction, None)
             .map(|(distance, surface_id)| {
@@ -331,8 +358,37 @@ impl MeshGeometry {
                     boundary,
                     next_cell_index,
                     surface_id: None, // Mesh surfaces don't have user-facing IDs
+                    relocate_triangle: None,
                 }
             })
+    }
+
+    /// Fill in the cell beyond a crossing that [`MeshGeometry::closest_boundary`]
+    /// deferred: the particle leaves its solid at `position + distance *
+    /// direction` through `hit.relocate_triangle`, and is relocated there.
+    pub(crate) fn resolve_crossing(
+        &self,
+        cell_index: usize,
+        hit: &mut BoundaryHit,
+        position: [f64; 3],
+        direction: [f64; 3],
+    ) {
+        let Some(tri) = hit.relocate_triangle.take() else {
+            return;
+        };
+        let x = [
+            position[0] + hit.distance * direction[0],
+            position[1] + hit.distance * direction[1],
+            position[2] + hit.distance * direction[2],
+        ];
+        let v = self
+            .mesh
+            .relocate(self.volume_ids[cell_index], tri, x, direction);
+        hit.next_cell_index = Some(if v == self.mesh.topology.implicit_complement {
+            self.cells.len() - 1
+        } else {
+            v as usize
+        });
     }
 
     /// Compute the bounding box of the mesh geometry.

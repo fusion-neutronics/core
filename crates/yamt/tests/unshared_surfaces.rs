@@ -59,6 +59,10 @@ fn geometry(
             r#"{"1": {"name": "mat:a", "dim": 3}, "2": {"name": "mat:b", "dim": 3}}"#.to_string(),
         surface_volumes_json: surface_volumes_json.to_string(),
         volume_measures: vec![],
+        imprinted: None,
+        contact_tolerance: None,
+        overlaps: vec![],
+        separated: vec![],
     };
     MeshGeometry::from_topology(build_topology(data).unwrap())
 }
