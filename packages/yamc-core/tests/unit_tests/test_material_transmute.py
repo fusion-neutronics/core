@@ -132,26 +132,28 @@ def test_stable_isotopes_constant_during_cooling(transmute_results):
 # --- golden characterization (tight numerical guard) --------------------------
 
 # Exact per-step densities for the fixture schedule, captured from the validated
-# implementation. Material.transmute is deterministic (multigroup collapse +
-# Bateman, no Monte Carlo), so these are reproducible to machine precision; the
-# tight tolerance below guards against any numerical regression.
+# implementation against endf-b8.1 release 2026-10-12.1, whose chain carries
+# Fe56's (n,X) residuals. Material.transmute is deterministic (multigroup
+# collapse + Bateman, no Monte Carlo), so these are reproducible to machine
+# precision; the tight tolerance below guards against any numerical regression.
+# A new data release moves them and they are captured again.
 _GOLDEN = [
     {  # step 0 (after 1 day irradiation)
-        "Fe56": 0.08473086419379175, "Fe55": 1.4826824510346344e-07,
-        "H1": 3.8525315306199334e-08, "Fe57": 8.812607323112645e-09,
-        "Mn56": 5.95841861173335e-09, "Cr53": 3.3779833922452382e-09,
+        "Fe56": 0.08473080389126865, "Fe55": 1.482681923371216e-07,
+        "H1": 7.988604853918558e-08, "Fe57": 8.81260270207914e-09,
+        "Mn56": 5.9584152509513416e-09, "Cr53": 1.4552225792075887e-08,
     },
     {  # step 1 (after 2 days irradiation)
-        "Fe56": 0.08473070366015778, "Fe55": 2.9643370173356404e-07,
-        "Fe57": 1.7625161441770162e-08, "Mn56": 5.967818791153792e-09,
+        "Fe56": 0.08473058305538612, "Fe55": 2.964334907171626e-07,
+        "Fe57": 1.762514295769268e-08, "Mn56": 5.967811455144106e-09,
     },
     {  # step 2 (after 1 cooling day)
-        "Fe56": 0.08473070961855034, "Fe55": 2.9622876087100245e-07,
-        "Mn55": 4.3892277114235013e-10, "Mn56": 9.426319839739035e-12,
+        "Fe56": 0.0847305890137713, "Fe55": 2.9622855000048824e-07,
+        "Mn55": 8.601384983992471e-08, "Mn56": 9.426308252327268e-12,
     },
     {  # step 3 (after 2 cooling days)
-        "Fe56": 0.08473070962796193, "Fe55": 2.960239616952899e-07,
-        "Mn55": 6.437219468548537e-10,
+        "Fe56": 0.0847305890231828, "Fe55": 2.960237509705621e-07,
+        "Mn55": 8.621864886985099e-08,
     },
 ]
 

@@ -764,7 +764,10 @@ impl Model {
         let mut pos = start;
         let mut remaining = max_distance;
         let mut tau = 0.0;
-        let mut cell_idx = match self.geometry.find_cell_index((pos[0], pos[1], pos[2])) {
+        let mut cell_idx = match self
+            .geometry
+            .find_cell_index_along((pos[0], pos[1], pos[2]), direction)
+        {
             Some(i) => i,
             None => return 0.0,
         };
@@ -1187,11 +1190,13 @@ impl Model {
     /// block, so it reaches `extract_material_xs` with the narrow data and fails
     /// with `TemperatureNotLoaded`.
     ///
-    /// An empty label is resolved rather than skipped. The CPU resolves it in
-    /// `calculate_macroscopic_xs` via `resolve_temperature`, which adopts the
-    /// single available temperature; nothing on the GPU path calls that, so
-    /// skipping here would leave `extract_material_xs` looking up the empty
-    /// string and failing in exactly the way this function exists to prevent.
+    /// An empty label is resolved rather than skipped, through the same
+    /// `try_resolve_temperature` the CPU setup uses (the single available
+    /// temperature, else the 294 K default). Nothing else on the GPU path
+    /// resolves it, so skipping here would leave `extract_material_xs` looking
+    /// up the empty string and failing in exactly the way this function exists
+    /// to prevent. A temperature that cannot be resolved is returned as an
+    /// error, before any dispatch.
     ///
     /// Runs before the photon prep, matching the CPU's order, and returns
     /// without cloning when nothing needs widening.
@@ -1201,24 +1206,18 @@ impl Model {
                 continue;
             }
             let labelled = !material_arc.temperature().is_empty();
+            // An unlabelled material is resolved on a clone, since resolving
+            // adopts the temperature it picks.
+            let mut resolved = None;
             let temperature = if labelled {
                 material_arc.temperature().to_string()
             } else {
-                // Same fallback `resolve_temperature` uses: the single
-                // temperature every nuclide agrees on. Left alone when there is
-                // no single answer, so the existing error still names the
-                // problem rather than this function guessing.
-                let mut all: Vec<String> = material_arc
-                    .nuclide_data
-                    .values()
-                    .flat_map(|n| n.available_temperatures.iter().cloned())
-                    .collect();
-                all.sort();
-                all.dedup();
-                match all.len() {
-                    1 => all.remove(0),
-                    _ => continue,
-                }
+                let mut material = (**material_arc).clone();
+                let temperature = material
+                    .try_resolve_temperature(None)
+                    .map_err(|e| format!("Material slot {slot}: {e}"))?;
+                resolved = Some(material);
+                temperature
             };
 
             // Servable, not merely listed. The GPU cannot blend in-kernel: its
@@ -1236,10 +1235,7 @@ impl Model {
                 continue;
             }
 
-            let mut material = (**material_arc).clone();
-            if !labelled {
-                material.set_temperature(&temperature);
-            }
+            let mut material = resolved.unwrap_or_else(|| (**material_arc).clone());
             material
                 .ensure_temperature_loaded(&temperature)
                 .map_err(|e| {
@@ -1248,6 +1244,38 @@ impl Model {
                          '{temperature}' for the GPU dispatch: {e}"
                     )
                 })?;
+            *material_arc = Arc::new(material);
+        }
+        Ok(())
+    }
+
+    /// Load every material's missing nuclide data, from the source each
+    /// nuclide was read from or, failing that, the global configuration
+    /// (`yamc.cross_section_data`). This is the data-loading step both the CPU
+    /// (`run_internal`) and the GPU dispatch run before transport, so a model
+    /// whose materials never had `read_nuclear_data` called works on either.
+    ///
+    /// The downloads behind the loads go out together first; with `photons`
+    /// that includes the photon data of each material's elements. Materials
+    /// that already carry transport cross sections (`fast_xs`, e.g. from a
+    /// transmutation step) are left alone.
+    pub fn ensure_nuclear_data_loaded(&mut self, photons: bool) -> Result<(), String> {
+        yamc_materials::Material::prefetch_nuclear_data(
+            self.geometry
+                .materials()
+                .iter()
+                .filter(|m| m.fast_xs.is_none())
+                .map(|m| m.as_ref()),
+            photons,
+        );
+        for (i, material_arc) in self.geometry.materials_mut().iter_mut().enumerate() {
+            if material_arc.fast_xs.is_some() {
+                continue;
+            }
+            let mut material = (**material_arc).clone();
+            material
+                .ensure_nuclides_loaded()
+                .map_err(|e| format!("{}: {e}", material_label(&material, i)))?;
             *material_arc = Arc::new(material);
         }
         Ok(())
@@ -1333,16 +1361,7 @@ impl Model {
         // `calculate_macroscopic_xs` borrows a `&Vec<i32>`; own the slice
         // once here so the per-material loop borrows it without reallocating.
         let mt_filter = mt_filter.to_vec();
-        // The loop below loads one material, and one nuclide, at a time. The
-        // downloads behind those loads go out together first.
-        yamc_materials::Material::prefetch_nuclear_data(
-            self.geometry
-                .materials()
-                .iter()
-                .filter(|m| m.fast_xs.is_none())
-                .map(|m| m.as_ref()),
-            transport_secondary_photons,
-        );
+        self.ensure_nuclear_data_loaded(transport_secondary_photons)?;
         for (i, material_arc) in self.geometry.materials_mut().iter_mut().enumerate() {
             // Skip materials that already have transport XS computed (e.g., from transmutation step)
             if material_arc.fast_xs.is_some() {
@@ -1355,9 +1374,16 @@ impl Model {
                 eprintln!("[DEBUG] Material slot {i} calculating macroscopic XS...");
             }
             let mut material = (**material_arc).clone();
-            material
-                .ensure_nuclides_loaded()
-                .map_err(|e| format!("{}: {e}", material_label(&material, i)))?;
+            // Resolve the temperature here, where a failure can be returned,
+            // rather than leaving it to `calculate_macroscopic_xs`, which can
+            // only panic. This is also where an unset temperature becomes the
+            // 294 K default. Photon-only materials carry no nuclide data and
+            // have no neutron temperature to resolve.
+            if !material.nuclide_data.is_empty() {
+                material
+                    .try_resolve_temperature(None)
+                    .map_err(|e| format!("{}: {e}", material_label(&material, i)))?;
+            }
             material.calculate_macroscopic_xs(&mt_filter, true);
             if has_nuclide_tallies {
                 material.populate_per_nuclide_xs();
@@ -2381,11 +2407,14 @@ impl Model {
                                 // Find initial cell for source birth tracking
                                 let initial_cell_id = self
                                     .geometry
-                                    .find_cell_index((
-                                        particle.position[0],
-                                        particle.position[1],
-                                        particle.position[2],
-                                    ))
+                                    .find_cell_index_along(
+                                        (
+                                            particle.position[0],
+                                            particle.position[1],
+                                            particle.position[2],
+                                        ),
+                                        particle.direction,
+                                    )
                                     .and_then(|idx| self.geometry.cells()[idx].cell_id);
 
                                 // Record source birth
