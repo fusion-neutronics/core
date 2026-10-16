@@ -12,7 +12,7 @@ import pytest
 cq = pytest.importorskip("cadquery")
 
 from yamc.cad import CadToYamc  # noqa: E402
-from yamc.cad._fidelity import check_mesh_fidelity  # noqa: E402
+from yamc.cad._fidelity import MeshFidelityError, check_mesh_fidelity  # noqa: E402
 
 
 def _meshed_spheres():
@@ -111,3 +111,45 @@ def test_a_revolved_spline_profile_meshes_faithfully():
     c2y = CadToYamc()
     c2y.add_cadquery_object(assy, material_tags=["blanket"])
     c2y.mesh(tolerance=0.5)
+
+
+def test_a_revolved_solid_touching_a_spline_extrusion_does_not_crack():
+    """A revolved D-shape whose end face is shared with a solid extruded from
+    it (a surface of extrusion, not routed to BRepMesh): the revolved solid
+    must not mix meshers, which would crack it along the shared face's edges
+    unseen by the gate. It is meshed whole on one side: either the mesh is
+    watertight or the gate refuses it."""
+    from collections import Counter
+
+    from OCP.BRepAdaptor import BRepAdaptor_Surface
+    from OCP.GeomAbs import GeomAbs_Plane
+
+    profile = (
+        cq.Workplane("XZ")
+        .moveTo(300, -200)
+        .spline([(450, -120), (520, 0), (450, 120)], includeCurrent=True)
+        .lineTo(300, 200)
+        .close()
+    )
+    revolved = profile.revolve(180, (0, 0, 0), (0, 1, 0)).val()
+    end = next(
+        f for f in revolved.Faces()
+        if BRepAdaptor_Surface(f.wrapped).GetType() == GeomAbs_Plane
+    )
+    extruded = cq.Solid.extrudeLinear(end, end.normalAt() * 100)
+    assy = cq.Assembly()
+    assy.add(revolved, name="revolved")
+    assy.add(extruded, name="extruded")
+    c2y = CadToYamc()
+    c2y.add_cadquery_object(assy, material_tags=["revolved", "extruded"])
+    try:
+        mesh = c2y.mesh(tolerance=0.5)
+    except MeshFidelityError:
+        return
+    faces = set(mesh.solid_faces[1])
+    uses = Counter()
+    for tri, fid in zip(mesh.triangles, mesh.triangle_face_ids):
+        if fid in faces:
+            for a, b in ((tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])):
+                uses[(min(a, b), max(a, b))] += 1
+    assert not [e for e, n in uses.items() if n != 2], "open edges in the revolved solid"
