@@ -10,15 +10,23 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import cadquery as cq
-from OCP.TopAbs import TopAbs_FACE, TopAbs_REVERSED
-from OCP.TopExp import TopExp_Explorer
+from OCP.TopAbs import (
+    TopAbs_EDGE, TopAbs_FACE, TopAbs_FORWARD, TopAbs_INTERNAL, TopAbs_REVERSED,
+    TopAbs_WIRE,
+)
+from OCP.TopExp import TopExp, TopExp_Explorer
+from OCP.TopTools import (
+    TopTools_IndexedDataMapOfShapeListOfShape, TopTools_IndexedMapOfShape,
+)
+from OCP.BRep import BRep_Builder
+from OCP.ShapeBuild import ShapeBuild_ReShape
 from OCP.BRepAdaptor import BRepAdaptor_Surface
 from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
 from OCP.BRepGProp import BRepGProp
 from OCP.GProp import GProp_GProps
 from OCP.TopLoc import TopLoc_Location
 from OCP.gp import gp_Trsf
-from OCP.TopoDS import TopoDS
+from OCP.TopoDS import TopoDS, TopoDS_Iterator
 
 
 class OverlappingSolidsError(ValueError):
@@ -137,8 +145,92 @@ def _imprint_assembly(assembly):
 
     imprint = cq.occ_impl.assembly.imprint
     if "glue" in inspect.signature(imprint).parameters:
-        return imprint(assembly, glue="partial")
-    return imprint(assembly)
+        compound, solids = imprint(assembly, glue="partial")
+    else:
+        compound, solids = imprint(assembly)
+    return _strip_free_internal_edges(compound, solids)
+
+
+def _sub_shapes(stored, placed):
+    """Yield each sub-shape of a shape twice over: as stored in it (location
+    and orientation relative to it, for rebuilding it) and as placed in the
+    model (for looking it up in maps of the whole model). *stored* and
+    *placed* are the same shape, *placed* with its location and orientation
+    in the model.
+    """
+    relative = TopoDS_Iterator(stored, False, False)
+    absolute = TopoDS_Iterator(placed)
+    while relative.More():
+        yield relative.Value(), absolute.Value()
+        relative.Next()
+        absolute.Next()
+
+
+def _strip_free_internal_edges(compound, solids_with_ids):
+    """Drop INTERNAL edges that no other face uses from the imprinted faces.
+
+    Where two solids share a spherical face whose poles do not line up (the
+    same sphere, one copy rotated), the imprint keeps one shared face but
+    leaves the other copy's seam on it as INTERNAL edges, a half meridian
+    between poles that are not the face's own, which no other face uses.
+    BRepMesh's sphere mesher then places interior nodes on only one side of
+    that open wire and spans the rest of the face with long chords through
+    the sphere, losing up to all of the inner solid's volume. Such an edge
+    bounds nothing, so dropping it changes neither the geometry nor which
+    faces the solids share. INTERNAL edges that other faces use too (a line
+    contact between solids) are kept.
+
+    The rebuilt faces replace the old ones in the compound and in every
+    imprinted solid alike, so the solids keep sharing them.
+
+    Returns:
+        ``(compound, {solid: origin names})`` as the imprint does; the inputs
+        themselves when no face has such an edge.
+    """
+    edge_faces = TopTools_IndexedDataMapOfShapeListOfShape()
+    TopExp.MapShapesAndUniqueAncestors_s(
+        compound.wrapped, TopAbs_EDGE, TopAbs_FACE, edge_faces
+    )
+    # An edge used by a single face is keyed with its orientation in it.
+    faces = TopTools_IndexedMapOfShape()  # faces with a free INTERNAL edge
+    drops = {}  # index in faces -> its free INTERNAL edges
+    for i in range(1, edge_faces.Extent() + 1):
+        edge = edge_faces.FindKey(i)
+        owners = edge_faces.FindFromIndex(i)
+        if owners.Size() == 1 and edge.Orientation() == TopAbs_INTERNAL:
+            drops.setdefault(faces.Add(owners.First()), []).append(edge)
+    if not drops:
+        return compound, solids_with_ids
+
+    builder = BRep_Builder()
+    reshape = ShapeBuild_ReShape()
+    for index, drop in drops.items():
+        face = faces.FindKey(index).Oriented(TopAbs_FORWARD)
+        new_face = face.EmptyCopied()
+        for wire, placed_wire in _sub_shapes(face, face):
+            if wire.ShapeType() != TopAbs_WIRE:
+                builder.Add(new_face, wire)
+                continue
+            new_wire = wire.EmptyCopied()
+            kept = 0
+            for edge, placed_edge in _sub_shapes(wire, placed_wire):
+                if placed_edge.Orientation() == TopAbs_INTERNAL and any(
+                    placed_edge.IsSame(d) for d in drop
+                ):
+                    continue
+                builder.Add(new_wire, edge)
+                kept += 1
+            if kept:
+                new_wire.Closed(wire.Closed())
+                builder.Add(new_face, new_wire)
+        reshape.Replace(face, new_face)
+
+    def rebuilt(shape):
+        return cq.Shape.cast(reshape.Apply(shape.wrapped))
+
+    return rebuilt(compound), {
+        rebuilt(solid): origins for solid, origins in solids_with_ids.items()
+    }
 
 
 def _refuse_lost_or_shared_inputs(assembly, imprinted_solids_with_ids):
