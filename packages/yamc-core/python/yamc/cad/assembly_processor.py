@@ -81,29 +81,54 @@ def _refuse_lost_or_shared_inputs(assembly, imprinted_solids_with_ids):
 
     Two ways an overlap between inputs goes wrong, both silently: an imprinted
     solid with more than one input as its origin (tagging it with the first
-    origin's material removes it from the others), and an input that is the
-    origin of no imprinted solid at all (a part sitting inside a body that was
-    never cut comes back as a piece of the body, so its material vanishes).
+    origin's material removes it from the others), and an input that comes
+    out smaller than it went in (a part sitting inside a body that was never
+    cut comes back as a piece of the body, so its material vanishes).
     Either way transport loses no particles to show it. cad-to-dagmc-mesher
     refuses the same things.
+
+    Origins are assembly names, so the second is checked by volume: the
+    imprinted solids an input name is an origin of must hold all the volume
+    its solids had. That also catches one of several solids under a name
+    being absorbed while the others survive. Assembly nodes without solids
+    (a face, a wire) are not inputs.
+
+    Overlaps whose surfaces cross without coinciding are not split by the
+    imprint at all: both solids come back whole, each with its own origin,
+    and are not caught here.
     """
     def short(name):
         return name.rsplit("/", 1)[-1]
 
-    inputs = list(dict.fromkeys(name for _obj, name, _loc, _c in assembly))
-    claimed = {name for origins in imprinted_solids_with_ids.values() for name in origins}
-    lost = [short(name) for name in inputs if name not in claimed]
-    shared = [
-        (solid, list(dict.fromkeys(short(name) for name in origins)))
-        for solid, origins in imprinted_solids_with_ids.items()
-        if len(set(origins)) > 1
-    ]
+    volume_in = {}
+    for obj, name, loc, _ in assembly:
+        for solid in obj.moved(loc).Solids():
+            volume_in[name] = volume_in.get(name, 0.0) + solid.Volume()
+    volume_out = {}
+    shared = []
+    for solid, origins in imprinted_solids_with_ids.items():
+        names = list(dict.fromkeys(origins))
+        volume = solid.Volume()
+        for name in names:
+            volume_out[name] = volume_out.get(name, 0.0) + volume
+        if len(names) > 1:
+            shared.append((volume, [short(n) for n in names]))
+    lost = []
+    for name, v_in in volume_in.items():
+        v_out = volume_out.get(name, 0.0)
+        if v_out <= 0.0:
+            lost.append(f"{short(name)!r} was absorbed into another solid")
+        elif v_out < v_in * (1.0 - 1e-4):
+            lost.append(
+                f"{short(name)!r} came out with {v_out:.6g} of its {v_in:.6g} volume "
+                "(part of it was absorbed into another solid)"
+            )
     if not lost and not shared:
         return
-    lines = [f"{name!r} was absorbed into another solid" for name in lost]
-    lines += [
-        f"{' and '.join(repr(n) for n in names)} share {solid.Volume():.6g}"
-        for solid, names in shared
+    lines = lost + [
+        f"{' and '.join(repr(n) for n in names)} came out as one region of "
+        f"volume {volume:.6g}"
+        for volume, names in shared
     ]
     raise OverlappingSolidsError(
         "The imprint did not give every input solid a region of its own:\n  "
@@ -232,9 +257,21 @@ def process_assembly(
         solid_faces[solid_id] = solid_face_ids
         solid_shapes[solid_id] = solid
 
-    # Step 4: Identify shared faces
+    # Step 4: Identify shared faces. A face bounds at most two solids; a third
+    # is an imprint left in a broken state (a zero-thickness sliver split off
+    # one solid, say), which the mesh cannot represent.
     shared = {}
     for fid, info in faces.items():
+        owners = list(dict.fromkeys(info.owning_solids))
+        if len(owners) > 2:
+            names = [repr(ordered_tags[s - 1]) for s in owners]
+            raise OverlappingSolidsError(
+                f"The imprint left a face bounding {len(owners)} solids, made "
+                f"from {', '.join(names[:-1])} and {names[-1]}; a face can bound "
+                "two. The imprint has failed on these solids: it can split a "
+                "zero-thickness sliver off one where curved faces touch (a name "
+                "listed twice is two pieces of one input)."
+            )
         if len(info.owning_solids) >= 2:
             shared[fid] = info.owning_solids[:2]
 

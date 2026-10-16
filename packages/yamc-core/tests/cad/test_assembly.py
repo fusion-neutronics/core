@@ -99,3 +99,37 @@ def test_a_solid_inside_another_is_refused():
     assy.add(box, name="box")
     with pytest.raises(OverlappingSolidsError, match="'cylinder' was absorbed"):
         process_assembly(assy, material_tags=["a", "b"])
+
+
+def test_one_of_two_solids_under_a_name_being_absorbed_is_refused():
+    """One child holds two cubes, one inside a box that was never cut and one
+    far away: the far cube still carries the child's name out of the imprint,
+    but the child's volume does not, so the absorbed cube is still caught."""
+    from yamc.cad import OverlappingSolidsError
+
+    box = cq.Workplane("XY").box(30, 30, 30)
+    pellets = (
+        cq.Workplane("XY").box(4, 4, 4)
+        .add(cq.Workplane("XY").box(4, 4, 4).translate((100, 0, 0)))
+        .combine(glue=False)
+    )
+    assy = cq.Assembly()
+    assy.add(box, name="box")
+    assy.add(pellets, name="pellets")
+    assert len(pellets.solids().vals()) == 2
+    with pytest.raises(OverlappingSolidsError, match="'pellets' came out with 64"):
+        process_assembly(assy, material_tags=["a", "b"])
+
+
+def test_an_assembly_node_without_solids_is_not_an_input():
+    """A face in the assembly (a tally plane, say) has no solid to come out of
+    the imprint, and must not read as absorbed."""
+    a = cq.Workplane("XY").box(10, 10, 10)
+    b = cq.Workplane("XY").box(10, 10, 10).translate((10, 0, 0))
+    plane = cq.Face.makePlane(5, 5)
+    assy = cq.Assembly()
+    assy.add(a, name="a")
+    assy.add(b, name="b")
+    assy.add(plane, name="tally_plane")
+    result = process_assembly(assy, material_tags=["a", "b", "c"])
+    assert len(result.solid_faces) == 2
