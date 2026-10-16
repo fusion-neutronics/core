@@ -27,7 +27,7 @@ pandas = ["pandas>=2.2"]
 polars = ["polars>=0.20"]
 xarray = ["xarray", "pandas>=2.2"]
 all = ["cadquery>=2.8.0", "numpy", "h5py"]
-dev = ["pytest", "maturin>=1.14", "cadquery>=2.8.0", "numpy", "matplotlib", "tqdm"]
+dev = ["pytest", "maturin>=1.14", "cadquery>=2.8.0", "numpy", "matplotlib", "tqdm", "pyarrow"]
 
 [tool.maturin]
 python-source = "python"
