@@ -474,7 +474,13 @@ impl MeshGeometry {
             // Inside the solid, the nearest of its facets is an exit: one query.
             None => match first_facet(false) {
                 Some((prim, t)) if sd.leaves(prim as usize, direction) => Some((prim, t)),
-                Some((_, t)) if t > self.contact_tolerance => {
+                // A face with this solid on both sides (an internal face, as a
+                // file from another writer can have) is no way in.
+                Some((prim, t))
+                    if t > self.contact_tolerance
+                        && self.topology.surface_volumes[sd.surf_ids[prim as usize] as usize]
+                            != (Some(volume), Some(volume)) =>
+                {
                     let here = self.find_volume(origin);
                     if here != volume {
                         return Some((0.0, SurfaceId::MAX, Beyond::Volume(Some(here))));
