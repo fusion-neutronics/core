@@ -32,7 +32,7 @@ from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Curve2d, BRepAdaptor_
 from OCP.GCPnts import GCPnts_TangentialDeflection, GCPnts_AbscissaPoint
 from OCP.TopoDS import TopoDS
 
-from yamc._core import mesh_faces_scene_resolved, weld_mesh
+from yamc._core import assemble_face_meshes, mesh_faces_scene_resolved
 
 # Max structured-grid divisions per parametric direction (fallback meshing).
 _MAX_GRID = 256
@@ -223,44 +223,22 @@ def assemble_surface_mesh(pa, per_face_meshes):
     """Combine per-face ``{fid: (verts_3d, tris_local)}`` meshes into welded
     global arrays.
 
-    Surface ids are 1-indexed and assigned in ``pa.faces`` order to faces that
-    produced triangles. Coincident vertices are then welded so the surface is
-    watertight at the INDEX level (faces append their own boundary vertices and
-    the structured-grid fallback duplicates seam/pole vertices ~1e-12 apart;
-    transport ray-fire leaks through those micro-gaps otherwise). Returns
-    ``(vertices, triangles, triangle_face_ids, triangle_surface_ids,
-    face_to_surface_id)``.
+    Degenerate triangles are dropped. Surface ids are 1-indexed and assigned in
+    ``pa.faces`` order to faces that keep triangles. Coincident vertices are
+    then welded so the surface is watertight at the INDEX level (faces append
+    their own boundary vertices and the structured-grid fallback duplicates
+    seam/pole vertices ~1e-12 apart; transport ray-fire leaks through those
+    micro-gaps otherwise). All of that runs in the Rust core
+    (``assemble_face_meshes``). Returns ``(vertices, triangles,
+    triangle_face_ids, triangle_surface_ids, face_to_surface_id)``.
     """
-    vertices, triangles, triangle_face_ids, triangle_surface_ids = [], [], [], []
-    face_to_surface_id = {}
-    surface_id = 0
+    faces = []
     for fid in pa.faces:
         mesh = per_face_meshes.get(fid)
-        if not mesh or not mesh[1]:
-            continue
-        face_verts, kept = mesh
-        surface_id += 1
-        face_to_surface_id[fid] = surface_id
-        base = len(vertices)
-        vertices.extend(face_verts)
-        for tri in kept:
-            triangles.append([tri[0] + base, tri[1] + base, tri[2] + base])
-            triangle_face_ids.append(fid)
-            triangle_surface_ids.append(surface_id)
-
-    vertices, triangles, triangle_face_ids, triangle_surface_ids = _weld_surface(
-        vertices, triangles, triangle_face_ids, triangle_surface_ids
+        if mesh and mesh[1]:
+            faces.append((fid, mesh[0], mesh[1]))
+    vertices, triangles, triangle_face_ids, triangle_surface_ids, face_surface = (
+        assemble_face_meshes(faces, 1e-6, _MIN_TRI_CROSS_SQ)
     )
-    return vertices, triangles, triangle_face_ids, triangle_surface_ids, face_to_surface_id
-
-
-def _weld_surface(vertices, triangles, face_ids, surface_ids, rel_tol=1e-6):
-    """Merge coincident vertices and reindex triangles (in the Rust core),
-    keeping the per-triangle face/surface id arrays aligned. Triangles that
-    collapse to degenerate after welding are dropped (with their ids)."""
-    if not vertices:
-        return vertices, triangles, face_ids, surface_ids
-    new_verts, new_tris, kept = weld_mesh(vertices, triangles, rel_tol)
-    new_face_ids = [face_ids[i] for i in kept]
-    new_surf_ids = [surface_ids[i] for i in kept]
-    return new_verts, new_tris, new_face_ids, new_surf_ids
+    return (vertices, triangles, triangle_face_ids, triangle_surface_ids,
+            dict(face_surface))
