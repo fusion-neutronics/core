@@ -61,7 +61,7 @@
 //! perturbed spectrum, so no standard deviation is given for damage energy or
 //! dpa yet.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use yamc_element::displacement::{
     check_displacement_energy, default_displacement_energy, nrt_dpa, DisplacementEnergy,
@@ -178,7 +178,7 @@ pub struct DisplacementDamage {
 }
 
 /// The elements of a composition with a positive amount.
-fn elements_of(nuclides: &HashMap<String, f64>) -> HashSet<String> {
+fn elements_of(nuclides: &HashMap<String, f64>) -> BTreeSet<String> {
     nuclides
         .iter()
         .filter(|&(_, &n)| n > 0.0)
@@ -403,7 +403,11 @@ pub(crate) fn accumulate(
 
     // The elements of the breakdown: the starting composition's, and any
     // product present on an irradiated step.
-    let mut elements: HashSet<String> = elements_of(states[0]);
+    // Every sum below runs in name order. A `HashMap`'s order differs between
+    // two maps holding the same entries, so summing in it gave one material
+    // a dpa that differed in its last bits from run to run, and alone from
+    // beside another material.
+    let mut elements: BTreeSet<String> = elements_of(states[0]);
     for (i, (_, irradiation)) in steps.iter().enumerate() {
         if irradiation.is_some() {
             elements.extend(elements_of(states[i]));
@@ -429,9 +433,11 @@ pub(crate) fn accumulate(
                 rates: &HashMap<String, Option<f64>>,
                 missing: &mut BTreeMap<String, f64>|
      -> (HashMap<String, ElementSums>, f64) {
-        let total: f64 = state.values().map(|&n| n.max(0.0)).sum();
+        let mut nuclides: Vec<(&String, f64)> = state.iter().map(|(k, &n)| (k, n)).collect();
+        nuclides.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        let total: f64 = nuclides.iter().map(|&(_, n)| n.max(0.0)).sum();
         let mut by_element: HashMap<String, ElementSums> = HashMap::new();
-        for (name, &n) in state {
+        for (name, n) in nuclides {
             if n <= 0.0 {
                 continue;
             }
@@ -563,6 +569,58 @@ mod tests {
                 source: DisplacementEnergySource::User
             }
         );
+    }
+
+    /// The same composition gives the same dpa to the bit whichever order
+    /// its maps happen to iterate in. Each `HashMap` is seeded on its own, so
+    /// fresh maps of one set of entries walk it in different orders, and a sum
+    /// taken in that order moved in the last bits between a material
+    /// transmuted alone and the same material beside another.
+    #[test]
+    fn the_sums_do_not_depend_on_map_order() {
+        // Magnitudes far apart and many elements, so a reordered sum rounds
+        // differently.
+        let entries: Vec<(String, f64)> = [
+            "Fe56", "Fe54", "Fe57", "Mn55", "Mn53", "Mn56", "Cr52", "Cr53", "Cr51", "Cr50", "V51",
+            "V50", "Ti48", "H1", "H2", "H3", "He3", "He4", "Co59", "Ni58",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            (
+                name.to_string(),
+                0.1 + 1.0e-3_f64.powi(i as i32 % 7) * (i as f64 + 0.37),
+            )
+        })
+        .collect();
+        let damage: Vec<(String, Option<f64>)> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, (name, _))| (name.clone(), Some(1.0 / (3.0 + i as f64))))
+            .collect();
+        let run = |reverse: bool| {
+            let mut order = entries.clone();
+            let mut d = damage.clone();
+            if reverse {
+                order.reverse();
+                d.reverse();
+            }
+            let start: HashMap<String, f64> = order.iter().cloned().collect();
+            let end: HashMap<String, f64> =
+                order.iter().map(|(k, v)| (k.clone(), v * 0.97)).collect();
+            let rates: HashMap<String, Option<f64>> = d.into_iter().collect();
+            let out = accumulate(
+                &[&start, &end],
+                &[(86400.0, Some((0, 1.06e14)))],
+                &[rates],
+                &DamageRequest::default(),
+            );
+            (out.dpa[1].to_bits(), out.damage_energy[1].to_bits())
+        };
+        let first = run(false);
+        for i in 0..64 {
+            assert_eq!(run(i % 2 == 1), first, "run {i} summed in another order");
+        }
     }
 
     /// A step over which a nuclide burns out contributes less than the one
