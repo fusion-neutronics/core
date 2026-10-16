@@ -339,7 +339,8 @@ pub(crate) fn handle_lost_particle(
             "Maximum lost particles exceeded ({count} > {max_lost}). \
              Most often this means the outermost surface of the geometry \
              does not have `boundary='vacuum'` -- particles that escape \
-             the geometry have nowhere to terminate, so they are flagged \
+             the geometry (or reach an unbounded cell with no surface \
+             ahead) have nowhere to terminate, so they are flagged \
              as lost. Set `boundary='vacuum'` on the outer surface, fix \
              any gaps between cells (the lost particle diagnostics above \
              show where each particle was last located), or pass \
@@ -347,6 +348,55 @@ pub(crate) fn handle_lost_particle(
              expected and acceptable."
         );
     }
+}
+
+/// End a particle that is inside `cell_index` but has nothing ahead of
+/// it: `closest_boundary` found no surface along its direction.
+///
+/// In a mesh's implicit complement this is a clean leak: a mesh without
+/// a graveyard leaves the complement open, and the particle has left the
+/// geometry (delta tracking ends the same flight where it leaves the
+/// mesh's bounding box). Anywhere else a healthy geometry never gets
+/// here, since every ray eventually meets a vacuum surface. It is how a
+/// missing vacuum boundary shows up when the outermost CSG cell is
+/// unbounded, and how a particle tracked in a mesh volume it is not
+/// inside shows up, so it goes through [`handle_lost_particle`]: counted,
+/// printed and checked against `max_lost`, with the diagnostic naming the
+/// cell the particle is in rather than the one it came from.
+#[cold]
+#[inline(never)]
+fn handle_no_boundary_ahead<T: Tracker>(
+    ctx: &TransportCtx,
+    particle: &mut yamc_particle::particle::Particle,
+    cell_index: usize,
+    tracker: &mut T,
+    current_particle_id: u64,
+    current_parent_id: Option<u64>,
+    current_generation: u32,
+) {
+    if ctx.geometry.is_open_complement(cell_index) {
+        tracker.record_termination(
+            current_particle_id,
+            current_parent_id,
+            current_generation,
+            particle.position,
+            particle.direction,
+            particle.energy,
+            particle.weight,
+            ctx.geometry.cells()[cell_index].cell_id,
+            TrackEventType::Leak,
+        );
+        particle.alive = false;
+        return;
+    }
+    particle.previous_cell_index = cell_index as u32;
+    handle_lost_particle(
+        particle,
+        ctx.geometry.cells(),
+        ctx.lost_particle_count,
+        ctx.lost_particles_collected,
+        ctx.max_lost,
+    );
 }
 
 /// Spatial tracking verification: before accepting a
@@ -838,12 +888,19 @@ pub(crate) fn transport_particle<T: Tracker>(
                 }
             }
         } else {
-            // No surface found -- particle is likely at the edge of a mesh
-            // approximation (inscribed polyhedron gap). Kill the particle
-            // rather than panicking. This is rare and has negligible
-            // impact on statistics.
-            particle.alive = false;
-            particle.weight = 0.0;
+            // No surface ahead: a leak from an open mesh complement,
+            // otherwise a lost particle (no vacuum boundary closes the
+            // geometry in this direction, or the particle is in a mesh
+            // volume it is not inside).
+            handle_no_boundary_ahead(
+                ctx,
+                particle,
+                cell_index,
+                tracker,
+                current_particle_id,
+                current_parent_id,
+                current_generation,
+            );
         }
     } // end of particle transport while loop
 }
@@ -1030,7 +1087,7 @@ pub(crate) fn do_photon_collision<T: Tracker>(
 /// 1. Sample `d_flight = -ln(ξ) / Σ_maj(E)` at the current position.
 /// 2. Score track-length over `[pos, pos + d_flight·direction]`.
 /// 3. `particle.move_by(d_flight)`. No boundary check.
-/// 4. Relocate at the new position. `None` → escape, kill particle.
+/// 4. Relocate at the new position. `None` → lost particle (no vacuum exit was crossed).
 /// 5. If the new cell is vacuum, loop (purely fictitious step).
 /// 6. Otherwise, accept the collision with probability `Σ_t / Σ_maj`;
 ///    on accept score collision-estimator tallies and run the
@@ -1308,10 +1365,16 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
                     }
                 }
                 None => {
-                    // No boundary -- geometry-gap edge case; kill,
-                    // mirroring surface tracking.
-                    particle.alive = false;
-                    particle.weight = 0.0;
+                    // No surface ahead: mirror surface tracking.
+                    handle_no_boundary_ahead(
+                        ctx,
+                        particle,
+                        cell_index,
+                        tracker,
+                        current_particle_id,
+                        current_parent_id,
+                        current_generation,
+                    );
                 }
             }
             if !particle.alive {
@@ -1394,10 +1457,11 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
 
         // Locate the post-flight cell starting from the pre-flight one
         // (CSG: its learned neighbours, then a full scan; mesh: its
-        // volume, then every volume). `None` here is a defensive
-        // fallback: true vacuum exits are caught by woodcock_flight_exit
-        // above, so this only fires in numerical corner cases (a mesh flight
-        // from a point that is not a number, say). The delta-collision is outside the geometry,
+        // volume, then every volume). `None` here means a lost particle:
+        // true vacuum exits are caught by woodcock_flight_exit above, so
+        // this only fires when the geometry has a gap or lacks a vacuum
+        // boundary, or in numerical corner cases (a mesh flight from a
+        // point that is not a number, say). The delta-collision is outside the geometry,
         // so the flight estimator scores nothing -- exactly the
         // behaviour that keeps it unbiased on leakage. (True
         // track-length mesh tallies are the exception: they score the
@@ -1441,8 +1505,18 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
                         );
                     }
                 }
-                particle.alive = false;
-                particle.weight = 0.0;
+                // Landed in no cell without crossing a vacuum surface: the
+                // geometry does not cover the space the flight reached.
+                // Lost, as surface tracking reports the same particle once
+                // it crosses into the uncovered space.
+                particle.previous_cell_index = pre_flight_cell_idx as u32;
+                handle_lost_particle(
+                    particle,
+                    geometry.cells(),
+                    ctx.lost_particle_count,
+                    ctx.lost_particles_collected,
+                    ctx.max_lost,
+                );
                 continue;
             }
         };
