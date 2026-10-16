@@ -90,6 +90,15 @@ jobs:
         # `kernels` module, which is #[cfg(not(target_os = "macos"))], so
         # --all-targets would fail to compile them on macOS.
         run: cargo clippy --workspace --lib --bins --tests --examples -- -D warnings
+      # The cache below is keyed on the release latest.json names, so
+      # a new release starts from a fresh cache rather than restoring
+      # the files of the old one.
+      - name: Resolve nuclear-data release
+        id: fixtures-release
+        shell: bash
+        run: |
+          release=$(python scripts/fetch_test_fixtures.py --print-release)
+          echo "release=$release" >> "$GITHUB_OUTPUT"
       - name: Cache nuclear-data test fixtures
         uses: actions/cache@v6
         with:
@@ -99,7 +108,7 @@ jobs:
             ~/.cache/yamc
             ~/Library/Caches/yamc
             ~/AppData/Local/yamc
-          key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs', 'crates/nuclear-data-schema/src/lib.rs') }}
+          key: yamc-test-fixtures-endf-b8.1-${{ steps.fixtures-release.outputs.release }}-${{ hashFiles('scripts/fetch_test_fixtures.py') }}
       - name: Fetch nuclear-data test fixtures
         shell: bash
         run: python scripts/fetch_test_fixtures.py
@@ -200,6 +209,15 @@ jobs:
           cache-on-failure: true
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+      # The cache below is keyed on the release latest.json names, so
+      # a new release starts from a fresh cache rather than restoring
+      # the files of the old one.
+      - name: Resolve nuclear-data release
+        id: fixtures-release
+        shell: bash
+        run: |
+          release=$(python3 scripts/fetch_test_fixtures.py --print-release)
+          echo "release=$release" >> "$GITHUB_OUTPUT"
       - name: Cache nuclear-data test fixtures
         uses: actions/cache@v6
         with:
@@ -209,7 +227,7 @@ jobs:
             ~/.cache/yamc
             ~/Library/Caches/yamc
             ~/AppData/Local/yamc
-          key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs', 'crates/nuclear-data-schema/src/lib.rs') }}
+          key: yamc-test-fixtures-endf-b8.1-${{ steps.fixtures-release.outputs.release }}-${{ hashFiles('scripts/fetch_test_fixtures.py') }}
       - name: Fetch nuclear-data test fixtures
         run: python3 scripts/fetch_test_fixtures.py
       # Default features only (arrow). GPU device tests are adapter-gated and

@@ -88,7 +88,17 @@ def test_an_override_is_used_and_reported_as_the_users():
         "energy": 50.0,
         "source": "user",
     }
-    assert user.get_dpa(1)[1] == pytest.approx(default.get_dpa(1)[1] * 40.0 / 50.0, rel=1e-12)
+    # Iron's own dpa scales exactly with its threshold. The material total does
+    # not: it is the atom-fraction-weighted sum over elements, and the products
+    # (chromium from (n,a), for one) keep their own default thresholds, so the
+    # total moves by slightly less than iron's share.
+    assert user.get_dpa(1, element="Fe")[1] == pytest.approx(
+        default.get_dpa(1, element="Fe")[1] * 40.0 / 50.0, rel=1e-12
+    )
+    assert user.get_dpa(1, element="Cr")[1] == pytest.approx(
+        default.get_dpa(1, element="Cr")[1], rel=1e-12
+    )
+    assert user.get_dpa(1)[1] == pytest.approx(default.get_dpa(1)[1] * 40.0 / 50.0, rel=1e-6)
 
 
 def test_an_element_without_a_displacement_energy_is_refused():

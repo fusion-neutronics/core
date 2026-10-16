@@ -8,31 +8,38 @@ uses (the platform cache directory: ``~/.cache/yamc`` on Linux,
 ``~/Library/Caches/yamc`` on macOS, ``%LOCALAPPDATA%\\yamc`` on Windows) and
 symlinks them into place. The fixtures keep their own flat layout there
 (``endf-b8.1-<Name>.arrow``), apart from the per-release folders the runtime
-downloader writes (``endf-b8.1/<release>/...``), and are fetched from the
-unversioned layout until the libraries are republished in the release layout.
+downloader writes (``endf-b8.1/<release>/...``).
+
+They come from the release layout the runtime reads: ``<keyword>/latest.json``
+names the current release, its ``manifest.json`` is checked against the
+pointer's size and sha256, and every file is downloaded from
+``<keyword>/<release>/<path>`` and checked against its manifest entry.
 
 Usage::
 
-    python scripts/fetch_test_fixtures.py            # fetch what is missing
-    python scripts/fetch_test_fixtures.py --check    # report, download nothing
-    python scripts/fetch_test_fixtures.py --force    # re-download everything
+    python scripts/fetch_test_fixtures.py                  # fetch what is missing or stale
+    python scripts/fetch_test_fixtures.py --check          # report, download nothing
+    python scripts/fetch_test_fixtures.py --force          # re-download everything
+    python scripts/fetch_test_fixtures.py --print-release  # print the current release id
 
-Already-cached sections are left alone, so re-running is cheap.
-
-A cached fixture whose ``data_version`` no longer matches the origin's is
-fetched again from scratch, so a republish reaches the fixtures rather than
-leaving a mix of two releases behind a symlink a test is reading.
+A cached file whose sha256 matches the manifest is left alone, so re-running
+is cheap: the pointer is one request, the manifest is read back from the cache
+while the pointer still names it, and the rest is hashing local files. A file
+whose sha256 differs is downloaded again, and an optional section the release
+no longer lists is removed and marked absent, so a new release reaches the
+fixtures rather than leaving a mix of two releases behind a symlink a test is
+reading.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.client
 import json
 import os
 import pathlib
 import shutil
-import subprocess
 import sys
 import time
 import urllib.error
@@ -40,7 +47,10 @@ import urllib.request
 
 ORIGIN = "https://yamc-data.xsplot.com"
 LIBRARY = "endf-b8.1"
-USER_AGENT = "yamc-fetch-test-fixtures/1.0"
+USER_AGENT = "yamc-fetch-test-fixtures/2.0"
+# The release format this build reads (SUPPORTED_FORMAT_VERSIONS in
+# crates/yamc-nuclide/src/storage/release.rs).
+FORMAT_VERSION = 2
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 FIXTURE_DIR = REPO_ROOT / "crates" / "yamc" / "tests"
@@ -48,26 +58,20 @@ FIXTURE_DIR = REPO_ROOT / "crates" / "yamc" / "tests"
 # (filename, required) per option-D section directory, mirroring
 # NEUTRON_SECTIONS / PHOTON_SECTIONS in crates/yamc-nuclide/src/storage/url_cache.rs.
 #
-# An optional section the origin 404s gets the same zero-byte `.absent` marker
-# the runtime cache writes. It is not just about re-asking: the
-# loader reads the marker as "this nuclide has no such section", and without it
-# a full-scope read of a fixture cannot distinguish that from a half-downloaded
-# directory and fails.
+# An optional section the release manifest does not list gets the same
+# zero-byte `.absent` marker the runtime cache writes. The loader reads the
+# marker as "this nuclide has no such section", and without it a full-scope
+# read of a fixture cannot distinguish that from a half-downloaded directory
+# and fails.
 ABSENT_SUFFIX = ".absent"  # crates/yamc-nuclide/src/storage/url_cache.rs
 
 NEUTRON_SECTIONS = [
     ("version.json", True),
     ("nuclide.arrow", True),
-    # Optional only until the libraries are republished at format_version 2:
-    # the origin still serves version 1, where the grids are columns of
-    # nuclide.arrow and there is no such object.
-    # `migrate_to_v2` below builds it locally from what was downloaded, so the
-    # fixtures this build reads are version 2 either way. Once the republish
-    # lands this becomes required and the migration stops finding anything.
-    ("energy.arrow", False),
+    ("energy.arrow", True),
     ("reactions.arrow", True),
-    ("products.arrow", False),
-    ("distributions.arrow", False),
+    ("products.arrow", True),
+    ("distributions.arrow", True),
     ("urr.arrow", False),
     ("total_nu.arrow", False),
     ("fission_photon.arrow", False),
@@ -79,10 +83,12 @@ PHOTON_SECTIONS = [
     ("compton.arrow", False),
     ("bremsstrahlung.arrow", False),
 ]
-# Transmutation subsections, and the section files published in each.
-# The stamp file that carries `data_version` comes first in every list, which is
-# where `fetch_sections` looks for it: `version.json` above, `provenance.json`
-# here.
+# Transmutation subsections, and the section files fetched from each. The
+# release also publishes `branching`, which is left out: the tests that need
+# branching rows read the ones committed under tests/fixtures, and the chain
+# loader reads the subsection whenever manifest.json names it, so adding it
+# would put an isomeric-branching overlay under every test that loads this
+# chain.
 CHAIN_SECTIONS = {
     "decay": [
         ("provenance.json", True),
@@ -227,107 +233,172 @@ def read_url(request: urllib.request.Request) -> bytes:
     raise AssertionError("unreachable: the last attempt returns or exits")
 
 
-def fetch(url: str, dest: pathlib.Path, required: bool, force: bool) -> str:
-    """Fetch one section. Returns 'cached', 'downloaded', or 'absent'."""
-    marker = dest.with_name(dest.name + ABSENT_SUFFIX)
-    if (dest.exists() or marker.exists()) and not force:
-        return "cached"
+def get(url: str) -> bytes:
+    """The body at ``url``. Any HTTP status but a 2xx is the origin answering,
+    so it ends the run rather than being retried."""
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        payload = read_url(request)
+        return read_url(request)
     except urllib.error.HTTPError as exc:
-        if exc.code == 404 and not required:
-            # Record the 404 the way the runtime cache does. Without this
-            # the loader cannot tell "this nuclide has no total_nu" from
-            # "this fixture is half-downloaded", and a full-scope read
-            # fails with a bare NotFound (Fe58, which has no total_nu, did
-            # exactly that).
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_bytes(b"")
-            return "absent"
-        # Any other HTTP status is the origin answering, so retrying it
-        # only turns one clear failure into four slow ones.
         raise SystemExit(f"failed to fetch {url}: {exc}")
+
+
+def sha256_hex(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def sha256_file(path: pathlib.Path) -> str | None:
+    """The sha256 of the file at ``path``, or None when there is no file."""
+    if not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify(what: str, payload: bytes, entry: dict) -> None:
+    """Refuse ``payload`` unless its size and sha256 are the ones ``entry``
+    (a manifest entry, or the pointer's record of the manifest) gives."""
+    if len(payload) != entry["bytes"] or sha256_hex(payload) != entry["sha256"]:
+        raise SystemExit(
+            f"{what}: got {len(payload)} bytes with sha256 {sha256_hex(payload)}, "
+            f"expected {entry['bytes']} bytes with sha256 {entry['sha256']}"
+        )
+
+
+def write_atomically(dest: pathlib.Path, payload: bytes) -> None:
+    """Write ``payload`` beside ``dest`` and rename it into place, so a test
+    reading through the symlink never sees half a file."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(payload)
-    # A section that used to be absent and is now published must lose its
-    # marker, or the loader keeps believing the 404.
-    marker.unlink(missing_ok=True)
-    return "downloaded"
+    tmp = dest.with_name(dest.name + ".partial")
+    tmp.write_bytes(payload)
+    os.replace(tmp, dest)
 
 
-def restamped(base_url: str, dest_dir: pathlib.Path, stamp: str) -> bool:
-    """Whether the cached fixture carries a different ``data_version`` than the
-    origin's copy of its stamp file (``version.json`` for a nuclide or element,
-    ``provenance.json`` for a chain subsection).
+def fetch_pointer() -> dict:
+    """The library's ``latest.json``, which names the current release.
 
-    False when nothing is cached yet: there is nothing to be stale. An
-    unreadable cached stamp counts as stale, since the fixture cannot be
-    trusted either way.
-
-    One request per cached fixture, so a warm cache makes as many of these as
-    a cold one makes downloads, and they go through the same retry.
+    The CDN caches the pointer, so the request carries a query string it has
+    not seen and is answered by the origin, as
+    ``origin_serves_a_readable_release_for_every_keyword`` does.
     """
-    cached = dest_dir / stamp
-    if not cached.is_file():
-        return False
+    bust = int(time.time())
+    url = f"{ORIGIN}/{LIBRARY}/latest.json?release-check={bust}"
     try:
-        local = json.loads(cached.read_text()).get("data_version")
-    except (OSError, ValueError):
-        return True
-    request = urllib.request.Request(f"{base_url}/{stamp}", headers={"User-Agent": USER_AGENT})
-    try:
-        remote = json.loads(read_url(request)).get("data_version")
-    except (urllib.error.HTTPError, ValueError) as exc:
-        raise SystemExit(f"failed to fetch {base_url}/{stamp}: {exc}")
-    return remote != local
-
-
-def fetch_sections(base_url: str, dest_dir: pathlib.Path, sections, force: bool) -> int:
-    if not force and restamped(base_url, dest_dir, sections[0][0]):
-        # Start over rather than refreshing file by file: the absent markers
-        # and optional sections of the old release say nothing about the new.
-        print(f"{dest_dir.name}: data_version differs from the origin, fetching again")
-        shutil.rmtree(dest_dir)
-        force = True
-    downloaded = 0
-    for filename, required in sections:
-        state = fetch(f"{base_url}/{filename}", dest_dir / filename, required, force)
-        downloaded += state == "downloaded"
-    return downloaded
-
-
-def fetch_chain(dest_dir: pathlib.Path, force: bool) -> int:
-    """Assemble the transmutation chain fixture from its published subsections.
-
-    The published layout is one directory per subsection; the local fixture adds
-    the manifest.json that names them, which the chain loader reads.
-    """
-    downloaded = 0
-    for subsection, sections in CHAIN_SECTIONS.items():
-        downloaded += fetch_sections(
-            f"{ORIGIN}/{LIBRARY}/transmutation/{subsection}.arrow",
-            dest_dir / subsection,
-            sections,
-            force,
+        pointer = json.loads(get(url))
+    except ValueError as exc:
+        raise SystemExit(f"{url} is not a valid release pointer: {exc}")
+    if pointer.get("keyword") != LIBRARY:
+        raise SystemExit(f"{url} names keyword {pointer.get('keyword')!r}, not {LIBRARY!r}")
+    if pointer.get("format_version") != FORMAT_VERSION:
+        raise SystemExit(
+            f"{url} names release {pointer.get('release')} at format_version "
+            f"{pointer.get('format_version')}, and this build reads {FORMAT_VERSION}"
         )
-    manifest = dest_dir / "manifest.json"
-    if not manifest.exists() or force:
-        manifest.write_text(
-            json.dumps(
-                {
-                    "format_version": 2,
-                    "library": LIBRARY,
-                    "subsections": {
-                        name: {"path": name} for name in CHAIN_SECTIONS
-                    },
-                },
-                indent=2,
+    return pointer
+
+
+def release_files(pointer: dict, cache: pathlib.Path, check: bool) -> dict:
+    """The files of the release ``pointer`` names, by path.
+
+    The manifest is checked against the pointer's size and sha256 and kept
+    beside the fixtures, so a warm run reads it back instead of fetching it
+    again while the pointer still names it.
+    """
+    record = {"bytes": pointer["manifest_bytes"], "sha256": pointer["manifest_sha256"]}
+    cached = cache / f"{LIBRARY}-fixtures-manifest.json"
+    payload = cached.read_bytes() if cached.is_file() else b""
+    if len(payload) != record["bytes"] or sha256_hex(payload) != record["sha256"]:
+        url = f"{ORIGIN}/{LIBRARY}/{pointer['manifest']}"
+        payload = get(url)
+        verify(url, payload, record)
+        if not check:
+            write_atomically(cached, payload)
+    manifest = json.loads(payload)
+    expected = {
+        "keyword": LIBRARY,
+        "release": pointer["release"],
+        "format_version": FORMAT_VERSION,
+    }
+    for field, value in expected.items():
+        if manifest.get(field) != value:
+            raise SystemExit(
+                f"manifest {pointer['manifest']} has {field} {manifest.get(field)!r}, "
+                f"expected {value!r}"
             )
-            + "\n"
-        )
-        downloaded += 1
-    return downloaded
+    return {entry["path"]: entry for entry in manifest["files"]}
+
+
+def sync_sections(
+    prefix: str,
+    dest_dir: pathlib.Path,
+    sections,
+    files: dict,
+    release: str,
+    force: bool,
+    check: bool,
+) -> list[str]:
+    """Bring ``dest_dir`` in line with the release's ``<prefix>/<file>``
+    entries, and return the paths that needed it.
+
+    A file whose sha256 matches its manifest entry is left alone; any other is
+    downloaded and verified. An optional section the manifest does not list is
+    removed and marked absent, a required one ends the run. With ``check``
+    nothing is changed and the list is only a report.
+    """
+    changed = []
+    for filename, required in sections:
+        path = f"{prefix}/{filename}"
+        dest = dest_dir / filename
+        marker = dest.with_name(dest.name + ABSENT_SUFFIX)
+        entry = files.get(path)
+        if entry is None:
+            if required:
+                raise SystemExit(
+                    f"release {release} of {LIBRARY} does not list {path}, "
+                    "which the fixtures need"
+                )
+            if dest.exists() or not marker.exists():
+                changed.append(path)
+                if not check:
+                    # Recorded the way the runtime cache records a section the
+                    # release does not publish. Without the marker the loader
+                    # cannot tell "this nuclide has no total_nu" from "this
+                    # fixture is half-downloaded", and a full-scope read fails
+                    # with a bare NotFound (Fe58, which has no total_nu, did
+                    # exactly that).
+                    dest.unlink(missing_ok=True)
+                    dest_dir.mkdir(parents=True, exist_ok=True)
+                    marker.write_bytes(b"")
+            continue
+        if not force and not marker.exists() and sha256_file(dest) == entry["sha256"]:
+            continue
+        changed.append(path)
+        if check:
+            continue
+        url = f"{ORIGIN}/{LIBRARY}/{release}/{path}"
+        payload = get(url)
+        verify(url, payload, entry)
+        write_atomically(dest, payload)
+        # A section that used to be absent and is now published must lose its
+        # marker, or the loader keeps believing it is not there.
+        marker.unlink(missing_ok=True)
+    return changed
+
+
+def chain_manifest() -> str:
+    """The manifest.json the chain loader reads, naming the subsections. The
+    published layout has one directory per subsection and no such file."""
+    return json.dumps(
+        {
+            "format_version": FORMAT_VERSION,
+            "library": LIBRARY,
+            "subsections": {name: {"path": name} for name in CHAIN_SECTIONS},
+        },
+        indent=2,
+    ) + "\n"
 
 
 def link(fixture: pathlib.Path, target: pathlib.Path) -> None:
@@ -353,91 +424,76 @@ def link(fixture: pathlib.Path, target: pathlib.Path) -> None:
         shutil.copytree(target, fixture)
 
 
-def migrate_to_v2(dirs) -> int:
-    """Move the energy grids of any version 1 fixture into ``energy.arrow``.
-
-    The origin still publishes ``format_version: 1``, where the union energy
-    grids are two columns of ``nuclide.arrow``; this build reads version 2,
-    where they are their own section, one record batch per temperature. Rather than block every test on the library
-    being republished, the downloaded fixture is migrated in place by the
-    converter's own ``split_energy``, which copies the grids rather than
-    recomputing them.
-
-    Transitional by construction: once the libraries are republished the
-    downloads are already version 2, nothing here matches, and this returns 0.
-    """
-    stale = []
-    for d in dirs:
-        marker = d / "version.json"
-        if not marker.is_file():
-            continue
-        try:
-            if json.loads(marker.read_text()).get("format_version") == 1:
-                stale.append(d)
-        except (json.JSONDecodeError, OSError):
-            continue
-    if not stale:
-        return 0
-
-    print(f"migrating {len(stale)} fixture(s) to format_version 2 ...")
-    cmd = [
-        "cargo", "run", "--release", "--quiet",
-        "-p", "yamc-convert", "--bin", "split_energy", "--",
-    ] + [str(d) for d in stale]
-    if subprocess.run(cmd, cwd=REPO_ROOT).returncode != 0:
-        raise SystemExit(
-            "split_energy failed; the fixtures are version 1 and this build "
-            "reads version 2, so the tests would fail on every one of them"
-        )
-    return len(stale)
-
-
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--check", action="store_true", help="report only")
     parser.add_argument("--force", action="store_true", help="re-download everything")
+    parser.add_argument(
+        "--print-release",
+        action="store_true",
+        help="print the release latest.json names and exit (the CI cache key)",
+    )
     args = parser.parse_args()
 
+    pointer = fetch_pointer()
+    release = pointer["release"]
+    if args.print_release:
+        print(release)
+        return 0
+
     cache = cache_root()
-    plan = [(n, f"{ORIGIN}/{LIBRARY}/neutron/{n}.arrow", NEUTRON_SECTIONS) for n in NUCLIDES]
-    plan += [(e, f"{ORIGIN}/{LIBRARY}/photon/{e}.arrow", PHOTON_SECTIONS) for e in ELEMENTS]
+    files = release_files(pointer, cache, args.check)
+    # (name, cache directory, [(release path prefix, subdirectory, sections)])
+    # per fixture. The chain fixture is one directory per subsection.
+    plan = [
+        (n, cache / f"{LIBRARY}-{n}.arrow", [(f"neutron/{n}.arrow", "", NEUTRON_SECTIONS)])
+        for n in NUCLIDES
+    ]
+    plan += [
+        (e, cache / f"{LIBRARY}-{e}.arrow", [(f"photon/{e}.arrow", "", PHOTON_SECTIONS)])
+        for e in ELEMENTS
+    ]
+    plan.append((
+        CHAIN_FIXTURE,
+        cache / f"{LIBRARY}-{CHAIN_FIXTURE}.arrow",
+        [(f"transmutation/{sub}.arrow", sub, s) for sub, s in CHAIN_SECTIONS.items()],
+    ))
+
+    missing, stale, changed = [], [], 0
+    for name, dest, parts in plan:
+        was_there = dest.is_dir()
+        paths = []
+        for prefix, subdir, sections in parts:
+            paths += sync_sections(
+                prefix, dest / subdir, sections, files, release, args.force, args.check
+            )
+        if name == CHAIN_FIXTURE:
+            manifest = dest / "manifest.json"
+            if not manifest.is_file() or manifest.read_text() != chain_manifest():
+                paths.append(str(manifest))
+                if not args.check:
+                    manifest.write_text(chain_manifest())
+        if not was_there:
+            missing.append(name)
+        elif paths:
+            stale.append(name)
+        changed += len(paths)
+        if not args.check:
+            link(FIXTURE_DIR / f"{name}.arrow", dest)
 
     if args.check:
-        missing = [
-            name for name, _, _ in plan
-            if not (cache / f"{LIBRARY}-{name}.arrow").is_dir()
-        ]
-        if not (cache / f"{LIBRARY}-{CHAIN_FIXTURE}.arrow").is_dir():
-            missing.append(CHAIN_FIXTURE)
-        stale = [
-            name for name, base_url, sections in plan
-            if restamped(base_url, cache / f"{LIBRARY}-{name}.arrow", sections[0][0])
-        ]
-        print(f"{len(plan) + 1 - len(missing)}/{len(plan) + 1} fixtures cached in {cache}")
+        print(f"{len(plan) - len(missing)}/{len(plan)} fixtures cached in {cache}")
         if missing:
             print("missing: " + ", ".join(missing))
         if stale:
-            print("stamped with another release than the origin: " + ", ".join(stale))
+            print(f"differing from release {release}: " + ", ".join(stale))
         return 1 if missing or stale else 0
 
-    downloaded = 0
-    fetched_dirs = []
-    for name, base_url, sections in plan:
-        dest = cache / f"{LIBRARY}-{name}.arrow"
-        downloaded += fetch_sections(base_url, dest, sections, args.force)
-        link(FIXTURE_DIR / f"{name}.arrow", dest)
-        fetched_dirs.append(dest)
-
-    migrated = migrate_to_v2(fetched_dirs)
-
-    chain_dest = cache / f"{LIBRARY}-{CHAIN_FIXTURE}.arrow"
-    downloaded += fetch_chain(chain_dest, args.force)
-    link(FIXTURE_DIR / f"{CHAIN_FIXTURE}.arrow", chain_dest)
-
     print(
-        f"{len(plan) + 1} fixtures ready in {cache} "
-        f"({downloaded} section files downloaded, {migrated} migrated to "
-        f"format_version 2), linked into {FIXTURE_DIR}"
+        f"{len(plan)} fixtures of {LIBRARY} release {release} ready in {cache} "
+        f"({changed} files downloaded or marked absent), linked into {FIXTURE_DIR}"
     )
     return 0
 

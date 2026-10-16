@@ -68,7 +68,11 @@ pub fn per_edge_rates(chain: &HashMap<String, ChainNuclide>, rates: &ReactionRat
             let Some(&rate) = rate_map.get(rx.kind.as_str()) else {
                 continue;
             };
-            if rate == 0.0 {
+            // A zero branching is an edge the solve did not drive either: the
+            // `(n,X)` fold sets a residual the spectrum does not reach to 0.0
+            // and keeps the row, so it is skipped here as a zero rate is.
+            let edge_rate = rx.branching * rate;
+            if edge_rate == 0.0 {
                 continue;
             }
             // A channel with no named product (fission) is still an edge worth
@@ -82,8 +86,8 @@ pub fn per_edge_rates(chain: &HashMap<String, ChainNuclide>, rates: &ReactionRat
             // Duplicate curves for one target sum rather than overwrite, as
             // they do in the branching overlay.
             match edges.iter_mut().find(|(t, _)| *t == target) {
-                Some((_, r)) => *r += rx.branching * rate,
-                None => edges.push((target, rx.branching * rate)),
+                Some((_, r)) => *r += edge_rate,
+                None => edges.push((target, edge_rate)),
             }
         }
     }
@@ -977,6 +981,40 @@ mod tests {
             per_edge_rates(&chain, &rates)["A"]["fission"],
             vec![(None, 2.5e-10)]
         );
+    }
+
+    /// A row whose branching is zero (an `(n,X)` residual the spectrum does not
+    /// reach) is absent, and a kind left with no driven edge is absent with it.
+    #[test]
+    fn test_per_edge_rates_skips_a_zero_branching() {
+        let row = |target: &str, branching: f64| ChainReaction {
+            kind: "(n,X)".to_string(),
+            target: Some(target.to_string()),
+            branching,
+            q_value: None,
+            branching_uncertainty: None,
+            evaluated_branching: None,
+            multiplicity: None,
+        };
+        let mut chain = HashMap::new();
+        chain.insert(
+            "A".to_string(),
+            nuclide("A", None, vec![], vec![row("B", 0.4), row("C", 0.0)]),
+        );
+        let rates: ReactionRates = HashMap::from([(
+            "A".to_string(),
+            HashMap::from([("(n,X)".to_string(), 1.0e-9)]),
+        )]);
+        assert_eq!(
+            per_edge_rates(&chain, &rates)["A"]["(n,X)"],
+            vec![(Some("B".to_string()), 0.4 * 1.0e-9)]
+        );
+
+        chain.insert(
+            "A".to_string(),
+            nuclide("A", None, vec![], vec![row("C", 0.0)]),
+        );
+        assert!(per_edge_rates(&chain, &rates).is_empty());
     }
 
     /// A decay-only step passes no rates, so there are no edges to report.

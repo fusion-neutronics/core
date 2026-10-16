@@ -3895,4 +3895,161 @@ mod tests {
         // Any other mode back into its own parent is a replace_missing loop.
         assert_eq!(target("Es258", "ec/beta+", Some("Es258")), None);
     }
+
+    /// A reduced chain whose edge cuts through an `(n,X)` list exports a file
+    /// that loads, with every residual of the list still named.
+    ///
+    /// `reduce_chain` clears a target outside the reduced set. On an `(n,X)`
+    /// row that carries its curve that left a null target beside a curve,
+    /// which the reader refuses (a null target there means the evaluation
+    /// gives no residual), so reducing the published chain and exporting it
+    /// gave a directory that could not be loaded.
+    #[test]
+    fn a_reduced_chain_cut_through_an_anything_list_round_trips() {
+        use crate::chain::{ChainNuclide, ChainReaction};
+        use std::collections::HashMap;
+
+        use super::ANYTHING;
+        use arrow_array::StringArray;
+
+        let nuclide = |name: &str, reactions: Vec<ChainReaction>| ChainNuclide {
+            name: name.to_string(),
+            half_life: None,
+            half_life_uncertainty: None,
+            decay_energy: 0.0,
+            decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
+            reactions,
+            decays: Vec::new(),
+            fission_yields: None,
+            sources: Vec::new(),
+        };
+        let plain = |kind: &str, target: &str| ChainReaction {
+            kind: kind.to_string(),
+            target: Some(target.to_string()),
+            branching: 1.0,
+            q_value: Some(0.0),
+            branching_uncertainty: None,
+            evaluated_branching: None,
+            multiplicity: None,
+        };
+        let anything = |target: Option<&str>| ChainReaction {
+            kind: ANYTHING.to_string(),
+            target: target.map(str::to_string),
+            branching: f64::NAN,
+            q_value: Some(-1.0e6),
+            branching_uncertainty: None,
+            evaluated_branching: None,
+            multiplicity: None,
+        };
+        // Pp1 (n,gamma) Qq2, and Qq2's MT=5 leaves Rr1 or Ss1 and a proton.
+        let mut chain: HashMap<String, ChainNuclide> = HashMap::new();
+        chain.insert(
+            "Pp1".to_string(),
+            nuclide("Pp1", vec![plain("(n,gamma)", "Qq2")]),
+        );
+        chain.insert(
+            "Qq2".to_string(),
+            nuclide(
+                "Qq2",
+                vec![
+                    anything(Some("Rr1")),
+                    anything(Some("Ss1")),
+                    anything(Some("H1")),
+                ],
+            ),
+        );
+        for name in ["Rr1", "Ss1", "H1"] {
+            chain.insert(name.to_string(), nuclide(name, Vec::new()));
+        }
+
+        // Give the rows their curves the way the reader does: write the
+        // energies, multiplicities, isomeric state and representation, load.
+        let base = std::env::temp_dir().join(format!("yani-nx-reduce-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (full_dir, reduced_dir) = (base.join("full"), base.join("reduced"));
+        super::export_chain_parts(&chain, &full_dir, Some("test")).expect("export succeeds");
+        let mut columns: Vec<(&'static str, ArrayRef)> = Vec::new();
+        {
+            let path = full_dir.join("reactions").join("reactions.arrow");
+            let batch = &super::read_arrow_file(&path).expect("reactions read")[0];
+            let n = batch.num_rows();
+            let types = super::col::<StringArray>(batch, "type").unwrap();
+            let targets = super::col::<StringArray>(batch, "target").unwrap();
+            let mut energy = ListBuilder::new(Float64Builder::new());
+            let mut multiplicity = ListBuilder::new(Float64Builder::new());
+            let mut lip = Int32Builder::new();
+            let mut share = BooleanBuilder::new();
+            for i in 0..n {
+                if types.value(i) == ANYTHING {
+                    let residual = targets.value(i) != "H1";
+                    energy.values().append_slice(&[1.0e6, 2.0e7]);
+                    energy.append(true);
+                    let m = if targets.value(i) == "Rr1" {
+                        0.25
+                    } else {
+                        0.75
+                    };
+                    multiplicity.values().append_slice(&[m, m]);
+                    multiplicity.append(true);
+                    lip.append_value(0);
+                    share.append_value(residual);
+                } else {
+                    energy.append(false);
+                    multiplicity.append(false);
+                    lip.append_null();
+                    share.append_null();
+                }
+            }
+            for name in ["nuclide", "type", "target", "Q", "branching_ratio"] {
+                columns.push((name, batch.column_by_name(name).unwrap().clone()));
+            }
+            columns.push(("energy", Arc::new(energy.finish())));
+            columns.push(("multiplicity", Arc::new(multiplicity.finish())));
+            columns.push(("lip", Arc::new(lip.finish())));
+            columns.push(("share", Arc::new(share.finish())));
+            let schema = Arc::new(super::section_schema("reactions/reactions.arrow"));
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                columns.iter().map(|(_, c)| c.clone()).collect(),
+            )
+            .expect("batch matches the schema");
+            super::write_arrow_file(&path, schema, batch).expect("reactions written");
+        }
+        let load = |dir: &std::path::Path| {
+            super::parse_chain_parts(&dir.join("decay"), Some(&dir.join("reactions")), None, None)
+        };
+        let (full, _) = load(&full_dir).expect("the full chain loads");
+        assert!(full["Qq2"]
+            .reactions
+            .iter()
+            .all(|r| r.multiplicity.is_some()));
+
+        // One level from Pp1 reaches Qq2 and stops: Qq2's products are cut.
+        let reduced = crate::reduce_chain(&full, &["Pp1"], 1);
+        let mut names: Vec<&String> = reduced.keys().collect();
+        names.sort();
+        assert_eq!(names, ["Pp1", "Qq2"]);
+        super::export_chain_parts(&reduced, &reduced_dir, Some("test")).expect("export succeeds");
+        let back = load(&reduced_dir);
+        let _ = std::fs::remove_dir_all(&base);
+        let (back, branch) = back.expect("the reduced chain's export loads");
+
+        let mut targets: Vec<Option<String>> = back["Qq2"]
+            .reactions
+            .iter()
+            .map(|r| r.target.clone())
+            .collect();
+        targets.sort();
+        assert_eq!(
+            targets,
+            [Some("H1".into()), Some("Rr1".into()), Some("Ss1".into())],
+            "no row may read as a residual the evaluation does not give"
+        );
+        let curves = &branch.curves()["Qq2"][ANYTHING];
+        assert_eq!(curves.len(), 3, "every curve of the list is kept");
+        // A plain reaction cut at the edge is still cleared.
+        let cut = crate::reduce_chain(&full, &["Pp1"], 0);
+        assert_eq!(cut["Pp1"].reactions[0].target, None);
+    }
 }
