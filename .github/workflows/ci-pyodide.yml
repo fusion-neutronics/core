@@ -166,11 +166,20 @@ jobs:
       - name: The wheel must carry no builder paths
         run: python3 scripts/check_binary_paths.py packages/"$PROJECT"/dist/*.whl
 
+      # The cache below is keyed on the release latest.json names, so
+      # a new release starts from a fresh cache rather than restoring
+      # the files of the old one.
+      - name: Resolve nuclear-data release
+        id: fixtures-release
+        shell: bash
+        run: |
+          release=$(python3 scripts/fetch_test_fixtures.py --print-release)
+          echo "release=$release" >> "$GITHUB_OUTPUT"
       - name: Cache nuclear-data test fixtures
         uses: actions/cache@v6
         with:
           path: ~/.cache/yamc
-          key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs', 'crates/nuclear-data-schema/src/lib.rs') }}
+          key: yamc-test-fixtures-endf-b8.1-${{ steps.fixtures-release.outputs.release }}-${{ hashFiles('scripts/fetch_test_fixtures.py') }}
       - name: Fetch nuclear-data test fixtures
         run: python3 scripts/fetch_test_fixtures.py
 
