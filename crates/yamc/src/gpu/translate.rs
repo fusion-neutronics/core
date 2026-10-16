@@ -756,9 +756,11 @@ pub fn translate_for_gpu(
 /// every explicit cell, e.g. `outer.above` or `~region`). It is encoded as
 /// an *empty* sentinel AABB (`lower = +inf`, `upper = -inf`): the kernel's
 /// point-in-AABB test (`px >= min && px <= max`) can never be true for a
-/// finite point, so the cell is never selected and any particle reaching it
-/// is treated as having left the geometry (leakage / history terminates).
-/// That matches a *vacuum* implicit complement on the CPU. It is only sound
+/// finite point, so the cell is never selected. A vacuum surface in front
+/// of it ends the history at that surface, before the particle is located
+/// again; one that crosses a transmission surface into it is found in no
+/// cell and recorded as lost, as the CPU reports a particle in an unbounded
+/// cell with no surface ahead. It is only sound
 /// when that cell is vacuum; an unbounded cell carrying a material is
 /// rejected with a clear error rather than silently mis-simulated.
 ///
@@ -777,8 +779,9 @@ pub(crate) fn translate_cells(
         if !bbox.is_finite() {
             // Unbounded cell. Only a *vacuum* implicit complement (no
             // material) is supported on GPU -- emit an empty sentinel
-            // AABB so the kernel never matches it and the particle
-            // leaks. A material-filled unbounded cell can't be
+            // AABB so the kernel never matches it (a particle reaching
+            // it is lost unless a vacuum surface ended its history
+            // first). A material-filled unbounded cell can't be
             // represented by point-in-AABB cell finding, so reject it.
             if cell.material_idx.is_some() {
                 return Err(GpuTranslateError::CellRegionUnsupported {

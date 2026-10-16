@@ -3,8 +3,10 @@ use yamc_particle::particle::ParticleType;
 /// Information about a particle that was lost during transport.
 ///
 /// A particle is "lost" when it crosses a surface but the new position
-/// is not contained in any cell. This indicates a gap in the geometry
-/// (CSG regions don't fully cover the space).
+/// is not contained in any cell, which indicates a gap in the geometry
+/// (CSG regions don't fully cover the space), or when it is inside a
+/// cell that has no surface ahead of it, which usually means the outer
+/// cell is unbounded and no vacuum boundary closes the geometry.
 #[derive(Debug, Clone)]
 pub struct LostParticle {
     /// Type of the lost particle (Neutron or Photon)
@@ -15,7 +17,8 @@ pub struct LostParticle {
     pub direction: [f64; 3],
     /// Energy of the particle in eV
     pub energy: f64,
-    /// Index of the last cell the particle was in (before crossing)
+    /// Index of the last cell the particle was in (before crossing, or
+    /// the cell it is in when no surface lay ahead)
     pub last_cell_index: Option<usize>,
     /// Cell ID of the last cell (user-facing ID)
     pub last_cell_id: Option<u32>,

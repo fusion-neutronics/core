@@ -143,4 +143,47 @@ impl MeshFilter {
             MeshKind::Rectangular(_) => None,
         }
     }
+
+    /// Axis-aligned box `[xmin, ymin, zmin, xmax, ymax, zmax]` around the
+    /// voxels. For a cylindrical mesh it bounds the annular sector the grid
+    /// covers, not the full circle.
+    pub fn bounding_box(&self) -> [f64; 6] {
+        match &self.mesh {
+            MeshKind::Rectangular(m) => {
+                let (lo, hi) = (m.lower_left(), m.upper_right());
+                [lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]]
+            }
+            MeshKind::Cylindrical(m) => {
+                let o = m.origin();
+                let (r, phi, z) = (m.r_grid(), m.phi_grid(), m.z_grid());
+                let (phi0, phi1) = (phi[0], phi[phi.len() - 1]);
+                // The sector's extreme points: both radii at both end angles
+                // and at every axis direction the sector spans.
+                let mut angles = vec![phi0, phi1];
+                angles.extend(
+                    (0..=4)
+                        .map(|k| k as f64 * std::f64::consts::FRAC_PI_2)
+                        .filter(|a| (phi0..=phi1).contains(a)),
+                );
+                let mut bb = [
+                    f64::INFINITY,
+                    f64::INFINITY,
+                    o[2] + z[0],
+                    f64::NEG_INFINITY,
+                    f64::NEG_INFINITY,
+                    o[2] + z[z.len() - 1],
+                ];
+                for radius in [r[0], r[r.len() - 1]] {
+                    for a in &angles {
+                        let (x, y) = (o[0] + radius * a.cos(), o[1] + radius * a.sin());
+                        bb[0] = bb[0].min(x);
+                        bb[1] = bb[1].min(y);
+                        bb[3] = bb[3].max(x);
+                        bb[4] = bb[4].max(y);
+                    }
+                }
+                bb
+            }
+        }
+    }
 }

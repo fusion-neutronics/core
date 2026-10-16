@@ -156,6 +156,14 @@ fn extract_sources(source: &Bound<'_, PyAny>) -> PyResult<Vec<ParticleSource>> {
 /// ``seed``, ``threads``, ``max_runtime``, ``compute``) are arguments of
 /// ``simulate_transport`` / ``simulate_transmutation``, not of the Model.
 ///
+/// A :class:`MeshGeometry` used as the whole geometry must be closed by a
+/// vacuum boundary. When the mesh has none, the run adds a vacuum box 10 cm
+/// outside its bounding box around a void implicit complement (and prints
+/// its extent), or raises ``ValueError`` when the implicit complement holds
+/// a material (pass ``graveyard_offset`` to the MeshGeometry then). A mesh
+/// tally that reaches outside the vacuum boundary gets a warning, since its
+/// outer voxels read zero.
+///
 /// Args:
 ///     geometry: The geometry defining the problem's spatial domain.
 ///     tallies: Optional list of tallies to score during simulation.
@@ -874,6 +882,7 @@ impl PyModel {
                  gaps epic.",
             ));
         }
+        self.check_mesh_boundary(py)?;
         // `total_particles=0` is an error (0 is not "unlimited"; use None).
         if total_particles == Some(0) {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -1208,6 +1217,7 @@ impl PyModel {
                 .map(|d| transport_data_uncertainty(&d.inner, d.sources_given, d.convergence_given))
                 .transpose()?,
         };
+        self.check_mesh_boundary(py)?;
         if compute == "cpu" {
             self.warn_if_max_steps_ignored(py, "simulate_transport(compute='cpu')")?;
             return self.simulate_transport_cpu(&settings, capture_tracks, py);
@@ -1720,6 +1730,7 @@ impl PyModel {
         // `simulate_transmutation` has no `compute=` argument, so its transport
         // solves always run on the CPU, which ignores the step cap.
         self.warn_if_max_steps_ignored(py, "simulate_transmutation")?;
+        self.check_mesh_boundary(py)?;
         // Parse the optional per-step wall-time budget (float seconds or a
         // (value, unit) tuple), while the GIL is held, before py.detach.
         let max_runtime_secs = match max_runtime {
@@ -1837,6 +1848,21 @@ impl PyModel {
         };
         let elapsed = start.elapsed().as_secs_f64();
         crate::simulation::build_results(&self.inner, settings, "cpu", elapsed, py_tracks)
+    }
+
+    /// Refuse a whole-model mesh geometry that cannot be closed by an
+    /// automatic vacuum box (no vacuum boundary and a material implicit
+    /// complement) with a `ValueError` before any transport, and warn for
+    /// each mesh tally that reaches outside the box particles are
+    /// transported in, whose outer voxels would read zero.
+    fn check_mesh_boundary(&self, py: Python<'_>) -> PyResult<()> {
+        self.inner
+            .mesh_transport_extent()
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        for message in self.inner.mesh_tally_extent_warnings() {
+            py.import("warnings")?.call_method1("warn", (message,))?;
+        }
+        Ok(())
     }
 
     /// Warn that `gpu_max_steps_per_particle` does nothing on a CPU run.

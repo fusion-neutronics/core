@@ -2345,10 +2345,26 @@ class MeshGeometry:
     model air or coolant interactions in the gaps, pass a :class:`Material`
     as *implicit_complement_material*.
     
-    A vacuum boundary box can be added automatically by setting
-    *graveyard_offset*.  This adds an axis-aligned bounding box expanded by
-    the given offset (cm) around the geometry, with vacuum boundary
-    conditions on all 6 faces.  Particles reaching this boundary are killed.
+    A vacuum boundary box can be added by setting *graveyard_offset*.  This
+    adds an axis-aligned bounding box expanded by the given offset (cm)
+    around the geometry, with vacuum boundary conditions on all 6 faces.
+    Particles reaching this boundary are killed.
+    
+    When this geometry is the whole model and the mesh has no vacuum
+    boundary (no *graveyard_offset* and no ``boundary:vacuum`` group, as is
+    usual for a mesh made from CAD), the :class:`Model` closes it before
+    transport:
+    
+    - with a void implicit complement it adds a vacuum box 10 cm outside the
+      mesh's bounding box and prints its extent.  In a void the margin
+      changes no result; set *graveyard_offset* to choose it.
+    - with an *implicit_complement_material* it raises ``ValueError``: the
+      box position sets how much of that material surrounds the model, so
+      *graveyard_offset* must be given explicitly.
+    
+    Used as the fill of a CSG cell, the mesh gets no box: the CSG geometry
+    bounds it.  Without any of these, a particle with no surface ahead of it
+    is a lost particle.
     
     A mesh written without imprinting (``CadToYamc.mesh(imprint=False)``)
     gives each solid its own surface, so touching solids meet along two
@@ -2371,8 +2387,9 @@ class MeshGeometry:
         materials: Mapping of material name to :class:`Material`.
         implicit_complement_material: Optional material for the unmeshed
             space between volumes.  Default ``None`` means void (free-streaming).
-        graveyard_offset: Optional offset (cm) for automatic vacuum boundary
-            box generation.
+        graveyard_offset: Optional offset (cm) of a vacuum boundary box
+            around the mesh.  ``None`` lets the :class:`Model` add one with a
+            10 cm offset around a void implicit complement, as above.
         contact_tolerance: Optional distance (cm) within which two solids'
             surfaces count as touching. Setting it tracks the mesh
             discontinuously. It must be at least the deepest overlap between
@@ -2561,6 +2578,14 @@ class Model:
     observations. Per-run execution parameters (``total_particles``,
     ``seed``, ``threads``, ``max_runtime``, ``compute``) are arguments of
     ``simulate_transport`` / ``simulate_transmutation``, not of the Model.
+    
+    A :class:`MeshGeometry` used as the whole geometry must be closed by a
+    vacuum boundary. When the mesh has none, the run adds a vacuum box 10 cm
+    outside its bounding box around a void implicit complement (and prints
+    its extent), or raises ``ValueError`` when the implicit complement holds
+    a material (pass ``graveyard_offset`` to the MeshGeometry then). A mesh
+    tally that reaches outside the vacuum boundary gets a warning, since its
+    outer voxels read zero.
     
     Args:
         geometry: The geometry defining the problem's spatial domain.
