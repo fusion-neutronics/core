@@ -350,45 +350,23 @@ pub(crate) fn handle_lost_particle(
     }
 }
 
-/// End a particle that is inside `cell_index` but has nothing ahead of
-/// it: `closest_boundary` found no surface along its direction.
-///
-/// In a mesh's implicit complement this is a clean leak: a mesh without
-/// a graveyard leaves the complement open, and the particle has left the
-/// geometry (delta tracking ends the same flight where it leaves the
-/// mesh's bounding box). Anywhere else a healthy geometry never gets
-/// here, since every ray eventually meets a vacuum surface. It is how a
-/// missing vacuum boundary shows up when the outermost CSG cell is
-/// unbounded, and how a particle tracked in a mesh volume it is not
-/// inside shows up, so it goes through [`handle_lost_particle`]: counted,
-/// printed and checked against `max_lost`, with the diagnostic naming the
-/// cell the particle is in rather than the one it came from.
+/// Record a particle that is inside `cell_index` but has nothing ahead
+/// of it: `closest_boundary` found no surface along its direction. A
+/// healthy geometry never gets here, since every ray eventually meets a
+/// vacuum surface (a whole-model mesh without one gets a vacuum box from
+/// the model before transport). It is how a missing vacuum boundary shows
+/// up when the outermost cell is unbounded (an implicit complement or a
+/// half-space void), and how a particle tracked in a mesh volume it is
+/// not inside shows up. Goes through [`handle_lost_particle`] so it is
+/// counted, printed and checked against `max_lost`, with the diagnostic
+/// naming the cell the particle is in rather than the one it came from.
 #[cold]
 #[inline(never)]
-fn handle_no_boundary_ahead<T: Tracker>(
+fn handle_no_boundary_ahead(
     ctx: &TransportCtx,
     particle: &mut yamc_particle::particle::Particle,
     cell_index: usize,
-    tracker: &mut T,
-    current_particle_id: u64,
-    current_parent_id: Option<u64>,
-    current_generation: u32,
 ) {
-    if ctx.geometry.is_open_complement(cell_index) {
-        tracker.record_termination(
-            current_particle_id,
-            current_parent_id,
-            current_generation,
-            particle.position,
-            particle.direction,
-            particle.energy,
-            particle.weight,
-            ctx.geometry.cells()[cell_index].cell_id,
-            TrackEventType::Leak,
-        );
-        particle.alive = false;
-        return;
-    }
     particle.previous_cell_index = cell_index as u32;
     handle_lost_particle(
         particle,
@@ -888,19 +866,10 @@ pub(crate) fn transport_particle<T: Tracker>(
                 }
             }
         } else {
-            // No surface ahead: a leak from an open mesh complement,
-            // otherwise a lost particle (no vacuum boundary closes the
-            // geometry in this direction, or the particle is in a mesh
-            // volume it is not inside).
-            handle_no_boundary_ahead(
-                ctx,
-                particle,
-                cell_index,
-                tracker,
-                current_particle_id,
-                current_parent_id,
-                current_generation,
-            );
+            // No surface ahead: no vacuum boundary closes the geometry in
+            // this direction, or the particle is in a mesh volume it is not
+            // inside. Report it as lost rather than ending it silently.
+            handle_no_boundary_ahead(ctx, particle, cell_index);
         }
     } // end of particle transport while loop
 }
@@ -1365,16 +1334,8 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
                     }
                 }
                 None => {
-                    // No surface ahead: mirror surface tracking.
-                    handle_no_boundary_ahead(
-                        ctx,
-                        particle,
-                        cell_index,
-                        tracker,
-                        current_particle_id,
-                        current_parent_id,
-                        current_generation,
-                    );
+                    // No surface ahead: lost, mirroring surface tracking.
+                    handle_no_boundary_ahead(ctx, particle, cell_index);
                 }
             }
             if !particle.alive {

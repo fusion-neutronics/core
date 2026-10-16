@@ -150,22 +150,6 @@ impl GeometryKind {
         }
     }
 
-    /// True when a particle in `cell_index` with no surface ahead has left
-    /// the geometry rather than been lost: the implicit complement of a
-    /// mesh geometry, which a mesh without a graveyard leaves open (void by
-    /// default), and which delta tracking likewise exits once a flight
-    /// leaves the mesh's bounding box. Always false for CSG, whose outer
-    /// cells must be closed by a vacuum surface.
-    #[cfg_attr(not(feature = "mesh"), allow(unused_variables))]
-    #[inline]
-    pub(crate) fn is_open_complement(&self, cell_index: usize) -> bool {
-        match self {
-            GeometryKind::Csg(_) => false,
-            #[cfg(feature = "mesh")]
-            GeometryKind::Mesh(g) => cell_index + 1 == g.cells.len(),
-        }
-    }
-
     /// Refine a spatially-located cell through any mesh fill: a point in
     /// a fill host's region resolves to the embedded mesh-volume cell it
     /// falls in (or stays with the host, the complement). No-op for the

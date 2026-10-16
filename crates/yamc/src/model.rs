@@ -596,6 +596,118 @@ impl Model {
         }
     }
 
+    /// The box a whole-model mesh geometry transports particles in, as
+    /// `[xmin, ymin, zmin, xmax, ymax, zmax]`, or `None` for a CSG geometry
+    /// (mesh fills included, whose CSG cells bound them).
+    ///
+    /// A mesh with a vacuum boundary (a `graveyard_offset` box or a
+    /// `boundary:vacuum` group) keeps it and reports its bounding box. One
+    /// without is closed at run start by a vacuum box
+    /// [`DEFAULT_GRAVEYARD_OFFSET`](crate::geometry::mesh::DEFAULT_GRAVEYARD_OFFSET)
+    /// cm outside its bounding box, which is reported here before it is
+    /// added. That needs a void implicit complement: with a material there,
+    /// where the box sits decides how much of that material surrounds the
+    /// model, so the run is refused with an `Err` asking for an explicit
+    /// `graveyard_offset`.
+    pub fn mesh_transport_extent(&self) -> Result<Option<[f64; 6]>, String> {
+        match &self.geometry {
+            GeometryKind::Csg(_) => Ok(None),
+            #[cfg(feature = "mesh")]
+            GeometryKind::Mesh(mesh) => {
+                if mesh.has_vacuum_boundary() {
+                    Ok(Some(mesh.transport_extent()))
+                } else if mesh.implicit_complement_has_material() {
+                    Err("The mesh geometry has no vacuum boundary and its implicit \
+                         complement is filled with a material, so nothing stops a particle \
+                         in the complement. A vacuum box is only added automatically around \
+                         a void complement: with a material there, where the box sits sets \
+                         how much of that material surrounds the model and so changes the \
+                         results. Pass graveyard_offset= to MeshGeometry to place one."
+                        .to_string())
+                } else {
+                    Ok(Some(mesh.graveyard_box(
+                        crate::geometry::mesh::DEFAULT_GRAVEYARD_OFFSET,
+                    )))
+                }
+            }
+        }
+    }
+
+    /// One message per mesh tally (regular or cylindrical mesh filter) that
+    /// reaches outside [`Self::mesh_transport_extent`]: no particle gets
+    /// there, so those voxels read zero. Empty for a CSG geometry or when
+    /// the mesh geometry would be refused.
+    pub fn mesh_tally_extent_warnings(&self) -> Vec<String> {
+        let Ok(Some(ext)) = self.mesh_transport_extent() else {
+            return Vec::new();
+        };
+        // Rounding in the box arithmetic must not warn on a tally mesh
+        // drawn exactly on the boundary.
+        let tol = 1e-9 * (1.0 + ext.iter().fold(0.0_f64, |m, v| m.max(v.abs())));
+        let mut warnings = Vec::new();
+        for (index, tally) in self.tallies.iter().enumerate() {
+            for filter in &tally.filters {
+                let yamc_tallies::filter::Filter::Mesh(mesh) = filter else {
+                    continue;
+                };
+                let bb = mesh.bounding_box();
+                let outside = (0..3).any(|k| bb[k] < ext[k] - tol || bb[k + 3] > ext[k + 3] + tol);
+                if outside {
+                    let name = tally
+                        .name
+                        .as_ref()
+                        .map_or_else(|| format!("{index}"), |n| format!("'{n}'"));
+                    warnings.push(format!(
+                        "Tally {name}: its mesh, x [{:.4}, {:.4}] y [{:.4}, {:.4}] z [{:.4}, \
+                         {:.4}] cm, extends beyond the vacuum boundary of the mesh geometry, \
+                         x [{:.4}, {:.4}] y [{:.4}, {:.4}] z [{:.4}, {:.4}] cm. No particle \
+                         reaches the voxels outside it, so they will read zero. Raise \
+                         graveyard_offset on the MeshGeometry or shrink the tally mesh.",
+                        bb[0],
+                        bb[3],
+                        bb[1],
+                        bb[4],
+                        bb[2],
+                        bb[5],
+                        ext[0],
+                        ext[3],
+                        ext[1],
+                        ext[4],
+                        ext[2],
+                        ext[5]
+                    ));
+                }
+            }
+        }
+        warnings
+    }
+
+    /// Close a whole-model mesh geometry that has no vacuum boundary with
+    /// the vacuum box described in [`Self::mesh_transport_extent`], and say
+    /// so (on `announce`, at the normal verbosity). Without it a particle in
+    /// the implicit complement with nothing ahead would be lost.
+    #[cfg_attr(not(feature = "mesh"), allow(unused_variables))]
+    fn close_mesh_geometry(&mut self, announce: bool) -> Result<(), String> {
+        #[cfg(feature = "mesh")]
+        if matches!(&self.geometry, GeometryKind::Mesh(m) if !m.has_vacuum_boundary()) {
+            self.mesh_transport_extent()?;
+            let offset = crate::geometry::mesh::DEFAULT_GRAVEYARD_OFFSET;
+            if let GeometryKind::Mesh(mesh) = &mut self.geometry {
+                let bb = mesh.add_graveyard(offset);
+                if announce && self.verbose.summary {
+                    println!(
+                        "Mesh geometry has no vacuum boundary: added a vacuum box {offset} cm \
+                         outside its bounding box, x [{:.4}, {:.4}] y [{:.4}, {:.4}] \
+                         z [{:.4}, {:.4}] cm. Pass graveyard_offset= to MeshGeometry to \
+                         choose the margin.",
+                        bb[0], bb[3], bb[1], bb[4], bb[2], bb[5]
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The survival-biasing settings, if the technique is enabled. At
     /// most one entry is allowed in `variance_reduction` (validated at
     /// run start).
@@ -1673,6 +1785,10 @@ impl Model {
         if is_root && mpi_size > 1 {
             println!("Running with MPI: {mpi_size} ranks");
         }
+
+        // A whole-model mesh with no vacuum boundary gets a vacuum box, or
+        // the run is refused when its implicit complement holds a material.
+        self.close_mesh_geometry(is_root)?;
 
         // Nuclear-data replica weights: refuse what they do not carry yet, and
         // load covariance before the tables are prepared from the same data.
