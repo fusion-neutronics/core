@@ -1483,10 +1483,17 @@ pub fn reduce_chain(
     for name in &visited {
         if let Some(nuclide) = chain.get(name) {
             let mut nuc = nuclide.clone();
-            // Keep reactions/decays but clear targets that point outside the reduced set
+            // Keep reactions/decays but clear targets that point outside the
+            // reduced set. An `(n,X)` row that carries its MF=6 curve keeps its
+            // target: on such a row a null target says the evaluation gives no
+            // residual (and the reader refuses one with a curve), and the
+            // residuals' shares are normalised over every listed curve, so the
+            // row must stay whole. A target outside the reduced chain is then
+            // a loss in the matrix, as a cleared target is.
             for rx in nuc.reactions.iter_mut().chain(nuc.decays.iter_mut()) {
                 if let Some(ref target) = rx.target
                     && !visited.contains(target)
+                    && rx.multiplicity.is_none()
                 {
                     rx.target = None;
                 }
