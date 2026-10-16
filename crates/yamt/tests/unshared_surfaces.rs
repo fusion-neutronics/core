@@ -55,7 +55,8 @@ fn geometry(
         triangles,
         triangle_surface_ids,
         vertices,
-        physical_groups_json: r#"{"1": {"name": "mat:a", "dim": 3}, "2": {"name": "mat:b", "dim": 3}}"#.to_string(),
+        physical_groups_json:
+            r#"{"1": {"name": "mat:a", "dim": 3}, "2": {"name": "mat:b", "dim": 3}}"#.to_string(),
         surface_volumes_json: surface_volumes_json.to_string(),
         volume_measures: vec![],
     };
