@@ -497,3 +497,72 @@ fn the_default_contact_tolerance_ignores_a_graveyard() {
         assert!((tol - expected).abs() < 1e-15, "{graveyard:?}: {tol}");
     }
 }
+
+#[test]
+fn an_internal_face_does_not_move_a_particle_out_of_its_solid() {
+    // One solid, the unit box, with an internal face at z = 0.5 that has the
+    // box on both sides, as a file from another writer can have; the face is
+    // in the solid's surface list twice, once each way. Crossing it, whichever
+    // copy the ray meets first, the particle stays in the box.
+    for flip in [false, true] {
+        let mut vertices = Vec::new();
+        let mut triangles = Vec::new();
+        let n_box = push_box(
+            &mut vertices,
+            &mut triangles,
+            [0.0; 3],
+            [1.0; 3],
+            false,
+            false,
+        );
+        let o = vertices.len() as u32;
+        for &(x, y) in &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
+            vertices.push([x, y, 0.5]);
+        }
+        if flip {
+            triangles.push([o, o + 2, o + 1]);
+            triangles.push([o, o + 3, o + 2]);
+        } else {
+            triangles.push([o, o + 1, o + 2]);
+            triangles.push([o, o + 2, o + 3]);
+        }
+        let mut triangle_surface_ids = vec![1u32; n_box];
+        triangle_surface_ids.extend([2, 2]);
+        let data = ArrowMeshData {
+            triangle_aabbs: build_triangle_aabbs(&triangles, &vertices),
+            tet_aabbs: build_tet_aabbs(&[], &vertices),
+            tet_adjacency: vec![],
+            tetrahedra: vec![],
+            tet_volume_ids: vec![],
+            tet_physical_groups: vec![],
+            triangle_physical_groups: vec![1; triangles.len()],
+            triangles,
+            triangle_surface_ids,
+            vertices,
+            physical_groups_json: r#"{"1": {"name": "mat:a", "dim": 3}}"#.to_string(),
+            surface_volumes_json: "[[0, null], [0, 0]]".to_string(),
+            volume_measures: vec![],
+            imprinted: Some(false),
+            contact_tolerance: Some(0.01),
+            separated: vec![],
+        };
+        let geom = MeshGeometry::from_topology(build_topology(data).unwrap());
+        let n = (0.1f64 * 0.1 + 0.05 * 0.05 + 1.0).sqrt();
+        let dir = [0.1 / n, 0.05 / n, 1.0 / n];
+        for i in 0..20 {
+            for j in 0..20 {
+                // Points whose ray meets the internal face well inside the box.
+                let p = [
+                    0.05 + 0.045 * f64::from(i),
+                    0.05 + 0.045 * f64::from(j),
+                    0.25,
+                ];
+                let (t, cell) = next(&geom, 0, p, dir);
+                assert!(
+                    t > 0.0 && cell == Some(0),
+                    "flip {flip}, from {p:?}: {t} into {cell:?}"
+                );
+            }
+        }
+    }
+}
