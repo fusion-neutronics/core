@@ -113,3 +113,53 @@ fn delta_tracking_on_a_mesh_matches_surface_tracking() {
         }
     }
 }
+
+#[test]
+fn delta_tracking_reaches_a_mesh_from_a_source_outside_it() {
+    // A beam from outside the mesh's bounding box, with no graveyard or
+    // vacuum boundary anywhere: surface tracking flies it through the void
+    // implicit complement into the box, and so must delta tracking, rather
+    // than ending flights that land short of the box.
+    let iron = material("Fe56", 7.874, 1);
+    let flux = |mode: TrackingMode, seed: u64| {
+        let materials = HashMap::from([("water".to_string(), iron.clone())]);
+        let mesh = MeshGeometry::from_arrow(
+            std::path::Path::new("../yamt/tests/data/box.arrow"),
+            &materials,
+        )
+        .expect("load box.arrow");
+        let mut t = Tally::new();
+        t.filters = vec![Filter::Material(MaterialFilter::new(&iron))];
+        t.scores = vec![Score::Flux(FluxScore)];
+        t.reset_accumulation();
+        let tally = Arc::new(t);
+        let source = ParticleSource::Neutron(Source {
+            space: SourceSpatialDistribution::Point(Point::new([-3.0, 0.0, 0.0])),
+            angle: AngularDistribution::new_monodirectional(1.0, 0.0, 0.0),
+            energy: SourceEnergyDistribution::Discrete(
+                Discrete::new(vec![14.06e6], vec![1.0]).unwrap(),
+            ),
+            strength: 1.0,
+        });
+        let mut model = Model::new_with_mesh(mesh, vec![source], vec![tally.clone()]);
+        model.verbose = Verbose::silent();
+        model.tracking_mode = mode;
+        model
+            .simulate_transport(&TransportSettings {
+                total_particles: Some(HISTORIES),
+                seed,
+                ..Default::default()
+            })
+            .unwrap_or_else(|e| panic!("{mode:?} run failed: {e}"));
+        (tally.get_mean()[0], tally.get_std_dev()[0])
+    };
+    let (reference, reference_sd) = flux(TrackingMode::Surface, 1);
+    for (mode, seed) in [(TrackingMode::Woodcock, 2), (TrackingMode::Hybrid, 3)] {
+        let (mean, sd) = flux(mode, seed);
+        let z = (mean - reference) / sd.hypot(reference_sd);
+        assert!(
+            z.abs() < 5.0,
+            "{mode:?}: box flux {mean:.5e} +- {sd:.1e}, surface tracking {reference:.5e} +- {reference_sd:.1e} (z = {z:.1})"
+        );
+    }
+}

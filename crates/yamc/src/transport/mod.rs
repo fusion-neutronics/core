@@ -1396,9 +1396,8 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
         // (CSG: its learned neighbours, then a full scan; mesh: its
         // volume, then every volume). `None` here is a defensive
         // fallback: true vacuum exits are caught by woodcock_flight_exit
-        // above, so this only fires in numerical corner cases (a flight
-        // slipping between two of a mesh's vacuum triangles, say, and
-        // landing outside its bounding box). The delta-collision is outside the geometry,
+        // above, so this only fires in numerical corner cases (a mesh flight
+        // from a point that is not a number, say). The delta-collision is outside the geometry,
         // so the flight estimator scores nothing -- exactly the
         // behaviour that keeps it unbiased on leakage. (True
         // track-length mesh tallies are the exception: they score the

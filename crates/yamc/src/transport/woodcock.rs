@@ -158,7 +158,8 @@ pub(super) fn distance_to_geometry_exit(
 /// through the current body must not kill the flight -- so each
 /// candidate is confirmed with one `find_cell` probe just past the
 /// crossing. On a mesh the vacuum boundaries are triangles, one BVH
-/// query over them per flight, and the first one met is the exit. Draws
+/// query over them per flight, and the first one met is the exit, unless
+/// the flight leaves the mesh's bounding box for good first. Draws
 /// no RNG and allocates nothing: non-leaking flight histories are
 /// bit-identical with the check on, and this CPU function is the source
 /// of truth for a future GPU port.
@@ -172,10 +173,11 @@ pub(super) fn woodcock_flight_exit(
     d_flight: f64,
 ) -> Option<f64> {
     // A mesh's vacuum boundaries are triangles, not analytic surfaces, and
-    // nothing lies beyond them: the first one the flight meets is its exit.
+    // nothing lies beyond them: the first one the flight meets is its exit,
+    // as is leaving the mesh's bounding box for good.
     #[cfg(feature = "mesh")]
     if let GeometryKind::Mesh(mesh) = geometry {
-        return mesh.distance_to_vacuum(start, direction, d_flight);
+        return mesh.distance_to_exit(start, direction, d_flight);
     }
     if vacuum_surfaces.is_empty() {
         return None;

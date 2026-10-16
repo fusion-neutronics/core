@@ -245,31 +245,41 @@ impl MeshGeometry {
     }
 
     /// The cell containing `point`, asking `hint` (the cell the particle was
-    /// last in) first, or `None` outside the mesh's bounding box. Every
-    /// vacuum boundary, a graveyard included, lies inside that box, so a
-    /// point outside it has left the geometry; inside it, a point in no
-    /// volume is in the implicit complement.
+    /// last in) first. A point in no volume, inside the mesh's bounding box or
+    /// outside it, is in the implicit complement, as for
+    /// [`MeshGeometry::find_cell_index`]: leaving the geometry is found along
+    /// the flight ([`MeshGeometry::distance_to_exit`]). `None` only for a
+    /// point that is not a number.
     pub fn locate_cell(&self, point: (f64, f64, f64), hint: usize) -> Option<usize> {
         let p = [point.0, point.1, point.2];
-        let bb = &self.mesh.topology.global_aabb;
-        if (0..3).any(|k| p[k] < bb[k] || p[k] > bb[k + 3]) {
+        if !p.iter().all(|v| v.is_finite()) {
             return None;
         }
         let hint = self.volume_ids.get(hint).copied().unwrap_or(u32::MAX);
         Some(self.cell_of_volume(self.mesh.find_volume_from(hint, p)))
     }
 
-    /// Distance along a ray to the first vacuum-boundary triangle, if one
-    /// lies within `max_distance` (see
-    /// [`yamt::MeshGeometry::distance_to_vacuum`]).
-    pub(crate) fn distance_to_vacuum(
+    /// Distance along a flight to where it leaves the geometry, if that is
+    /// within `max_distance`: the first vacuum-boundary triangle it meets
+    /// (see [`yamt::MeshGeometry::distance_to_vacuum`]), or where it leaves
+    /// the mesh's bounding box for good, beyond which there is nothing to
+    /// meet. Surface tracking likewise ends a particle with no surface ahead.
+    /// A flight from a point that is not a number leaves at once.
+    pub(crate) fn distance_to_exit(
         &self,
         origin: [f64; 3],
         direction: [f64; 3],
         max_distance: f64,
     ) -> Option<f64> {
-        self.mesh
-            .distance_to_vacuum(origin, direction, max_distance)
+        if !origin.iter().chain(&direction).all(|v| v.is_finite()) {
+            return Some(0.0);
+        }
+        let leaves_box = box_exit(origin, direction, &self.mesh.topology.global_aabb);
+        let vacuum = self
+            .mesh
+            .distance_to_vacuum(origin, direction, max_distance.min(leaves_box));
+        let exit = vacuum.unwrap_or(leaves_box);
+        (exit <= max_distance).then_some(exit)
     }
 
     fn cell_of_volume(&self, vol: u32) -> usize {
@@ -364,6 +374,31 @@ impl MeshGeometry {
 /// The region is never evaluated during mesh transport (containment and
 /// boundary queries go through the mesh backend). We create a simple
 /// "inside an infinite sphere" region to satisfy the `Cell` constructor.
+/// Distance along a ray to where it leaves the box `[lo.., hi..]` for good: its
+/// exit from the box, or 0 when the box is not ahead at all.
+fn box_exit(origin: [f64; 3], direction: [f64; 3], bb: &[f64; 6]) -> f64 {
+    let (mut near, mut far) = (f64::NEG_INFINITY, f64::INFINITY);
+    for k in 0..3 {
+        if direction[k] == 0.0 {
+            if origin[k] < bb[k] || origin[k] > bb[k + 3] {
+                return 0.0;
+            }
+            continue;
+        }
+        let (a, b) = (
+            (bb[k] - origin[k]) / direction[k],
+            (bb[k + 3] - origin[k]) / direction[k],
+        );
+        near = near.max(a.min(b));
+        far = far.min(a.max(b));
+    }
+    if far < near.max(0.0) {
+        0.0
+    } else {
+        far
+    }
+}
+
 fn make_dummy_region() -> Region {
     let big_sphere = Arc::new(Surface {
         surface_id: None,
