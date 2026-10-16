@@ -472,11 +472,6 @@ impl Geometry {
                 None => return false,
             };
             let f = &self.fills[fill_idx as usize];
-            // A mesh made without imprinting overlaps by design (the slivers
-            // between two facetings), which this check would flag.
-            if f.mesh.is_discontinuous() {
-                return false;
-            }
             let vol_id = volume.unwrap_or(f.mesh.topology.implicit_complement);
             f.segment_blocked_world(vol_id, origin, direction, t_max)
         }
