@@ -103,10 +103,24 @@ def _route_faces(pa):
 
     A face goes to BRepMesh iff every solid owning it is "all-primitive" -- all
     of that solid's faces are primitive OCC surfaces (plane / cylinder / cone /
-    sphere / torus) -- or the face is a closed doubly-periodic surface (see
-    ``_is_closed_doubly_periodic``). Faces of solids with any b-spline /
-    imported surface otherwise go to the scene CDT. Returns
-    ``(brep_face_ids, scene_face_ids)``.
+    sphere / torus) or surfaces of revolution -- or the face is a closed
+    doubly-periodic surface (see ``_is_closed_doubly_periodic``). Faces of
+    solids with any other b-spline / imported surface go to the scene CDT.
+    Returns ``(brep_face_ids, scene_face_ids)``.
+
+    Surfaces of revolution count as primitive because the scene CDT meshes
+    them short: a profile revolved about an axis is u-periodic, and the CDT
+    closes its seam on itself (it logs "self-touching face boundary"), leaving
+    paramak tokamaks 40% short in face area and up to 99.9% short in solid
+    volume. BRepMesh meshes them to the requested deflection.
+
+    A face shared with a solid that is not all-primitive goes to the scene
+    CDT, and the two meshers discretize the edges between it and its
+    neighbours differently, which leaves cracks the fidelity gate cannot see.
+    So a solid with a surface of revolution goes to BRepMesh only if every
+    solid it shares a face with does too; otherwise it stays on the scene CDT
+    entirely, as before surfaces of revolution were routed here, where a
+    short mesh fails the fidelity gate rather than cracking.
     """
     from OCP.BRepAdaptor import BRepAdaptor_Surface
     from OCP.GeomAbs import (
@@ -115,23 +129,44 @@ def _route_faces(pa):
         GeomAbs_Cone,
         GeomAbs_Sphere,
         GeomAbs_Torus,
+        GeomAbs_SurfaceOfRevolution,
     )
 
     primitive_types = {
         GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Cone, GeomAbs_Sphere, GeomAbs_Torus,
+        GeomAbs_SurfaceOfRevolution,
     }
-    solid_all_primitive = {
-        sid: all(
-            BRepAdaptor_Surface(pa.face_to_occ[fid]).GetType() in primitive_types
-            for fid in fids
-        )
+    surface_types = {
+        sid: [BRepAdaptor_Surface(pa.face_to_occ[fid]).GetType() for fid in fids]
         for sid, fids in pa.solid_faces.items()
     }
+    brep_solids = {
+        sid for sid, types in surface_types.items()
+        if all(t in primitive_types for t in types)
+    }
+    revolved = {
+        sid for sid, types in surface_types.items()
+        if GeomAbs_SurfaceOfRevolution in types
+    }
+    neighbours = {sid: set() for sid in pa.solid_faces}
+    for info in pa.faces.values():
+        owners = set(info.owning_solids)
+        for sid in owners:
+            neighbours.setdefault(sid, set()).update(owners - {sid})
+    # Dropping one solid can expose another, so repeat until nothing changes.
+    changed = True
+    while changed:
+        drop = {
+            sid for sid in brep_solids & revolved
+            if not neighbours.get(sid, set()) <= brep_solids
+        }
+        brep_solids -= drop
+        changed = bool(drop)
 
     brep_fids, scene_fids = [], []
     for fid, info in pa.faces.items():
         owners = info.owning_solids
-        if owners and all(solid_all_primitive.get(s, False) for s in owners):
+        if owners and all(s in brep_solids for s in owners):
             brep_fids.append(fid)
         elif _is_closed_doubly_periodic(pa.face_to_occ[fid]):
             # Closed doubly-periodic b-spline faces (full-torus shells,
