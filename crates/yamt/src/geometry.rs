@@ -72,6 +72,16 @@ pub(crate) struct SurfaceBvhData {
     pub(crate) precomputed: PrecomputedTriData,
 }
 
+/// Triangles of the vacuum-boundary surfaces, for
+/// [`MeshGeometry::distance_to_vacuum`].
+#[derive(Clone)]
+struct VacuumBvh {
+    bvh: Bvh,
+    tri_ids: Vec<TriangleId>,
+    surf_ids: Vec<SurfaceId>,
+    precomputed: PrecomputedTriData,
+}
+
 /// Complete mesh geometry with acceleration structures, ready for queries.
 ///
 /// This is the primary public API of the crate. It mirrors the DAGMC
@@ -83,6 +93,11 @@ pub struct MeshGeometry {
 
     /// Per-volume surface BVH + mapping arrays.
     surface_bvhs: Vec<SurfaceBvhData>,
+
+    /// BVH over the triangles of every vacuum-boundary surface (`None` when
+    /// there are none), for [`MeshGeometry::distance_to_vacuum`]. Built on
+    /// first use: only delta tracking asks.
+    vacuum_bvh: std::sync::OnceLock<Option<VacuumBvh>>,
 
     /// Per-volume element BVH + mapping arrays.
     /// `element_bvhs[vol_id] = (bvh, tet_ids)`
@@ -141,6 +156,7 @@ impl MeshGeometry {
         Self {
             topology: topo,
             surface_bvhs,
+            vacuum_bvh: std::sync::OnceLock::new(),
             element_bvhs,
         }
     }
@@ -278,6 +294,48 @@ impl MeshGeometry {
     /// Find which volume contains a point.
     pub fn find_volume(&self, point: [f64; 3]) -> VolumeId {
         point_in_volume::find_volume(&self.topology, &self.surface_bvhs, point)
+    }
+
+    /// Which volume contains `point`, asking `hint` first. Volumes of a
+    /// valid mesh do not overlap, so a point inside `hint` is inside no other
+    /// and the answer is [`MeshGeometry::find_volume`]'s; the hint saves the
+    /// search over every volume when a particle has stayed where it was.
+    pub fn find_volume_from(&self, hint: VolumeId, point: [f64; 3]) -> VolumeId {
+        if hint < self.topology.num_volumes && self.point_in_volume(hint, point) {
+            return hint;
+        }
+        self.find_volume(point)
+    }
+
+    /// Distance from `origin` along `direction` to the first triangle of a
+    /// vacuum-boundary surface, if one lies within `max_distance`.
+    ///
+    /// Delta (Woodcock) tracking moves a particle through the mesh without
+    /// following its surfaces, so it asks this to end a flight where surface
+    /// tracking would have killed the particle.
+    pub fn distance_to_vacuum(
+        &self,
+        origin: [f64; 3],
+        direction: [f64; 3],
+        max_distance: f64,
+    ) -> Option<f64> {
+        let sd = self
+            .vacuum_bvh
+            .get_or_init(|| build_vacuum_bvh(&self.topology))
+            .as_ref()?;
+        ray_fire::ray_fire(
+            &sd.bvh,
+            &sd.tri_ids,
+            &sd.surf_ids,
+            &sd.precomputed.v0,
+            &sd.precomputed.edge1,
+            &sd.precomputed.edge2,
+            origin,
+            direction,
+            None,
+        )
+        .map(|hit| hit.distance)
+        .filter(|&t| t <= max_distance)
     }
 
     /// Get the volume on the other side of a surface.
@@ -569,6 +627,49 @@ fn build_surface_bvhs(topo: &MeshTopology) -> Vec<SurfaceBvhData> {
     }
 }
 
+/// BVH over the triangles of every vacuum-boundary surface, `None` when the
+/// mesh has none.
+fn build_vacuum_bvh(topo: &MeshTopology) -> Option<VacuumBvh> {
+    let mut surfaces: Vec<SurfaceId> = topo
+        .physical_data
+        .surface_bcs
+        .iter()
+        .filter(|&(_, &bc)| bc == BoundaryCondition::Vacuum)
+        .map(|(&surf_id, _)| surf_id)
+        .collect();
+    if surfaces.is_empty() {
+        return None;
+    }
+    // Map order is arbitrary; a fixed one keeps the BVH reproducible.
+    surfaces.sort_unstable();
+    let mut tri_ids = Vec::new();
+    let mut surf_ids = Vec::new();
+    let mut aabbs = Vec::new();
+    let mut v0 = Vec::new();
+    let mut edge1 = Vec::new();
+    let mut edge2 = Vec::new();
+    for surf_id in surfaces {
+        let range = &topo.surface_tri_ranges[surf_id as usize];
+        for i in range.start..range.end {
+            let tri_id = topo.surface_tri_indices[i as usize];
+            let tri = &topo.triangles[tri_id as usize];
+            let a = topo.vertices[tri[0] as usize];
+            tri_ids.push(tri_id);
+            surf_ids.push(surf_id);
+            aabbs.push(topo.triangle_aabbs[tri_id as usize]);
+            v0.push(a);
+            edge1.push(intersect::sub(topo.vertices[tri[1] as usize], a));
+            edge2.push(intersect::sub(topo.vertices[tri[2] as usize], a));
+        }
+    }
+    Some(VacuumBvh {
+        bvh: Bvh::build(&aabbs),
+        tri_ids,
+        surf_ids,
+        precomputed: PrecomputedTriData { v0, edge1, edge2 },
+    })
+}
+
 /// Build per-volume element BVHs (for point-in-tet queries).
 fn build_element_bvhs(topo: &MeshTopology) -> Vec<(Bvh, Vec<TetrahedronId>)> {
     let iter = 0..topo.num_volumes;
@@ -631,6 +732,42 @@ mod tests {
             geom.find_volume([0.5, 0.5, -1.0]),
             geom.topology.implicit_complement
         );
+    }
+
+    fn sphere_in_cube_geometry() -> MeshGeometry {
+        MeshGeometry::from_arrow(std::path::Path::new("tests/data/sphere_in_cube.arrow")).unwrap()
+    }
+
+    #[test]
+    fn distance_to_vacuum_stops_only_at_a_vacuum_boundary() {
+        // A sphere inside a 20 cm cube whose outside is a vacuum boundary.
+        // From the centre the sphere's (transmission) surface comes first
+        // and does not count; the cube face 10 cm away does.
+        let geom = sphere_in_cube_geometry();
+        let d = geom
+            .distance_to_vacuum([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 100.0)
+            .expect("the cube face is a vacuum boundary");
+        assert!((d - 10.0).abs() < 1e-9, "d = {d}");
+        // A flight that stops short of it does not leave.
+        assert_eq!(
+            geom.distance_to_vacuum([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 9.0),
+            None
+        );
+    }
+
+    #[test]
+    fn find_volume_from_answers_as_find_volume_whatever_the_hint() {
+        let geom = sphere_in_cube_geometry();
+        let ic = geom.implicit_complement();
+        for point in [[0.0, 0.0, 0.0], [8.0, 1.0, -2.0], [20.0, 0.0, 0.0]] {
+            for hint in [0, 1, ic, u32::MAX] {
+                assert_eq!(
+                    geom.find_volume_from(hint, point),
+                    geom.find_volume(point),
+                    "point {point:?}, hint {hint}"
+                );
+            }
+        }
     }
 
     #[test]

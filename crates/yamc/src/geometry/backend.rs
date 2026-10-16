@@ -162,6 +162,27 @@ impl GeometryKind {
         }
     }
 
+    /// The cell containing `point`, searched from `hint` (the cell the
+    /// particle was last in), or `None` outside the geometry.
+    ///
+    /// CSG asks the cells `hint` has learned as neighbours first, then every
+    /// cell. A mesh asks `hint`'s volume first, then every volume, by point
+    /// containment: its cells carry placeholder CSG regions that contain
+    /// every point, so a neighbour-list search over them would put every
+    /// point in the first cell.
+    pub(crate) fn locate_cell(
+        &self,
+        neighbor_lists: &mut crate::geometry::neighbor_lists::NeighborLists,
+        point: (f64, f64, f64),
+        hint: usize,
+    ) -> Option<usize> {
+        match self {
+            GeometryKind::Csg(g) => neighbor_lists.find_cell(&g.cells, point, hint),
+            #[cfg(feature = "mesh")]
+            GeometryKind::Mesh(g) => g.locate_cell(point, hint),
+        }
+    }
+
     /// Find the first cell containing the given point.
     pub fn find_cell(&self, point: (f64, f64, f64)) -> Option<&Cell> {
         self.find_cell_index(point).map(|idx| &self.cells()[idx])
