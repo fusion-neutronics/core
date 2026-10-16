@@ -35,6 +35,17 @@ def _solid_triangles(mesh):
     }
 
 
+def _own_vertices(vertices, tris):
+    """*tris* re-indexed over just the vertices they use, as
+    ``(vertices, tris)``."""
+    index = {}
+    local = [[index.setdefault(i, len(index)) for i in tri] for tri in tris]
+    own = [None] * len(index)
+    for i, j in index.items():
+        own[j] = vertices[i]
+    return own, local
+
+
 def _solid_volumes(mesh):
     """Each solid's mesh volume, by the divergence theorem over its faces,
     each face signed by whether it is reversed in that solid."""
@@ -92,6 +103,7 @@ def resolve_smaller_wins(mesh, found, contact_tolerance, samples=200_000):
     """
     tris = _solid_triangles(mesh)
     volumes = _solid_volumes(mesh)
+    own = {}  # solid -> its triangles over its own vertices
     pairs = []
     lines = []
     given_up = {sid: 0.0 for sid in volumes}
@@ -99,8 +111,20 @@ def resolve_smaller_wins(mesh, found, contact_tolerance, samples=200_000):
     inside = set()  # (outer, inner): inner lies wholly inside outer
     for a, b, depth, _exposure in found:
         low, high = sorted((a, b), key=lambda s: (-volumes[s], s))
+        for sid in (low, high):
+            if sid not in own:
+                own[sid] = _own_vertices(mesh.vertices, tris[sid])
+        # Only the pair's own vertices go across: the whole model's made every
+        # pair cost as much as the model, which a part in a big assembly,
+        # overlapping many others, paid many times over.
+        (verts_low, tris_low), (verts_high, tris_high) = own[low], own[high]
+        n = len(verts_low)
         shared, err, embedded = solid_shared_volume(
-            mesh.vertices, tris[low], tris[high], contact_tolerance, samples
+            verts_low + verts_high,
+            tris_low,
+            [[i + n for i in tri] for tri in tris_high],
+            contact_tolerance,
+            samples,
         )
         if embedded is not None:
             inner = (low, high)[embedded]
