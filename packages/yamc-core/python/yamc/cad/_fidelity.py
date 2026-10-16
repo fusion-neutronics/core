@@ -13,8 +13,10 @@ Two deterministic checks, both against exact OCC properties:
   degenerate seam-wire meshes this catches sit near half the true area.
 - per-solid volume: the divergence-theorem volume of every solid shell
   against the OCC solid volume, catching global distortion that happens to
-  preserve area. A negative volume means the solid was meshed inside out,
-  which transport reads as the solid's complement.
+  preserve area. A negative mesh volume means the facets enclose the solid
+  the wrong way round (inside out, or with surfaces that cross), which
+  transport reads as the solid's complement. A CAD solid whose own volume is
+  negative (a reversed solid) is reported as such.
 
 Tolerances scale with the requested deflection so legitimately coarse
 meshes of small parts do not trip the gate.
@@ -34,11 +36,11 @@ def _occ_face_area(occ_face):
     return props.Mass()
 
 
-def _occ_solid_volume(shape):
+def _occ_signed_volume(shape):
     occ = getattr(shape, "wrapped", shape)
     props = GProp_GProps()
     BRepGProp.VolumeProperties_s(occ, props)
-    return abs(props.Mass())
+    return props.Mass()
 
 
 def check_mesh_fidelity(mesh, pa, tolerance):
@@ -108,8 +110,14 @@ def check_mesh_fidelity(mesh, pa, tolerance):
         shape = pa.solid_shapes.get(sid)
         if shape is None:
             continue
-        vol_occ = _occ_solid_volume(shape)
-        if vol_occ <= 0.0:
+        vol_occ = _occ_signed_volume(shape)
+        if vol_occ < 0.0:
+            problems.append(
+                f"solid {sid}: inside out in the CAD (volume {vol_occ:.6g}), "
+                f"its faces point into it, as for a reversed solid"
+            )
+            continue
+        if vol_occ == 0.0:
             continue
         total = 0.0
         area_sum = 0.0
@@ -117,21 +125,28 @@ def check_mesh_fidelity(mesh, pa, tolerance):
             sign = -1.0 if mesh.face_solid_reversed.get((sid, fid)) else 1.0
             total += sign * face_signed_vol.get(fid, 0.0)
             area_sum += face_area.get(fid, 0.0)
-        vol_mesh = abs(total)
         r_eff = 3.0 * vol_occ / max(area_sum, 1e-12)
         allowed = max(0.02, 8.0 * tolerance / max(r_eff, 1e-12))
-        rel = abs(vol_mesh - vol_occ) / vol_occ
+        if total < 0.0:
+            # Transport would read the solid from the wrong side of its
+            # facets. A mesh pointing the wrong way everywhere has the right
+            # volume, negated; anything else has surfaces that cross.
+            if abs(-total - vol_occ) <= min(allowed, 0.1) * vol_occ:
+                problems.append(
+                    f"solid {sid}: meshed inside out, its facets point into it "
+                    f"(mesh volume {total:.6g} vs CAD {vol_occ:.6g})"
+                )
+            else:
+                problems.append(
+                    f"solid {sid}: mesh volume {total:.6g} vs CAD {vol_occ:.6g} "
+                    f"is negative: its surfaces cross, or its facets point into it"
+                )
+            continue
+        rel = abs(total - vol_occ) / vol_occ
         if rel > allowed:
             problems.append(
                 f"solid {sid}: mesh volume {total:.6g} vs CAD {vol_occ:.6g} "
                 f"({rel * 100:.1f}% off, allowed {allowed * 100:.1f}%)"
-            )
-        elif total < 0.0:
-            # The right volume with every facet pointing the wrong way:
-            # transport would read the solid as its complement.
-            problems.append(
-                f"solid {sid}: meshed inside out, its facets point into it "
-                f"(mesh volume {total:.6g} vs CAD {vol_occ:.6g})"
             )
 
     return problems

@@ -1,11 +1,11 @@
 """Parts placed by a mirroring location.
 
 A mirroring location (one with a negative determinant) is the usual way to
-place the left and right copies of a symmetric part, and STEP assemblies use
-them for the same reason. OCC reads a solid placed that way inside out: its
-face normals point into it and its volume integrates negative. Meshed as it
-was, its facets pointed into it. Imprinting it went wrong as well: the result
-had an extra solid, and every solid was named after the mirrored part.
+place the left and right copies of a symmetric part. OCC reads a solid placed
+that way inside out: its face normals point into it and its volume integrates
+negative. Meshed as it was, its facets pointed into it. Imprinting it went
+wrong as well: the result had an extra solid, and every solid was named after
+the mirrored part.
 """
 
 import os
@@ -14,16 +14,43 @@ import pytest
 import yamc
 
 cq = pytest.importorskip("cadquery")
-from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt, gp_Trsf  # noqa: E402
+from OCP.gp import gp_Ax2, gp_Ax3, gp_Dir, gp_Pnt, gp_Trsf  # noqa: E402
 from yamc.cad import CadToYamc  # noqa: E402
-from yamc.cad._fidelity import check_mesh_fidelity  # noqa: E402
+from yamc.cad._fidelity import MeshFidelityError, check_mesh_fidelity  # noqa: E402
 from yamc.cad.assembly_processor import process_assembly  # noqa: E402
 
 
-def _mirror_in_yz():
-    trsf = gp_Trsf()
-    trsf.SetMirror(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(1, 0, 0)))
-    return cq.Location(trsf)
+def _placements():
+    """Placements taking the box at x = 0..10 to x = -10..0, each with a
+    flag for whether the box goes in reversed."""
+    in_yz = gp_Trsf()
+    in_yz.SetMirror(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(1, 0, 0)))
+    through_origin = gp_Trsf()
+    through_origin.SetMirror(gp_Pnt(0, 0, 0))
+    # A frame mirrored in the yz plane: OCC keeps this reflection in the
+    # matrix, with a positive scale factor.
+    in_mirrored_frame = gp_Trsf()
+    in_mirrored_frame.SetTransformation(
+        gp_Ax3().Mirrored(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(1, 0, 0))), gp_Ax3()
+    )
+    # Two reflections, (x, y) -> (-x, -y), make a rotation, though OCC
+    # keeps one in the scale factor's sign and the other in the matrix.
+    in_xz = gp_Trsf()
+    in_xz.SetMirror(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 1, 0)))
+    x_reversed = gp_Ax3()
+    x_reversed.XReverse()
+    flip_x = gp_Trsf()
+    flip_x.SetTransformation(x_reversed)
+    return {
+        "mirror in a plane": (in_yz, False),
+        "mirror through a point": (through_origin, False),
+        "mirrored frame": (in_mirrored_frame, False),
+        "reversed solid through a mirror": (in_yz, True),
+        "two reflections": (in_xz.Multiplied(flip_x), False),
+    }
+
+
+PLACEMENTS = list(_placements())
 
 
 def _box_from(x0):
@@ -31,14 +58,23 @@ def _box_from(x0):
     return cq.Workplane().box(10, 10, 10).translate((x0 + 5, 0, 0))
 
 
-def _row(mirrored):
-    """Three touching 10 cm boxes in a row from x = -10 to 20. The left one
-    is either the box at 0..10 placed through a mirror, or built in place."""
+def _left(placement):
+    """The left box, from -10 to 0: built in place when *placement* is None,
+    otherwise the box at 0..10 placed by the named placement."""
+    if placement is None:
+        return _box_from(-10), cq.Location()
+    trsf, reverse = _placements()[placement]
+    shape = _box_from(0).val()
+    if reverse:
+        shape = cq.Solid(shape.wrapped.Reversed())
+    return shape, cq.Location(trsf)
+
+
+def _row(placement):
+    """Three touching 10 cm boxes in a row from x = -10 to 20."""
+    shape, loc = _left(placement)
     assembly = cq.Assembly()
-    if mirrored:
-        assembly.add(_box_from(0), name="left", loc=_mirror_in_yz())
-    else:
-        assembly.add(_box_from(-10), name="left")
+    assembly.add(shape, name="left", loc=loc)
     assembly.add(_box_from(0), name="middle")
     assembly.add(_box_from(10), name="right")
     return assembly
@@ -66,8 +102,9 @@ def _signed_volumes(mesh):
     }
 
 
-def test_a_mirrored_part_imprints_into_its_own_solid():
-    result = process_assembly(_row(mirrored=True), ["steel", "lead", "water"])
+@pytest.mark.parametrize("placement", PLACEMENTS)
+def test_a_mirrored_part_imprints_into_its_own_solid(placement):
+    result = process_assembly(_row(placement), ["steel", "lead", "water"])
     placed = {}
     for sid, tag in enumerate(result.material_tags, start=1):
         solid = result.solid_shapes[sid]
@@ -82,9 +119,11 @@ def test_a_mirrored_part_imprints_into_its_own_solid():
     assert len(result.shared_faces) == 2
 
 
-def test_a_lone_mirrored_part_is_meshed_facing_out():
+@pytest.mark.parametrize("placement", PLACEMENTS)
+def test_a_lone_mirrored_part_is_meshed_facing_out(placement):
+    shape, loc = _left(placement)
     assembly = cq.Assembly()
-    assembly.add(_box_from(0), name="left", loc=_mirror_in_yz())
+    assembly.add(shape, name="left", loc=loc)
     c2y = CadToYamc()
     c2y.add_cadquery_object(assembly, material_tags=["steel"])
     mesh = c2y.mesh()
@@ -93,16 +132,45 @@ def test_a_lone_mirrored_part_is_meshed_facing_out():
     assert (min(xs), max(xs)) == pytest.approx((-10.0, 0.0))
 
 
-def test_the_fidelity_gate_refuses_a_solid_meshed_inside_out():
+def _box_mesh():
+    """A 10 cm box centred on the origin, meshed, with its converter."""
     assembly = cq.Assembly()
-    assembly.add(_box_from(0), name="box")
+    assembly.add(cq.Workplane().box(10, 10, 10), name="box")
     c2y = CadToYamc()
     c2y.add_cadquery_object(assembly, material_tags=["steel"])
     mesh = c2y.mesh()
     assert check_mesh_fidelity(mesh, c2y._processed, 0.1) == []
+    return c2y, mesh
+
+
+def test_the_fidelity_gate_refuses_a_solid_meshed_inside_out():
+    c2y, mesh = _box_mesh()
     mesh.triangles = [[t[0], t[2], t[1]] for t in mesh.triangles]
     problems = check_mesh_fidelity(mesh, c2y._processed, 0.1)
-    assert len(problems) == 1 and "inside out" in problems[0], problems
+    assert len(problems) == 1 and "meshed inside out" in problems[0], problems
+
+
+def test_the_fidelity_gate_refuses_a_mesh_whose_volume_comes_out_negative():
+    # Each face of a box centred on the origin holds a sixth of its volume,
+    # so turning four faces round leaves -1/3 of it: not the box inside out,
+    # but no box either.
+    c2y, mesh = _box_mesh()
+    turned = sorted(set(mesh.triangle_face_ids))[:4]
+    mesh.triangles = [
+        [t[0], t[2], t[1]] if fid in turned else t
+        for t, fid in zip(mesh.triangles, mesh.triangle_face_ids)
+    ]
+    problems = check_mesh_fidelity(mesh, c2y._processed, 0.1)
+    assert len(problems) == 1 and "is negative" in problems[0], problems
+
+
+def test_the_fidelity_gate_names_a_solid_that_is_inside_out_in_the_cad():
+    assembly = cq.Assembly()
+    assembly.add(cq.Solid(_box_from(0).val().wrapped.Reversed()), name="box")
+    c2y = CadToYamc()
+    c2y.add_cadquery_object(assembly, material_tags=["steel"])
+    with pytest.raises(MeshFidelityError, match="inside out in the CAD"):
+        c2y.mesh()
 
 
 def _materials():
@@ -120,11 +188,11 @@ def _materials():
     return out
 
 
-def _fluxes(tmp_path, mirrored):
+def _fluxes(tmp_path, placement):
     c2y = CadToYamc()
-    c2y.add_cadquery_object(_row(mirrored), material_tags=["steel", "lead", "beryllium"])
+    c2y.add_cadquery_object(_row(placement), material_tags=["steel", "lead", "beryllium"])
     c2y.mesh()
-    path = os.path.join(tmp_path, f"row_{mirrored}.arrow")
+    path = os.path.join(tmp_path, f"row_{placement}.arrow")
     c2y.to_arrow(path)
     materials = _materials()
     geometry = yamc.MeshGeometry(path, materials, graveyard_offset=1.0)
@@ -143,8 +211,9 @@ def _fluxes(tmp_path, mirrored):
     return {t.name: results[t.name].mean[0] for t in tallies}
 
 
-def test_a_mirrored_part_transports_like_the_part_built_in_place(tmp_path):
-    mirrored = _fluxes(tmp_path, mirrored=True)
-    in_place = _fluxes(tmp_path, mirrored=False)
+@pytest.mark.parametrize("placement", ["mirror in a plane", "mirrored frame"])
+def test_a_mirrored_part_transports_like_the_part_built_in_place(tmp_path, placement):
+    mirrored = _fluxes(tmp_path, placement)
+    in_place = _fluxes(tmp_path, None)
     assert all(flux > 0.0 for flux in in_place.values())
     assert mirrored == pytest.approx(in_place, rel=1e-3)

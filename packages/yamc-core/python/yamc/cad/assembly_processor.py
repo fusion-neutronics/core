@@ -17,6 +17,7 @@ from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
 from OCP.BRepGProp import BRepGProp
 from OCP.GProp import GProp_GProps
 from OCP.TopLoc import TopLoc_Location
+from OCP.gp import gp_Trsf
 from OCP.TopoDS import TopoDS
 
 
@@ -44,16 +45,37 @@ class ProcessedAssembly:
     solid_shapes: dict = field(default_factory=dict)  # solid_id -> CadQuery Shape
 
 
+def _signed_volume(shape):
+    props = GProp_GProps()
+    BRepGProp.VolumeProperties_s(shape, props)
+    return props.Mass()
+
+
 def _is_mirrored(solid):
-    """Whether *solid* is placed by a mirroring (negative determinant) location."""
-    return solid.wrapped.Location().Transformation().IsNegative()
+    """Whether *solid* is placed by a mirroring (negative determinant) location.
+
+    ``gp_Trsf.IsNegative`` is not enough: it reads only the sign of the scale
+    factor, and OCC can keep a reflection in the matrix instead, for instance
+    for a placement in a mirrored frame.
+    """
+    trsf = solid.wrapped.Location().Transformation()
+    return trsf.VectorialPart().Determinant() < 0.0
 
 
 def _unmirrored(solid):
     """*solid* with its mirroring placement copied into its geometry."""
-    trsf = solid.wrapped.Location().Transformation()
+    placed = solid.wrapped.Location().Transformation()
+    # The copy turns the faces round only when the scale factor is negative.
+    # Rebuilding the transformation from its coefficients moves a reflection
+    # held in the matrix into the scale factor's sign.
+    trsf = gp_Trsf()
+    trsf.SetValues(*(placed.Value(r, c) for r in (1, 2, 3) for c in (1, 2, 3, 4)))
     bare = solid.wrapped.Located(TopLoc_Location())
-    return cq.Solid(BRepBuilderAPI_Transform(bare, trsf, True).Shape())
+    baked = BRepBuilderAPI_Transform(bare, trsf, True).Shape()
+    if _signed_volume(baked) < 0.0:
+        # It was inside out under its mirror too: a reversed solid.
+        baked = baked.Reversed()
+    return cq.Solid(baked)
 
 
 def _bake_mirrored_parts(assembly):
