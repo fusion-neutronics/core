@@ -161,7 +161,14 @@ def _write_touching_boxes(path, **provenance):
     )
 
 
-def _two_box_fluxes(path, **kwargs):
+def _two_box_fluxes(path, allow_lost=False, **kwargs):
+    """Fluxes in cubes a and b, and the number of particles lost.
+
+    ``allow_lost`` is for the runs that track touching solids with separate
+    surfaces conformally on purpose: a particle carried past the unshared
+    interface has no surface ahead and is counted as lost, so those runs are
+    allowed to lose particles rather than stop at the default limit.
+    """
     mats = {}
     for tag in "ab":
         m = yamc.Material(composition={"Be9": 1.0}, density=1.85, name=tag, temperature=294)
@@ -175,9 +182,11 @@ def _two_box_fluxes(path, **kwargs):
         source=yamc.NeutronSource(
             energy=yamc.sources.Discrete([14.06e6], [1.0]), position=(5.0, 5.0, 5.0)
         ),
+        max_lost_particles=5_000 if allow_lost else 10,
     )
     results = model.simulate_transport(total_particles=5_000, seed=3)
-    return geometry, [float(results[t].mean[0]) for t in tallies]
+    fluxes = [float(results[t].mean[0]) for t in tallies]
+    return geometry, fluxes, len(model.lost_particles)
 
 
 def test_contact_tolerance_tracks_a_mesh_from_another_writer(tmp_path):
@@ -188,17 +197,23 @@ def test_contact_tolerance_tracks_a_mesh_from_another_writer(tmp_path):
     _write_touching_boxes(path)
 
     with pytest.warns(UserWarning, match="contact_tolerance"):
-        conformal, (_, b_conformal) = _two_box_fluxes(path)
+        conformal, (_, b_conformal), lost_conformal = _two_box_fluxes(
+            path, allow_lost=True
+        )
     assert not conformal.discontinuous
+    # The conformal tracking is wrong, and loudly so: particles carried past
+    # the unshared interface are lost.
+    assert lost_conformal > 0
 
-    forced, (a, b) = _two_box_fluxes(path, contact_tolerance=1e-3)
+    forced, (a, b), lost = _two_box_fluxes(path, contact_tolerance=1e-3)
+    assert lost == 0
     assert forced.discontinuous
     assert forced.contact_tolerance == pytest.approx(1e-3)
     assert b > 10 * b_conformal, (b, b_conformal)
 
     recorded = str(tmp_path / "recorded.arrow")
     _write_touching_boxes(recorded, imprinted=False, contact_tolerance=1e-3)
-    from_file, (a2, b2) = _two_box_fluxes(recorded)
+    from_file, (a2, b2), _ = _two_box_fluxes(recorded)
     assert from_file.discontinuous
     # Same tracking either way; only the threaded tally reduction may round
     # differently in the last bit.
@@ -389,12 +404,13 @@ def test_overlaps_option_is_checked():
 
 def test_a_mesh_from_another_writer_whose_solids_touch_is_flagged(tmp_path):
     """Touching solids with separate surfaces and no provenance in the file
-    are tracked conformally, which skips the solid on the far side without
-    losing a particle: warn, and say how to track it properly."""
+    are tracked conformally, which skips the solid on the far side (the
+    particles carried past are lost): warn, and say how to track it
+    properly."""
     path = str(tmp_path / "boxes.arrow")
     _write_touching_boxes(path)
     with pytest.warns(UserWarning, match="contact_tolerance"):
-        _two_box_fluxes(path)
+        _two_box_fluxes(path, allow_lost=True)
 
     import warnings
 
@@ -410,7 +426,7 @@ def test_an_imprint_that_left_touching_solids_unshared_is_flagged(tmp_path):
     path = str(tmp_path / "boxes.arrow")
     _write_touching_boxes(path, imprinted=True)
     with pytest.warns(UserWarning, match="imprint did not join them"):
-        _two_box_fluxes(path)
+        _two_box_fluxes(path, allow_lost=True)
 
 
 def test_a_gap_in_the_cad_is_recorded_and_kept(tmp_path):
