@@ -13,7 +13,8 @@ Two deterministic checks, both against exact OCC properties:
   degenerate seam-wire meshes this catches sit near half the true area.
 - per-solid volume: the divergence-theorem volume of every solid shell
   against the OCC solid volume, catching global distortion that happens to
-  preserve area.
+  preserve area. A negative volume means the solid was meshed inside out,
+  which transport reads as the solid's complement.
 
 Tolerances scale with the requested deflection so legitimately coarse
 meshes of small parts do not trip the gate.
@@ -122,8 +123,15 @@ def check_mesh_fidelity(mesh, pa, tolerance):
         rel = abs(vol_mesh - vol_occ) / vol_occ
         if rel > allowed:
             problems.append(
-                f"solid {sid}: mesh volume {vol_mesh:.6g} vs CAD {vol_occ:.6g} "
+                f"solid {sid}: mesh volume {total:.6g} vs CAD {vol_occ:.6g} "
                 f"({rel * 100:.1f}% off, allowed {allowed * 100:.1f}%)"
+            )
+        elif total < 0.0:
+            # The right volume with every facet pointing the wrong way:
+            # transport would read the solid as its complement.
+            problems.append(
+                f"solid {sid}: meshed inside out, its facets point into it "
+                f"(mesh volume {total:.6g} vs CAD {vol_occ:.6g})"
             )
 
     return problems

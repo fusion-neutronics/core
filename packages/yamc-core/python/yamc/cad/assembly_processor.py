@@ -13,8 +13,10 @@ import cadquery as cq
 from OCP.TopAbs import TopAbs_FACE, TopAbs_REVERSED
 from OCP.TopExp import TopExp_Explorer
 from OCP.BRepAdaptor import BRepAdaptor_Surface
+from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
 from OCP.BRepGProp import BRepGProp
 from OCP.GProp import GProp_GProps
+from OCP.TopLoc import TopLoc_Location
 from OCP.TopoDS import TopoDS
 
 
@@ -40,6 +42,47 @@ class ProcessedAssembly:
     # (i.e. the UV surface normal points inward to the solid)
     imprinted_compound: object = None  # OCC compound (source of the global edge map)
     solid_shapes: dict = field(default_factory=dict)  # solid_id -> CadQuery Shape
+
+
+def _is_mirrored(solid):
+    """Whether *solid* is placed by a mirroring (negative determinant) location."""
+    return solid.wrapped.Location().Transformation().IsNegative()
+
+
+def _unmirrored(solid):
+    """*solid* with its mirroring placement copied into its geometry."""
+    trsf = solid.wrapped.Location().Transformation()
+    bare = solid.wrapped.Located(TopLoc_Location())
+    return cq.Solid(BRepBuilderAPI_Transform(bare, trsf, True).Shape())
+
+
+def _bake_mirrored_parts(assembly):
+    """The assembly's parts as iterating it gives them, with every mirrored
+    solid turned into an ordinary one in the same place.
+
+    A solid placed by a mirroring location, the usual way to place the left
+    and right copies of a symmetric part, is inside out to OCC: its face
+    normals point into it and its volume integrates negative. Meshed as it
+    is, its facets point into it, and transport through it is wrong without
+    losing a particle. Imprinting it goes wrong as well:
+    BOPAlgo_MakeConnected returns extra solids and names every unmodified
+    output after the mirrored part. Copying the geometry through the mirror
+    gives an ordinary solid that OCC and the mesher both read the right way
+    round. Parts without a mirrored solid pass through untouched.
+
+    Returns:
+        List of ``(shape, name, location, color)``, one per part, in the
+        assembly's order.
+    """
+    parts = []
+    for obj, name, loc, color in assembly:
+        solids = obj.moved(loc).Solids()
+        if not any(_is_mirrored(s) for s in solids):
+            parts.append((obj, name, loc, color))
+            continue
+        baked = [_unmirrored(s) if _is_mirrored(s) else s for s in solids]
+        parts.append((cq.Compound.makeCompound(baked), name, cq.Location(), color))
+    return parts
 
 
 def _imprint_assembly(assembly):
@@ -88,6 +131,10 @@ def process_assembly(
     Returns:
         ProcessedAssembly with topology data and imprinted compound.
     """
+    # Everything below only iterates the parts, and no mirrored solid may
+    # reach any of it.
+    assembly = _bake_mirrored_parts(assembly)
+
     # Step 1: Imprint the assembly
     imprinted_compound, imprinted_solids_with_ids = _imprint_assembly(assembly)
 
