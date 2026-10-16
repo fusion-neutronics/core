@@ -18,6 +18,10 @@ from OCP.GProp import GProp_GProps
 from OCP.TopoDS import TopoDS
 
 
+class OverlappingSolidsError(ValueError):
+    """Two input solids claim the same region of space."""
+
+
 @dataclass
 class FaceInfo:
     """Information about a single BRep face."""
@@ -72,6 +76,83 @@ def _imprint_assembly(assembly):
     return imprint(assembly)
 
 
+def _refuse_lost_or_shared_inputs(assembly, imprinted_solids_with_ids):
+    """Raise unless every input solid comes out of the imprint as its own.
+
+    Two ways an overlap between inputs goes wrong, both silently: an imprinted
+    solid with more than one input as its origin (tagging it with the first
+    origin's material removes it from the others), and an input that comes
+    out smaller than it went in (a part sitting inside a body that was never
+    cut comes back as a piece of the body, so its material vanishes).
+    Either way transport loses no particles to show it. cad-to-dagmc-mesher
+    refuses the same things.
+
+    Origins are assembly names, so the second is checked by volume: the
+    imprinted solids an input name is an origin of must hold all the volume
+    its solids had, a piece counted once per time the name is among its
+    origins (two overlapping solids under one name share a piece that lists
+    the name twice). That also catches one of several solids under a name
+    being absorbed while the others survive. Volumes are integrated to a
+    relative precision of 1e-7: OCC's default integration is off by up to a
+    few percent on revolved and spline solids, and differently once the
+    imprint splits their faces. Assembly nodes without solids (a face, a
+    wire) are not inputs.
+
+    Overlaps whose surfaces cross without coinciding are not split by the
+    imprint at all: both solids come back whole, each with its own origin,
+    and are not caught here.
+    """
+    def short(name):
+        return name.rsplit("/", 1)[-1]
+
+    def volume_of(solid):
+        # A mirroring location turns the integrated volume negative.
+        props = GProp_GProps()
+        BRepGProp.VolumeProperties_s(getattr(solid, "wrapped", solid), props, 1e-7)
+        return abs(props.Mass())
+
+    volume_in = {}
+    for obj, name, loc, _ in assembly:
+        for solid in obj.moved(loc).Solids():
+            volume_in[name] = volume_in.get(name, 0.0) + volume_of(solid)
+    volume_out = {}
+    shared = []
+    for solid, origins in imprinted_solids_with_ids.items():
+        volume = volume_of(solid)
+        for name in origins:
+            volume_out[name] = volume_out.get(name, 0.0) + volume
+        names = list(dict.fromkeys(origins))
+        if len(names) > 1:
+            shared.append((volume, [short(n) for n in names]))
+    lost = []
+    for name, v_in in volume_in.items():
+        v_out = volume_out.get(name, 0.0)
+        if v_out <= 0.0:
+            lost.append(f"{short(name)!r} was absorbed into another solid")
+        elif v_out < v_in * (1.0 - 1e-4):
+            lost.append(
+                f"{short(name)!r} came out with {v_out:.6g} of its {v_in:.6g} volume "
+                "(part of it was absorbed into another solid)"
+            )
+    if not lost and not shared:
+        return
+    lines = lost + [
+        f"{' and '.join(repr(n) for n in names)} came out as one region of "
+        f"volume {volume:.6g}"
+        for volume, names in shared
+    ]
+    raise OverlappingSolidsError(
+        "The imprint did not give every input solid a region of its own:\n  "
+        + "\n  ".join(lines)
+        + "\nSuch a region gets only one of its solids' materials, so the other "
+        "solid comes out smaller than the CAD says or disappears altogether, "
+        "and transport loses no particles to show it. Usually the solids "
+        "overlap in the CAD: cut one from the other (for instance "
+        "b = b.cut(a)) so every point belongs to exactly one solid. If they "
+        "only touch, the imprint itself has failed on them."
+    )
+
+
 def process_assembly(
     assembly: cq.Assembly, material_tags: list[str]
 ) -> ProcessedAssembly:
@@ -90,6 +171,7 @@ def process_assembly(
     """
     # Step 1: Imprint the assembly
     imprinted_compound, imprinted_solids_with_ids = _imprint_assembly(assembly)
+    _refuse_lost_or_shared_inputs(assembly, imprinted_solids_with_ids)
 
     # Get the OCC compound shape
     if hasattr(imprinted_compound, 'wrapped'):
@@ -186,9 +268,21 @@ def process_assembly(
         solid_faces[solid_id] = solid_face_ids
         solid_shapes[solid_id] = solid
 
-    # Step 4: Identify shared faces
+    # Step 4: Identify shared faces. A face bounds at most two solids; a third
+    # is an imprint left in a broken state (a zero-thickness sliver split off
+    # one solid, say), which the mesh cannot represent.
     shared = {}
     for fid, info in faces.items():
+        owners = list(dict.fromkeys(info.owning_solids))
+        if len(owners) > 2:
+            names = [repr(ordered_tags[s - 1]) for s in owners]
+            raise OverlappingSolidsError(
+                f"The imprint left a face bounding {len(owners)} solids, made "
+                f"from {', '.join(names[:-1])} and {names[-1]}; a face can bound "
+                "two. The imprint has failed on these solids: it can split a "
+                "zero-thickness sliver off one where curved faces touch (a name "
+                "listed twice is two pieces of one input)."
+            )
         if len(info.owning_solids) >= 2:
             shared[fid] = info.owning_solids[:2]
 
