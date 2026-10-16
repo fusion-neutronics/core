@@ -264,14 +264,14 @@ pub(crate) fn find_or_lose_cell(
         particle.position[2],
     );
     let found = if particle.previous_cell_index != yamc_particle::particle::NO_CELL {
-        // The neighbor lists locate the CSG cell only; a fill host is
+        // For CSG the neighbor lists locate the cell only; a fill host is
         // refined to the embedded mesh volume containing the point
         // (geometry.find_cell_index resolves fills itself).
-        neighbor_lists
-            .find_cell(geometry.cells(), pos, particle.previous_cell_index as usize)
+        geometry
+            .locate_cell(neighbor_lists, pos, particle.previous_cell_index as usize)
             .map(|idx| geometry.resolve_fill_at(idx, pos))
     } else {
-        geometry.find_cell_index(pos)
+        geometry.find_cell_index_along(pos, particle.direction)
     };
     match found {
         Some(idx) => {
@@ -1392,13 +1392,12 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
         // structural difference from hybrid tracking.
         particle.move_by(d_flight);
 
-        // Locate the post-flight cell directly via the neighbor list
-        // (which falls back to a full geometry scan when the new
-        // position isn't in any pre-flight neighbour). `None` here is
-        // now a defensive fallback: true vacuum exits are caught by
-        // woodcock_flight_exit above, so this only fires for mesh
-        // backends (no precomputed vacuum surfaces) and numerical
-        // corner cases. The delta-collision is outside the geometry,
+        // Locate the post-flight cell starting from the pre-flight one
+        // (CSG: its learned neighbours, then a full scan; mesh: its
+        // volume, then every volume). `None` here is a defensive
+        // fallback: true vacuum exits are caught by woodcock_flight_exit
+        // above, so this only fires in numerical corner cases (a mesh flight
+        // from a point that is not a number, say). The delta-collision is outside the geometry,
         // so the flight estimator scores nothing -- exactly the
         // behaviour that keeps it unbiased on leakage. (True
         // track-length mesh tallies are the exception: they score the
@@ -1408,7 +1407,7 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
             particle.position[1],
             particle.position[2],
         );
-        let post_idx = match neighbor_lists.find_cell(geometry.cells(), pos, pre_flight_cell_idx) {
+        let post_idx = match geometry.locate_cell(neighbor_lists, pos, pre_flight_cell_idx) {
             Some(idx) => idx,
             None => {
                 // True track-length mesh tallies still see the

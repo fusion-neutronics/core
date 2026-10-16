@@ -52,6 +52,15 @@ jobs:
         with:
           shared-key: ci-wasm
           cache-on-failure: true
+      # The cache below is keyed on the release latest.json names, so
+      # a new release starts from a fresh cache rather than restoring
+      # the files of the old one.
+      - name: Resolve nuclear-data release
+        id: fixtures-release
+        shell: bash
+        run: |
+          release=$(python3 scripts/fetch_test_fixtures.py --print-release)
+          echo "release=$release" >> "$GITHUB_OUTPUT"
       - name: Cache nuclear-data test fixtures
         uses: actions/cache@v6
         with:
@@ -61,7 +70,7 @@ jobs:
             ~/.cache/yamc
             ~/Library/Caches/yamc
             ~/AppData/Local/yamc
-          key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs', 'crates/nuclear-data-schema/src/lib.rs') }}
+          key: yamc-test-fixtures-endf-b8.1-${{ steps.fixtures-release.outputs.release }}-${{ hashFiles('scripts/fetch_test_fixtures.py') }}
       - name: Fetch nuclear-data test fixtures
         run: python3 scripts/fetch_test_fixtures.py
       # The browser run is not only a compile check: tests/wasm_fetch_browser.rs
@@ -106,6 +115,15 @@ jobs:
         with:
           shared-key: wasm32
           cache-on-failure: true
+      # The cache below is keyed on the release latest.json names, so
+      # a new release starts from a fresh cache rather than restoring
+      # the files of the old one.
+      - name: Resolve nuclear-data release
+        id: fixtures-release
+        shell: bash
+        run: |
+          release=$(python3 scripts/fetch_test_fixtures.py --print-release)
+          echo "release=$release" >> "$GITHUB_OUTPUT"
       - name: Cache nuclear-data test fixtures
         uses: actions/cache@v6
         with:
@@ -115,7 +133,7 @@ jobs:
             ~/.cache/yamc
             ~/Library/Caches/yamc
             ~/AppData/Local/yamc
-          key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs', 'crates/nuclear-data-schema/src/lib.rs') }}
+          key: yamc-test-fixtures-endf-b8.1-${{ steps.fixtures-release.outputs.release }}-${{ hashFiles('scripts/fetch_test_fixtures.py') }}
       # The native tests drive `YaniSession` against real Arrow fixtures. They
       # skip themselves when the fixtures are absent rather than failing, so
       # without this step the job would pass while asserting nothing.
