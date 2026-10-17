@@ -26,6 +26,10 @@
 //! downloader, which downloads and verifies every file whole, is the verified
 //! path.
 //!
+//! The pointer is asked for with a cache-busting query ([`pointer_url`]), so
+//! neither the CDN's edge nor the browser's own cache answers with an old copy.
+//! The manifest and the sections never change and are asked for plainly.
+//!
 //! The origin answers a `Range` request with 206 and the bytes asked for, or,
 //! if some proxy on the way dropped the header, with 200 and the whole object.
 //! The second is not an error: what arrived is the entire file and is
@@ -47,7 +51,7 @@ use nuclear_data_schema::reaction_ranges::{splice_spans, Range};
 use yamc_nuclide::in_memory_storage::InMemoryStorage;
 use yamc_nuclide::nuclide_arrow::read_available_temperatures;
 use yamc_nuclide::storage::release::{
-    parse_latest, parse_manifest, sha256_hex, verify, ManifestFile, Release, LATEST,
+    parse_latest, parse_manifest, pointer_url, sha256_hex, verify, ManifestFile, Release,
 };
 use yamc_nuclide::storage::Storage;
 
@@ -314,7 +318,7 @@ impl ReleaseView {
 async fn resolve_release(library_url: &str, stats: &mut Stats) -> Result<ReleaseView, String> {
     let library_url = library_url.trim_end_matches('/');
     let keyword = library_url.rsplit('/').next().unwrap_or(library_url);
-    let latest_url = format!("{library_url}/{LATEST}");
+    let latest_url = pointer_url(library_url);
     stats.requests += 1;
     let latest = match finish_retrying(start(&latest_url, None)).await? {
         Fetched::Body { bytes, .. } => bytes,

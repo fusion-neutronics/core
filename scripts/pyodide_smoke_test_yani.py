@@ -23,7 +23,14 @@ activity at shutdown.
 
 import sys
 
-from pyodide_smoke_test import KEYWORD, ORIGIN, RELEASE, origin, publish
+from pyodide_smoke_test import (
+    KEYWORD,
+    ORIGIN,
+    RELEASE,
+    check_release_requests,
+    origin,
+    publish,
+)
 
 # What the material is made of and what its closure reaches among the
 # fixtures. The rest of the closure is absent from this release.
@@ -81,10 +88,7 @@ def main(fixtures):
         f"{sum(r is not None for _, r in requests)} ranged"
     )
 
-    if not requests:
-        sys.exit("the data fetcher was never called")
-    if requests[0][0] != f"{ORIGIN}{KEYWORD}/latest.json":
-        sys.exit(f"the first request was {requests[0][0]}, not the release pointer")
+    check_release_requests(requests)
     asked = {url.removeprefix(f"{ORIGIN}{KEYWORD}/{RELEASE}/") for url, _ in requests}
     for subsection in ("decay", "reactions"):
         if not any(a.startswith(f"transmutation/{subsection}.arrow/") for a in asked):

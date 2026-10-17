@@ -5,7 +5,7 @@
 //! mutable pointer:
 //!
 //! ```text
-//! <origin>/<keyword>/latest.json                      the pointer (short TTL)
+//! <origin>/<keyword>/latest.json                      the pointer
 //! <origin>/<keyword>/<release>/manifest.json          every file, bytes and sha256
 //! <origin>/<keyword>/<release>/neutron/<Name>.arrow/...
 //! <origin>/<keyword>/<release>/photon/<Name>.arrow/...
@@ -16,7 +16,9 @@
 //! manifest's presence marks a complete release), then moves `latest.json`.
 //! Nothing under a release prefix is ever rewritten, so a cached file is
 //! current for as long as its release is the one in use, and no stamp has to
-//! be compiled into a build to tell a stale cache from a current one.
+//! be compiled into a build to tell a stale cache from a current one. The
+//! pointer is the one object that changes, so every reader asks for it with a
+//! cache-busting query ([`pointer_url`]) and everything else plainly.
 //!
 //! This module is the one place that knows the shape of `latest.json` and
 //! `manifest.json`, and which `format_version`s this build reads. It does no
@@ -45,6 +47,32 @@ pub const LATEST: &str = "latest.json";
 /// The manifest object under `<origin>/<keyword>/<release>/`, and its name in
 /// a release folder on disk.
 pub const MANIFEST: &str = "manifest.json";
+
+/// The query parameter every request for `latest.json` carries, with a random
+/// value, so the CDN in front of the origin cannot answer it from its cache.
+///
+/// `latest.json` is the one object of a library that changes, and the zone's
+/// cache settings, not the `Cache-Control` it is uploaded with, decide how long
+/// the edge keeps a copy. The edge once served a pointer 5.8 days old, naming a
+/// release that had since been deleted, so every download from an empty cache
+/// failed with a 404. The edge keys its cache on the query string as well as
+/// the path, so a value it has not seen goes through to the origin, which
+/// answers with the pointer as it is now. The manifest and the release files
+/// are asked for without one: they never change, and the edge caching them is
+/// what the CDN is for.
+pub const CACHE_BUST_PARAM: &str = "release-check";
+
+/// The URL of the `latest.json` of the library at `library_url`
+/// (`<origin>/<keyword>`), with a [`CACHE_BUST_PARAM`] value of 64 random
+/// bits, so in practice no two requests, from one process or from many, carry
+/// the same one.
+pub fn pointer_url(library_url: &str) -> String {
+    format!(
+        "{}/{LATEST}?{CACHE_BUST_PARAM}={:016x}",
+        library_url.trim_end_matches('/'),
+        rand::random::<u64>()
+    )
+}
 
 /// `<origin>/<keyword>/latest.json`: which release of a library is current.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -414,6 +442,23 @@ mod tests {
         s.update(b"a");
         s.update(b"bc");
         assert_eq!(s.finish(), (3, sha256_hex(b"abc")));
+    }
+
+    #[test]
+    fn every_pointer_url_carries_a_cache_busting_value_of_its_own() {
+        let prefix = "https://yamc-data.xsplot.com/endf-b8.1/latest.json?release-check=";
+        let urls: Vec<String> = ["endf-b8.1", "endf-b8.1/"]
+            .iter()
+            .map(|library| pointer_url(&format!("https://yamc-data.xsplot.com/{library}")))
+            .collect();
+        for url in &urls {
+            let value = url.strip_prefix(prefix).unwrap_or_else(|| panic!("{url}"));
+            assert!(
+                value.len() == 16 && value.chars().all(|c| c.is_ascii_hexdigit()),
+                "{url}"
+            );
+        }
+        assert_ne!(urls[0], urls[1], "two requests, two values");
     }
 
     #[test]

@@ -551,7 +551,16 @@ library's current published release, once per process:
    build reads the `format_version`s in
    `yamc_nuclide::storage::release::SUPPORTED_FORMAT_VERSIONS` and refuses any
    other with a message saying to upgrade. A data fix that keeps the format
-   needs no yamc release.
+   needs no yamc release. The pointer is asked for with a cache-busting query,
+   `latest.json?release-check=<16 random hex digits>`, by the native and
+   Pyodide downloader and by the browser fetcher alike
+   (`yamc_nuclide::storage::release::pointer_url`). The CDN's edge keeps its own
+   copy of `latest.json` for as long as the zone's cache settings say, whatever
+   `Cache-Control` the object was uploaded with, and once served a copy 5.8 days
+   old that named a deleted release, so every download from an empty cache
+   failed with a 404. A query the edge has not seen goes through to the origin.
+   The manifest and the release files never change and are asked for plainly,
+   so the edge caches them.
 2. `<keyword>/<release>/manifest.json` lists every file of the release with its
    size and sha256. It is checked against the pointer and kept in the cache.
    It is also the index of what the release carries: a nuclide, element or

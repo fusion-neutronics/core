@@ -11,7 +11,9 @@ those files instead of the network. It serves them as a release of
 `endf-b8.1` the way the origin does (`latest.json`, then the release's
 `manifest.json`, then each file), so release resolution, the batched
 prefetch, verification against the manifest, the cache and the transport run
-the same code they run in the browser. Only the transfer is local.
+the same code they run in the browser. Only the transfer is local. The pointer
+is asked for with a cache-busting query string, which the origin answers by
+path as the real one does, and nothing else carries one.
 
 The fetcher takes a batch of requests per call, as the browser's does: the
 prefetch sends a nuclide's whole files together in one call, then the byte
@@ -25,8 +27,9 @@ served here adds them to each `version.json` (what the converter's
 and the fetcher answers `Range` requests as the origin does: one range as the
 bytes alone, several as `multipart/byteranges`.
 
-`publish` and `origin` are shared with `pyodide_smoke_test_yani.py`, which
-serves the yani-core wheel the same release with the transmutation chain added.
+`publish`, `origin` and `check_release_requests` are shared with
+`pyodide_smoke_test_yani.py`, which serves the yani-core wheel the same release
+with the transmutation chain added.
 """
 
 import hashlib
@@ -37,6 +40,10 @@ import sys
 ORIGIN = "https://yamc-data.xsplot.com/"
 KEYWORD = "endf-b8.1"
 RELEASE = "2026-01-01"
+# How every request for the pointer starts: a cache-busting query follows, so
+# the CDN's edge cannot answer it with an old copy (`pointer_url` in
+# yamc-nuclide's release.rs).
+POINTER = f"{ORIGIN}{KEYWORD}/latest.json?release-check="
 # The nuclides the model below is made of, the only ones the release carries.
 NUCLIDES = ("Li6",)
 
@@ -169,9 +176,14 @@ def origin(objects):
     batches = []
 
     def fetch_one(url, range_header):
-        """Answer one GET from the published release, as the origin would."""
+        """Answer one GET from the published release, as the origin would.
+
+        By path: the query string a request for the pointer carries is for
+        the CDN's cache, and does not change the object.
+        """
         requests.append((url, range_header))
-        body = objects.get(url.removeprefix(ORIGIN)) if url.startswith(ORIGIN) else None
+        path = url.removeprefix(ORIGIN).split("?", 1)[0]
+        body = objects.get(path) if url.startswith(ORIGIN) else None
         if body is None:
             return 404, b""
         if range_header is not None:
@@ -184,6 +196,27 @@ def origin(objects):
         return [fetch_one(url, range_header) for url, range_header in batch]
 
     return fetch, requests, batches
+
+
+def check_release_requests(requests):
+    """Exit unless the run asked for the pointer first, with a cache-busting
+    query, and for everything else plainly.
+
+    Args:
+        requests: The `(url, range)` pairs the fetcher was asked for, in order.
+    """
+    if not requests:
+        sys.exit("the data fetcher was never called")
+    first = requests[0][0]
+    bust = first.removeprefix(POINTER)
+    if bust == first or len(bust) != 16 or any(c not in "0123456789abcdef" for c in bust):
+        sys.exit(
+            f"the first request was {first}, not the release pointer with a "
+            "cache-busting query"
+        )
+    queried = [url for url, _ in requests[1:] if "?" in url]
+    if queried:
+        sys.exit(f"only the pointer carries a query string, but so did {queried}")
 
 
 def main(fixtures):
@@ -221,10 +254,7 @@ def main(fixtures):
         f"{sum(r is not None for _, r in requests)} ranged"
     )
 
-    if not requests:
-        sys.exit("the data fetcher was never called")
-    if requests[0][0] != f"{ORIGIN}{KEYWORD}/latest.json":
-        sys.exit(f"the first request was {requests[0][0]}, not the release pointer")
+    check_release_requests(requests)
     release = results.runs[0]["data_releases"][KEYWORD]["release"]
     if release != RELEASE:
         sys.exit(f"the run recorded release {release}, not {RELEASE}")

@@ -3,7 +3,9 @@
 //!
 //! Per library keyword, once per process:
 //!
-//! 1. `<origin>/<keyword>/latest.json` names the current release. Its
+//! 1. `<origin>/<keyword>/latest.json` names the current release. It is asked
+//!    for with a cache-busting query ([`super::release::pointer_url`]), so a
+//!    copy the CDN's edge holds does not decide the release. Its
 //!    `format_version` must be one this build reads
 //!    ([`super::release::SUPPORTED_FORMAT_VERSIONS`]).
 //! 2. The release's `manifest.json` is fetched (or read back from the cache),
@@ -86,8 +88,8 @@ use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
 
 use super::release::{
-    parse_latest, parse_manifest, verify, DataRelease, LatestPointer, ManifestFile, Release,
-    StreamHash, LATEST, MANIFEST,
+    parse_latest, parse_manifest, pointer_url, verify, DataRelease, LatestPointer, ManifestFile,
+    Release, StreamHash, LATEST, MANIFEST,
 };
 use super::url_cache::{
     cache_root, drop_superseded, fetch_ranged, get_path_lock, ranged, ranges_section,
@@ -289,7 +291,7 @@ impl Registry {
     fn resolve(&self, keyword: &str) -> Result<Library, String> {
         let root = self.root()?;
         let library_dir = root.join(keyword);
-        let latest_url = format!("{}{keyword}/{LATEST}", self.origin);
+        let latest_url = pointer_url(&format!("{}{keyword}", self.origin));
         let pointer = match self.get_small(&latest_url, true) {
             Ok(Some(bytes)) => parse_latest(keyword, &bytes)?,
             Ok(None) => return Err(not_published_error(keyword, &latest_url)),

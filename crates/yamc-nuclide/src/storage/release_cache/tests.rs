@@ -2,7 +2,7 @@
 //! synthetic release tree, so every case runs without the network.
 
 use super::*;
-use crate::storage::release::sha256_hex;
+use crate::storage::release::{sha256_hex, CACHE_BUST_PARAM};
 use crate::LoadScope;
 use nuclear_data_schema::energy_ranges::EnergyRanges;
 use nuclear_data_schema::reaction_ranges::{Hashes, Range, ReactionRanges};
@@ -37,6 +37,11 @@ struct Served {
 struct Origin {
     url: String,
     files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    /// What a CDN edge in front of the origin holds, by request target (the
+    /// path and the query string, as the edge keys its cache). A request for
+    /// one of these is answered from here and never reaches `files`.
+    edge: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    /// Every request target asked for, query string included.
     hits: Arc<Mutex<Vec<String>>>,
     served: Arc<Mutex<Vec<Served>>>,
     behaviour: Arc<Mutex<Behaviour>>,
@@ -51,6 +56,7 @@ impl Origin {
         let origin = Origin {
             url,
             files: Arc::default(),
+            edge: Arc::default(),
             hits: Arc::default(),
             served: Arc::default(),
             behaviour: Arc::new(Mutex::new(Behaviour::Serve)),
@@ -58,6 +64,7 @@ impl Origin {
         };
         let state = State {
             files: Arc::clone(&origin.files),
+            edge: Arc::clone(&origin.edge),
             hits: Arc::clone(&origin.hits),
             served: Arc::clone(&origin.served),
             behaviour: Arc::clone(&origin.behaviour),
@@ -142,6 +149,7 @@ impl Origin {
 #[derive(Clone)]
 struct State {
     files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    edge: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     hits: Arc<Mutex<Vec<String>>>,
     served: Arc<Mutex<Vec<Served>>>,
     behaviour: Arc<Mutex<Behaviour>>,
@@ -179,22 +187,22 @@ fn answer(mut stream: TcpStream, state: &State) {
             range = Some(value.trim().to_string());
         }
     }
-    let path = request_line
+    let target = request_line
         .split_whitespace()
         .nth(1)
         .unwrap_or("/")
         .trim_start_matches('/')
-        .split('?')
-        .next()
-        .unwrap_or("")
         .to_string();
-    state.hits.lock().unwrap().push(path.clone());
+    // The origin answers by path; only the edge tells queries apart.
+    let path = target.split('?').next().unwrap_or("").to_string();
+    state.hits.lock().unwrap().push(target.clone());
     let behaviour = *state.behaviour.lock().unwrap();
     if behaviour == Behaviour::Silent {
         std::thread::sleep(Duration::from_secs(20));
         return;
     }
-    let body = state.files.lock().unwrap().get(&path).cloned();
+    let cached = state.edge.lock().unwrap().get(&target).cloned();
+    let body = cached.or_else(|| state.files.lock().unwrap().get(&path).cloned());
     let Some(body) = body else {
         let _ = stream
             .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
@@ -265,6 +273,26 @@ fn answer(mut stream: TcpStream, state: &State) {
             let _ = stream.write_all(&body);
         }
     }
+}
+
+/// `hits` with the value of every cache-busting query replaced by `*`, each
+/// checked first to be the 16 hex digits [`pointer_url`] writes, so a test can
+/// compare whole request lists although every pointer request carries a value
+/// of its own.
+fn masked(hits: &[String]) -> Vec<String> {
+    let marker = format!("?{CACHE_BUST_PARAM}=");
+    hits.iter()
+        .map(|hit| match hit.split_once(&marker) {
+            Some((path, value)) => {
+                assert!(
+                    value.len() == 16 && value.chars().all(|c| c.is_ascii_hexdigit()),
+                    "{hit}: the cache-busting value is not 16 hex digits"
+                );
+                format!("{path}{marker}*")
+            }
+            None => hit.clone(),
+        })
+        .collect()
 }
 
 /// A scratch cache root that removes itself.
@@ -483,7 +511,10 @@ fn a_format_this_build_cannot_read_is_refused_before_any_download() {
     let err = fetch(&registry(&origin.url, &root), "Fe56").unwrap_err();
     assert!(err.contains("format_version 3"), "{err}");
     assert!(err.contains("reads format_version 2"), "{err}");
-    assert_eq!(origin.hits(), ["endf-b8.1/latest.json"]);
+    assert_eq!(
+        masked(&origin.hits()),
+        ["endf-b8.1/latest.json?release-check=*"]
+    );
 }
 
 #[test]
@@ -543,7 +574,10 @@ fn a_warm_cache_is_reused_and_needs_no_network() {
     // A new process with the origin up: the pointer is asked, nothing else.
     let before = origin.hits().len();
     fetch(&registry(&origin.url, &root), "Fe56").expect("cache hit");
-    assert_eq!(&origin.hits()[before..], ["endf-b8.1/latest.json"]);
+    assert_eq!(
+        masked(&origin.hits()[before..]),
+        ["endf-b8.1/latest.json?release-check=*"]
+    );
 
     // And with no network at all.
     let reg = registry(&dead_origin(), &root);
@@ -590,6 +624,75 @@ fn a_new_release_replaces_the_old_for_every_file_and_never_mixes() {
         )
         .unwrap(),
         b"Li6 reactions.arrow of 2026-10-01"
+    );
+}
+
+/// Every resolution asks for the pointer with a cache-busting value of its
+/// own, and for nothing else: the manifest and the release files never change,
+/// and asking for them plainly is what lets the CDN's edge cache them.
+#[test]
+fn each_resolution_busts_the_cache_for_the_pointer_and_only_the_pointer() {
+    let origin = Origin::start();
+    publish(&origin, "2026-10-01", &["Fe56"], &[]);
+    let root = Scratch::new("bust");
+    // Two processes, the second reading what the first cached.
+    fetch(&registry(&origin.url, &root), "Fe56").expect("download");
+    fetch(&registry(&origin.url, &root), "Fe56").expect("cache hit");
+
+    let hits = origin.hits();
+    let (pointers, rest): (Vec<String>, Vec<String>) = hits
+        .iter()
+        .cloned()
+        .partition(|hit| hit.starts_with("endf-b8.1/latest.json"));
+    assert_eq!(
+        masked(&pointers),
+        ["endf-b8.1/latest.json?release-check=*"; 2]
+    );
+    assert_ne!(pointers[0], pointers[1], "two resolutions, two values");
+    assert!(
+        rest.iter().any(|hit| hit.ends_with("/manifest.json"))
+            && rest.iter().any(|hit| hit.ends_with("/reactions.arrow")),
+        "{rest:?}"
+    );
+    assert!(
+        rest.iter().all(|hit| !hit.contains('?')),
+        "the manifest and the files are asked for plainly: {rest:?}"
+    );
+}
+
+/// The CDN's edge once answered `latest.json` with a copy 5.8 days old that
+/// named a release which had since been deleted, so every download from an
+/// empty cache failed with a 404. The edge holds no copy for a query it has
+/// not seen, so with a cache-busting value the origin answers, with the
+/// release that is current.
+#[test]
+fn a_stale_pointer_at_the_edge_does_not_decide_the_release() {
+    let origin = Origin::start();
+    publish(&origin, "2026-10-10", &["Fe56"], &[]);
+    let stale = published(&origin, "endf-b8.1/latest.json");
+    // The next release goes up, and the old one is deleted ...
+    publish(&origin, "2026-10-12", &["Fe56"], &[]);
+    origin
+        .files
+        .lock()
+        .unwrap()
+        .retain(|path, _| !path.starts_with("endf-b8.1/2026-10-10/"));
+    // ... while the edge still answers the plain URL with the old pointer.
+    origin
+        .edge
+        .lock()
+        .unwrap()
+        .insert("endf-b8.1/latest.json".into(), stale);
+
+    let root = Scratch::new("stale-edge");
+    let reg = registry(&origin.url, &root);
+    let dir = fetch(&reg, "Fe56").expect("the pointer the origin serves now");
+    assert_eq!(dir, root.0.join("endf-b8.1/2026-10-12/neutron/Fe56.arrow"));
+    assert_eq!(reg.data_releases()["endf-b8.1"].release, "2026-10-12");
+    assert!(
+        !origin.hits().iter().any(|hit| hit.contains("2026-10-10")),
+        "{:?}",
+        origin.hits()
     );
 }
 
@@ -988,7 +1091,10 @@ fn a_ranged_fetch_is_verified_and_cached_under_its_own_folder() {
     // The ranged copy serves the same load later, online and offline.
     let before = origin.hits().len();
     fetch_scoped(&registry(&origin.url, &root), "Fe56", &at_294()).expect("cache hit");
-    assert_eq!(&origin.hits()[before..], ["endf-b8.1/latest.json"]);
+    assert_eq!(
+        masked(&origin.hits()[before..]),
+        ["endf-b8.1/latest.json?release-check=*"]
+    );
     let offline = registry(&dead_origin(), &root);
     fetch_scoped(&offline, "Fe56", &at_294()).expect("offline from the ranged copy");
     // A load that needs every temperature is not served by it offline.
@@ -1213,8 +1319,13 @@ fn a_keyword_prefetch_serves_the_release_downloads_from_its_replies() {
     prefetch(&reg, &NAMES, &at_294());
 
     let hits = origin.hits();
-    assert_eq!(hits[0], "endf-b8.1/latest.json");
-    assert_eq!(hits[1], "endf-b8.1/2026-10-01/manifest.json");
+    assert_eq!(
+        masked(&hits[..2]),
+        [
+            "endf-b8.1/latest.json?release-check=*",
+            "endf-b8.1/2026-10-01/manifest.json"
+        ]
+    );
     let served = served_all(&origin);
     assert_eq!(served.len(), hits.len(), "{hits:?}");
     let mut unique = served.clone();
