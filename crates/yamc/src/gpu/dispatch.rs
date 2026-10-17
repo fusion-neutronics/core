@@ -26,8 +26,9 @@
 //! Models with no tally still run cleanly. Anything else (filters other
 //! than `CellFilter` / `MaterialFilter` / `MeshFilter` / `EnergyFilter`
 //! / `EnergyFunctionFilter` / `ParticleTypeFilter` /
-//! `ParentNuclideFilter`, multi-score) is rejected up front with a
-//! structured `GpuDispatchError`.
+//! `ParentNuclideFilter`, multi-score, a per-nuclide axis other than the
+//! material total) is rejected up front with a structured
+//! `GpuDispatchError`.
 //!
 //! ## macOS
 //!
@@ -154,6 +155,14 @@ pub enum GpuDispatchError {
     OverlayTallyUnsupported {
         tally_index: usize,
     },
+    /// A tally with a per-nuclide axis (`nuclides=`) other than the single
+    /// material-total bin. The kernel scores the cell material's macroscopic
+    /// cross section and the writeback puts it in nuclide bin 0, so the first
+    /// nuclide's bin read the whole material's rate and every other bin read
+    /// zero, with no diagnostic.
+    NuclideBinsUnsupported {
+        tally_index: usize,
+    },
     /// An uncapped run (`total_particles = None`) with no `max_runtime`. The
     /// GPU launch loop has no other stop condition, so it would launch forever.
     /// Rejected up front. The Python layer's own "at least one stop condition"
@@ -266,6 +275,14 @@ impl std::fmt::Display for GpuDispatchError {
                  not supported on the GPU -- the kernel scores the cell material's \
                  macroscopic cross section, so the requested response would be silently \
                  dropped. Run this tally with compute='cpu'."
+            ),
+            Self::NuclideBinsUnsupported { tally_index } => write!(
+                f,
+                "compute='gpu' tally {tally_index}: per-nuclide tally bins (nuclides=) are \
+                 not supported on the GPU. The kernel scores the cell material's macroscopic \
+                 cross section, so the first nuclide's bin would read the whole material's \
+                 rate and every other bin zero. Run this tally with compute='cpu', or score \
+                 the material total (no nuclides=) on the GPU."
             ),
             Self::UncappedWithoutRuntime => write!(
                 f,
@@ -685,6 +702,13 @@ fn run_on_gpu_dispatch(
     if let Some(tally_index) = model.tallies.iter().position(|t| t.covariance) {
         return Err(GpuDispatchError::TallyCovarianceUnsupported { tally_index });
     }
+    if let Some(tally_index) = model
+        .tallies
+        .iter()
+        .position(|t| !nuclide_axis_is_material_total(t))
+    {
+        return Err(GpuDispatchError::NuclideBinsUnsupported { tally_index });
+    }
     // The GPU kernels always surface-track. Unlike variance_reduction (a
     // hard reject), a non-Surface tracking_mode still yields an unbiased
     // flux, so warn-and-proceed rather than refuse -- a reject would drop a
@@ -949,6 +973,19 @@ impl ValidatedTally<'_> {
     fn block_bins(&self) -> usize {
         self.tally.num_bins() / self.tally.scores.len()
     }
+}
+
+/// Whether a tally's nuclide axis is one the kernel can score: none, or the
+/// single material-total bin. The kernel folds the cell material's macroscopic
+/// cross section, which is the CPU's `NuclideBin::Total` score, and the
+/// writeback (`accumulate_kernel_tally`) puts it in nuclide bin 0. Any
+/// `NuclideBin::Specific` bin, or a second bin, would come back as the material
+/// total in the first bin and zero in the rest.
+fn nuclide_axis_is_material_total(t: &Tally) -> bool {
+    matches!(
+        t.nuclides.as_slice(),
+        [] | [yamc_tallies::NuclideBin::Total]
+    )
 }
 
 /// Reject tally configurations the writeback can't handle. Each tally
@@ -5665,6 +5702,60 @@ mod tests {
             !matches!(err, GpuDispatchError::VarianceReductionUnsupported),
             "survival biasing must be accepted by the VR gate, got {err:?}"
         );
+    }
+
+    /// A model whose only tally carries `nuclides`, scoring the total.
+    fn model_with_nuclide_bins(nuclides: Vec<yamc_tallies::NuclideBin>) -> Model {
+        let mut t = Tally::new();
+        t.filters = vec![Filter::Cell(CellFilter { cell_ids: vec![1] })];
+        t.scores = vec!["total".parse().unwrap()];
+        t.nuclides = nuclides;
+        let geometry = crate::geometry::Geometry::new(Vec::new(), Vec::new()).unwrap();
+        Model::new(geometry, Vec::new(), vec![Arc::new(t)])
+    }
+
+    /// The kernel scores the material's cross section into nuclide bin 0, so a
+    /// per-nuclide tally used to come back with the material total in the first
+    /// nuclide's bin and zero in the others (Li6/Li7/Fe56 at 14 MeV: `total`
+    /// read 5.58, 0, 0 against the CPU's 1.42, 1.19, 2.96). Refused before any
+    /// data load or GPU init, so this runs without hardware.
+    #[test]
+    fn a_per_nuclide_tally_is_refused_rather_than_binned_as_the_material_total() {
+        use yamc_tallies::NuclideBin::{Specific, Total};
+        for nuclides in [
+            vec![Specific("Li6".into()), Specific("Li7".into())],
+            vec![Specific("Li6".into())],
+            vec![Specific("Li6".into()), Total],
+            vec![Total, Total],
+        ] {
+            let mut model = model_with_nuclide_bins(nuclides.clone());
+            let err =
+                run_on_gpu(&mut model, &crate::model::TransportSettings::default()).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    GpuDispatchError::NuclideBinsUnsupported { tally_index: 0 }
+                ),
+                "{nuclides:?}: expected NuclideBinsUnsupported, got {err:?}"
+            );
+            assert!(err.to_string().contains("nuclides="), "{err}");
+        }
+    }
+
+    /// The material total is what the kernel scores, so a tally without a
+    /// nuclide axis, or with only the total bin, passes this gate (and fails
+    /// later here, on the empty fixture, for an unrelated reason).
+    #[test]
+    fn the_material_total_bin_is_not_refused() {
+        for nuclides in [vec![], vec![yamc_tallies::NuclideBin::Total]] {
+            let mut model = model_with_nuclide_bins(nuclides.clone());
+            let err =
+                run_on_gpu(&mut model, &crate::model::TransportSettings::default()).unwrap_err();
+            assert!(
+                !matches!(err, GpuDispatchError::NuclideBinsUnsupported { .. }),
+                "{nuclides:?}: the material total must pass the nuclide gate, got {err:?}"
+            );
+        }
     }
 
     #[test]
