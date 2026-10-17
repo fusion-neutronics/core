@@ -38,7 +38,7 @@ fn iron_gas_matches_the_hand_calculation() {
         return;
     };
     let loaded =
-        yani::load_chain_parts(&decay, Some(&reactions), Some(&yields), None).expect("chain");
+        yani::load_chain_parts(&decay, Some(&reactions), Some(&yields), &[]).expect("chain");
 
     let composition: HashMap<String, f64> = IRON
         .iter()

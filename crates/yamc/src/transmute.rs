@@ -1429,7 +1429,7 @@ mod tests {
             &dir(chain_dir.join("decay")),
             Some(&dir(chain_dir.join("reactions"))),
             None,
-            Some(&dir(branch_dir.to_path_buf())),
+            &[("branching", &dir(branch_dir.to_path_buf()))],
         )
         .expect("chain");
         let branch = Arc::new(loaded.branch);

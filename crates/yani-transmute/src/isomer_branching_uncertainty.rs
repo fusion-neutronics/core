@@ -147,6 +147,8 @@ type StateKey = (i32, i32);
 struct State {
     /// `(MT, LFS)` as the MF=40 section numbers them.
     key: StateKey,
+    /// The branching source whose blocks give it, in the run's order.
+    source: usize,
     /// The list in `lists[parent]` and the curve in that list's `curves`.
     list: usize,
     curve: usize,
@@ -215,6 +217,8 @@ const NOT_RELATIVE: &str = "an absolute or short-range layout (LB=0 or 8)";
 const MALFORMED: &str = "the block's arrays do not match its declared sizes or its LB";
 const LAYOUT: &str = "an LB layout that is not implemented";
 const TRANSPOSE: &str = "the transpose of a cross-state block already used";
+const OTHER_SOURCE: &str =
+    "the partner state's reaction takes its isomeric split from another branching source";
 
 /// Where `block`'s own state sits in `rules`.
 fn place(block: &BranchingCovarianceBlock, rules: &[ListRule<'_>]) -> Placement {
@@ -271,14 +275,21 @@ fn interval_of(edges: &[f64], a: f64, b: f64) -> Option<usize> {
 impl IsomerCovariance {
     /// Place `blocks` on the lists of `lists` and build each parent's field.
     ///
-    /// Parents with no list in `lists` (not in the chain) are left out. A
-    /// block that cannot be used is counted against its parent rather than
-    /// dropped without a word.
-    pub(crate) fn new(blocks: &[BranchingCovarianceBlock], lists: &Lists<'_>) -> Self {
-        let mut by_parent: BTreeMap<&str, Vec<&BranchingCovarianceBlock>> = BTreeMap::new();
-        for b in blocks {
+    /// Each block comes with the index of the branching source it is from, in
+    /// the run's order of sources, which is what a list's
+    /// [`ListRule::source`] counts in. A state is only ever correlated with a
+    /// partner of its own source. Parents with no list in `lists` (not in the
+    /// chain) are left out. A block that cannot be used is counted against its
+    /// parent rather than dropped without a word.
+    pub(crate) fn new(blocks: &[(usize, BranchingCovarianceBlock)], lists: &Lists<'_>) -> Self {
+        let mut by_parent: BTreeMap<&str, Vec<(usize, &BranchingCovarianceBlock)>> =
+            BTreeMap::new();
+        for (source, b) in blocks {
             if lists.contains_key(&b.nuclide) {
-                by_parent.entry(b.nuclide.as_str()).or_default().push(b);
+                by_parent
+                    .entry(b.nuclide.as_str())
+                    .or_default()
+                    .push((*source, b));
             }
         }
         let mut out = IsomerCovariance::default();
@@ -294,17 +305,42 @@ impl IsomerCovariance {
         out
     }
 
-    /// Read the blocks out of `branch`'s `branching_covariance.arrow` and place
-    /// them, or an empty covariance where the subsection carries none.
+    /// Read the blocks out of each branching source's
+    /// `branching_covariance.arrow` and place them, or an empty covariance
+    /// where no source carries one.
+    ///
+    /// A channel takes its covariance from the source it took its split from
+    /// and from no other: a source's blocks for a `(parent, reaction)` another
+    /// source supplied are that other evaluation's account of curves this run
+    /// does not use, so they are passed over (see [`yani::BranchTable`]).
     pub(crate) fn from_table(
         branch: &yani::BranchTable,
         lists: &Lists<'_>,
     ) -> Result<Self, String> {
-        let Some(batches) = branch.covariance() else {
-            return Ok(Self::default());
-        };
-        let blocks = yamc_nuclide::arrow::covariance_arrow::branching_covariance_blocks(batches)
-            .map_err(|e| format!("reading the MF=40 isomer production covariance: {e}"))?;
+        let mut blocks = Vec::new();
+        for (index, source) in branch.sources().iter().enumerate() {
+            let Some(batches) = source.covariance() else {
+                continue;
+            };
+            let read = yamc_nuclide::arrow::covariance_arrow::branching_covariance_blocks(batches)
+                .map_err(|e| {
+                    format!(
+                        "reading the MF=40 isomer production covariance of the branching \
+                             source '{}': {e}",
+                        source.name
+                    )
+                })?;
+            for b in read {
+                let owner = b
+                    .reaction
+                    .as_deref()
+                    .and_then(|kind| branch.source_index(&b.nuclide, kind));
+                if owner.is_some_and(|owner| owner != index) {
+                    continue;
+                }
+                blocks.push((index, b));
+            }
+        }
         Ok(Self::new(&blocks, lists))
     }
 
@@ -314,9 +350,21 @@ impl IsomerCovariance {
     }
 }
 
-/// One parent's field from its blocks, and the blocks not used, by reason.
+/// Whether some other source than `source` supplies the list a partner state
+/// of MT `mt1` would sit on.
+fn partner_elsewhere(rules: &[ListRule<'_>], mt1: i32, source: usize) -> bool {
+    rules.iter().any(|r| {
+        !r.emits && r.mt == Some(mt1) && r.source.as_ref().is_some_and(|s| s.index != source)
+    })
+}
+
+/// A final state of one parent's reaction in one branching source.
+type SourcedKey = (usize, StateKey);
+
+/// One parent's field from its blocks, each with its source, and the blocks
+/// not used, by reason.
 fn parent_field(
-    blocks: &[&BranchingCovarianceBlock],
+    blocks: &[(usize, &BranchingCovarianceBlock)],
     rules: &[ListRule<'_>],
 ) -> (Option<ParentField>, BTreeMap<String, usize>) {
     let mut not_used: BTreeMap<String, usize> = BTreeMap::new();
@@ -324,18 +372,18 @@ fn parent_field(
 
     // Where each state sits, from its first block: every block of one state
     // places it the same way, since the placement reads only the state.
-    let mut states: BTreeMap<StateKey, Placement> = BTreeMap::new();
-    for b in blocks {
+    let mut states: BTreeMap<SourcedKey, Placement> = BTreeMap::new();
+    for (source, b) in blocks {
         states
-            .entry((b.block.mt, b.lfs))
+            .entry((*source, (b.block.mt, b.lfs)))
             .or_insert_with(|| place(b, rules));
     }
 
     // Each block, expanded, or the reason it is not used.
-    let mut used: Vec<(StateKey, StateKey, ExpandedBlock)> = Vec::new();
-    let mut pairs: BTreeSet<(StateKey, StateKey)> = BTreeSet::new();
-    for b in blocks {
-        let row = (b.block.mt, b.lfs);
+    let mut used: Vec<(SourcedKey, SourcedKey, ExpandedBlock)> = Vec::new();
+    let mut pairs: BTreeSet<(SourcedKey, SourcedKey)> = BTreeSet::new();
+    for &(source, b) in blocks {
+        let row = (source, (b.block.mt, b.lfs));
         match &states[&row] {
             Placement::Curve { .. } => {}
             // A block of the `(n,n')` ground state has nothing to move.
@@ -353,13 +401,19 @@ fn parent_field(
             skip(OTHER_FILE);
             continue;
         }
-        let col = (b.block.mt1, b.block.xlfs1 as i32);
+        // The partner is a state of the same source: a source's block says
+        // nothing about a curve another source supplied.
+        let col = (source, (b.block.mt1, b.block.xlfs1 as i32));
         match states.get(&col) {
             Some(Placement::Curve { .. }) => {}
             // The partner is the `(n,n')` ground: nothing to correlate with.
             Some(Placement::NoProduct) => continue,
             _ => {
-                skip(PARTNER_UNPLACED);
+                skip(if partner_elsewhere(rules, b.block.mt1, source) {
+                    OTHER_SOURCE
+                } else {
+                    PARTNER_UNPLACED
+                });
                 continue;
             }
         }
@@ -398,7 +452,7 @@ fn parent_field(
     }
 
     // Each state's intervals: the union of the grids of the blocks it is on.
-    let mut edges: BTreeMap<StateKey, Vec<f64>> = BTreeMap::new();
+    let mut edges: BTreeMap<SourcedKey, Vec<f64>> = BTreeMap::new();
     for (row, col, e) in &used {
         edges.entry(*row).or_default().extend(&e.row_energies);
         edges.entry(*col).or_default().extend(&e.col_energies);
@@ -416,10 +470,11 @@ fn parent_field(
         };
         let own = blocks
             .iter()
-            .find(|b| (b.block.mt, b.lfs) == key)
-            .and_then(|b| b.energy.clone().zip(b.values.clone()));
+            .find(|(source, b)| (*source, (b.block.mt, b.lfs)) == key)
+            .and_then(|(_, b)| b.energy.clone().zip(b.values.clone()));
         let state = State {
-            key,
+            key: key.1,
+            source: key.0,
             list,
             curve,
             own,
@@ -432,8 +487,11 @@ fn parent_field(
     if n == 0 {
         return (None, not_used);
     }
-    let index: HashMap<StateKey, usize> =
-        placed.iter().enumerate().map(|(i, s)| (s.key, i)).collect();
+    let index: HashMap<SourcedKey, usize> = placed
+        .iter()
+        .enumerate()
+        .map(|(i, s)| ((s.source, s.key), i))
+        .collect();
     let mut covariance = vec![0.0; n * n];
     for (row, col, e) in &used {
         let (r, c) = (&placed[index[row]], &placed[index[col]]);
@@ -1074,6 +1132,13 @@ mod tests {
 
     use crate::branching_rule::ListRule;
 
+    /// `blocks` as the covariance of the run's only branching source.
+    fn one_source(
+        blocks: impl IntoIterator<Item = BranchingCovarianceBlock>,
+    ) -> Vec<(usize, BranchingCovarianceBlock)> {
+        blocks.into_iter().map(|b| (0, b)).collect()
+    }
+
     fn state(mt: i32, lfs: i32) -> BranchState {
         BranchState {
             mt,
@@ -1185,7 +1250,7 @@ mod tests {
             (16, 1),
             lb5(vec![1.0e-5, 1.5e7, 2.0e7], vec![0.0, 0.0, 0.09]),
         );
-        let cov = IsomerCovariance::new(&[ground, isomer], &lists);
+        let cov = IsomerCovariance::new(&one_source(vec![ground, isomer]), &lists);
         let field = &cov.fields["Nb93"];
         assert_eq!(field.n, 4);
         assert_eq!(field.states[0].edges, vec![1.0e-5, 1.0e7, 2.0e7]);
@@ -1237,7 +1302,7 @@ mod tests {
                 lb5(grid.clone(), vec![-0.03]),
             ),
         ];
-        let cov = IsomerCovariance::new(&blocks, &lists);
+        let cov = IsomerCovariance::new(&one_source(blocks), &lists);
         let field = &cov.fields["Nb93"];
         assert_eq!(field.covariance, vec![0.04, -0.03, -0.03, 0.09]);
         assert_eq!(cov.not_used["Nb93"][TRANSPOSE], 1);
@@ -1291,7 +1356,10 @@ mod tests {
             lb5(grid.clone(), vec![0.04]),
         );
         nowhere.target = None;
-        let cov = IsomerCovariance::new(&[other_mat, other_file, absolute, nowhere], &lists);
+        let cov = IsomerCovariance::new(
+            &one_source(vec![other_mat, other_file, absolute, nowhere]),
+            &lists,
+        );
         assert!(cov.fields.is_empty());
         let reasons = &cov.not_used["Nb93"];
         assert_eq!(reasons[CROSS_MATERIAL], 1);
@@ -1325,7 +1393,7 @@ mod tests {
                 lb5(grid.clone(), vec![0.09]),
             ),
         ];
-        let cov = IsomerCovariance::new(&blocks, &lists);
+        let cov = IsomerCovariance::new(&one_source(blocks), &lists);
         assert!(cov.not_used.is_empty());
         let field = &cov.fields["Nb93"];
         assert_eq!(field.n, 1);
@@ -1396,7 +1464,7 @@ mod tests {
                 lb5(grid.clone(), vec![correlation * a * b]),
             ));
         }
-        let cov = IsomerCovariance::new(&blocks, &lists);
+        let cov = IsomerCovariance::new(&one_source(blocks), &lists);
         let folded = ListRates {
             production: vec![3.0, 1.0],
             to_rate: 1.0e-24,
@@ -1504,7 +1572,7 @@ mod tests {
             (16, 1),
             lb5(grid, vec![0.0]),
         )];
-        let cov = IsomerCovariance::new(&blocks, &lists);
+        let cov = IsomerCovariance::new(&one_source(blocks), &lists);
         terms.insert(
             "Nb93".to_string(),
             vec![Some(crate::flux_uncertainty::ListTerms {

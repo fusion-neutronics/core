@@ -81,3 +81,6 @@ yamc-test-cache = { path = "../yamc-test-cache" }
 # cycle: neither depends on this crate.
 yani-convert = { path = "../yani-convert" }
 arrow-ipc = "60"
+# The branching-sources test reads its fixtures' curves straight from the
+# files, apart from the loader it checks.
+arrow-array = "60"

@@ -1002,7 +1002,20 @@ pub struct ChainSections {
     pub decay: SectionFiles,
     pub reactions: SectionFiles,
     pub fission_yields: SectionFiles,
-    pub branching: SectionFiles,
+    /// The isomeric-branching overlay, one `branching/` subsection per source,
+    /// in the order a `(parent, reaction)` channel takes its curves from them.
+    /// Empty for no overlay.
+    pub branching: Vec<BranchingSection>,
+}
+
+/// One source of the isomeric-branching overlay: the files of a `branching/`
+/// subsection, and the name the run gives it.
+#[derive(Debug, Default, Clone)]
+pub struct BranchingSection {
+    /// What the run names the source by (a library keyword or a path), which
+    /// is what the branching report says each channel came from.
+    pub source: String,
+    pub files: SectionFiles,
 }
 
 impl ChainSections {
@@ -1025,6 +1038,11 @@ impl ChainSections {
     /// Errors on an unknown subsection rather than dropping the bytes: a
     /// silently ignored section loads as an empty chain, which produces a
     /// transmutation of nothing rather than a complaint.
+    ///
+    /// A `"branching"` file goes to the one source named `branching`, which
+    /// is how a host that uploads a single branching subsection has it named.
+    /// Several sources, in order, are [`BranchingSection`]s pushed onto
+    /// [`ChainSections::branching`].
     pub fn insert(
         &mut self,
         subsection: &str,
@@ -1035,7 +1053,19 @@ impl ChainSections {
             "decay" => &mut self.decay,
             "reactions" => &mut self.reactions,
             "fission_yields" => &mut self.fission_yields,
-            "branching" => &mut self.branching,
+            "branching" => {
+                let at = match self.branching.iter().position(|s| s.source == "branching") {
+                    Some(at) => at,
+                    None => {
+                        self.branching.push(BranchingSection {
+                            source: "branching".to_string(),
+                            files: SectionFiles::new(),
+                        });
+                        self.branching.len() - 1
+                    }
+                };
+                &mut self.branching[at].files
+            }
             other => {
                 return Err(format!(
                     "unknown chain subsection '{other}' \
@@ -1135,6 +1165,15 @@ fn attach_evaluated_yields(
 ///
 /// The filesystem entry point is [`parse_chain_parts`], which reads the same
 /// files and delegates here.
+///
+/// The branching sources are laid over the chain in order. Each `(parent,
+/// reaction)` channel takes every one of its curves, and the `(n,n')` and
+/// metastable channels they graft, from the first source whose
+/// `branching.arrow` evaluates it; a later source's rows for that channel are
+/// passed over whole, so no channel splits some states from one evaluation and
+/// some from another. [`BranchTable::source_of`] records which source supplied
+/// each. A source without a `branching.arrow` is refused, since a misspelt
+/// path would otherwise load as a source that evaluates nothing.
 pub fn parse_chain_parts_from_bytes(
     parts: &ChainSections,
 ) -> Result<(HashMap<String, ChainNuclide>, BranchTable), Box<dyn Error>> {
@@ -1430,7 +1469,8 @@ pub fn parse_chain_parts_from_bytes(
 
     report_unstated_yield_laws(&chain);
 
-    // branching/branching.arrow -- optional isomeric-branching overlay.
+    // branching/branching.arrow -- optional isomeric-branching overlay, one
+    // per branching source, laid over in order by `overlay_branching`.
     //
     // Each row is a verbatim energy-dependent curve for one
     // (parent, reaction, final-state) triple. We only keep curves whose parent
@@ -1465,101 +1505,169 @@ pub fn parse_chain_parts_from_bytes(
             .or_default()
             .push(curve);
     }
-    {
-        if let Some(bytes) = parts.branching.get("branching.arrow") {
-            for batch in read_arrow_bytes(bytes)? {
-                let nuclides = col::<StringArray>(&batch, "nuclide")?;
-                let reactions = col::<StringArray>(&batch, "reaction")?;
-                let targets = col::<StringArray>(&batch, "target")?;
-                let quantities = col::<StringArray>(&batch, "quantity")?;
-                let energy_col = col::<ListArray>(&batch, "energy")?;
-                let values_col = col::<ListArray>(&batch, "values")?;
-                let state_cols = BranchStateColumns::from_batch(&batch)?;
-                for i in 0..batch.num_rows() {
-                    let parent = nuclides.value(i);
-                    if !chain.contains_key(parent) {
-                        continue;
-                    }
-                    let kind = reactions.value(i).to_string();
-                    if kind == ANYTHING {
-                        return Err(format!(
-                            "branching.arrow has an {ANYTHING} row for {parent}. MT=5's \
-                             products are read from the reactions subsection, the same \
-                             evaluation as the chain's topology, and a second source for \
-                             them would mix two libraries in one reaction"
-                        )
-                        .into());
-                    }
-                    let target = targets.value(i).to_string();
-                    let quantity = match quantities.value(i) {
-                        "yield" => BranchQuantity::Yield,
-                        "cross_section" => BranchQuantity::CrossSection,
-                        _ => continue,
-                    };
-                    let energy = list_f64(energy_col, i)?;
-                    let values = list_f64(values_col, i)?;
-                    if energy.is_empty() || energy.len() != values.len() {
-                        continue;
-                    }
-                    let (states, normalisation) = match &state_cols {
-                        Some(columns) => columns.row(i, energy.len())?,
-                        None => (Vec::new(), None),
-                    };
+    for section in &parts.branching {
+        overlay_branching(&mut chain, &mut branch_table, section)?;
+    }
 
-                    // Graft the metastable-production channel when the base
-                    // chain lacks it (see the block comment above and
-                    // `should_graft` for the guard rationale).
-                    let target_is_nuclide = chain.contains_key(&target);
-                    let nuc = chain.get_mut(parent).expect("parent present");
-                    let kind_present = nuc.reactions.iter().any(|r| r.kind == kind);
-                    if should_graft(&kind, &target, parent, target_is_nuclide, kind_present) {
-                        let exists = nuc
-                            .reactions
-                            .iter()
-                            .any(|r| r.kind == kind && r.target.as_deref() == Some(&target));
-                        if !exists {
-                            nuc.reactions.push(ChainReaction {
-                                kind: kind.clone(),
-                                target: Some(target.clone()),
-                                branching: 0.0,
-                                q_value: None,
-                                branching_uncertainty: None,
-                                evaluated_branching: None,
-                                multiplicity: None,
-                            });
-                        }
-                    }
+    Ok((chain, branch_table))
+}
 
-                    branch_table
-                        .curves_mut()
-                        .entry(parent.to_string())
-                        .or_default()
-                        .entry(kind)
-                        .or_default()
-                        .push(BranchCurve {
-                            target,
-                            quantity,
-                            energy,
-                            values,
-                            states: states.into(),
-                            normalisation,
-                        });
+/// Lay one branching source over `chain` and `table`, after the sources
+/// already in `table`.
+///
+/// A `(parent, reaction)` channel an earlier source supplied keeps that
+/// source's curves: this source's rows for it are passed over whole, grafting
+/// nothing, so a channel's states all come from one evaluation. Every other
+/// row is read as a single source's always was. The source's
+/// `branching_covariance.arrow` is attached to it, and its `provenance.json`,
+/// when there is one, names the library it was converted from.
+fn overlay_branching(
+    chain: &mut HashMap<String, ChainNuclide>,
+    table: &mut BranchTable,
+    section: &BranchingSection,
+) -> Result<(), Box<dyn Error>> {
+    let Some(bytes) = section.files.get("branching.arrow") else {
+        return Err(format!(
+            "the branching source '{}' has no branching.arrow. A branching source is a \
+             library keyword or a directory holding a branching subsection \
+             (branching.arrow, with branching_covariance.arrow beside it where the \
+             library has MF=40); check the name or the path",
+            section.source
+        )
+        .into());
+    };
+    let library = match section.files.get("provenance.json") {
+        Some(bytes) => provenance_library(bytes).map_err(|e| {
+            format!(
+                "the branching source '{}' has a provenance.json that cannot be read: {e}",
+                section.source
+            )
+        })?,
+        None => None,
+    };
+    let index = table.add_source(&section.source, library)?;
+    // The channels the sources before this one supplied, which this one does
+    // not reach. Taken before any of its rows, so its own several rows of one
+    // channel all land.
+    let earlier: std::collections::HashSet<(String, String)> = table
+        .curves()
+        .iter()
+        .flat_map(|(parent, kinds)| {
+            kinds
+                .keys()
+                .filter(|kind| table.source_index(parent, kind).is_some())
+                .map(|kind| (parent.clone(), kind.clone()))
+        })
+        .collect();
+    for batch in read_arrow_bytes(bytes)? {
+        let nuclides = col::<StringArray>(&batch, "nuclide")?;
+        let reactions = col::<StringArray>(&batch, "reaction")?;
+        let targets = col::<StringArray>(&batch, "target")?;
+        let quantities = col::<StringArray>(&batch, "quantity")?;
+        let energy_col = col::<ListArray>(&batch, "energy")?;
+        let values_col = col::<ListArray>(&batch, "values")?;
+        let state_cols = BranchStateColumns::from_batch(&batch)?;
+        for i in 0..batch.num_rows() {
+            let parent = nuclides.value(i);
+            if !chain.contains_key(parent) {
+                continue;
+            }
+            let kind = reactions.value(i).to_string();
+            if kind == ANYTHING {
+                return Err(format!(
+                    "branching.arrow has an {ANYTHING} row for {parent}. MT=5's \
+                     products are read from the reactions subsection, the same \
+                     evaluation as the chain's topology, and a second source for \
+                     them would mix two libraries in one reaction"
+                )
+                .into());
+            }
+            if earlier.contains(&(parent.to_string(), kind.clone())) {
+                continue;
+            }
+            let target = targets.value(i).to_string();
+            let quantity = match quantities.value(i) {
+                "yield" => BranchQuantity::Yield,
+                "cross_section" => BranchQuantity::CrossSection,
+                _ => continue,
+            };
+            let energy = list_f64(energy_col, i)?;
+            let values = list_f64(values_col, i)?;
+            if energy.is_empty() || energy.len() != values.len() {
+                continue;
+            }
+            let (states, normalisation) = match &state_cols {
+                Some(columns) => columns.row(i, energy.len())?,
+                None => (Vec::new(), None),
+            };
+
+            // Graft the metastable-production channel when the base
+            // chain lacks it (see the branching block comment in
+            // `parse_chain_parts_from_bytes` and `should_graft` for the guard
+            // rationale).
+            let target_is_nuclide = chain.contains_key(&target);
+            let nuc = chain.get_mut(parent).expect("parent present");
+            let kind_present = nuc.reactions.iter().any(|r| r.kind == kind);
+            if should_graft(&kind, &target, parent, target_is_nuclide, kind_present) {
+                let exists = nuc
+                    .reactions
+                    .iter()
+                    .any(|r| r.kind == kind && r.target.as_deref() == Some(&target));
+                if !exists {
+                    nuc.reactions.push(ChainReaction {
+                        kind: kind.clone(),
+                        target: Some(target.clone()),
+                        branching: 0.0,
+                        q_value: None,
+                        branching_uncertainty: None,
+                        evaluated_branching: None,
+                        multiplicity: None,
+                    });
                 }
             }
+
+            table.set_source(parent, &kind, index);
+            table
+                .curves_mut()
+                .entry(parent.to_string())
+                .or_default()
+                .entry(kind)
+                .or_default()
+                .push(BranchCurve {
+                    target,
+                    quantity,
+                    energy,
+                    values,
+                    states: states.into(),
+                    normalisation,
+                });
         }
     }
 
     // branching/branching_covariance.arrow -- the optional MF=40 covariance of
-    // those curves. Held whole, as the file's batches: see `BranchTable`.
-    if let Some(bytes) = parts.branching.get("branching_covariance.arrow") {
-        branch_table.set_covariance(read_section_bytes(
-            bytes,
-            "branching/branching_covariance.arrow",
-            "branching/branching_covariance.arrow",
-        )?);
+    // the source's curves. Held whole, as the file's batches: see `BranchTable`.
+    if let Some(bytes) = section.files.get("branching_covariance.arrow") {
+        table.set_covariance(
+            index,
+            read_section_bytes(
+                bytes,
+                "branching/branching_covariance.arrow",
+                "branching/branching_covariance.arrow",
+            )?,
+        );
     }
+    Ok(())
+}
 
-    Ok((chain, branch_table))
+/// The `library` a subsection's `provenance.json` names, or `None` where it
+/// names none.
+fn provenance_library(bytes: &[u8]) -> Result<Option<String>, String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    Ok(value
+        .get("library")
+        .and_then(|l| l.as_str())
+        .filter(|l| !l.is_empty())
+        .map(str::to_string))
 }
 
 /// Read one optional section file. A missing file is an absent section, which
@@ -1574,14 +1682,19 @@ fn load_optional(dir: &Path, file: &str, into: &mut SectionFiles) -> Result<(), 
 
 /// Parse a v2 split chain from directories on disk.
 ///
-/// Reads the eight section files into [`ChainSections`] and hands them to
+/// Reads the section files into [`ChainSections`] and hands them to
 /// [`parse_chain_parts_from_bytes`], which holds the actual parsing. The split
 /// exists so a host without a filesystem can reach the same parser.
+///
+/// `branching` is the isomeric-branching overlay: `(source, directory)` per
+/// `branching/` subsection, in the order a channel takes its curves from
+/// them, the source being the name the branching report gives it. Empty for
+/// no overlay.
 pub fn parse_chain_parts(
     decay_dir: &Path,
     reactions_dir: Option<&Path>,
     fpy_dir: Option<&Path>,
-    branch_dir: Option<&Path>,
+    branching: &[(&str, &Path)],
 ) -> Result<(HashMap<String, ChainNuclide>, BranchTable), Box<dyn Error>> {
     let mut parts = ChainSections::default();
 
@@ -1622,15 +1735,17 @@ pub fn parse_chain_parts(
         load_optional(fpy_dir, "aliases.arrow", &mut parts.fission_yields)?;
         load_optional(fpy_dir, "evaluated_yields.arrow", &mut parts.fission_yields)?;
     }
-    if let Some(branch_dir) = branch_dir {
-        load_optional(branch_dir, "branching.arrow", &mut parts.branching)?;
+    for (source, branch_dir) in branching {
+        let mut files = SectionFiles::new();
+        load_optional(branch_dir, "branching.arrow", &mut files)?;
         // An `.absent` marker, a settled 404 in the download cache, is not the
         // file, so it loads as no covariance.
-        load_optional(
-            branch_dir,
-            "branching_covariance.arrow",
-            &mut parts.branching,
-        )?;
+        load_optional(branch_dir, "branching_covariance.arrow", &mut files)?;
+        load_optional(branch_dir, "provenance.json", &mut files)?;
+        parts.branching.push(BranchingSection {
+            source: source.to_string(),
+            files,
+        });
     }
 
     parse_chain_parts_from_bytes(&parts)
@@ -2472,7 +2587,7 @@ mod tests {
 
         super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
         let (back, _branch) =
-            super::parse_chain_parts(&dir.join("decay"), None, None, None).expect("load succeeds");
+            super::parse_chain_parts(&dir.join("decay"), None, None, &[]).expect("load succeeds");
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(back["Co60"].half_life_uncertainty, Some(1.21e4));
@@ -2565,7 +2680,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
         let (back, _branch) =
-            super::parse_chain_parts(&dir.join("decay"), None, None, None).expect("load succeeds");
+            super::parse_chain_parts(&dir.join("decay"), None, None, &[]).expect("load succeeds");
         let _ = std::fs::remove_dir_all(&dir);
 
         for (name, written) in &chain {
@@ -2649,7 +2764,7 @@ mod tests {
         super::write_arrow_file(&dir.join("decay/decay_modes.arrow"), old, batch)
             .expect("overwrite decay_modes.arrow");
 
-        let (back, _branch) = super::parse_chain_parts(&dir.join("decay"), None, None, None)
+        let (back, _branch) = super::parse_chain_parts(&dir.join("decay"), None, None, &[])
             .expect("a file without the column still loads");
         let _ = std::fs::remove_dir_all(&dir);
         let decays: Vec<_> = back.values().flat_map(|n| &n.decays).collect();
@@ -2833,7 +2948,7 @@ mod tests {
             &dir.join("decay"),
             Some(&dir.join("reactions")),
             Some(&dir.join("fission_yields")),
-            None,
+            &[],
         )
         .expect("round trips");
         let co60 = back.get("Co60").expect("Co60 survives the round trip");
@@ -2920,7 +3035,7 @@ mod tests {
             let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
             super::write_arrow_file(&dir.join("decay/sources.arrow"), schema, batch).unwrap();
 
-            let result = parse_chain_parts(&dir.join("decay"), None, None, None);
+            let result = parse_chain_parts(&dir.join("decay"), None, None, &[]);
             let _ = std::fs::remove_dir_all(&dir);
             match result {
                 Ok(_) => String::new(),
@@ -3004,7 +3119,7 @@ mod tests {
         .unwrap();
         super::write_arrow_file(&dir.join("flat/sources.arrow"), schema, batch).unwrap();
 
-        let parts = parse_chain_parts(&dir.join("decay"), None, None, None).map(|(c, _)| c);
+        let parts = parse_chain_parts(&dir.join("decay"), None, None, &[]).map(|(c, _)| c);
         let flat = super::parse_chain_arrow(dir.join("flat"));
         let _ = std::fs::remove_dir_all(&dir);
         for chain in [parts.unwrap(), flat.unwrap()] {
@@ -3059,7 +3174,7 @@ mod tests {
             ));
             let _ = std::fs::remove_dir_all(&dir);
             super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
-            let result = parse_chain_parts(&dir.join("decay"), None, None, None);
+            let result = parse_chain_parts(&dir.join("decay"), None, None, &[]);
             let _ = std::fs::remove_dir_all(&dir);
             match result {
                 Ok(_) => String::new(),
@@ -3127,7 +3242,7 @@ mod tests {
             ));
             let _ = std::fs::remove_dir_all(&dir);
             super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
-            let result = parse_chain_parts(&dir.join("decay"), None, None, None);
+            let result = parse_chain_parts(&dir.join("decay"), None, None, &[]);
             let _ = std::fs::remove_dir_all(&dir);
             result.map_err(|e| e.to_string())
         };
@@ -3196,7 +3311,7 @@ mod tests {
             ));
             let _ = std::fs::remove_dir_all(&dir);
             super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
-            let result = parse_chain_parts(&dir.join("decay"), None, None, None);
+            let result = parse_chain_parts(&dir.join("decay"), None, None, &[]);
             let _ = std::fs::remove_dir_all(&dir);
             result.map(|_| ()).map_err(|e| e.to_string())
         };
@@ -3368,7 +3483,7 @@ mod tests {
                 &dir.join("decay"),
                 Some(&dir.join("reactions")),
                 Some(&dir.join("fission_yields")),
-                None,
+                &[],
             )
             .map(|(chain, _)| chain)
         };
@@ -3447,7 +3562,7 @@ mod tests {
         use crate::chain::YieldInterpolation;
         let dir = std::env::temp_dir().join(format!("yani-law-fallback-{}", std::process::id()));
         let read = |fy: &std::path::Path| {
-            parse_chain_parts(&dir.join("decay"), None, Some(fy), None)
+            parse_chain_parts(&dir.join("decay"), None, Some(fy), &[])
                 .map(|(chain, _)| chain)
                 .unwrap()
         };
@@ -3478,7 +3593,7 @@ mod tests {
 
         // In the evaluated yields a file without the column falls back to.
         let fy = chain_without_the_law_column(&dir, Some(5));
-        let err = parse_chain_parts(&dir.join("decay"), None, Some(&fy), None)
+        let err = parse_chain_parts(&dir.join("decay"), None, Some(&fy), &[])
             .map(|_| ())
             .expect_err("a log-log yield law must be refused")
             .to_string();
@@ -3495,7 +3610,7 @@ mod tests {
         let schema = Arc::new(super::section_schema("fission_yields/fission_yields.arrow"));
         let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
         super::write_arrow_file(&path, schema, batch).unwrap();
-        let err = parse_chain_parts(&dir.join("decay"), None, Some(&fy), None)
+        let err = parse_chain_parts(&dir.join("decay"), None, Some(&fy), &[])
             .map(|_| ())
             .expect_err("an unknown yield law must be refused")
             .to_string();
@@ -3535,7 +3650,7 @@ mod tests {
             &dir.join("decay"),
             None,
             Some(&dir.join("fission_yields")),
-            None,
+            &[],
         )
         .expect("reloads");
         let yields = &back["U235"].fission_yields.as_ref().unwrap().yields;
@@ -3570,7 +3685,7 @@ mod tests {
             &root.join("b/decay"),
             None,
             Some(&root.join("b/fission_yields")),
-            None,
+            &[],
         )
         .expect_err("an orphaned evaluated row must not load")
         .to_string();
@@ -3742,7 +3857,7 @@ mod tests {
             &root.join("decay"),
             Some(&root.join("reactions")),
             Some(&root.join("fission_yields")),
-            None,
+            &[],
         )
         .expect_err("a flat-layout directory must not load as an empty chain")
         .to_string();
@@ -3766,7 +3881,7 @@ mod tests {
             &root.join("decay"),
             Some(&root.join("reactions")),
             Some(&root.join("fission_yields")),
-            None,
+            &[],
         )
         .expect_err("a directory with no decay index must not load")
         .to_string();
@@ -3813,29 +3928,51 @@ mod tests {
                 .expect("write");
             writer.finish().expect("finish");
         }
+        // And a branching.arrow of its schema with no rows, which a source has
+        // to have.
+        let curves_schema = std::sync::Arc::new(nuclear_data_schema::branching_branching());
+        let mut curves = Vec::new();
+        {
+            let mut writer = arrow_ipc::writer::FileWriter::try_new(&mut curves, &curves_schema)
+                .expect("writer");
+            writer
+                .write(&arrow_array::RecordBatch::new_empty(curves_schema.clone()))
+                .expect("write");
+            writer.finish().expect("finish");
+        }
         let (with, marker, broken) = (root.join("with"), root.join("marker"), root.join("broken"));
         for dir in [&with, &marker, &broken] {
             std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("branching.arrow"), &curves).unwrap();
         }
         std::fs::write(with.join("branching_covariance.arrow"), &file).unwrap();
         std::fs::write(marker.join("branching_covariance.arrow.absent"), b"").unwrap();
         std::fs::write(broken.join("branching_covariance.arrow"), b"not arrow").unwrap();
 
         let load = |branch: &std::path::Path| {
-            parse_chain_parts(&root.join("decay"), None, None, Some(branch))
+            parse_chain_parts(&root.join("decay"), None, None, &[("test", branch)])
         };
         let loaded = load(&with).expect("load succeeds").1;
-        let batches = loaded.covariance().expect("the covariance is loaded");
+        let batches = loaded.sources()[0]
+            .covariance()
+            .expect("the covariance is loaded");
         assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 0);
         assert_eq!(batches[0].schema().fields().len(), schema.fields().len());
-        assert!(load(&marker)
-            .expect("load succeeds")
-            .1
+        assert!(load(&marker).expect("load succeeds").1.sources()[0]
             .covariance()
             .is_none());
         assert!(
             load(&broken).is_err(),
             "an unreadable covariance is not silence"
+        );
+        // A source with no branching.arrow is refused, not loaded as one that
+        // evaluates nothing.
+        let empty = root.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        let err = load(&empty).expect_err("a source without branching.arrow");
+        assert!(
+            err.to_string().contains("'test' has no branching.arrow"),
+            "{err}"
         );
 
         let mut sections = super::ChainSections::default();
@@ -3847,12 +3984,16 @@ mod tests {
             )
             .unwrap();
         let (_, without) = super::parse_chain_parts_from_bytes(&sections).expect("bytes load");
-        assert!(without.covariance().is_none());
+        assert!(without.sources().is_empty());
+        sections
+            .insert("branching", "branching.arrow", curves)
+            .unwrap();
         sections
             .insert("branching", "branching_covariance.arrow", file)
             .unwrap();
         let (_, with_bytes) = super::parse_chain_parts_from_bytes(&sections).expect("bytes load");
-        assert!(with_bytes.covariance().is_some());
+        assert_eq!(with_bytes.sources()[0].name, "branching");
+        assert!(with_bytes.sources()[0].covariance().is_some());
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -4017,7 +4158,7 @@ mod tests {
             super::write_arrow_file(&path, schema, batch).expect("reactions written");
         }
         let load = |dir: &std::path::Path| {
-            super::parse_chain_parts(&dir.join("decay"), Some(&dir.join("reactions")), None, None)
+            super::parse_chain_parts(&dir.join("decay"), Some(&dir.join("reactions")), None, &[])
         };
         let (full, _) = load(&full_dir).expect("the full chain loads");
         assert!(full["Qq2"]

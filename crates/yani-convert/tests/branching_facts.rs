@@ -191,7 +191,7 @@ fn read_back(chain: &Path, branching: &Path) -> yani::BranchTable {
         &chain.join("decay"),
         Some(&chain.join("reactions")),
         Some(&chain.join("fission_yields")),
-        Some(branching),
+        &[("branching", branching)],
     )
     .expect("yani reads the branching subsection")
     .1

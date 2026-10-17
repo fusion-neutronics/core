@@ -1655,7 +1655,7 @@ mod tests {
                 println!("{library}: not present");
                 continue;
             }
-            let chain = yani::load_chain_parts(&decay.to_string_lossy(), None, None, None)
+            let chain = yani::load_chain_parts(&decay.to_string_lossy(), None, None, &[])
                 .expect("chain loads")
                 .chain;
             let started = std::time::Instant::now();

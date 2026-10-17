@@ -279,8 +279,13 @@ fn endf_b8_1_case(nuclide: &str) -> Option<(yani::LoadedChain, Material)> {
         return None;
     }
     let dir = |i: usize| dirs[i].to_string_lossy().into_owned();
-    let loaded = yani::load_chain_parts(&dir(0), Some(&dir(1)), Some(&dir(2)), Some(&dir(3)))
-        .expect("chain");
+    let loaded = yani::load_chain_parts(
+        &dir(0),
+        Some(&dir(1)),
+        Some(&dir(2)),
+        &[("endf-b8.1", &dir(3))],
+    )
+    .expect("chain");
     let mut material = Material::new(
         HashMap::from([(nuclide.to_string(), 3.8e-2)]),
         "atom",

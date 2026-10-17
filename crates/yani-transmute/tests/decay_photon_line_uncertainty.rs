@@ -298,7 +298,7 @@ fn endf_b8_1_contact_dose_ranges_from_the_lines_alone() {
         eprintln!("skipping -- {} absent", decay.display());
         return;
     }
-    let chain = yani::load_chain_parts(&decay.to_string_lossy(), None, None, None)
+    let chain = yani::load_chain_parts(&decay.to_string_lossy(), None, None, &[])
         .expect("decay data")
         .chain;
     let has_sigmas = chain["W187"]

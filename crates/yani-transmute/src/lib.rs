@@ -100,18 +100,24 @@ pub use material_transmute::{
 /// `_decay_data` has no such state: half-lives come from it and a chain
 /// without them is empty.
 ///
-/// When `yamc.transmutation_branch_ratios` is set, its `branching/` subsection
-/// is also resolved and returned in `LoadedChain::branch`: the chain then
-/// carries grafted `(n,n')` metastable channels. On the coupled path the
+/// When `yamc.transmutation_branch_ratios` names branching sources, each
+/// one's `branching/` subsection is also resolved, and they are laid over the
+/// chain in the order given and returned in `LoadedChain::branch`: each
+/// `(parent, reaction)` channel takes its curves, and its MF=40 covariance,
+/// from the first source that evaluates it (see
+/// [`yani::parse_chain_parts_from_bytes`]), and the branching report names
+/// that source per channel. The chain then carries grafted `(n,n')` and
+/// metastable channels. On the coupled path the
 /// verbatim energy-dependent curves are scored directly at the collision
 /// energy during transport (see `transmutation_tallies`); the
 /// flux-given `Material::transmute` path folds them against the user's
-/// multigroup spectrum (see `material_transmute`). When unset, the overlay
-/// holds only the reactions subsection's own MT=5 `(n,X)` multiplicities,
-/// which are folded the same way whatever branching source is set, and every
-/// other reaction's product lands where the plain three-part chain puts it.
+/// multigroup spectrum (see `material_transmute`). When none is named, the
+/// overlay holds only the reactions subsection's own MT=5 `(n,X)`
+/// multiplicities, which are folded the same way whatever branching source is
+/// set, and every other reaction's product lands where the plain three-part
+/// chain puts it.
 pub fn load_configured_chain() -> Result<yani::LoadedChain, Box<dyn std::error::Error>> {
-    let (decay_src, reactions_src, fpy_src, branch_src) = {
+    let (decay_src, reactions_src, fpy_src, branch_srcs) = {
         let cfg = yamc_nuclide::config::Config::global();
         (
             cfg.get_transmutation_decay_data(),
@@ -131,7 +137,17 @@ pub fn load_configured_chain() -> Result<yani::LoadedChain, Box<dyn std::error::
     };
     let reactions_dir = resolve(reactions_src, "reactions")?;
     let fpy_dir = resolve(fpy_src, "fission_yields")?;
-    let branch_dir = resolve(branch_src, "branching")?;
+    let branch_dirs: Vec<(String, String)> = branch_srcs
+        .into_iter()
+        .map(|src| {
+            let dir = yamc_nuclide::url_cache::resolve_subsection(&src, "branching")?;
+            Ok((src, dir.to_string_lossy().into_owned()))
+        })
+        .collect::<Result<_, Box<dyn std::error::Error>>>()?;
+    let branching: Vec<(&str, &str)> = branch_dirs
+        .iter()
+        .map(|(src, dir)| (src.as_str(), dir.as_str()))
+        .collect();
     yani::load_chain_parts(
         &decay_dir.to_string_lossy(),
         reactions_dir
@@ -139,7 +155,7 @@ pub fn load_configured_chain() -> Result<yani::LoadedChain, Box<dyn std::error::
             .map(|p| p.to_string_lossy())
             .as_deref(),
         fpy_dir.as_ref().map(|p| p.to_string_lossy()).as_deref(),
-        branch_dir.as_ref().map(|p| p.to_string_lossy()).as_deref(),
+        &branching,
     )
 }
 pub use damage::{DamageRequest, DisplacementDamage};

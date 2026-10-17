@@ -664,7 +664,7 @@ fn session_with_sm158_law(law: Option<yani::Interpolation>) -> Option<YaniSessio
         &root.join("decay"),
         Some(&root.join("reactions")),
         Some(&root.join("fission_yields")),
-        None,
+        &[],
     )
     .expect("fixture chain parses");
     let sm158 = chain.get_mut("Sm158").expect("Sm158 is in the fixture");

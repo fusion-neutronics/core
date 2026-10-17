@@ -91,11 +91,21 @@ fn read_back(dir: &Path) -> Vec<BranchingCovarianceBlock> {
     };
     let chain = std::collections::HashMap::from([("Nb93".to_string(), nuclide)]);
     yani::export_chain_parts(&chain, &chain_dir, Some("test")).expect("chain exports");
-    let (_, branch) = yani::parse_chain_parts(&chain_dir.join("decay"), None, None, Some(dir))
-        .expect("chain loads");
-    let blocks =
-        branching_covariance_blocks(branch.covariance().expect("the covariance is loaded"))
-            .expect("blocks read");
+    // A branching source carries its branching.arrow. Most of these tests
+    // write the covariance alone, so they get an empty one: the blocks are
+    // read whatever the curves are.
+    if !dir.join("branching.arrow").exists() {
+        write_branching(&[], dir).expect("an empty branching.arrow");
+    }
+    let (_, branch) =
+        yani::parse_chain_parts(&chain_dir.join("decay"), None, None, &[("branching", dir)])
+            .expect("chain loads");
+    let blocks = branching_covariance_blocks(
+        branch.sources()[0]
+            .covariance()
+            .expect("the covariance is loaded"),
+    )
+    .expect("blocks read");
 
     let mut sections = yani::ChainSections::default();
     for (subsection, from) in [
@@ -114,7 +124,7 @@ fn read_back(dir: &Path) -> Vec<BranchingCovarianceBlock> {
     }
     let (_, from_bytes) = yani::parse_chain_parts_from_bytes(&sections).expect("bytes load");
     let bytes_blocks = branching_covariance_blocks(
-        from_bytes
+        from_bytes.sources()[0]
             .covariance()
             .expect("the covariance is loaded from bytes"),
     )

@@ -47,11 +47,16 @@ impl PyChain {
         // in `load_configured_chain` from the configured `branch_ratios`
         // source, so `reduce()`/`export_to_arrow()` round-trip the base chain.
         let branch_root = root.join("branching");
+        let branching: Vec<(&str, &std::path::Path)> = if branch_root.is_dir() {
+            vec![(path, branch_root.as_path())]
+        } else {
+            Vec::new()
+        };
         let (chain, _branch) = yani::parse_chain_parts(
             &root.join("decay"),
             Some(&root.join("reactions")),
             Some(&root.join("fission_yields")),
-            branch_root.is_dir().then_some(branch_root.as_path()),
+            &branching,
         )
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("Failed to load chain: {e}")))?;
         let library = read_chain_library(path);

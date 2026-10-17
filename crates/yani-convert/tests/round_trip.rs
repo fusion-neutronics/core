@@ -126,7 +126,7 @@ fn yani_reads_what_the_converter_writes() {
         &c.dir.join("decay"),
         Some(&c.dir.join("reactions")),
         Some(&c.dir.join("fission_yields")),
-        None,
+        &[],
     )
     .expect("yani reads the converted chain");
 
@@ -169,7 +169,7 @@ fn the_decay_energy_split_survives() {
         &c.dir.join("decay"),
         Some(&c.dir.join("reactions")),
         Some(&c.dir.join("fission_yields")),
-        None,
+        &[],
     )
     .expect("yani reads the converted chain");
 
@@ -330,7 +330,7 @@ fn every_branching_ratio_and_sigma_is_written_as_the_tape_gives_it() {
 
     // yani's reader takes the dBR as stored, 0.0 included, so what it exports
     // is what it read.
-    let (back, _) = yani::parse_chain_parts(&c.dir.join("decay"), None, None, None)
+    let (back, _) = yani::parse_chain_parts(&c.dir.join("decay"), None, None, &[])
         .expect("yani reads the converted chain");
     let dbr = |name: &str| -> Vec<Option<f64>> {
         back[name]
@@ -416,7 +416,7 @@ fn every_nuclide_sigma_is_written_as_the_tape_gives_it() {
          nothing here shows a zero surviving as a zero"
     );
 
-    let (back, _) = yani::parse_chain_parts(&c.dir.join("decay"), None, None, None)
+    let (back, _) = yani::parse_chain_parts(&c.dir.join("decay"), None, None, &[])
         .expect("yani reads the converted chain");
     assert_eq!(
         back["Cs137"].decay_energy_components[2].map(|p| p.uncertainty),
@@ -438,7 +438,7 @@ fn reaction_q_values_survive() {
         &c.dir.join("decay"),
         Some(&c.dir.join("reactions")),
         Some(&c.dir.join("fission_yields")),
-        None,
+        &[],
     )
     .expect("reads back");
 
@@ -527,7 +527,7 @@ fn convert_transmutation_writes_a_complete_directory() {
         &dir.join("decay"),
         Some(&dir.join("reactions")),
         Some(&dir.join("fission_yields")),
-        None,
+        &[],
     )
     .expect("yani reads it");
     assert_eq!(back.len(), chain.nuclides.len());
@@ -598,14 +598,14 @@ fn convert_transmutation_writes_a_complete_directory() {
         &dir.join("decay"),
         Some(&dir.join("reactions")),
         Some(&dir.join("fission_yields")),
-        None,
+        &[],
     )
     .expect("first reads");
     let (b, _) = yani::parse_chain_parts(
         &again.join("decay"),
         Some(&again.join("reactions")),
         Some(&again.join("fission_yields")),
-        None,
+        &[],
     )
     .expect("second reads");
     assert_eq!(
@@ -736,7 +736,7 @@ fn branching_is_written_and_joins_the_manifest() {
         &out.join("decay"),
         Some(&out.join("reactions")),
         Some(&out.join("fission_yields")),
-        Some(&out.join("branching")),
+        &[("branching", out.join("branching").as_path())],
     )
     .expect("yani reads the chain and its branching subsection");
     assert!(!chain.is_empty(), "no chain came back");
@@ -810,7 +810,7 @@ fn the_default_reaction_set_is_not_the_short_one() {
             &dir.join("out/decay"),
             Some(&dir.join("out/reactions")),
             Some(&dir.join("out/fission_yields")),
-            None,
+            &[],
         )
         .expect("reads");
         let n = chain.values().map(|c| c.reactions.len()).sum();
@@ -1235,7 +1235,7 @@ fn fission_yield_evaluations_are_written_verbatim() {
         &dir.join("decay"),
         None,
         Some(&dir.join("fission_yields")),
-        None,
+        &[],
     )
     .expect("yani reads it");
     let set = back["U235"]

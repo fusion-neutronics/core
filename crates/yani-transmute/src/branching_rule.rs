@@ -138,6 +138,37 @@ pub(crate) struct ListRule<'a> {
     /// neutron allow at most `floor((A + 1) / A_product)` of a product, and a
     /// multiplicity above that is clipped like any other impossible value.
     pub(crate) bounds: Vec<f64>,
+    /// The branching source the curves came from, or `None` for a list no
+    /// branching source supplied: the `(n,X)` multiplicities, which come from
+    /// the reactions subsection.
+    pub(crate) source: Option<ListSource>,
+}
+
+/// Which branching source a list's curves came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ListSource {
+    /// Its place in the run's order of sources.
+    pub(crate) index: usize,
+    /// What the run named it: a library keyword or a path.
+    pub(crate) name: String,
+    /// The library it holds: what its `provenance.json` names, else its name.
+    pub(crate) library: String,
+}
+
+impl ListSource {
+    /// The source `branch` took `parent`'s `kind` channel from, if any.
+    pub(crate) fn of(branch: &yani::BranchTable, parent: &str, kind: &str) -> Option<Self> {
+        let index = branch.source_index(parent, kind)?;
+        let source = &branch.sources()[index];
+        Some(ListSource {
+            index,
+            name: source.name.clone(),
+            library: source
+                .library
+                .clone()
+                .unwrap_or_else(|| source.name.clone()),
+        })
+    }
 }
 
 /// The most of `product` one neutron reaction on `parent` can make, by
@@ -294,6 +325,7 @@ impl<'a> ListRule<'a> {
             own_total_excess: None,
             emits: false,
             bounds,
+            source: None,
         };
         rule.own_total_excess = rule.excess_over_own_total();
         Ok(Some(rule))
@@ -356,20 +388,25 @@ impl<'a> ListRule<'a> {
             last,
             own_total_excess: None,
             emits: true,
+            source: None,
         })
     }
 
     /// Every list `curves` makes for `(parent, kind)`: the one of
     /// [`ListRule::new`], and for `(n,X)` its light particles as well, in
-    /// that order.
+    /// that order, each recording `source` as where its curves came from.
     pub(crate) fn all(
         parent: &str,
         kind: &str,
         curves: &'a [BranchCurve],
+        source: Option<ListSource>,
     ) -> Result<Vec<ListRule<'a>>, String> {
         let mut out: Vec<ListRule<'a>> = ListRule::new(parent, kind, curves)?.into_iter().collect();
         if kind == ANYTHING {
             out.extend(ListRule::particles(parent, kind, curves));
+        }
+        for rule in &mut out {
+            rule.source = source.clone();
         }
         Ok(out)
     }
@@ -473,6 +510,7 @@ impl<'a> ListRule<'a> {
             own_total_excess: self.own_total_excess,
             emits: self.emits,
             bounds: self.bounds,
+            source: self.source,
         }
     }
 
@@ -750,7 +788,12 @@ pub(crate) fn build_lists<'a>(
         names.sort();
         let mut rules = Vec::new();
         for kind in names {
-            rules.extend(ListRule::all(parent, kind, &kinds[kind])?);
+            rules.extend(ListRule::all(
+                parent,
+                kind,
+                &kinds[kind],
+                ListSource::of(branch, parent, kind),
+            )?);
         }
         if !rules.is_empty() {
             out.insert(parent.clone(), rules);
@@ -826,6 +869,15 @@ pub struct BranchingChannel {
     pub own_total_excess: Option<(f64, f64)>,
     /// The parent evaluation's MF=1 normalisation block, when it names one.
     pub normalisation: Option<String>,
+    /// The branching source the split came from, as the run named it (an
+    /// entry of `transmutation_branch_ratios`: a library keyword or a path).
+    /// `None` for an `(n,X)` channel, whose products come from the reactions
+    /// subsection rather than from a branching source.
+    pub source: Option<String>,
+    /// The library the reaction's total came from: the parent's transport
+    /// cross sections, by the keyword they were loaded with, else the library
+    /// their data names (as its keyword). `None` where the run does not say.
+    pub cross_section_library: Option<String>,
 }
 
 /// A branching channel, or part of one, that carries no production in the
@@ -872,6 +924,16 @@ pub struct BranchingReport {
     pub dropped: Vec<DroppedChannel>,
     /// Parents with a non-zero MT=5 rate, largest share first.
     pub unmodelled_mt5: Vec<UnmodelledRate>,
+    /// The branching sources the channels' splits came from, in the run's
+    /// order of sources: one entry when a single source supplied them all.
+    pub sources: Vec<String>,
+    /// Whether the run mixes libraries in its isomeric branching: its
+    /// channels' splits come from more than one library, or a split comes
+    /// from a library other than the one its reaction's total came from.
+    /// A source is compared by the library its `provenance.json` names, else
+    /// by its name; a total whose library the run does not know is not
+    /// counted.
+    pub mixed: bool,
 }
 
 impl BranchingReport {
@@ -879,6 +941,55 @@ impl BranchingReport {
     pub fn is_empty(&self) -> bool {
         self.channels.is_empty() && self.dropped.is_empty() && self.unmodelled_mt5.is_empty()
     }
+}
+
+/// The list a reported channel was resolved from: its parent's first list of
+/// its kind that is not emitted particles.
+fn list_of<'l, 'a>(lists: &'l Lists<'a>, channel: &BranchingChannel) -> Option<&'l ListRule<'a>> {
+    lists
+        .get(&channel.parent)?
+        .iter()
+        .find(|r| r.kind == channel.reaction && !r.emits)
+}
+
+/// The branching sources `channels` took their splits from, in the run's
+/// order of sources.
+pub(crate) fn sources_used(channels: &[BranchingChannel], lists: &Lists<'_>) -> Vec<String> {
+    let mut used: Vec<&ListSource> = channels
+        .iter()
+        .filter_map(|c| list_of(lists, c)?.source.as_ref())
+        .collect();
+    used.sort_by_key(|s| s.index);
+    used.dedup_by_key(|s| s.index);
+    used.into_iter().map(|s| s.name.clone()).collect()
+}
+
+/// Name each channel's cross-section library and say whether the run mixes
+/// libraries (see [`BranchingReport::mixed`]).
+///
+/// `library_of(parent)` is where the parent's transport cross sections came
+/// from, `None` where the caller does not know.
+pub(crate) fn mark_mixing(
+    report: &mut BranchingReport,
+    lists: &Lists<'_>,
+    library_of: &dyn Fn(&str) -> Option<String>,
+) {
+    use yamc_nuclide::storage::url_cache::library_keyword;
+    let mut splits: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut across = false;
+    for channel in &mut report.channels {
+        channel.cross_section_library =
+            library_of(&channel.parent).map(|l| library_keyword(&l).to_string());
+        let Some(source) = list_of(lists, channel).and_then(|r| r.source.as_ref()) else {
+            continue;
+        };
+        let split = library_keyword(&source.library);
+        splits.insert(split.to_string());
+        if let Some(total) = &channel.cross_section_library {
+            across |= library_keyword(total) != split;
+        }
+    }
+    report.mixed = across || splits.len() > 1;
 }
 
 /// A parent's neutron removal rate: every reaction rate the chain drives on

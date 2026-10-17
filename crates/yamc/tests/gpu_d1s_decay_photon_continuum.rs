@@ -59,7 +59,7 @@ fn continuum_chain() -> std::path::PathBuf {
         &src.join("decay"),
         Some(&src.join("reactions")),
         Some(&src.join("fission_yields")),
-        None,
+        &[],
     )
     .expect("parse the fixture chain");
     let mn56 = chain.get_mut("Mn56").expect("the fixture chain has Mn56");

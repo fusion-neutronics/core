@@ -3905,6 +3905,14 @@ class TransmutationResults:
         much of the parent's removal rate rests on anything the evaluation
         does not give.
         
+        It also says where each split came from. With several branching
+        sources (``transmutation_branch_ratios = ["irdff-ii", "endf-b8.1"]``)
+        each channel takes its split from the first source that evaluates it,
+        and its ``source`` names that one. ``mixed`` is True when the splits
+        come from more than one library, or a split from a library other than
+        its reaction's total, so a mixed run reads as one at the top of the
+        report.
+        
         MT=5, ``(n,anything)``, is the ``(n,X)`` reaction: its residuals, read
         from the reaction library's MF=6 MT=5, are shares of the MT=5 total
         at each energy (``file`` 6, ``representation`` ``"share"``), and its
@@ -3927,7 +3935,8 @@ class TransmutationResults:
             step: Schedule step index, as ``get_reaction_rates`` takes it.
         
         Returns:
-            dict | None: ``channels``, ``dropped`` and ``unmodelled_mt5``, or
+            dict | None: ``channels``, ``dropped``, ``unmodelled_mt5``,
+            ``sources`` and ``mixed``, or
             None if the material or the step is unknown. Each channel has
             ``parent``, ``reaction``, ``mt``, ``file`` (6, 9 or 10),
             ``representation`` (``"share"``, ``"absolute"`` or
@@ -3938,8 +3947,15 @@ class TransmutationResults:
             reaction's share of the parent's removal rate), ``clipped_share``
             and ``extrapolated_share`` (of the same removal rate),
             ``own_total_excess`` (``(energy_ev, ratio)`` where the listed values
-            most exceed the evaluation's own total, or None) and
-            ``normalisation``. Each dropped channel has ``parent``,
+            most exceed the evaluation's own total, or None),
+            ``normalisation``, ``source`` (the branching source the split came
+            from, as named in ``transmutation_branch_ratios``, or None for an
+            ``(n,X)`` channel, whose products come from the reactions
+            subsection) and ``cross_section_library`` (where the reaction's
+            total came from, or None where that is not known). ``sources`` lists
+            the branching sources the channels used, in the configured order,
+            and ``mixed`` says whether the run mixes libraries as above. Each
+            dropped channel has ``parent``,
             ``reaction``, ``target``, ``reason`` and ``removal_share`` (None
             where it cannot be folded). ``unmodelled_mt5`` is
             ``[(nuclide, share, reason)]``, MT=5's share of the removal rate
@@ -3950,6 +3966,11 @@ class TransmutationResults:
             >>> report = results.get_branching_report(material_id=1, step=0)
             >>> report["channels"][0]["representation"]
             'absolute'
+            >>> # A Nb93 foil, transmutation_branch_ratios = ["irdff-ii", "endf-b8.1"]
+            >>> [(c["reaction"], c["source"]) for c in report["channels"] if c["parent"] == "Nb93"]
+            [('(n,2n)', 'irdff-ii'), ('(n,gamma)', 'irdff-ii'), ("(n,n')", 'irdff-ii')]
+            >>> report["mixed"]
+            True
         """
     def get_production_routes(self, material_id: builtins.int, product: builtins.str, step: builtins.int, reaction_depth: builtins.int = 1, decay_depth: builtins.int = 3) -> typing.Optional[typing.Any]:
         r"""
@@ -4346,9 +4367,14 @@ def get_cross_section_data() -> typing.Any:
     to paths.
     """
 
-def get_transmutation_branch_ratios() -> typing.Optional[builtins.str]:
+def get_transmutation_branch_ratios() -> builtins.str | list[builtins.str] | None:
     r"""
-    Get the isomeric branch-ratios source for the transmutation network, or ``None``.
+    Get the isomeric-branching sources of the transmutation network.
+    
+    Returns:
+        The one source as a string, several as a list in the order a reaction
+        takes its split from them, or ``None`` when none is set and no
+        isomeric-branching overlay is applied.
     """
 
 def get_transmutation_decay_data() -> typing.Optional[builtins.str]:
@@ -4614,9 +4640,33 @@ def set_cross_section_data_entry(nuclide_or_keyword: builtins.str, path: typing.
     directory.
     """
 
-def set_transmutation_branch_ratios(value: typing.Optional[builtins.str]) -> None:
+def set_transmutation_branch_ratios(value: typing.Optional[builtins.str | typing.Sequence[builtins.str]]) -> None:
     r"""
-    Set the isomeric branch-ratios source. Pass ``None`` to disable the overlay.
+    Set the isomeric-branching sources of the transmutation network.
+    
+    A source is a library keyword or a path to a ``branching`` subsection.
+    Give one, or several in order: each reaction of each parent (each
+    channel) takes its isomeric split, and the MF=40 covariance of that
+    split, from the first source that evaluates it, and the other sources'
+    data for that channel are not used. The branching report
+    (``TransmutationResults.get_branching_report``) names the source of every
+    channel, and says whether the run mixes libraries.
+    
+    ``"irdff-ii"``, the IAEA dosimetry library IRDFF-II, supplies isomeric
+    branching only, so it is only ever a source here, and only where it is
+    named: it is never a default.
+    
+    Args:
+        value: A source, a list of sources in order, or ``None`` (or an empty
+            list) for no isomeric-branching overlay.
+    
+    Raises:
+        ValueError: If a source is empty or is listed twice.
+    
+    Examples:
+        >>> yani.transmutation_branch_ratios = ["irdff-ii", "endf-b8.1"]
+        >>> yani.transmutation_branch_ratios
+        ['irdff-ii', 'endf-b8.1']
     """
 
 def set_transmutation_decay_data(value: typing.Optional[builtins.str]) -> None:

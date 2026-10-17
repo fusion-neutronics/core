@@ -214,22 +214,59 @@ pub struct BranchState {
 /// so they are here whether or not a `branching/` subsection was supplied.
 /// The table is empty only when neither gives anything.
 ///
-/// The table also holds the subsection's `branching_covariance.arrow`, the
-/// MF=40 covariance of the MF=10 partials, when the subsection carries one.
-/// That is kept as the file's record batches, schema-checked and otherwise
-/// as written: it is every MF=40 block of the library, not only those of this
-/// chain's parents, and turning a row into a covariance block is the
-/// covariance reader's job (`yamc-nuclide`), which this crate does not depend
-/// on. Nothing here reads it, so the curves and every nominal result are what
-/// they are without it.
+/// The curves of a reaction come from one `branching/` subsection, its
+/// source, and several sources can be given in order (see
+/// [`crate::parse_chain_parts_from_bytes`]): each `(parent, reaction)` channel
+/// takes every curve from the first source that evaluates it, never some
+/// states from one source and some from another. [`BranchTable::source_of`]
+/// says which source supplied a channel. The `(n,X)` multiplicities come from
+/// no branching source and have none.
+///
+/// Each source also brings its `branching_covariance.arrow`, the MF=40
+/// covariance of its MF=10 partials, when it carries one. That is kept as the
+/// file's record batches, schema-checked and otherwise as written: it is every
+/// MF=40 block of the library, not only those of this chain's parents, and
+/// turning a row into a covariance block is the covariance reader's job
+/// (`yamc-nuclide`), which this crate does not depend on. Nothing here reads
+/// it, so the curves and every nominal result are what they are without it. A
+/// channel's covariance is only ever its own source's: the reader is to pass
+/// over a source's blocks for a channel another source supplies.
 #[derive(Clone, Debug, Default)]
 pub struct BranchTable {
     curves: HashMap<String, HashMap<String, Vec<BranchCurve>>>,
+    /// `channel_sources[parent][kind]`: which of `sources` supplied the
+    /// channel's curves.
+    channel_sources: HashMap<String, HashMap<String, usize>>,
+    sources: Vec<BranchSource>,
+}
+
+/// One source of a [`BranchTable`]'s curves: a `branching/` subsection, as the
+/// run named it.
+#[derive(Clone, Debug, Default)]
+pub struct BranchSource {
+    /// What the run named it by: a library keyword or a path.
+    pub name: String,
+    /// The library its `provenance.json` says it was converted from (the
+    /// converter's `library` field), when it has one. Where the name is a path
+    /// this is what says which evaluation the path holds.
+    pub library: Option<String>,
     covariance: Option<Vec<RecordBatch>>,
 }
 
+impl BranchSource {
+    /// The rows of its `branching_covariance.arrow`, when it has one.
+    ///
+    /// `None` for a library without MF=40 (JENDL-5.0), for a subsection
+    /// published before the file existed, and for a bytes-fed host that did not
+    /// hand the file over. None of those is an error: there is simply no
+    /// stated covariance of the isomeric split.
+    pub fn covariance(&self) -> Option<&[RecordBatch]> {
+        self.covariance.as_deref()
+    }
+}
+
 impl BranchTable {
-    /// An empty table with no covariance.
+    /// An empty table with no sources.
     pub fn new() -> Self {
         Self::default()
     }
@@ -244,19 +281,56 @@ impl BranchTable {
         &mut self.curves
     }
 
-    /// The rows of `branching_covariance.arrow`, when the subsection has one.
-    ///
-    /// `None` for a library without MF=40 (JENDL-5.0), for a subsection
-    /// published before the file existed, and for a bytes-fed host that did not
-    /// hand the file over. None of those is an error: there is simply no
-    /// stated covariance of the isomeric split.
-    pub fn covariance(&self) -> Option<&[RecordBatch]> {
-        self.covariance.as_deref()
+    /// The branching sources, in the order a channel takes its curves from
+    /// them.
+    pub fn sources(&self) -> &[BranchSource] {
+        &self.sources
     }
 
-    /// Attach the covariance batches read from the subsection.
-    pub fn set_covariance(&mut self, batches: Vec<RecordBatch>) {
-        self.covariance = Some(batches);
+    /// Add a source after the others, returning its index.
+    ///
+    /// Refuses a name already given: two entries of one source would make the
+    /// second unreachable and say nothing about why.
+    pub fn add_source(&mut self, name: &str, library: Option<String>) -> Result<usize, String> {
+        if self.sources.iter().any(|s| s.name == name) {
+            return Err(format!(
+                "the branching source '{name}' is given twice; name each source once, in the \
+                 order its channels should be taken from"
+            ));
+        }
+        self.sources.push(BranchSource {
+            name: name.to_string(),
+            library,
+            covariance: None,
+        });
+        Ok(self.sources.len() - 1)
+    }
+
+    /// Record that source `index` supplied `parent`'s `kind` channel.
+    pub fn set_source(&mut self, parent: &str, kind: &str, index: usize) {
+        self.channel_sources
+            .entry(parent.to_string())
+            .or_default()
+            .insert(kind.to_string(), index);
+    }
+
+    /// The index of the source that supplied `parent`'s `kind` channel, or
+    /// `None` for a channel no branching source supplied: the `(n,X)`
+    /// multiplicities, which come from the reactions subsection, and curves
+    /// added through [`BranchTable::curves_mut`] without one.
+    pub fn source_index(&self, parent: &str, kind: &str) -> Option<usize> {
+        self.channel_sources.get(parent)?.get(kind).copied()
+    }
+
+    /// The source that supplied `parent`'s `kind` channel (see
+    /// [`BranchTable::source_index`]).
+    pub fn source_of(&self, parent: &str, kind: &str) -> Option<&BranchSource> {
+        self.source_index(parent, kind).map(|i| &self.sources[i])
+    }
+
+    /// Attach source `index`'s covariance batches.
+    pub fn set_covariance(&mut self, index: usize, batches: Vec<RecordBatch>) {
+        self.sources[index].covariance = Some(batches);
     }
 }
 
@@ -831,29 +905,39 @@ pub fn load_chain(path: &str) -> Result<Arc<HashMap<String, ChainNuclide>>, Box<
     Ok(chain)
 }
 
-/// Load a transmutation chain from separate v2 subsection directories, plus an
-/// optional `branching/` overlay directory, caching by the combined
-/// `(decay, reactions, fission_yields, branch)` key so a mixed-library
+/// Load a transmutation chain from separate v2 subsection directories, plus
+/// the `branching/` overlay directories, caching by the combined
+/// `(decay, reactions, fission_yields, branching)` key so a mixed-library
 /// combination caches distinctly from an all-one-library one.
 ///
-/// When `branch_dir` is `Some`, the returned chain has `(n,n')` metastable
-/// channels grafted on and the returned `branch` table carries the verbatim
-/// energy-dependent curves for the rate-time fold; when `None`, `branch` is
-/// empty and the chain is the plain three-part merge.
+/// `branching` is `(source, directory)` per branching source, in the order a
+/// `(parent, reaction)` channel takes its curves from them (see
+/// [`crate::parse_chain_parts_from_bytes`]); the source is the name the
+/// branching report gives it. With any, the returned chain has the `(n,n')`
+/// and metastable channels they evaluate grafted on and the returned `branch`
+/// table carries the verbatim energy-dependent curves for the rate-time fold;
+/// with none, `branch` holds only the `(n,X)` multiplicities and the chain is
+/// the plain three-part merge.
 pub fn load_chain_parts(
     decay_dir: &str,
     reactions_dir: Option<&str>,
     fpy_dir: Option<&str>,
-    branch_dir: Option<&str>,
+    branching: &[(&str, &str)],
 ) -> Result<LoadedChain, Box<dyn Error>> {
     // Combine the resolved paths into a single cache key (the unit separator
-    // can't appear in a path). The empty branch slot keeps no-overlay loads
-    // distinct from overlaid ones.
+    // can't appear in a path, nor the record separator in a source name). The
+    // empty branching slot keeps no-overlay loads distinct from overlaid ones,
+    // and the sources' order is part of the key, since it decides which one
+    // supplies a channel two of them evaluate.
+    let branching_key: Vec<String> = branching
+        .iter()
+        .map(|(source, dir)| format!("{source}\u{1e}{dir}"))
+        .collect();
     let key = format!(
         "{decay_dir}\u{1f}{}\u{1f}{}\u{1f}{}",
         reactions_dir.unwrap_or(""),
         fpy_dir.unwrap_or(""),
-        branch_dir.unwrap_or("")
+        branching_key.join("\u{1f}")
     );
     {
         let cache = LOADED_CHAIN_CACHE
@@ -871,11 +955,15 @@ pub fn load_chain_parts(
         return Ok(loaded.clone());
     }
 
+    let branching: Vec<(&str, &Path)> = branching
+        .iter()
+        .map(|(source, dir)| (*source, Path::new(*dir)))
+        .collect();
     let (chain, branch) = crate::chain_arrow::parse_chain_parts(
         Path::new(decay_dir),
         reactions_dir.map(Path::new),
         fpy_dir.map(Path::new),
-        branch_dir.map(Path::new),
+        &branching,
     )?;
     let loaded = LoadedChain {
         chain: Arc::new(chain),

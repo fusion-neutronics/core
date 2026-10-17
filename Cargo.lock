@@ -7285,6 +7285,7 @@ dependencies = [
  "nuclear-data-schema",
  "num-complex",
  "once_cell",
+ "serde_json",
 ]
 
 [[package]]
@@ -7338,6 +7339,7 @@ dependencies = [
 name = "yani-transmute"
 version = "0.1.0"
 dependencies = [
+ "arrow-array",
  "arrow-ipc",
  "endf",
  "faer",

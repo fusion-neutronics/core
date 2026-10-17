@@ -3915,6 +3915,7 @@ pub(crate) fn collapse_and_fold(
         folded.insert(parent.clone(), per);
     }
     let (folded_chain, mut report) = fold_branching_into_chain(chain, lists, &folded, &mut rates)?;
+    crate::branching_rule::mark_mixing(&mut report, lists, &|n| library_of(material, n));
     report.unmodelled_mt5 = measure_unmodelled_mt5(chain, &rates, &mt5);
     let densities = material.get_atoms_per_barn_cm().unwrap_or_default();
     refuse_clipped_or_held(&report.channels, &rates, &densities, &|n| {
@@ -4006,6 +4007,7 @@ pub(crate) fn fold_branching_into_chain(
         d.removal_share = rate.map(|r| if removal > 0.0 { r / removal } else { 0.0 });
         report.dropped.push(d);
     }
+    report.sources = crate::branching_rule::sources_used(&report.channels, lists);
     Ok((refine_chain(chain, &refine), report))
 }
 
@@ -4267,6 +4269,9 @@ fn resolve_list(
             extrapolated_share: 0.0,
             own_total_excess: rule.own_total_excess,
             normalisation: rule.curves.iter().find_map(|c| c.normalisation.clone()),
+            source: rule.source.as_ref().map(|s| s.name.clone()),
+            // Filled in by the caller, which knows where the totals came from.
+            cross_section_library: None,
         },
         rate: reaction_rate,
         clipped: folded.clipped * to_rate,
@@ -4547,7 +4552,12 @@ pub fn apply_coupled_branching(
             let Some(curves) = kinds.get(kind) else {
                 continue;
             };
-            for rule in ListRule::all(parent, kind, curves)? {
+            for rule in ListRule::all(
+                parent,
+                kind,
+                curves,
+                crate::branching_rule::ListSource::of(branch, parent, kind),
+            )? {
                 folded
                     .entry(parent.clone())
                     .or_default()
@@ -4562,6 +4572,9 @@ pub fn apply_coupled_branching(
         }
     }
     let (folded_chain, mut report) = fold_branching_into_chain(chain, &lists, &folded, rates)?;
+    crate::branching_rule::mark_mixing(&mut report, &lists, &|n| {
+        diagnostics.and_then(|d| d.libraries.get(n).cloned())
+    });
     if let Some(d) = diagnostics {
         report.unmodelled_mt5 = measure_unmodelled_mt5(chain, rates, &d.mt5);
         refuse_clipped_or_held(&report.channels, rates, &d.densities, &|n| {

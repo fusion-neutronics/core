@@ -11,6 +11,17 @@ fn is_keyword_or_directory(value: &str) -> bool {
     crate::url_cache::is_keyword(value) || std::path::Path::new(value).is_dir()
 }
 
+/// Refuse a branching-only library keyword (`irdff-ii`) as a cross-section
+/// source, as the other invalid sources here are refused.
+fn refuse_branching_only(value: &str) {
+    if crate::url_cache::is_branching_only(value) {
+        panic!(
+            "{}",
+            crate::url_cache::branching_only_error(value, "the neutron cross-section library")
+        );
+    }
+}
+
 /// Global configuration container for the nuclear data library.
 ///
 /// The configuration is primarily a mapping from nuclide names (e.g. "Li6")
@@ -93,9 +104,12 @@ pub struct Config {
     /// Source for the fission-yields part (`fission_yields/` subsection), or
     /// [`SubsectionSource::Off`] for a material nothing in which fissions.
     pub transmutation_fission_yields: SubsectionSource,
-    /// Source for the isomeric branching overlay (`branching/` subsection).
-    /// `None` means no branching overlay is applied.
-    pub transmutation_branch_ratios: Option<String>,
+    /// Sources for the isomeric branching overlay (`branching/` subsections),
+    /// in the order a `(parent, reaction)` channel takes its split from them:
+    /// the first source that evaluates the channel supplies all of it. Each is
+    /// a library keyword or a path. Empty means no branching overlay is
+    /// applied.
+    pub transmutation_branch_ratios: Vec<String>,
 }
 
 impl Default for Config {
@@ -113,12 +127,13 @@ impl Config {
             transmutation_decay_data: None,
             transmutation_reactions: SubsectionSource::Default,
             transmutation_fission_yields: SubsectionSource::Default,
-            transmutation_branch_ratios: None,
+            transmutation_branch_ratios: Vec::new(),
         }
     }
 
     /// Set a cross section file path for a nuclide, or set a global default if only a keyword/directory is provided
     pub fn set_cross_section(&mut self, nuclide_or_keyword: &str, path: Option<&str>) {
+        refuse_branching_only(path.unwrap_or(nuclide_or_keyword));
         match path {
             Some(p) => {
                 // Validate file exists when a path is provided (keywords and directories bypass)
@@ -172,7 +187,7 @@ impl Config {
                  `yamc.cross_section_data = \"endf-b8.1\"` (or `yani.`): a library keyword \
                  ({}), a local release directory, or a {{nuclide: path}} dict. Or load \
                  the material's data yourself with `Material.read_nuclear_data`.",
-                crate::url_cache::KEYWORDS.join(", "),
+                crate::url_cache::cross_section_keywords().join(", "),
             )
         } else {
             format!(
@@ -209,10 +224,36 @@ impl Config {
         self.transmutation_fission_yields.resolve()
     }
 
-    /// Effective source for the branching overlay, or `None` if unset (no
+    /// The branching overlay's sources, in order; empty when none is set (no
     /// branching overlay is applied).
-    pub fn get_transmutation_branch_ratios(&self) -> Option<String> {
+    pub fn get_transmutation_branch_ratios(&self) -> Vec<String> {
         self.transmutation_branch_ratios.clone()
+    }
+
+    /// Set the branching overlay's sources, in the order a channel takes its
+    /// split from them. Empty turns the overlay off.
+    ///
+    /// Refuses an empty name and a source given twice: the second entry of a
+    /// source could never supply a channel, so listing it again is a mistake
+    /// in the order rather than a request.
+    pub fn set_transmutation_branch_ratios(&mut self, sources: Vec<String>) -> Result<(), String> {
+        for (i, source) in sources.iter().enumerate() {
+            if source.trim().is_empty() {
+                return Err(format!(
+                    "transmutation_branch_ratios entry {i} is empty: each source is a library \
+                     keyword or a path"
+                ));
+            }
+            if sources[..i].contains(source) {
+                return Err(format!(
+                    "'{source}' is listed twice in transmutation_branch_ratios: a channel takes \
+                     its split from the first source that evaluates it, so a second entry of \
+                     the same source could never supply one"
+                ));
+            }
+        }
+        self.transmutation_branch_ratios = sources;
+        Ok(())
     }
 
     /// Clear all cross section mappings, default, and transmutation settings.
@@ -222,7 +263,7 @@ impl Config {
         self.transmutation_decay_data = None;
         self.transmutation_reactions = SubsectionSource::Default;
         self.transmutation_fission_yields = SubsectionSource::Default;
-        self.transmutation_branch_ratios = None;
+        self.transmutation_branch_ratios = Vec::new();
     }
 }
 
@@ -256,6 +297,7 @@ pub trait IntoCrossSectionsInput {
 impl IntoCrossSectionsInput for HashMap<String, String> {
     fn apply(self, config: &mut Config) {
         for (nuclide, path) in self {
+            refuse_branching_only(&path);
             if crate::url_cache::is_keyword(&path) {
                 // If value is a keyword, set as global default
                 config.default_cross_section = Some(path.clone());
@@ -275,6 +317,7 @@ impl IntoCrossSectionsInput for HashMap<String, String> {
 
 impl IntoCrossSectionsInput for &str {
     fn apply(self, config: &mut Config) {
+        refuse_branching_only(self);
         if !is_keyword_or_directory(self) {
             panic!(
                 "Invalid cross section source: '{}'. Must be a keyword (tendl-2025, fendl-3.2d, endf-b8.1) or a directory path.",
@@ -357,6 +400,37 @@ mod subsection_source_tests {
             config.get_transmutation_fission_yields().as_deref(),
             Some(DEFAULT_TRANSMUTATION_LIBRARY)
         );
+    }
+
+    /// The branching sources are an ordered list: kept in order, emptied by
+    /// `clear`, and refused where an entry is empty or repeated.
+    #[test]
+    fn branching_sources_are_an_ordered_list() {
+        let mut config = Config::new();
+        assert!(config.get_transmutation_branch_ratios().is_empty());
+        let sources = vec!["irdff-ii".to_string(), "endf-b8.1".to_string()];
+        config
+            .set_transmutation_branch_ratios(sources.clone())
+            .expect("two sources");
+        assert_eq!(config.get_transmutation_branch_ratios(), sources);
+        let twice = config
+            .set_transmutation_branch_ratios(vec!["irdff-ii".into(), "irdff-ii".into()])
+            .expect_err("a source listed twice");
+        assert!(twice.contains("listed twice"), "{twice}");
+        assert!(config
+            .set_transmutation_branch_ratios(vec![String::new()])
+            .is_err());
+        // A refused list leaves the setting as it was.
+        assert_eq!(config.get_transmutation_branch_ratios(), sources);
+        config.clear();
+        assert!(config.get_transmutation_branch_ratios().is_empty());
+    }
+
+    /// A branching-only library is not a cross-section source.
+    #[test]
+    #[should_panic(expected = "supplies isomeric branching only")]
+    fn irdff_ii_is_not_a_cross_section_source() {
+        Config::new().set_cross_sections("irdff-ii");
     }
 
     #[test]

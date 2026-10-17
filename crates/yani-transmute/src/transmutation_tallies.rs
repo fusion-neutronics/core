@@ -441,7 +441,12 @@ fn build_lists(
                 if kind != INELASTIC && !chain_nuclide.reactions.iter().any(|r| &r.kind == kind) {
                     continue;
                 }
-                for rule in ListRule::all(name, kind, &kinds[kind])? {
+                for rule in ListRule::all(
+                    name,
+                    kind,
+                    &kinds[kind],
+                    crate::branching_rule::ListSource::of(branch, name, kind),
+                )? {
                     let Some(mt) = rule.mt else {
                         continue;
                     };

@@ -134,7 +134,7 @@ fn anything_rows_survive_a_round_trip_and_reach_the_branching_table() {
     let written = chain();
     let dir = round_trip(&written, "trip");
     let (read, branch) =
-        parse_chain_parts(&dir.join("decay"), Some(&dir.join("reactions")), None, None)
+        parse_chain_parts(&dir.join("decay"), Some(&dir.join("reactions")), None, &[])
             .expect("read");
     for parent in ["Fe54", "Fe58"] {
         let a = anything_rows(&written[parent]);
@@ -238,7 +238,7 @@ fn a_multiplicity_on_another_kind_is_refused() {
     chain.get_mut("Fe54").unwrap().reactions[0].multiplicity =
         Some(Arc::new(curve("Mn54", true, 0, &[1.0, 1.0])));
     let dir = round_trip(&chain, "bad");
-    let err = parse_chain_parts(&dir.join("decay"), Some(&dir.join("reactions")), None, None)
+    let err = parse_chain_parts(&dir.join("decay"), Some(&dir.join("reactions")), None, &[])
         .unwrap_err()
         .to_string();
     let _ = std::fs::remove_dir_all(&dir);
