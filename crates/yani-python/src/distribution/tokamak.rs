@@ -187,9 +187,10 @@ fn parse_fuel(fuel: Option<HashMap<String, f64>>) -> PyResult<Vec<(FuelIon, f64)
 ///     list[NeutronSource]: One ring source per (mesh voxel, reaction).
 ///
 /// Raises:
-///     ValueError: If the plasma parameters are inconsistent (for example a
-///             minor radius larger than the major radius), the fuel is not
-///             D and/or T, or the plasma is too cold to make neutrons.
+///     ValueError: If a parameter is NaN or infinite (the message names it),
+///             the plasma parameters are inconsistent (for example a minor
+///             radius larger than the major radius), the fuel is not D and/or
+///             T, or the plasma is too cold to make neutrons.
 ///
 /// Examples:
 ///     >>> import yamc

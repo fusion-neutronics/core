@@ -2,11 +2,50 @@ use crate::distribution::energy::{Discrete, Normal, Uniform};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
+/// Why `xyz` cannot be the point `what` names (a source position, a ring
+/// origin), if it cannot: a coordinate that is NaN or infinite.
+pub fn check_position(what: &str, xyz: [f64; 3]) -> Result<(), String> {
+    if let Some(i) = xyz.iter().position(|c| !c.is_finite()) {
+        let kind = if xyz[i].is_nan() {
+            "a NaN"
+        } else {
+            "an infinite"
+        };
+        return Err(format!(
+            "{what} {xyz:?} has {kind} coordinate ({} = {}). Every coordinate must be a \
+             finite number of cm.",
+            ["x", "y", "z"][i],
+            xyz[i]
+        ));
+    }
+    Ok(())
+}
+
 /// Point spatial distribution - a fixed position in 3D space
+///
+/// [`Point::new`] takes the position as given, for positions computed in
+/// code. One given by a user is checked where it enters, with
+/// [`check_position`]: in the Python source constructors, and as a model file
+/// is read.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "PointData")]
 pub struct Point {
     // Position coordinates
     xyz: [f64; 3],
+}
+
+#[derive(Deserialize)]
+struct PointData {
+    xyz: [f64; 3],
+}
+
+impl TryFrom<PointData> for Point {
+    type Error = String;
+
+    fn try_from(data: PointData) -> Result<Self, String> {
+        check_position("position", data.xyz)?;
+        Ok(Point::new(data.xyz))
+    }
 }
 
 impl Point {
@@ -60,7 +99,11 @@ impl Univariate {
 /// The cylindrical axis is always Z: positions are computed as
 /// `x = origin.x + r*cos(phi)`, `y = origin.y + r*sin(phi)`,
 /// `z = origin.z + z_sample`.
+///
+/// A model file is read through [`CylindricalRing::new`], so it is checked as
+/// a constructed one is; `r`, `phi` and `z` are checked by their own types.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "CylindricalRingData")]
 pub struct CylindricalRing {
     /// Distribution of r-coordinates (radial distance from axis).
     pub r: Univariate,
@@ -72,9 +115,33 @@ pub struct CylindricalRing {
     pub origin: [f64; 3],
 }
 
+#[derive(Deserialize)]
+struct CylindricalRingData {
+    r: Univariate,
+    phi: Univariate,
+    z: Univariate,
+    origin: [f64; 3],
+}
+
+impl TryFrom<CylindricalRingData> for CylindricalRing {
+    type Error = String;
+
+    fn try_from(data: CylindricalRingData) -> Result<Self, String> {
+        CylindricalRing::new(data.r, data.phi, data.z, data.origin)
+    }
+}
+
 impl CylindricalRing {
-    pub fn new(r: Univariate, phi: Univariate, z: Univariate, origin: [f64; 3]) -> Self {
-        Self { r, phi, z, origin }
+    /// A ring about `origin`, refused when `origin` has a NaN or infinite
+    /// coordinate (see [`check_position`]).
+    pub fn new(
+        r: Univariate,
+        phi: Univariate,
+        z: Univariate,
+        origin: [f64; 3],
+    ) -> Result<Self, String> {
+        check_position("CylindricalRing origin", origin)?;
+        Ok(Self { r, phi, z, origin })
     }
 
     pub fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> [f64; 3] {
