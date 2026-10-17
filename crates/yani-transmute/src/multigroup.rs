@@ -711,19 +711,14 @@ pub fn spectrum_above_evaluation(
     group_boundaries: &[f64],
     mts: &HashSet<i32>,
 ) -> Vec<(String, f64, f64)> {
+    let Some(temperature) = crate::temperature_of(material) else {
+        return Vec::new();
+    };
     let mut names: Vec<&String> = material.nuclide_data.keys().collect();
     names.sort();
     let mut out = Vec::new();
     for name in names {
         let nuclide_data = &material.nuclide_data[name];
-        let temperature = if material.temperature().is_empty() {
-            crate::default_temperature(nuclide_data)
-        } else {
-            Some(material.temperature().to_string())
-        };
-        let Some(temperature) = temperature else {
-            continue;
-        };
         let Some(reactions) = nuclide_data.reactions_for_temp(&temperature) else {
             continue;
         };
@@ -813,19 +808,14 @@ pub fn weight_sensitive_reactions(
     multigroup_flux: &[f64],
     group_boundaries: &[f64],
 ) -> Vec<(String, i32, f64)> {
+    let Some(temperature) = crate::temperature_of(material) else {
+        return Vec::new();
+    };
     let mut names: Vec<&String> = material.nuclide_data.keys().collect();
     names.sort();
     let mut out = Vec::new();
     for name in names {
         let nuclide_data = &material.nuclide_data[name];
-        let temperature = if material.temperature().is_empty() {
-            crate::default_temperature(nuclide_data)
-        } else {
-            Some(material.temperature().to_string())
-        };
-        let Some(temperature) = temperature else {
-            continue;
-        };
         let Some(reactions) = nuclide_data.reactions_for_temp(&temperature) else {
             continue;
         };
@@ -1293,6 +1283,9 @@ struct CollapseSetup<'a> {
     mixture: Option<crate::self_shielding::MixtureTotal<'a>>,
     active: Vec<usize>,
     total_flux: f64,
+    /// The temperature every nuclide's reactions are read at, `None` where
+    /// the material's data cannot place one.
+    temperature: Option<String>,
 }
 
 impl<'a> CollapseSetup<'a> {
@@ -1307,19 +1300,17 @@ impl<'a> CollapseSetup<'a> {
             return None;
         }
 
+        // One temperature for the whole material, as transport reads it, so
+        // the mixture total and every nuclide's reactions come from the same
+        // one.
+        let temperature = crate::temperature_of(material);
+
         // The flux depression is a property of the whole material, so the
         // mixture total is gathered once and every nuclide's shape is built
         // against it.
         let densities = material.get_atoms_per_barn_cm().unwrap_or_default();
-        let temperature_for = |name: &str| -> Option<String> {
-            let nd = material.nuclide_data.get(name)?;
-            if material.temperature().is_empty() {
-                crate::default_temperature(nd)
-            } else {
-                Some(material.temperature().to_string())
-            }
-        };
-        let mixture = shielding.map(|_| mixture_total(material, &densities, &temperature_for));
+        let mixture =
+            shielding.map(|_| mixture_total(material, &densities, temperature.as_deref()));
 
         // The groups worth walking, decided once for the whole spectrum rather
         // than per nuclide per reaction. A group with no flux contributes
@@ -1344,6 +1335,7 @@ impl<'a> CollapseSetup<'a> {
             mixture,
             active,
             total_flux,
+            temperature,
         })
     }
 
@@ -1369,6 +1361,7 @@ impl<'a> CollapseSetup<'a> {
             mixture: self.mixture.as_ref(),
             active: &self.active,
             total_flux: self.total_flux,
+            temperature: self.temperature.as_deref(),
         }
     }
 }
@@ -1451,6 +1444,8 @@ struct Collapse<'a> {
     mixture: Option<&'a crate::self_shielding::MixtureTotal<'a>>,
     active: &'a [usize],
     total_flux: f64,
+    /// [`CollapseSetup::temperature`].
+    temperature: Option<&'a str>,
 }
 
 impl Collapse<'_> {
@@ -1460,13 +1455,10 @@ impl Collapse<'_> {
     /// the same way; a second copy of this is a second chance to read a
     /// different evaluation than the one the rates came from.
     fn reactions_for(&self, nuclide_name: &str) -> Option<&HashMap<i32, std::sync::Arc<Reaction>>> {
-        let nuclide_data = self.material.nuclide_data.get(nuclide_name)?;
-        let temperature = if self.material.temperature().is_empty() {
-            crate::default_temperature(nuclide_data)?
-        } else {
-            self.material.temperature().to_string()
-        };
-        nuclide_data.reactions_for_temp(&temperature)
+        self.material
+            .nuclide_data
+            .get(nuclide_name)?
+            .reactions_for_temp(self.temperature?)
     }
 
     /// The flux shape one nuclide's group averages are taken under, with what

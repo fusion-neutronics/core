@@ -347,12 +347,18 @@ impl<'a> MixtureTotal<'a> {
     }
 }
 
-/// Gather the material's total cross sections at the temperature in use.
+/// Gather the material's total cross sections at `temperature`, the one the
+/// collapse reads every nuclide at; nothing when there is none.
 pub fn mixture_total<'a>(
     material: &'a Material,
     densities: &HashMap<String, f64>,
-    temperature_of: &dyn Fn(&str) -> Option<String>,
+    temperature: Option<&str>,
 ) -> MixtureTotal<'a> {
+    let Some(temperature) = temperature else {
+        return MixtureTotal {
+            entries: Vec::new(),
+        };
+    };
     // In name order, so the sum in `MixtureTotal::at` is the same bits every
     // time it is built: the covariance fold rebuilds it to recover the
     // collapse's shape, and a hash map's order differs between two maps.
@@ -367,10 +373,7 @@ pub fn mixture_total<'a>(
         let Some(nuclide_data) = material.nuclide_data.get(name) else {
             continue;
         };
-        let Some(temperature) = temperature_of(name) else {
-            continue;
-        };
-        let Some(reactions) = nuclide_data.reactions_for_temp(&temperature) else {
+        let Some(reactions) = nuclide_data.reactions_for_temp(temperature) else {
             continue;
         };
         if let Some(total) = reactions.get(&MT_TOTAL) {
