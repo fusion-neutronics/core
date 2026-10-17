@@ -157,13 +157,8 @@ impl Material {
         // request against the UNION over nuclides, so a temperature most of the
         // material can serve passes there and fails here, naming the one
         // nuclide whose evaluation ships a shorter ladder.
-        for (nuclide_name, nuclide_data) in &self.nuclide_data {
-            if let Err(e) = yamc_nuclide::temperature::resolve(
-                &temperature,
-                &nuclide_data.available_temperatures,
-            ) {
-                panic!("Nuclide '{nuclide_name}': {e}");
-            }
+        if let Err(e) = self.check_temperature_servable(&temperature) {
+            panic!("{e}");
         }
 
         // If not cached, build the grid

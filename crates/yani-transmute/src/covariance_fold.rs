@@ -2573,6 +2573,9 @@ pub fn fold_rate_covariance(
         return (out, coverage);
     }
     let shapes = CollapseShapes::new(material, multigroup_flux, group_boundaries, shielding);
+    // The temperature the collapse read the rates at, so the fold weights them
+    // with the same cross sections.
+    let temperature = crate::temperature_of(material);
 
     // Sorted, so the fold visits nuclides in the same order every run.
     let mut names: Vec<&String> = rates.keys().collect();
@@ -2596,15 +2599,10 @@ pub fn fold_rate_covariance(
             return (None, coverage);
         };
 
-        let temperature = if material.temperature().is_empty() {
-            match crate::default_temperature(nuclide_data) {
-                Some(t) => t,
-                None => return (None, coverage),
-            }
-        } else {
-            material.temperature().to_string()
-        };
-        let Some(by_mt) = nuclide_data.reactions_for_temp(&temperature) else {
+        let Some(by_mt) = temperature
+            .as_deref()
+            .and_then(|t| nuclide_data.reactions_for_temp(t))
+        else {
             return (None, coverage);
         };
 
@@ -2840,13 +2838,14 @@ pub fn cell_fields(
         .collect();
     let names: BTreeSet<&String> = spectra.iter().flat_map(|s| s.rates.keys()).collect();
     let names: Vec<&String> = names.into_iter().collect();
+    let temperature = crate::temperature_of(material);
 
     let one = |name: &&String| -> Option<(String, CellField)> {
         let field = activation_field(
             name,
             chain.get(*name)?,
             material.nuclide_data.get(*name)?,
-            material.temperature(),
+            temperature.as_deref()?,
             without_mf32_rows.contains(*name),
             spectra,
             &shapes,
@@ -2869,9 +2868,9 @@ pub fn cell_fields(
 }
 
 /// One nuclide's activation [`CellField`], its cells fixed by the channels of
-/// its full-chain entry `full`, at `temperature` (the nuclide's default where
-/// empty), from its tape blocks alone with `without_mf32_rows`. See
-/// [`cell_fields`].
+/// its full-chain entry `full`, at `temperature` (its material's, see
+/// [`crate::temperature_of`]), from its tape blocks alone with
+/// `without_mf32_rows`. See [`cell_fields`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn activation_field(
     name: &str,
@@ -2893,12 +2892,7 @@ pub(crate) fn activation_field(
     } else {
         &blocks[..]
     };
-    let temperature = if temperature.is_empty() {
-        crate::default_temperature(nuclide_data)?
-    } else {
-        temperature.to_string()
-    };
-    let by_mt = nuclide_data.reactions_for_temp(&temperature)?;
+    let by_mt = nuclide_data.reactions_for_temp(temperature)?;
     let reactions: BTreeMap<i32, &Reaction> =
         by_mt.iter().map(|(mt, r)| (*mt, r.as_ref())).collect();
     nuclide_field(
@@ -3018,13 +3012,17 @@ pub fn transport_fields_of(
 ) -> (BTreeMap<String, TransportField>, BTreeSet<String>) {
     let mut without_data = BTreeSet::new();
     let mut out = BTreeMap::new();
+    // No temperature to read anything at is no cross sections at all.
+    let Some(temperature) = crate::temperature_of(material) else {
+        return (out, without_data);
+    };
     for &name in names {
         let Some(nuclide_data) = material.nuclide_data.get(name) else {
             continue;
         };
         if nuclide_data.covariance.is_none() {
             // Only a nuclide transport has cross sections for is reported.
-            if reactions_at(nuclide_data, material.temperature()).is_some() {
+            if nuclide_data.reactions_for_temp(&temperature).is_some() {
                 without_data.insert(name.clone());
             }
             continue;
@@ -3032,7 +3030,7 @@ pub fn transport_fields_of(
         if let Some(field) = nuclide_transport_field(
             name,
             nuclide_data,
-            material.temperature(),
+            &temperature,
             scored,
             without_mf32_rows.contains(name),
         ) {
@@ -3042,22 +3040,9 @@ pub fn transport_fields_of(
     (out, without_data)
 }
 
-/// The reactions of `nuclide_data` at `temperature`, or at its default
-/// temperature where that is empty.
-fn reactions_at<'a>(
-    nuclide_data: &'a yamc_nuclide::Nuclide,
-    temperature: &str,
-) -> Option<&'a std::collections::HashMap<i32, std::sync::Arc<Reaction>>> {
-    if temperature.is_empty() {
-        nuclide_data.reactions_for_temp(&crate::default_temperature(nuclide_data)?)
-    } else {
-        nuclide_data.reactions_for_temp(temperature)
-    }
-}
-
-/// One nuclide's [`TransportField`] at `temperature` (its default where
-/// empty), with the MTs of `scored` it holds without their partials fielded
-/// as partials of their own, from its tape blocks alone with
+/// One nuclide's [`TransportField`] at `temperature` (its material's, see
+/// [`crate::temperature_of`]), with the MTs of `scored` it holds without their
+/// partials fielded as partials of their own, from its tape blocks alone with
 /// `without_mf32_rows`, or `None` where it has no cross sections there or no
 /// covariance. See [`transport_fields_of`].
 pub(crate) fn nuclide_transport_field(
@@ -3067,7 +3052,7 @@ pub(crate) fn nuclide_transport_field(
     scored: &[i32],
     without_mf32_rows: bool,
 ) -> Option<TransportField> {
-    let by_mt = reactions_at(nuclide_data, temperature)?;
+    let by_mt = nuclide_data.reactions_for_temp(temperature)?;
     let blocks = nuclide_data.covariance.as_ref()?;
     let tape_only: Vec<CovarianceBlock>;
     let blocks: &[CovarianceBlock] = if without_mf32_rows {

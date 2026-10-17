@@ -592,7 +592,7 @@ fn run_nuclide(
         .resonance_parameters
         .as_ref()
         .expect("only nuclides with resonance parameters are prepared");
-    let (_, temperature) = kelvin(material, nd)?;
+    let (_, temperature) = kelvin(material)?;
 
     // Channels first: preparing a nuclide no channel could read is wasted.
     let any_candidate = spectra.iter().any(|s| {
@@ -766,14 +766,10 @@ fn flux_density(
 }
 
 /// The temperature, in kelvin, a nuclide's resonance cross sections are
-/// broadened to in `material`: its label, or the nuclide's default where the
-/// material has none.
-fn kelvin(material: &Material, nd: &yamc_nuclide::Nuclide) -> Result<(String, f64), String> {
-    let label = if material.temperature().is_empty() {
-        crate::default_temperature(nd).unwrap_or_default()
-    } else {
-        material.temperature().to_string()
-    };
+/// broadened to in `material`: the one its cross sections are read at (see
+/// [`crate::temperature_of`]).
+fn kelvin(material: &Material) -> Result<(String, f64), String> {
+    let label = crate::temperature_of(material).unwrap_or_default();
     let kelvin = yamc_nuclide::temperature::label_to_kelvin(&label)
         .ok_or_else(|| format!("its temperature label {label:?} is not a number of kelvin"))?;
     Ok((label, kelvin))

@@ -1047,6 +1047,10 @@ pub fn preload_activation_data(
     let want_covariance =
         uncertainty.is_some_and(|u| u.wants(crate::uncertainty::Source::CrossSections));
 
+    // Every temperature the files carry while the material has none, as
+    // transport loads an unlabelled material: the rule that resolves it below
+    // reads each nuclide's ladder. Once resolved, the label is the material's
+    // own, so the products a later screening round loads are read at it alone.
     let temp_filter = if !material.temperature().is_empty() {
         let mut s = HashSet::new();
         s.insert(material.temperature().to_string());
@@ -1187,21 +1191,36 @@ pub fn preload_activation_data(
         }
     }
 
-    // `to_load` skips nuclides already in `nuclide_data`, so `temp_filter`
-    // never reaches them. A material whose data was loaded at one
-    // temperature and then relabelled keeps the narrow reaction set, and
-    // every rate lookup below resolves the label through
+    // The temperature every rate is read at, resolved by the rule transport
+    // setup applies (`Material::try_resolve_temperature`) and adopted, as
+    // transport adopts it: the material's own, else the only one its data
+    // carries, else 294 K. It used to be each nuclide's lowest loaded
+    // temperature, 250 K for ENDF/B-VIII.1 Fe56 and TENDL-2017 U235, so an
+    // unlabelled material activated at a different temperature from the one
+    // it was documented at and transported at. Only when there is data to
+    // resolve it against: a decay-only schedule loads none and reads no cross
+    // section.
+    //
+    // Then loaded into every nuclide. `to_load` skips nuclides already in
+    // `nuclide_data`, so `temp_filter` never reaches them: a material whose
+    // data was loaded at one temperature and then relabelled keeps the narrow
+    // reaction set, and every rate lookup resolves the label through
     // `reactions_for_temp`, which answers `None` and is handled by
     // `return 0.0` / `continue`. That is a silent zero: an irradiation
-    // reporting no activation, with no error anywhere.
+    // reporting no activation, with no error anywhere. The same widening
+    // builds a temperature the data only brackets by blending its two
+    // neighbours, as transport does. It goes through the material rather than
+    // the loop above because that loop resolves paths from CONFIG, which never
+    // sees the explicit paths handed to `read_nuclear_data`;
+    // `ensure_temperature_loaded` uses each nuclide's own `data_path`.
     //
-    // Widening goes through the material rather than the loop above because
-    // that loop resolves paths from CONFIG, which never sees the explicit
-    // paths handed to `read_nuclear_data`; `ensure_temperature_loaded` uses
-    // each nuclide's own `data_path`.
-    let label = material.temperature().to_string();
-    if !label.is_empty() {
+    // A nuclide whose data cannot serve the temperature at all is left alone
+    // by the widening, and would fall into the same silent zero, so it is
+    // refused by name instead, as transport's grid builder refuses it.
+    if !material.nuclide_data.is_empty() {
+        let label = material.try_resolve_temperature(None)?;
         material.ensure_temperature_loaded(&label)?;
+        material.check_temperature_servable(&label)?;
     }
 
     // And the same for covariance, for the same reason: a nuclide already
@@ -1319,6 +1338,11 @@ fn screen_case(
     let screening =
         crate::screening::screen_products(chain, &composition, threshold, |to_load, loaded| {
             preload_activation_data(material, chain, branch, uncertainty, shielding, to_load)?;
+            // The temperature the first load resolved, which the copy was
+            // taken before.
+            if work.temperature() != material.temperature() {
+                work.set_temperature(material.temperature());
+            }
             let found: BTreeSet<String> = to_load
                 .iter()
                 .filter(|n| material.nuclide_data.contains_key(*n))

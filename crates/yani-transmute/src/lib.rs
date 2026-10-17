@@ -42,31 +42,29 @@ mod transmutation_stepper;
 mod transmutation_tallies;
 pub mod uncertainty;
 
-/// The temperature to read a nuclide at when the material names none.
+/// The temperature label `material`'s cross sections are read at.
 ///
-/// Not `nd.energy.keys().next()`, which is what the three call sites below used
-/// to do. `energy` is keyed by every temperature the Arrow file carries, and
-/// that is a superset of the ones whose reactions were loaded: ENDF/B-8.1 Fe56
-/// has grids for 250, 294, 600, 900, 1200 and 2500 K, and also a `0` that no
-/// reaction set backs. `keys().next()` returns an arbitrary one of them, and a
-/// different one per parse, because every `HashMap` is seeded separately. Draw
-/// the `0` and `reactions_for_temp` answers `None`, the caller gives up on that
-/// nuclide, and it contributes no reaction rates at all -- an irradiation that
-/// activates nothing and reports zero activity, for the same input, about one
-/// run in seven.
+/// The material's own label. Every transmutation entry point resolves and
+/// loads it before any rate is collapsed ([`preload_activation_data`]), by the
+/// rule transport applies (`Material::try_resolve_temperature`): the
+/// temperature the material was given, else the only one its data carries,
+/// else 294 K. Each nuclide then holds reactions at it, blended from the two
+/// temperatures either side where its data only brackets it, or the run is
+/// refused naming the nuclide that cannot serve it. That is what makes the
+/// choice the same on every run and backed by reactions.
 ///
-/// `loaded_temperatures` lists exactly the temperatures that do have reactions,
-/// sorted, so its first entry is both valid and the same on every run.
-pub(crate) fn default_temperature(nd: &yamc_nuclide::Nuclide) -> Option<String> {
-    // Prefer a temperature that actually carries reactions. `loaded_temperatures`
-    // is in the order the file lists them, and nothing guarantees the first
-    // entry is backed by a reaction set on every dataset; falling back to it
-    // keeps callers that only want an energy grid working.
-    nd.loaded_temperatures
-        .iter()
-        .find(|t| nd.reactions_for_temp(t).is_some_and(|r| !r.is_empty()))
-        .or_else(|| nd.loaded_temperatures.first())
-        .cloned()
+/// A material handed straight to a collapse without going through an entry
+/// point is read where the same rule puts it (`Material::resolved_temperature`),
+/// and `None` where the rule cannot place it. There is no per-nuclide default.
+/// The lowest temperature a nuclide had loaded used to stand in for an unset
+/// one, which read ENDF/B-VIII.1 Fe56 and TENDL-2017 U235 at 250 K, the lowest
+/// they carry, where transport runs the same material at 294 K.
+pub(crate) fn temperature_of(material: &yamc_materials::Material) -> Option<String> {
+    if material.temperature().is_empty() {
+        material.resolved_temperature(None).ok()
+    } else {
+        Some(material.temperature().to_string())
+    }
 }
 // Re-export from yani (cram, chain, matrix now live there)
 pub use yani::{

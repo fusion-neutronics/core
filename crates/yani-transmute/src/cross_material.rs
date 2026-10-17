@@ -124,6 +124,9 @@ impl CrossMaterial {
         for material in materials {
             let mut names: Vec<&String> = material.nuclide_data.keys().collect();
             names.sort();
+            // Empty where the material's data cannot place a temperature,
+            // which no reaction set is held at.
+            let temperature = crate::temperature_of(material).unwrap_or_default();
             for name in names {
                 let nuclide = &material.nuclide_data[name];
                 if nuclide.covariance.is_some() && !nuclides.contains_key(name) {
@@ -131,7 +134,7 @@ impl CrossMaterial {
                         name.clone(),
                         Linked {
                             nuclide: Arc::clone(nuclide),
-                            temperature: material.temperature().to_string(),
+                            temperature: temperature.clone(),
                         },
                     );
                 }

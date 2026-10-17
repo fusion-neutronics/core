@@ -1700,7 +1700,35 @@ impl Material {
     /// Transport setup calls this before building any cross section, so a
     /// temperature the data cannot serve reaches the caller as an error (a
     /// Python `ValueError`) instead of a panic from inside the grid builder.
+    /// The flux-given transmutation calls it before collapsing any rate, so
+    /// both read an unset temperature at the same one.
+    ///
+    /// An unset temperature that steps 3 and 4 resolve is adopted as the
+    /// material's own. [`Material::resolved_temperature`] answers the same
+    /// question without adopting the answer.
     pub fn try_resolve_temperature(&mut self, provided: Option<&str>) -> Result<String, String> {
+        let label = self.resolved_temperature(provided)?;
+        // Only steps 3 and 4 resolve an empty label, and they fill it in with
+        // the temperature the caches are about to be built at. Through
+        // `assign_temperature`, because filling the label in by hand is why
+        // `temperature_k` could go stale even when the user never touched the
+        // temperature at all. Not `set_temperature`: there is nothing derived
+        // from a *different* temperature to throw away, and invalidating here
+        // would drop a grid the caller is part-way through building.
+        if provided.is_none() && self.temperature.is_empty() {
+            self.assign_temperature(&label);
+        }
+        Ok(label)
+    }
+
+    /// The temperature [`Material::try_resolve_temperature`] resolves to,
+    /// without adopting it.
+    ///
+    /// For a reader that holds the material by shared reference and has to
+    /// read its cross sections at the temperature everything else does. One
+    /// rule rather than a reader's own fallback, so no reader can pick a
+    /// temperature transport would not.
+    pub fn resolved_temperature(&self, provided: Option<&str>) -> Result<String, String> {
         // Collect all available temperatures from nuclide data
         let mut all_temps: std::collections::HashSet<String> = std::collections::HashSet::new();
         for nuclide in self.nuclide_data.values() {
@@ -1754,19 +1782,9 @@ impl Material {
             return Ok(self.temperature.clone());
         }
 
-        // 3. If material.temperature is empty and there's only one temp, auto-detect and set it
+        // 3. If material.temperature is empty and there's only one temp, use it
         if self.temperature.is_empty() && all_temps.len() == 1 {
-            let detected_temp = all_temps.into_iter().next().unwrap();
-            // Through the setter: this branch is why `temperature_k` could go
-            // stale even when the user never touched the temperature at all.
-            //
-            // `assign_temperature`, not `set_temperature`: this fills in an
-            // empty label with the temperature the caches are about to be built
-            // at, so there is nothing derived from a *different* temperature to
-            // throw away, and invalidating here would drop a grid the caller is
-            // part-way through building.
-            self.assign_temperature(&detected_temp);
-            return Ok(detected_temp);
+            return Ok(all_temps.into_iter().next().unwrap());
         }
 
         // 4. An unset temperature means the documented default, 294 K, when
@@ -1775,8 +1793,7 @@ impl Material {
         // runs at its one temperature rather than being refused because 294 K
         // lies outside it. Checked per nuclide rather than against the union,
         // so a nuclide whose evaluation ships a shorter ladder is named here
-        // instead of failing later in the grid builder. `assign_temperature`
-        // for the same reason as step 3.
+        // instead of failing later in the grid builder.
         if self.temperature.is_empty() {
             let default = yamc_nuclide::temperature::DEFAULT_TEMPERATURE_K.to_string();
             let mut names: Vec<&String> = self.nuclide_data.keys().collect();
@@ -1790,10 +1807,7 @@ impl Material {
                 .map(|e| format!("nuclide '{name}': {e}"))
             });
             return match unservable {
-                None if !sorted_all.is_empty() => {
-                    self.assign_temperature(&default);
-                    Ok(default)
-                }
+                None if !sorted_all.is_empty() => Ok(default),
                 None => Err(format!(
                     "No temperature was set, and the nuclear data carries no \
                      temperatures to use the default of {default} K from"
@@ -1815,6 +1829,30 @@ impl Material {
             Ok(_) => unreachable!("step 2 returns for every temperature that resolves"),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    /// Refuse `temperature` when a nuclide's data cannot serve it, listed or
+    /// bracketed, naming the first such nuclide in name order.
+    ///
+    /// The per-nuclide half of the check. [`Material::try_resolve_temperature`]
+    /// checks a temperature the material already carries against the union of
+    /// every nuclide's temperatures, so one that most of the material can
+    /// serve passes there; this names the nuclide whose evaluation ships a
+    /// shorter ladder. [`Material::ensure_temperature_loaded`] leaves such a
+    /// nuclide alone, so a reader that skips a nuclide with nothing at its
+    /// temperature would otherwise drop it without a word.
+    pub fn check_temperature_servable(&self, temperature: &str) -> Result<(), String> {
+        let mut names: Vec<&String> = self.nuclide_data.keys().collect();
+        names.sort();
+        for name in names {
+            if let Err(e) = yamc_nuclide::temperature::resolve(
+                temperature,
+                &self.nuclide_data[name].available_temperatures,
+            ) {
+                return Err(format!("Nuclide '{name}': {e}"));
+            }
+        }
+        Ok(())
     }
 
     /// Validate that all loaded nuclides have compatible temperatures

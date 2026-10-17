@@ -175,13 +175,8 @@ fn compute_one_group_xs(material: &Material, nuclide_name: &str, mt: i32) -> f64
     };
 
     // Get temperature for data lookup
-    let temperature = if material.temperature().is_empty() {
-        match crate::default_temperature(nuclide_data) {
-            Some(t) => t,
-            None => return 0.0,
-        }
-    } else {
-        material.temperature().to_string()
+    let Some(temperature) = crate::temperature_of(material) else {
+        return 0.0;
     };
 
     // Get reactions for this temperature
