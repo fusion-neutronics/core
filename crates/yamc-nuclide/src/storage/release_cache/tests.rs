@@ -102,6 +102,18 @@ impl Origin {
     /// Publish a release of `keyword`: its files, then its manifest, then the
     /// pointer, in the order the publishing scripts upload them.
     fn publish(&self, keyword: &str, release: &str, files: &[(&str, &[u8])]) {
+        self.publish_listing(keyword, release, files, Some(&["test"]));
+    }
+
+    /// [`Origin::publish`], with the manifest's `converter_versions` given,
+    /// or left out for `None`.
+    fn publish_listing(
+        &self,
+        keyword: &str,
+        release: &str,
+        files: &[(&str, &[u8])],
+        converter_versions: Option<&[&str]>,
+    ) {
         let entries: Vec<serde_json::Value> = files
             .iter()
             .map(|(path, bytes)| {
@@ -109,16 +121,18 @@ impl Origin {
                 serde_json::json!({"path": path, "bytes": bytes.len(), "sha256": sha256_hex(bytes)})
             })
             .collect();
-        let manifest = serde_json::to_vec(&serde_json::json!({
+        let mut manifest = serde_json::json!({
             "schema": "test",
             "keyword": keyword,
             "release": release,
             "format_version": 2,
-            "converter_versions": ["test"],
             "created": "2026-10-01T00:00:00Z",
             "files": entries,
-        }))
-        .unwrap();
+        });
+        if let Some(converters) = converter_versions {
+            manifest["converter_versions"] = serde_json::json!(converters);
+        }
+        let manifest = serde_json::to_vec(&manifest).unwrap();
         self.put(&format!("{keyword}/{release}/manifest.json"), &manifest);
         self.point(keyword, release, &manifest, 2);
     }
@@ -593,6 +607,91 @@ fn a_new_release_replaces_the_old_for_every_file_and_never_mixes() {
     );
 }
 
+/// The converters that wrote the 2026-10-12.1 releases, as their manifests
+/// list them: every keyword core resolves, and the chain-only irdff-ii.
+const CONVERTERS_2026_10_12_1: [&str; 2] = ["yamc-convert 0.1.0", "yani-convert 0.1.0"];
+const IRDFF_II_CONVERTERS_2026_10_12_1: [&str; 1] = ["yani-convert 0.1.0"];
+
+/// A run records the converters its release's manifest lists, online and
+/// from the cache when the origin is out of reach.
+#[test]
+fn a_run_records_the_converters_that_wrote_its_release() {
+    let origin = Origin::start();
+    let files = nuclide_files("Fe56", "2026-10-12.1");
+    let files: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(p, b)| (p.as_str(), b.as_slice()))
+        .collect();
+    origin.publish_listing(
+        "endf-b8.1",
+        "2026-10-12.1",
+        &files,
+        Some(&CONVERTERS_2026_10_12_1),
+    );
+    let root = Scratch::new("converters");
+
+    let online = registry(&origin.url, &root);
+    fetch(&online, "Fe56").expect("download");
+    let record = &online.data_releases()["endf-b8.1"];
+    assert_eq!(
+        (record.release.as_str(), record.offline),
+        ("2026-10-12.1", false)
+    );
+    assert_eq!(record.converter_versions, CONVERTERS_2026_10_12_1);
+
+    let offline = registry(&dead_origin(), &root);
+    fetch(&offline, "Fe56").expect("from the cache");
+    let record = &offline.data_releases()["endf-b8.1"];
+    assert!(record.offline);
+    assert_eq!(record.converter_versions, CONVERTERS_2026_10_12_1);
+}
+
+/// A library that publishes only a transmutation subsection, as irdff-ii
+/// does, records its converter the same way.
+#[test]
+fn a_chain_only_library_records_its_converter() {
+    let origin = Origin::start();
+    origin.publish_listing(
+        "irdff-ii",
+        "2026-10-12.1",
+        &[("transmutation/branching.arrow/branching.arrow", b"b")],
+        Some(&IRDFF_II_CONVERTERS_2026_10_12_1),
+    );
+    let root = Scratch::new("converters-irdff");
+    let reg = registry(&origin.url, &root);
+    fetch_subsection(&reg, "irdff-ii", "branching").expect("published");
+    assert_eq!(
+        reg.data_releases()["irdff-ii"].converter_versions,
+        IRDFF_II_CONVERTERS_2026_10_12_1
+    );
+}
+
+/// A cached release whose manifest lists no converters (one written before
+/// the publishing scripts listed them) still loads, online and offline, and
+/// records an empty list.
+#[test]
+fn a_release_whose_manifest_lists_no_converters_records_an_empty_list() {
+    let origin = Origin::start();
+    let files = nuclide_files("Fe56", "2026-10-01");
+    let files: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(p, b)| (p.as_str(), b.as_slice()))
+        .collect();
+    origin.publish_listing("endf-b8.1", "2026-10-01", &files, None);
+    let root = Scratch::new("converters-none");
+
+    let online = registry(&origin.url, &root);
+    fetch(&online, "Fe56").expect("download");
+    assert!(online.data_releases()["endf-b8.1"]
+        .converter_versions
+        .is_empty());
+
+    let offline = registry(&dead_origin(), &root);
+    fetch(&offline, "Fe56").expect("from the cache");
+    let record = &offline.data_releases()["endf-b8.1"];
+    assert!(record.offline && record.converter_versions.is_empty());
+}
+
 /// The offline choice is the newest cached release holding every file the
 /// first request needs, and then that release for the rest of the process.
 #[test]
@@ -765,6 +864,49 @@ fn origin_serves_a_readable_release_for_every_keyword() {
         "the origin does not serve a release this build reads:\n  {}",
         failures.join("\n  ")
     );
+}
+
+/// A run against the live origin records the converters its release's
+/// manifest lists, for a full library (endf-b8.1) and for the chain-only
+/// irdff-ii, each read through a transmutation subsection into an empty cache.
+/// For the 2026-10-12.1 releases they are the values published then.
+///
+/// Ignored by default because it needs the network and downloads about 7 MB:
+///   cargo test -p yamc-nuclide --features download-tls --lib -- \
+///       --ignored a_run_on_the_live_origin_records_its_converters --nocapture
+#[test]
+#[ignore]
+fn a_run_on_the_live_origin_records_its_converters() {
+    let root = Scratch::new("live-converters");
+    let reg = Registry::new(
+        super::super::url_cache::ORIGIN,
+        Some(root.0.clone()),
+        Timeouts::DEFAULT,
+    );
+    for (keyword, expected_2026_10_12_1) in [
+        ("endf-b8.1", &CONVERTERS_2026_10_12_1[..]),
+        ("irdff-ii", &IRDFF_II_CONVERTERS_2026_10_12_1[..]),
+    ] {
+        fetch_subsection(&reg, keyword, "branching").expect("download");
+        let record = &reg.data_releases()[keyword];
+        assert!(!record.offline, "{keyword}: the origin was not reached");
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.0.join(keyword).join(&record.release).join(MANIFEST)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::json!(record.converter_versions),
+            manifest["converter_versions"],
+            "{keyword}: the record is the manifest's list"
+        );
+        if record.release == "2026-10-12.1" {
+            assert_eq!(record.converter_versions, expected_2026_10_12_1);
+        }
+        println!(
+            "{keyword}: release {} converter_versions {:?}",
+            record.release, record.converter_versions
+        );
+    }
 }
 
 /// The MTs and temperatures of the synthetic indexed nuclide.

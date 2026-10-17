@@ -4547,9 +4547,13 @@ class SimulationResults:
         ``data_releases`` maps each library keyword the run downloaded data
         from to a dict with ``release`` (the published release identifier),
         ``manifest_sha256`` (the hash of that release's manifest, which pins
-        every file in it), ``format_version`` and ``offline`` (True when the
+        every file in it), ``format_version``, ``offline`` (True when the
         data origin was unreachable and the newest complete cached release was
-        used). Empty when all data came from local directories.
+        used) and ``converter_versions`` (every converter that wrote the
+        release's files, with its version, as its manifest lists them, e.g.
+        ``["yamc-convert 0.1.0", "yani-convert 0.1.0"]``; empty in results
+        saved before releases recorded them). Empty when all data came from
+        local directories.
         """
     def __len__(self) -> builtins.int:
         r"""
@@ -5721,10 +5725,12 @@ class TransmutationResults:
         The published nuclear-data release each library keyword came from, as
         a dict keyed by keyword. Each value is a dict with ``release`` (the
         release identifier), ``manifest_sha256`` (the hash of that release's
-        manifest, which pins every file in it), ``format_version`` and
+        manifest, which pins every file in it), ``format_version``,
         ``offline`` (True when the data origin was unreachable and the newest
-        complete cached release was used). Empty when every data source was a
-        local directory.
+        complete cached release was used) and ``converter_versions`` (every
+        converter that wrote the release's files, with its version, as its
+        manifest lists them; empty in results recorded before releases
+        listed them). Empty when every data source was a local directory.
         """
     @property
     def num_steps(self) -> builtins.int:

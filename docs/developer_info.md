@@ -622,9 +622,12 @@ when per-file load logging is on.
 
 Results record the release of each library a run used: `SimulationResults.runs`
 entries carry `data_releases` (`release`, `manifest_sha256`, `format_version`,
-`offline`), and `TransmutationResults.data_releases` carries the same.
-`combine_results` refuses to pool runs that read different releases of one
-library.
+`offline`, `converter_versions`), and `TransmutationResults.data_releases`
+carries the same. `converter_versions` is the release manifest's list of the
+converters that wrote its files, with their versions (`["yamc-convert 0.1.0",
+"yani-convert 0.1.0"]` for the 2026-10-12.1 releases); results saved before it
+was recorded read back with an empty list. `combine_results` refuses to pool
+runs that read different releases of one library.
 
 A local directory passed as the data source is read as it is, with no
 download and no manifest check.

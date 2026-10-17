@@ -529,10 +529,12 @@ impl PyTransmutationResults {
     /// The published nuclear-data release each library keyword came from, as
     /// a dict keyed by keyword. Each value is a dict with ``release`` (the
     /// release identifier), ``manifest_sha256`` (the hash of that release's
-    /// manifest, which pins every file in it), ``format_version`` and
+    /// manifest, which pins every file in it), ``format_version``,
     /// ``offline`` (True when the data origin was unreachable and the newest
-    /// complete cached release was used). Empty when every data source was a
-    /// local directory.
+    /// complete cached release was used) and ``converter_versions`` (every
+    /// converter that wrote the release's files, with its version, as its
+    /// manifest lists them; empty in results recorded before releases
+    /// listed them). Empty when every data source was a local directory.
     #[getter]
     fn data_releases<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let out = PyDict::new(py);
@@ -542,6 +544,7 @@ impl PyTransmutationResults {
             d.set_item("manifest_sha256", &release.manifest_sha256)?;
             d.set_item("format_version", release.format_version)?;
             d.set_item("offline", release.offline)?;
+            d.set_item("converter_versions", &release.converter_versions)?;
             out.set_item(keyword, d)?;
         }
         Ok(out)
