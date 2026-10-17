@@ -114,6 +114,51 @@ pub struct MeshTopology {
     // -- Implicit complement --
     /// Volume ID of the implicit complement (virtual "outside" volume).
     pub implicit_complement: VolumeId,
+
+    // -- Provenance --
+    /// `Some(false)` when the writer meshed every solid on its own (no
+    /// imprinting), so touching solids each have their own surface where they
+    /// meet. Selects discontinuous tracking in
+    /// [`crate::geometry::MeshGeometry::from_topology`].
+    pub imprinted: Option<bool>,
+    /// Contact tolerance (cm) the writer recorded for a non-imprinted mesh.
+    pub contact_tolerance: Option<f64>,
+    /// Overlapping solids of a non-imprinted mesh, as `(low, high)` pairs:
+    /// where the two overlap, the cell is `high`. Free of cycles (checked
+    /// when the topology is built).
+    pub overlaps: Vec<(VolumeId, VolumeId)>,
+    /// Solid pairs `(a, b)`, `a < b`, that come within the contact tolerance
+    /// in the mesh although the CAD solids do not touch: a real gap, which
+    /// relocation must not fill.
+    pub separated: Vec<(VolumeId, VolumeId)>,
+}
+
+/// Rank every volume so that, for each `(low, high)` overlap pair, `high`
+/// outranks `low`: `ranks[v]` is the length of the longest chain of pairs
+/// ending at `v`. `None` when the pairs contain a cycle.
+pub fn overlap_ranks(num_volumes: u32, pairs: &[(VolumeId, VolumeId)]) -> Option<Vec<u32>> {
+    let n = num_volumes as usize;
+    let mut indegree = vec![0u32; n];
+    let mut above: Vec<Vec<VolumeId>> = vec![Vec::new(); n];
+    for &(low, high) in pairs {
+        above[low as usize].push(high);
+        indegree[high as usize] += 1;
+    }
+    let mut ranks = vec![0u32; n];
+    let mut ready: Vec<usize> = (0..n).filter(|&v| indegree[v] == 0).collect();
+    let mut seen = 0;
+    while let Some(v) = ready.pop() {
+        seen += 1;
+        for &h in &above[v] {
+            let h = h as usize;
+            ranks[h] = ranks[h].max(ranks[v] + 1);
+            indegree[h] -= 1;
+            if indegree[h] == 0 {
+                ready.push(h);
+            }
+        }
+    }
+    (seen == n).then_some(ranks)
 }
 
 // ---------------------------------------------------------------------------

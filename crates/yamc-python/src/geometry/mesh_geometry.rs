@@ -46,8 +46,21 @@ use yamc::geometry::mesh::MeshGeometry;
 /// bounds it.  Without any of these, a particle with no surface ahead of it
 /// is a lost particle.
 ///
-/// Loading warns when some solids touch without sharing a surface where they
-/// meet: a particle leaving one of them is not placed in the solid it enters.
+/// A mesh written without imprinting (``CadToYamc.mesh(imprint=False)``)
+/// gives each solid its own surface, so touching solids meet along two
+/// independently faceted surfaces that may overlap or leave thin gaps. Such a
+/// mesh is tracked discontinuously: a particle leaving a solid is placed in
+/// whichever touching solid contains it. Solids closer than the contact
+/// tolerance count as touching, so an overlap or a gap thinner than it is
+/// crossed straight into the next solid (an overlap stays with the solid the
+/// particle was already in); a wider gap, or one the file records as being in
+/// the CAD, is the implicit complement. The file records all this;
+/// *contact_tolerance* forces it on for a mesh from another writer, or
+/// overrides the tolerance the file records.
+///
+/// Loading warns when a mesh tracked conformally has solids that touch
+/// without sharing a surface where they meet: a particle leaving one of them
+/// is not placed in the solid it enters.
 ///
 /// Args:
 ///     filename: Path to an Arrow IPC mesh file (``.arrow``).
@@ -57,6 +70,13 @@ use yamc::geometry::mesh::MeshGeometry;
 ///     graveyard_offset: Optional offset (cm) of a vacuum boundary box
 ///         around the mesh.  ``None`` lets the :class:`Model` add one with a
 ///         10 cm offset around a void implicit complement, as above.
+///     contact_tolerance: Optional distance (cm) within which two solids'
+///         surfaces count as touching. Setting it tracks the mesh
+///         discontinuously. It must be at least the deepest overlap between
+///         touching solids, and gaps narrower than it are filled by the solid
+///         on the far side, except between solids the file records as apart
+///         in the CAD (``CadToYamc`` checks this when meshing without
+///         imprinting).
 ///
 /// Raises:
 ///     ValueError: If the file is not an Arrow IPC mesh, or if it contains a
@@ -90,19 +110,29 @@ pub struct PyMeshGeometry {
     ic_mat: Option<Arc<yamc_materials::material::Material>>,
     /// Current graveyard offset.
     graveyard_offset: Option<f64>,
+    /// Contact tolerance passed by the caller, re-applied on rebuild.
+    contact_tolerance: Option<f64>,
 }
 
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyMeshGeometry {
     #[new]
-    #[pyo3(signature = (filename, materials, implicit_complement_material=None, graveyard_offset=None))]
+    #[pyo3(signature = (filename, materials, implicit_complement_material=None, graveyard_offset=None, contact_tolerance=None))]
     pub fn new<'py>(
         filename: &str,
         materials: &Bound<'py, PyDict>,
         implicit_complement_material: Option<&Bound<'py, PyMaterial>>,
         graveyard_offset: Option<f64>,
+        contact_tolerance: Option<f64>,
     ) -> PyResult<Self> {
+        if let Some(tol) = contact_tolerance
+            && !(tol.is_finite() && tol >= 0.0)
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "contact_tolerance must be a non-negative number of cm, got {tol}"
+            )));
+        }
         // Mirror PyGeometry::new: auto-assign material IDs to any Material
         // that doesn't have one yet, mutating the user's Python objects in
         // place. This means subsequent calls like
@@ -195,17 +225,31 @@ impl PyMeshGeometry {
         let topo = yamt::build_topology(data).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("Invalid mesh '{filename}': {e}"))
         })?;
-        let mesh = yamt::MeshGeometry::from_topology(topo);
+        let mut mesh = yamt::MeshGeometry::from_topology(topo);
+        if contact_tolerance.is_some() {
+            mesh.set_contact_tolerance(contact_tolerance);
+        }
         if mesh.touches_without_shared_surface(4096) {
-            let message = format!(
-                "'{filename}': some solids touch without sharing a surface where they meet. \
-                 A particle crosses from one solid into the next only through a shared \
-                 surface, so one leaving these solids is not placed in the solid it enters, \
-                 and tallies come out wrong without any lost particles. A mesh made without \
-                 imprinting is like this, and so is an imprinted one whose imprint did not \
-                 join these faces. Mesh the CAD so that touching solids share the surface \
-                 where they meet."
-            );
+            let message = if mesh.topology.imprinted == Some(true) {
+                format!(
+                    "'{filename}': the file says its solids were imprinted, but some of them \
+                     touch without sharing a surface, so the imprint did not join them. A \
+                     particle leaving one of these solids is not placed in the solid it \
+                     enters, so tallies come out wrong. Mesh the CAD with imprint=False \
+                     instead, or pass contact_tolerance=<distance in cm> to track this file \
+                     discontinuously, which crosses these contacts but cannot repair anything \
+                     else the imprint got wrong."
+                )
+            } else {
+                format!(
+                    "'{filename}': some solids touch without sharing a surface, as in a mesh \
+                     made without imprinting, but the file does not say it was made that way. \
+                     Tracked as an imprinted mesh, a particle leaving one of these solids is \
+                     not placed in the solid it enters, so tallies come out wrong without any \
+                     lost particles. Pass contact_tolerance=<distance in cm> to track it \
+                     discontinuously."
+                )
+            };
             materials
                 .py()
                 .import("warnings")?
@@ -221,7 +265,24 @@ impl PyMeshGeometry {
             mat_map,
             ic_mat,
             graveyard_offset,
+            contact_tolerance,
         })
+    }
+
+    /// True when the mesh is tracked discontinuously: its solids were meshed
+    /// one by one without imprinting, so a particle leaving one is placed in
+    /// whichever touching solid contains it rather than read off a shared
+    /// surface.
+    #[getter]
+    pub fn discontinuous(&self) -> bool {
+        self.inner.mesh.is_discontinuous()
+    }
+
+    /// Distance (cm) within which two solids' surfaces count as touching, for
+    /// a discontinuously tracked mesh; ``None`` for an imprinted one.
+    #[getter]
+    pub fn contact_tolerance(&self) -> Option<f64> {
+        self.inner.mesh.contact_tolerance()
     }
 
     /// Number of volumes (cells) in the mesh (excluding implicit complement).
@@ -391,7 +452,10 @@ impl PyMeshGeometry {
         }
         let topo = yamt::build_topology(data)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid mesh: {e}")))?;
-        let mesh = yamt::MeshGeometry::from_topology(topo);
+        let mut mesh = yamt::MeshGeometry::from_topology(topo);
+        if self.contact_tolerance.is_some() {
+            mesh.set_contact_tolerance(self.contact_tolerance);
+        }
 
         self.inner = MeshGeometry::new(mesh, &self.mat_map, self.ic_mat.clone())
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;

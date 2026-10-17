@@ -84,6 +84,7 @@ pub fn mesh_geometry_to_geo_mesh(mesh: &crate::geometry::mesh::MeshGeometry) -> 
             material_id,
             material_name,
             triangles,
+            rank: mesh.mesh.rank(vol_id as u32),
         });
     }
 

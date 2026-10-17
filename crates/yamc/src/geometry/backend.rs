@@ -26,6 +26,11 @@ pub struct BoundaryHit {
     pub next_cell_index: Option<usize>,
     /// Surface ID of the crossed surface (for diagnostics).
     pub surface_id: Option<usize>,
+    /// Set when the cell beyond is only worked out if the particle takes the
+    /// crossing: a discontinuous mesh relocates a particle leaving a solid,
+    /// which costs a ray query that a collision before the boundary would
+    /// waste. [`GeometryKind::resolve_crossing`] fills `next_cell_index`.
+    pub relocate_triangle: Option<u32>,
 }
 
 /// Backend-agnostic geometry. The transport loop only sees this type.
@@ -242,6 +247,31 @@ impl GeometryKind {
             GeometryKind::Csg(g) => g.closest_boundary(cell_index, position, direction),
             #[cfg(feature = "mesh")]
             GeometryKind::Mesh(g) => g.closest_boundary(cell_index, position, direction),
+        }
+    }
+
+    /// Work out the cell beyond a crossing the particle is about to take, when
+    /// [`GeometryKind::closest_boundary`] deferred it (see
+    /// [`BoundaryHit::relocate_triangle`]). No-op otherwise.
+    #[cfg_attr(not(feature = "mesh"), allow(unused_variables))]
+    #[inline]
+    pub fn resolve_crossing(
+        &self,
+        cell_index: usize,
+        hit: &mut BoundaryHit,
+        position: [f64; 3],
+        direction: [f64; 3],
+    ) {
+        if hit.relocate_triangle.is_none() {
+            return;
+        }
+        match self {
+            #[cfg(feature = "mesh")]
+            GeometryKind::Csg(g) => g.resolve_fill_crossing(cell_index, hit, position, direction),
+            #[cfg(not(feature = "mesh"))]
+            GeometryKind::Csg(_) => {}
+            #[cfg(feature = "mesh")]
+            GeometryKind::Mesh(g) => g.resolve_crossing(cell_index, hit, position, direction),
         }
     }
 

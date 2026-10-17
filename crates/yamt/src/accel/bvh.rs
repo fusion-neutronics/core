@@ -807,6 +807,45 @@ impl Bvh {
         }
     }
 
+    /// Call `visit` for every primitive in a leaf whose bounds overlap the box
+    /// `query` (`[min_x, min_y, min_z, max_x, max_y, max_z]`). Leaves group
+    /// several primitives under one box, so a caller that needs an exact
+    /// answer tests each primitive's own bounds itself.
+    pub fn aabb_query<F>(&self, query: [f64; 6], mut visit: F)
+    where
+        F: FnMut(u32),
+    {
+        if self.nodes.is_empty() {
+            return;
+        }
+        let mut stack: Vec<u32> = Vec::with_capacity(64);
+        stack.push(0);
+        while let Some(node_idx) = stack.pop() {
+            let node = &self.nodes[node_idx as usize];
+            for i in 0..node.num_children as usize {
+                if query[3] < node.child_min_x[i]
+                    || query[0] > node.child_max_x[i]
+                    || query[4] < node.child_min_y[i]
+                    || query[1] > node.child_max_y[i]
+                    || query[5] < node.child_min_z[i]
+                    || query[2] > node.child_max_z[i]
+                {
+                    continue;
+                }
+                let meta = node.child_meta[i];
+                if Bvh4Node::is_child_leaf(meta) {
+                    let offset = Bvh4Node::child_offset(meta);
+                    let count = Bvh4Node::child_count(meta);
+                    for j in offset..(offset + count) {
+                        visit(self.indices[j as usize]);
+                    }
+                } else {
+                    stack.push(Bvh4Node::child_offset(meta));
+                }
+            }
+        }
+    }
+
     /// Find all primitives whose AABB contains the given point.
     /// Calls `test_fn` for each candidate and returns the first that returns `true`.
     pub fn point_query<F>(&self, point: [f64; 3], mut test_fn: F) -> Option<u32>
@@ -996,8 +1035,9 @@ impl Bvh {
     ///
     /// Takes precomputed triangle data (v0, edge1, edge2) indexed by the BVH's
     /// primitive indices. Uses SIMD-dispatched 4-wide Moller-Trumbore for leaf
-    /// testing. The `accept` closure is called only for actual hits and can
-    /// reject specific primitives (e.g. history exclusion in ray_fire).
+    /// testing. The `accept` closure is called only for actual hits, with the
+    /// primitive and its hit distance, and can reject specific primitives
+    /// (e.g. history exclusion in ray_fire, or facets crossed the wrong way).
     ///
     /// Returns the closest accepted hit `(prim_idx, distance)`.
     #[allow(clippy::too_many_arguments)]
@@ -1012,7 +1052,7 @@ impl Bvh {
         mut accept: F,
     ) -> Option<(u32, f64)>
     where
-        F: FnMut(u32) -> bool,
+        F: FnMut(u32, f64) -> bool,
     {
         if self.nodes.is_empty() {
             return None;
@@ -1224,7 +1264,7 @@ impl Bvh {
                             continue;
                         }
                         let prim_idx = self.indices[(offset as usize) + k];
-                        if accept(prim_idx) {
+                        if accept(prim_idx, t) {
                             closest = Some((prim_idx, t));
                         }
                     }

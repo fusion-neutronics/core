@@ -360,6 +360,249 @@ pub fn find_solid_overlaps(
     found
 }
 
+/// Volume shared by two closed triangle meshes.
+///
+/// When the surfaces never come within `tol` of each other and one lies wholly
+/// inside the other, the shared volume is all of the inner solid, which the
+/// caller knows exactly; that case returns `SharedVolume::Embedded` with the
+/// inner solid's index (0 for `a`, 1 for `b`). When they never come close and
+/// neither is inside the other, nothing is shared. Otherwise (the surfaces
+/// meet, or hollow solids interleave) the shared volume is estimated by
+/// sampling `samples` points uniformly in the intersection of the two
+/// bounding boxes (deterministic for a given `seed`).
+pub fn shared_volume(
+    vertices: &[[f64; 3]],
+    a: &[[usize; 3]],
+    b: &[[usize; 3]],
+    tol: f64,
+    samples: usize,
+    seed: u64,
+) -> SharedVolume {
+    let bvh = |tris: &[[usize; 3]]| {
+        let t: Vec<([f64; 3], [f64; 3], [f64; 3])> = tris
+            .iter()
+            .map(|t| (vertices[t[0]], vertices[t[1]], vertices[t[2]]))
+            .collect();
+        TriangleBvh::new(&t)
+    };
+    let (ba, bb) = (bvh(a), bvh(b));
+    if !ba.surfaces_within(&bb, tol) {
+        // Each connected piece (shell) of either boundary then lies wholly
+        // inside or outside the other solid, and one vertex of it says which.
+        // `b` lies wholly inside `a` when all of `b`'s shells are inside `a`
+        // and none of `a`'s is inside `b` (a void of `a` inside `b` is a hole
+        // in what they share). With no shell of either inside the other they
+        // are apart; anything else (hollow solids interleaved) is sampled.
+        let inside = |shells: &[usize], other: &TriangleBvh| {
+            shells
+                .iter()
+                .filter(|&&v| other.is_point_inside(&vertices[v]))
+                .count()
+        };
+        let (shells_a, shells_b) = (shell_representatives(a), shell_representatives(b));
+        let (a_in_b, b_in_a) = (inside(&shells_a, &bb), inside(&shells_b, &ba));
+        if !shells_b.is_empty() && b_in_a == shells_b.len() && a_in_b == 0 {
+            return SharedVolume::Embedded(1);
+        }
+        if !shells_a.is_empty() && a_in_b == shells_a.len() && b_in_a == 0 {
+            return SharedVolume::Embedded(0);
+        }
+        if a_in_b == 0 && b_in_a == 0 {
+            return SharedVolume::Estimate {
+                volume: 0.0,
+                std_err: 0.0,
+            };
+        }
+    }
+    let bounds = |tris: &[[usize; 3]]| {
+        let mut lo = [f64::MAX; 3];
+        let mut hi = [f64::MIN; 3];
+        for t in tris {
+            for &v in t {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(vertices[v][k]);
+                    hi[k] = hi[k].max(vertices[v][k]);
+                }
+            }
+        }
+        (lo, hi)
+    };
+    let ((la, ha), (lb, hb)) = (bounds(a), bounds(b));
+    let lo = [la[0].max(lb[0]), la[1].max(lb[1]), la[2].max(lb[2])];
+    let hi = [ha[0].min(hb[0]), ha[1].min(hb[1]), ha[2].min(hb[2])];
+    if (0..3).any(|k| hi[k] <= lo[k]) || samples == 0 {
+        return SharedVolume::Estimate {
+            volume: 0.0,
+            std_err: 0.0,
+        };
+    }
+    let box_volume = (hi[0] - lo[0]) * (hi[1] - lo[1]) * (hi[2] - lo[2]);
+    const CHUNK: usize = 4096;
+    let chunks = samples.div_ceil(CHUNK);
+    let hits: usize = (0..chunks)
+        .into_par_iter()
+        .map(|c| {
+            // splitmix64, each chunk starting from its own mixed state so that
+            // the chunks' streams do not overlap (seed ^ c * step shifted one
+            // chunk's stream by a few draws from another's): deterministic
+            // whatever the threads.
+            let mut state = {
+                let mut z = seed.wrapping_add((c as u64 + 1).wrapping_mul(0xD1B5_4A32_D192_ED03));
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^ (z >> 31)
+            };
+            let mut next = || {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+            };
+            let n = CHUNK.min(samples - c * CHUNK);
+            (0..n)
+                .filter(|_| {
+                    let p = [
+                        lo[0] + (hi[0] - lo[0]) * next(),
+                        lo[1] + (hi[1] - lo[1]) * next(),
+                        lo[2] + (hi[2] - lo[2]) * next(),
+                    ];
+                    ba.is_point_inside(&p) && bb.is_point_inside(&p)
+                })
+                .count()
+        })
+        .sum();
+    let p = hits as f64 / samples as f64;
+    SharedVolume::Estimate {
+        volume: box_volume * p,
+        std_err: box_volume * (p * (1.0 - p) / samples as f64).sqrt(),
+    }
+}
+
+/// Result of [`shared_volume`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SharedVolume {
+    /// One solid (0 = `a`, 1 = `b`) lies wholly inside the other.
+    Embedded(usize),
+    /// Monte Carlo estimate, with its standard error.
+    Estimate { volume: f64, std_err: f64 },
+}
+
+/// Points where two solids' closed surface meshes come within `tolerance` of
+/// each other.
+///
+/// For every pair of solids whose meshes come that close, up to `samples`
+/// mesh vertices of one of them that lie within `tolerance` of the other's
+/// surface, as `(solid_a, solid_b, points on solid_a)`. A pair whose meshes
+/// come close only between vertices is returned with no points, and so is a
+/// pair whose meshes share a vertex: a mesh vertex lies on its solid's CAD
+/// surface, so one that belongs to both lies on both and the two touch.
+/// Ordered by pair, whatever the thread scheduling.
+///
+/// The CAD layer uses these to tell solids that touch (each sample lies on
+/// the other CAD solid) from solids separated by a real gap that faceting has
+/// brought within the tolerance.
+#[allow(clippy::type_complexity)]
+pub fn contact_samples(
+    vertices: &[[f64; 3]],
+    solids: &[SolidBoundary],
+    tolerance: f64,
+    samples: usize,
+) -> Vec<(usize, usize, Vec<[f64; 3]>)> {
+    struct Solid {
+        id: usize,
+        bvh: TriangleBvh,
+        verts: Vec<usize>,
+        lo: [f64; 3],
+        hi: [f64; 3],
+    }
+    let prepared: Vec<Solid> = solids
+        .par_iter()
+        .map(|(id, tris)| {
+            let t: Vec<([f64; 3], [f64; 3], [f64; 3])> = tris
+                .iter()
+                .map(|t| (vertices[t[0]], vertices[t[1]], vertices[t[2]]))
+                .collect();
+            let mut verts: Vec<usize> = tris.iter().flatten().copied().collect();
+            verts.sort_unstable();
+            verts.dedup();
+            let mut lo = [f64::MAX; 3];
+            let mut hi = [f64::MIN; 3];
+            for &v in &verts {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(vertices[v][k]);
+                    hi[k] = hi[k].max(vertices[v][k]);
+                }
+            }
+            Solid {
+                id: *id,
+                bvh: TriangleBvh::new(&t),
+                verts,
+                lo,
+                hi,
+            }
+        })
+        .collect();
+    let mut pairs = Vec::new();
+    for i in 0..prepared.len() {
+        for j in (i + 1)..prepared.len() {
+            let (a, b) = (&prepared[i], &prepared[j]);
+            if (0..3).any(|k| a.hi[k] + tolerance < b.lo[k] || b.hi[k] + tolerance < a.lo[k]) {
+                continue;
+            }
+            pairs.push((i, j));
+        }
+    }
+    let near = |a: &Solid, b: &Solid| -> Vec<[f64; 3]> {
+        let mut out = Vec::new();
+        for &v in &a.verts {
+            let p = vertices[v];
+            if (0..3).any(|k| p[k] < b.lo[k] - tolerance || p[k] > b.hi[k] + tolerance) {
+                continue;
+            }
+            if dist(&p, &b.bvh.nearest_point_on_surface(&p)) <= tolerance {
+                out.push(p);
+                if out.len() >= samples {
+                    break;
+                }
+            }
+        }
+        out
+    };
+    let mut found: Vec<(usize, usize, Vec<[f64; 3]>)> = pairs
+        .par_iter()
+        .filter_map(|&(i, j)| {
+            let (a, b) = (&prepared[i], &prepared[j]);
+            if !a.bvh.surfaces_within(&b.bvh, tolerance) {
+                return None;
+            }
+            let (small, large) = if a.verts.len() <= b.verts.len() {
+                (a, b)
+            } else {
+                (b, a)
+            };
+            if small
+                .verts
+                .iter()
+                .any(|v| large.verts.binary_search(v).is_ok())
+            {
+                return Some((a.id, b.id, Vec::new()));
+            }
+            let from_a = near(a, b);
+            if !from_a.is_empty() {
+                return Some((a.id, b.id, from_a));
+            }
+            let from_b = near(b, a);
+            if !from_b.is_empty() {
+                return Some((b.id, a.id, from_b));
+            }
+            Some((a.id, b.id, Vec::new()))
+        })
+        .collect();
+    found.sort_by_key(|&(a, b, _)| (a.min(b), a.max(b)));
+    found
+}
+
 /// Test `a`'s features against `b`'s closed surface.
 ///
 /// Returns `((max_depth, inside_vertices, crossing_edges, inside_faces), lens_area)`.
@@ -627,6 +870,145 @@ mod tests {
         assert_eq!(a[0].max_depth, b[0].max_depth);
         assert_eq!(a[0].inside_vertices, b[0].inside_vertices);
         assert_eq!(a[0].lens_area, b[0].lens_area);
+    }
+
+    #[test]
+    fn shared_volume_of_two_offset_boxes() {
+        // Two 10 cm cubes offset by 5 along x share a 5 x 10 x 10 block.
+        let (v, s) = two_boxes(5.0);
+        match shared_volume(&v, &s[0].1, &s[1].1, 1e-9, 200_000, 7) {
+            SharedVolume::Estimate { volume, std_err } => {
+                assert!(
+                    (volume - 500.0).abs() < 4.0 * std_err + 1.0,
+                    "{volume} +- {std_err}"
+                );
+            }
+            other => panic!("expected an estimate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shared_volume_of_interleaved_hollow_solids_is_sampled() {
+        // a: [-5,5]^3 with a [-3,3]^3 void, b: [-6,6]^3 with a [-4,4]^3 void.
+        // No surface of one comes near the other's, neither lies inside the
+        // other, and they share the shell between 4 and 5: 1000 - 512 = 488.
+        // Whichever shell of each is listed first.
+        for (a_void_first, b_void_first) in [(false, false), (true, false), (false, true)] {
+            let mut v = Vec::new();
+            let hollow = |v: &mut Vec<[f64; 3]>, outer: f64, inner: f64, void_first: bool| {
+                let (o, i) = if void_first {
+                    let i = push_box(v, [-inner; 3], [inner; 3]);
+                    (push_box(v, [-outer; 3], [outer; 3]), i)
+                } else {
+                    let o = push_box(v, [-outer; 3], [outer; 3]);
+                    (o, push_box(v, [-inner; 3], [inner; 3]))
+                };
+                if void_first {
+                    [i, o].concat()
+                } else {
+                    [o, i].concat()
+                }
+            };
+            let a = hollow(&mut v, 5.0, 3.0, a_void_first);
+            let b = hollow(&mut v, 6.0, 4.0, b_void_first);
+            for (x, y) in [(&a, &b), (&b, &a)] {
+                match shared_volume(&v, x, y, 1e-6, 400_000, 3) {
+                    SharedVolume::Estimate { volume, std_err } => assert!(
+                        (volume - 488.0).abs() < 5.0 * std_err,
+                        "{volume} +- {std_err}"
+                    ),
+                    other => panic!("expected an estimate, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shared_volume_errors_are_honest_across_seeds() {
+        // The interleaved hollow cubes share 488 of the 1000 cm^3 box sampled.
+        // Each seed's estimate must sit within its own stated error: chunks
+        // drawing overlapping streams used to understate it several times over.
+        let mut v = Vec::new();
+        let a = [
+            push_box(&mut v, [-5.0; 3], [5.0; 3]),
+            push_box(&mut v, [-3.0; 3], [3.0; 3]),
+        ]
+        .concat();
+        let b = [
+            push_box(&mut v, [-6.0; 3], [6.0; 3]),
+            push_box(&mut v, [-4.0; 3], [4.0; 3]),
+        ]
+        .concat();
+        for seed in 1..=6 {
+            match shared_volume(&v, &a, &b, 1e-6, 1_000_000, seed) {
+                SharedVolume::Estimate { volume, std_err } => assert!(
+                    (volume - 488.0).abs() < 4.5 * std_err,
+                    "seed {seed}: {volume} +- {std_err}"
+                ),
+                other => panic!("expected an estimate, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn shared_volume_of_an_embedded_box_is_the_whole_box() {
+        let mut v = Vec::new();
+        let outer = push_box(&mut v, [0.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
+        let inner = push_box(&mut v, [3.0, 3.0, 3.0], [7.0, 7.0, 7.0]);
+        assert_eq!(
+            shared_volume(&v, &outer, &inner, 1e-9, 1000, 7),
+            SharedVolume::Embedded(1)
+        );
+        assert_eq!(
+            shared_volume(&v, &inner, &outer, 1e-9, 1000, 7),
+            SharedVolume::Embedded(0)
+        );
+    }
+
+    #[test]
+    fn contact_samples_find_touching_and_near_pairs_only() {
+        // Face to face: samples on the shared plane. 0.05 apart within a 0.1
+        // tolerance: samples too (the caller decides whether the CAD
+        // touches). 5 apart: no pair.
+        for (offset, expect) in [(10.0, true), (10.05, true), (15.0, false)] {
+            let (v, s) = two_boxes(offset);
+            let found = contact_samples(&v, &s, 0.1, 4);
+            assert_eq!(!found.is_empty(), expect, "offset {offset}: {found:?}");
+            if let Some((_, _, points)) = found.first() {
+                assert!(!points.is_empty() && points.len() <= 4);
+            }
+        }
+    }
+
+    #[test]
+    fn contact_samples_need_no_points_for_solids_sharing_a_vertex() {
+        // The second box reuses the first one's corner at (10, 0, 0), as
+        // welding does where two meshes meet: the pair is listed, touching,
+        // with no points to check against the CAD.
+        let (v, mut s) = two_boxes(10.0);
+        let shared = s[0]
+            .1
+            .iter()
+            .flatten()
+            .copied()
+            .find(|&i| v[i] == [10.0, 0.0, 0.0]);
+        let own = s[1]
+            .1
+            .iter()
+            .flatten()
+            .copied()
+            .find(|&i| v[i] == [10.0, 0.0, 0.0]);
+        let (shared, own) = (shared.unwrap(), own.unwrap());
+        for tri in s[1].1.iter_mut() {
+            for i in tri.iter_mut() {
+                if *i == own {
+                    *i = shared;
+                }
+            }
+        }
+        let found = contact_samples(&v, &s, 0.1, 4);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].2.is_empty(), "{found:?}");
     }
 
     #[test]

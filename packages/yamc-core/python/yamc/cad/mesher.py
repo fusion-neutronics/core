@@ -1,8 +1,9 @@
 """Main CadToYamc class -- end-to-end surface meshing pipeline.
 
-Takes a CadQuery assembly, imprints it, meshes each face with the
-``cad-to-dagmc-mesher`` scene mesher (see :mod:`yamc.cad._scene_extract`), and
-produces a global vertex + triangle mesh with per-face and per-volume metadata.
+Takes a CadQuery assembly, imprints it (unless ``imprint=False``), meshes each
+face with the ``cad-to-dagmc-mesher`` scene mesher (see
+:mod:`yamc.cad._scene_extract`), and produces a global vertex + triangle mesh
+with per-face and per-volume metadata.
 """
 
 from __future__ import annotations
@@ -10,7 +11,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
 
+import math
 import os
+import warnings
 
 from .assembly_processor import process_assembly
 from . import cad_mesh_labels as _cad_mesh_labels
@@ -218,6 +221,11 @@ class CadToYamc:
         self._surface_mesh = None
         self._tet_data = {}  # solid_id -> (tet_vertices, tet_connectivity)
         self._tet_index_maps = {}  # solid_id -> local vertex -> index in mesh.vertices
+        self._imprint = True
+        self._contact_tolerance = None
+        self._overlaps = []  # (low, high) 1-based solid pairs, high takes the overlap
+        self._volume_measures = None  # per-solid volumes when overlaps are resolved
+        self._separated = []  # (a, b) 1-based solid pairs a real gap apart
 
     def add_cadquery_object(
         self,
@@ -246,6 +254,8 @@ class CadToYamc:
         tolerance: float = 0.1,
         angular_tolerance: float = 0.1,
         fidelity_check: bool = True,
+        imprint: bool = True,
+        contact_tolerance: float | None = None,
         overlaps: str = "error",
     ) -> SurfaceMesh:
         """Mesh the assembly: surfaces + optional tet volumes.
@@ -263,14 +273,37 @@ class CadToYamc:
                 curved surfaces.  Default 0.1.
             angular_tolerance: Angular deflection tolerance for surface
                 meshing (radians).  Default 0.1 (~5.7 degrees).
+            imprint: Imprint the assembly first, so solids that touch share
+                one surface where they meet (a conformal mesh). ``False``
+                skips the imprint and meshes every solid on its own: much
+                faster on a large assembly, and it accepts CAD that will not
+                imprint cleanly. Touching solids then meet along two separately
+                faceted surfaces that may overlap or leave a thin gap, and
+                :class:`yamc.MeshGeometry` tracks the exported mesh
+                discontinuously to suit. Default True.
+            contact_tolerance: Only with ``imprint=False``: the distance
+                (3D units) within which two solids count as touching. A
+                particle crosses an overlap or a gap thinner than this
+                straight into the next solid. Defaults to twice *tolerance*,
+                which covers the slivers two facetings of one CAD surface
+                leave between them; raise it to accept sloppier CAD. A gap
+                that is in the CAD stays a gap whatever the tolerance: the
+                solids either side are checked against the CAD and recorded
+                as separated.
             overlaps: What to do when two solids of the mesh overlap deeper
-                than twice *tolerance*. The imprint shares the surfaces where
+                than twice *tolerance* (with ``imprint=False``, deeper than
+                *contact_tolerance*). The imprint shares the surfaces where
                 solids coincide, but it does not split solids whose surfaces
                 cross (a rod poking out of a box), so both come out of it
-                whole and still overlap, and transport would give the overlap
-                to whichever solid a particle was already in. ``"error"``
-                (default) raises :class:`OverlappingSolidsError`.
-                ``"ignore"`` skips the check.
+                whole and still overlap; without imprinting, a part embedded
+                in a body that was never cut overlaps it in the same way.
+                Transport would give each overlap to whichever solid a
+                particle was already in. ``"error"`` (default) raises
+                :class:`OverlappingSolidsError`. ``"smaller_wins"``, only with
+                ``imprint=False``, gives every such overlap to the smaller
+                solid of the pair, wherever a particle arrives from, and takes
+                the shared volume off the larger one; the pairs travel to the
+                transport in the mesh file. ``"ignore"`` skips the check.
 
         Returns:
             SurfaceMesh with global vertex/triangle arrays.
@@ -287,6 +320,8 @@ class CadToYamc:
             tolerance=tolerance,
             angular_tolerance=angular_tolerance,
             fidelity_check=fidelity_check,
+            imprint=imprint,
+            contact_tolerance=contact_tolerance,
             overlaps=overlaps,
         )
 
@@ -312,6 +347,8 @@ class CadToYamc:
         tolerance: float = 0.1,
         angular_tolerance: float = 0.1,
         fidelity_check: bool = True,
+        imprint: bool = True,
+        contact_tolerance: float | None = None,
         overlaps: str = "error",
     ) -> SurfaceMesh:
         """Mesh all surfaces of the assembly.
@@ -320,7 +357,9 @@ class CadToYamc:
             tolerance: Chordal deflection tolerance for surface meshing
                 (3D units).
             angular_tolerance: Angular deflection tolerance (radians).
-            overlaps: ``"error"`` or ``"ignore"``; see :meth:`mesh`.
+            imprint: Imprint the assembly first; see :meth:`mesh`.
+            contact_tolerance: See :meth:`mesh`.
+            overlaps: See :meth:`mesh`.
 
         Returns:
             SurfaceMesh with global vertex/triangle arrays.
@@ -332,6 +371,8 @@ class CadToYamc:
             tolerance=tolerance,
             angular_tolerance=angular_tolerance,
             fidelity_check=fidelity_check,
+            imprint=imprint,
+            contact_tolerance=contact_tolerance,
             overlaps=overlaps,
         )
 
@@ -377,7 +418,13 @@ class CadToYamc:
     # ------------------------------------------------------------------
 
     def _mesh_surfaces(
-        self, tolerance=0.1, angular_tolerance=0.1, fidelity_check=True, overlaps="error"
+        self,
+        tolerance=0.1,
+        angular_tolerance=0.1,
+        fidelity_check=True,
+        imprint=True,
+        contact_tolerance=None,
+        overlaps="error",
     ):
         """Mesh surfaces with a hybrid backend, mirroring cad-to-dagmc-mesher.
 
@@ -393,17 +440,49 @@ class CadToYamc:
         from ._brepmesh import brepmesh_face_meshes
         from ._scene_extract import assemble_surface_mesh, scene_face_meshes
 
-        if overlaps not in ("error", "ignore"):
-            raise ValueError(f"overlaps must be 'error' or 'ignore', got {overlaps!r}")
+        if imprint and contact_tolerance is not None:
+            raise ValueError(
+                "contact_tolerance only applies with imprint=False: an imprinted "
+                "mesh shares the surface between touching solids, so there is "
+                "no contact to resolve"
+            )
+        if overlaps not in ("error", "smaller_wins", "ignore"):
+            raise ValueError(
+                f"overlaps must be 'error', 'smaller_wins' or 'ignore', got {overlaps!r}"
+            )
+        if imprint and overlaps == "smaller_wins":
+            raise ValueError(
+                "overlaps='smaller_wins' needs imprint=False: an imprinted mesh "
+                "is tracked across the surfaces its solids share, which cannot "
+                "give an overlap to one of them"
+            )
+        if contact_tolerance is None:
+            # Two facetings of one CAD surface each stay within the chordal
+            # deflection of it, so they sit at most twice that apart.
+            contact_tolerance = 2.0 * tolerance
+        elif not (contact_tolerance >= 0.0 and math.isfinite(contact_tolerance)):
+            raise ValueError(
+                f"contact_tolerance must be a non-negative distance, got "
+                f"{contact_tolerance!r}"
+            )
 
-        self._processed = process_assembly(self._assembly, self._material_tags)
+        self._processed = process_assembly(
+            self._assembly, self._material_tags, imprint=imprint
+        )
+        self._imprint = imprint
+        self._contact_tolerance = None if imprint else float(contact_tolerance)
+        self._overlaps = []
+        self._volume_measures = None
+        self._separated = []
         pa = self._processed
 
         brep_fids, scene_fids = _route_faces(pa)
 
         per_face = {}
         per_face.update(
-            brepmesh_face_meshes(pa, brep_fids, tolerance, angular_tolerance)
+            brepmesh_face_meshes(
+                pa, brep_fids, tolerance, angular_tolerance, parallel=not imprint
+            )
         )
         per_face.update(
             scene_face_meshes(pa, tolerance, angular_tolerance, scene_fids)
@@ -439,27 +518,63 @@ class CadToYamc:
                     "Pass fidelity_check=False to bypass this gate."
                 )
 
-        if overlaps == "error":
-            from ._overlap import describe, find_overlaps
+        if overlaps != "ignore":
+            from ._overlap import describe, find_overlaps, resolve_smaller_wins
             from .assembly_processor import OverlappingSolidsError
 
-            # Two facetings of one CAD surface each stay within the chordal
-            # deflection of it, so they sit at most twice that apart.
-            depth_tolerance = 2.0 * tolerance
-            found = find_overlaps(self._surface_mesh, depth_tolerance)
-            if found:
+            # With the imprint, contact_tolerance is its default, twice the
+            # deflection.
+            found = find_overlaps(self._surface_mesh, contact_tolerance)
+            if found and imprint:
                 detail = "\n  ".join(describe(self._surface_mesh, found))
                 raise OverlappingSolidsError(
                     f"Solids overlap deeper than twice the deflection "
-                    f"({depth_tolerance:g}):\n  {detail}\n"
+                    f"({contact_tolerance:g}):\n  {detail}\n"
                     "The imprint shares the surfaces where solids coincide, but "
                     "does not split solids whose surfaces cross: both come out "
                     "whole and still overlap. Transport then gives the overlap "
                     "to whichever solid a particle was already in, which gives "
                     "wrong tallies and no lost particles. Cut one solid from the "
-                    "other in the CAD (for instance b = b.cut(a)). Pass "
+                    "other in the CAD (for instance b = b.cut(a)), or mesh with "
+                    "imprint=False and overlaps='smaller_wins' to give each "
+                    "overlap to the smaller solid of the pair. Pass "
                     "overlaps='ignore' to bypass this gate."
                 )
+            if found and overlaps == "error":
+                detail = "\n  ".join(describe(self._surface_mesh, found))
+                raise OverlappingSolidsError(
+                    f"Solids overlap deeper than the contact tolerance "
+                    f"({contact_tolerance:g}):\n  {detail}\n"
+                    "Without imprinting, an overlap belongs to whichever solid a "
+                    "particle was already in. That is harmless for slivers "
+                    "thinner than the contact tolerance, but a solid sitting "
+                    "inside another is never entered by particles arriving from "
+                    "outside it, which gives wrong tallies and no lost "
+                    "particles. Cut one solid from the other in the CAD (for "
+                    "instance b = b.cut(a)); or pass overlaps='smaller_wins' to "
+                    "give each overlap to the smaller solid of the pair; or, if "
+                    "the overlap is modelling slack you accept, pass a "
+                    "contact_tolerance above its depth. Pass overlaps='ignore' "
+                    "to bypass this gate."
+                )
+            if found:
+                pairs, measures, lines = resolve_smaller_wins(
+                    self._surface_mesh, found, contact_tolerance
+                )
+                self._overlaps = pairs
+                self._volume_measures = measures
+                warnings.warn(
+                    "Resolving overlapping solids, smaller solid wins:\n  "
+                    + "\n  ".join(lines),
+                    stacklevel=3,
+                )
+
+        if not imprint:
+            from ._contact import find_separated
+
+            self._separated = find_separated(
+                self._surface_mesh, pa.solid_shapes, contact_tolerance
+            )
 
         return self._surface_mesh
 
@@ -598,7 +713,8 @@ class CadToYamc:
         ]
 
         # Physical-group assignment, tet offsetting, surface-to-volume topology
-        # and the Arrow write all run in the Rust core in one call.
+        # and the Arrow write all run in the Rust core in one call. A mesh made
+        # without imprinting records that, and its contact tolerance.
         _cad_mesh_to_arrow(
             path=str(path),
             vertices=mesh.vertices,
@@ -611,6 +727,11 @@ class CadToYamc:
             face_solid_reversed=mesh.face_solid_reversed,
             tet_blocks=self._tet_blocks(),
             boundary_tags=tags,
+            imprinted=self._imprint,
+            contact_tolerance=self._contact_tolerance,
+            overlaps=self._overlaps,
+            volume_measures=self._volume_measures,
+            separated=self._separated,
         )
 
     def exterior_surface_ids(self) -> list[int]:
@@ -620,9 +741,24 @@ class CadToYamc:
         the surfaces bounding two solids (imprinted internal interfaces) are
         excluded. These are the surfaces a standalone mesh model wants tagged
         with a boundary condition.
+
+        Raises:
+            RuntimeError: For a mesh made with ``imprint=False``. Every surface
+                of such a mesh belongs to one solid, including the surfaces
+                where solids touch, so tagging these vacuum would kill
+                particles inside the model. Bound it with
+                ``MeshGeometry(..., graveyard_offset=...)`` instead.
         """
         if self._surface_mesh is None:
             raise RuntimeError("No surface mesh. Call mesh() first.")
+        if not self._imprint:
+            raise RuntimeError(
+                "exterior_surface_ids() is not defined for a mesh made with "
+                "imprint=False: every surface there belongs to a single solid, "
+                "including the surfaces where solids touch, so tagging them "
+                "vacuum would kill particles inside the model. Bound the model "
+                "with yamc.MeshGeometry(..., graveyard_offset=...) instead."
+            )
 
         mesh = self._surface_mesh
         return sorted(

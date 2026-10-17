@@ -373,6 +373,7 @@ impl Geometry {
                 boundary,
                 next_cell_index: None,
                 surface_id: surf_id,
+                relocate_triangle: None,
             });
         #[cfg(feature = "mesh")]
         if let Some(role) = cell.fill_role {
@@ -383,7 +384,9 @@ impl Geometry {
             };
             let f = &self.fills[fill_idx as usize];
             let vol_id = volume.unwrap_or(f.mesh.topology.implicit_complement);
-            if let Some((dist, surface_id)) = f.ray_fire_world(vol_id, position, direction) {
+            if let Some((dist, next_cell_index, relocate_triangle)) =
+                f.next_crossing_world(vol_id, position, direction)
+            {
                 let csg_dist = csg_hit.as_ref().map_or(f64::INFINITY, |h| h.distance);
                 // The mesh crossing must beat the CSG exit by more than
                 // the transport crossing nudge (SURFACE_TOLERANCE, 1e-8).
@@ -398,22 +401,50 @@ impl Geometry {
                 // protruding meshes.
                 const CROSSING_MARGIN: f64 = 1e-8;
                 if dist + CROSSING_MARGIN < csg_dist {
-                    // next_volume == None leaves next_cell_index unset,
-                    // falling back to spatial re-location (never a loss).
-                    let next_cell_index = f
-                        .mesh
-                        .next_volume(surface_id, vol_id)
-                        .map(|nv| f.cell_index_for_volume(nv));
+                    // No cell and no triangle leaves next_cell_index unset,
+                    // falling back to spatial re-location (never a loss); a
+                    // triangle is relocated through once the crossing is
+                    // taken (resolve_fill_crossing).
                     return Some(BoundaryHit {
                         distance: dist,
                         boundary: crate::geo::BoundaryType::Transmission,
                         next_cell_index,
                         surface_id: None,
+                        relocate_triangle,
                     });
                 }
             }
         }
         csg_hit
+    }
+
+    /// Work out the cell beyond a crossing out of a fill's solid that
+    /// [`Geometry::closest_boundary`] deferred: a solid of a mesh made without
+    /// imprinting, left through a surface facing the implicit complement
+    /// (see [`crate::geometry::fill::MeshFill::relocate_world`]). No-op
+    /// otherwise.
+    #[cfg(feature = "mesh")]
+    pub(crate) fn resolve_fill_crossing(
+        &self,
+        cell_index: usize,
+        hit: &mut crate::geometry::backend::BoundaryHit,
+        position: [f64; 3],
+        direction: [f64; 3],
+    ) {
+        use crate::geometry::fill::FillRole;
+        let Some(tri) = hit.relocate_triangle.take() else {
+            return;
+        };
+        let Some(FillRole::Embedded { fill, volume }) = self.cells[cell_index].fill_role else {
+            return;
+        };
+        let x = [
+            position[0] + hit.distance * direction[0],
+            position[1] + hit.distance * direction[1],
+            position[2] + hit.distance * direction[2],
+        ];
+        hit.next_cell_index =
+            Some(self.fills[fill as usize].relocate_world(volume, tri, x, direction));
     }
 
     /// Spatial tracking verification for mesh fills: before

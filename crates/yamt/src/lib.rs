@@ -9,7 +9,7 @@ pub mod types;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
-pub use geometry::MeshGeometry;
+pub use geometry::{Beyond, MeshGeometry};
 pub use mesh::physical_groups::PhysicalGroupData;
 pub use mesh::topology::MeshTopology;
 pub use query::ray_history::RayHistory;

@@ -169,6 +169,9 @@ def test_cad_mesh_to_arrow_matches_lowlevel_writer(tmp_path):
         tet_physical_groups=tet_physical_groups,
         physical_groups_json=json.dumps(physical_groups),
         surface_volumes_json=json.dumps(surface_volumes),
+        # cad_mesh_to_arrow records the imprint (imprinted=True by default);
+        # the low-level writer records it only when told.
+        imprinted=True,
     )
 
     new_path = tmp_path / "finalized.arrow"

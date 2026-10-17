@@ -650,7 +650,7 @@ pub(crate) fn transport_particle<T: Tracker>(
             );
         }
 
-        if let Some(boundary_hit) =
+        if let Some(mut boundary_hit) =
             geometry.closest_boundary(cell_index, particle.position, particle.direction)
         {
             let dist_surface = boundary_hit.distance;
@@ -658,6 +658,12 @@ pub(crate) fn transport_particle<T: Tracker>(
                 if verify_crossing(ctx, particle, cell_index, dist_surface) {
                     continue;
                 }
+                geometry.resolve_crossing(
+                    cell_index,
+                    &mut boundary_hit,
+                    particle.position,
+                    particle.direction,
+                );
                 let segment = ctx.replica.and_then(|r| {
                     replica::ReplicaSegment::new(r, particle, cell.material_idx, dist_surface)
                 });
@@ -1217,11 +1223,17 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
             };
 
             match geometry.closest_boundary(cell_index, particle.position, particle.direction) {
-                Some(boundary_hit) if boundary_hit.distance < dist_collision => {
+                Some(mut boundary_hit) if boundary_hit.distance < dist_collision => {
                     // Cross the boundary -- no collision this step.
                     if verify_crossing(ctx, particle, cell_index, boundary_hit.distance) {
                         continue;
                     }
+                    geometry.resolve_crossing(
+                        cell_index,
+                        &mut boundary_hit,
+                        particle.position,
+                        particle.direction,
+                    );
                     // A surface step flies against the local Σ_t, so its
                     // replica factors are surface tracking's.
                     let segment = ctx.replica.and_then(|r| {
