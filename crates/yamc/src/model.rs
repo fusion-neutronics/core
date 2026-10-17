@@ -518,6 +518,44 @@ impl Model {
         names.into_iter().collect()
     }
 
+    /// The temperatures the model's materials load each nuclide at, keyed by
+    /// nuclide.
+    ///
+    /// Labels are stripped of any `K`, as materials spell them. `None` means
+    /// every temperature: some material holding the nuclide has no temperature
+    /// set, and the loader then materialises every temperature the data
+    /// carries. A nuclide two materials hold at two temperatures is loaded at
+    /// both.
+    ///
+    /// The one answer to "which temperatures does this model read": the
+    /// browser fetch ranges each nuclide's sections to it, and an exported
+    /// page's embedded data is checked against it, so neither can disagree
+    /// with the loads the page then makes.
+    pub fn required_temperatures(
+        &self,
+    ) -> std::collections::BTreeMap<String, Option<std::collections::BTreeSet<String>>> {
+        let mut wanted: std::collections::BTreeMap<
+            String,
+            Option<std::collections::BTreeSet<String>>,
+        > = std::collections::BTreeMap::new();
+        for material in self.geometry.materials() {
+            let temperature = yamc_nuclide::temperature::strip_k(material.temperature());
+            for nuclide in material.nuclides.keys() {
+                let entry = wanted
+                    .entry(nuclide.clone())
+                    .or_insert_with(|| Some(std::collections::BTreeSet::new()));
+                match entry {
+                    None => {}
+                    Some(_) if temperature.is_empty() => *entry = None,
+                    Some(set) => {
+                        set.insert(temperature.to_string());
+                    }
+                }
+            }
+        }
+        wanted
+    }
+
     /// Element symbols the model needs PHOTON data for, sorted and de-duplicated.
     /// Empty when no photons will be in flight, since photon data is only loaded
     /// when [`Self::has_photons`] holds.
@@ -3631,6 +3669,55 @@ mod tests {
         model.use_decay_photons = true;
         assert!(model.has_photons());
         assert_eq!(model.required_elements(), vec!["Fe".to_string()]);
+    }
+
+    /// No nuclear data is read, so this runs anywhere.
+    #[test]
+    fn each_nuclide_is_wanted_at_the_temperatures_of_the_materials_holding_it() {
+        let material = |nuclides: &[&str], temperature: Option<&str>| {
+            let mut mat = Material::new(
+                nuclides.iter().map(|n| (n.to_string(), 1.0)).collect(),
+                "atom",
+                "g/cm3",
+                Some(1.0),
+            )
+            .unwrap();
+            if let Some(t) = temperature {
+                mat.set_temperature(t);
+            }
+            Arc::new(mat)
+        };
+        let materials = vec![
+            material(&["Li6", "Fe56"], Some("294")),
+            material(&["Li6"], Some("600K")),
+            material(&["Fe56", "O16"], None),
+        ];
+        let cells = (0..materials.len())
+            .map(|i| {
+                let sphere = Arc::new(Surface::sphere(
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0 + i as f64,
+                    Some(i + 1),
+                    Some(BoundaryType::Vacuum),
+                ));
+                let region = Region::new_from_halfspace(HalfspaceType::Below(sphere));
+                Cell::new(Some(i as u32 + 1), region, None, Some(i as u32))
+            })
+            .collect();
+        let geometry = Geometry::new(cells, materials).unwrap();
+        let model = Model::new(geometry, vec![], vec![]);
+
+        let wanted = model.required_temperatures();
+        let labels = |l: &[&str]| Some(l.iter().map(|s| s.to_string()).collect());
+        // Two materials at two temperatures: both, spelled without the `K`.
+        assert_eq!(wanted["Li6"], labels(&["294", "600"]));
+        // A material with no temperature loads every temperature, whatever
+        // another material holding the nuclide is at.
+        assert_eq!(wanted["Fe56"], None);
+        assert_eq!(wanted["O16"], None);
+        assert_eq!(wanted.len(), 3);
     }
 
     /// Smoke test: run photon transport through an Fe sphere.

@@ -428,6 +428,34 @@ impl PyModel {
         self.inner.required_nuclides()
     }
 
+    /// The temperatures this model's materials load each nuclide at.
+    ///
+    /// A nuclide two materials hold at two temperatures is loaded at both. A
+    /// material with no temperature set loads every temperature the data
+    /// carries, so a nuclide any such material holds maps to ``None``.
+    ///
+    /// Returns:
+    ///     dict[str, list[str] | None]: Keyed by nuclide name. Each value is the
+    ///     temperature labels in Kelvin, spelled as materials spell them
+    ///     (``"294"``) and in ascending order, or ``None`` for every
+    ///     temperature.
+    pub fn required_temperatures(&self) -> std::collections::BTreeMap<String, Option<Vec<String>>> {
+        use yamc_nuclide::temperature::label_to_kelvin;
+        let kelvin = |label: &str| label_to_kelvin(label).unwrap_or(f64::INFINITY);
+        self.inner
+            .required_temperatures()
+            .into_iter()
+            .map(|(nuclide, labels)| {
+                let labels = labels.map(|set| {
+                    let mut labels: Vec<String> = set.into_iter().collect();
+                    labels.sort_by(|a, b| kelvin(a).total_cmp(&kelvin(b)).then_with(|| a.cmp(b)));
+                    labels
+                });
+                (nuclide, labels)
+            })
+            .collect()
+    }
+
     /// Element symbols this model needs photon data for.
     ///
     /// Photon data is per element (``Fe``, not ``Fe56``). Empty when no photons

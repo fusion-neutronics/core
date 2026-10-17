@@ -52,8 +52,8 @@ use yamc_nuclide::storage::release::{
 use yamc_nuclide::storage::Storage;
 
 use super::fetch_plan::{
-    neutron_url, photon_url, plan_neutron_sections, plan_photon_sections, required_temperatures,
-    store_dir, wanted_labels, SectionPlan,
+    neutron_url, photon_url, plan_neutron_sections, plan_photon_sections, store_dir, wanted_labels,
+    SectionPlan,
 };
 use super::simulation_wasm::WasmSimulation;
 
@@ -592,7 +592,8 @@ impl WasmSimulation {
     fn fetch_targets(&self) -> Result<Targets, String> {
         let storage = self.storage();
         self.with_model(|model| {
-            let nuclides = required_temperatures(model)
+            let nuclides = model
+                .required_temperatures()
                 .into_iter()
                 .filter(|(name, _)| {
                     !storage.exists(Path::new(&format!("{}/nuclide.arrow", store_dir(name))))

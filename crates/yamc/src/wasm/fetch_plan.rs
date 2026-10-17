@@ -12,11 +12,12 @@
 //! those alone over HTTP range requests and skip the other five or six
 //! temperatures, which on ENDF/B-VIII.1 is most of every file.
 //!
-//! This module is the arithmetic of that: which nuclides at which temperatures,
-//! which labels those resolve to against what the nuclide publishes, and which
-//! byte spans of which sections to request. It touches neither the network nor
-//! the DOM, so it compiles and is tested on the native target; the wasm32-only
-//! fetcher in `fetch_wasm` executes what it plans.
+//! This module is the arithmetic of that: which labels the temperatures the
+//! model's materials are at (`Model::required_temperatures`) resolve to against
+//! what the nuclide publishes, and which byte spans of which sections to
+//! request. It touches neither the network nor the DOM, so it compiles and is
+//! tested on the native target; the wasm32-only fetcher in `fetch_wasm`
+//! executes what it plans.
 //!
 //! The temperature resolution goes through `yamc_nuclide::temperature::resolve`,
 //! the same function the loader applies when the material later asks for its
@@ -24,14 +25,12 @@
 //! the bytes fetched are exactly the bytes the loader will read, by
 //! construction rather than by keeping two implementations in step.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use nuclear_data_schema::energy_ranges::EnergyRanges;
 use nuclear_data_schema::reaction_ranges::{Range, ReactionRanges};
 use yamc_nuclide::temperature::{resolve, strip_k, TemperatureSource};
 use yamc_nuclide::url_cache::{NEUTRON_SECTIONS, PHOTON_SECTIONS};
-
-use crate::model::Model;
 
 /// The published library an exported page fetches from unless the host names
 /// another. Its `latest.json` names the current release; within the release
@@ -65,36 +64,6 @@ pub fn photon_url(library_url: &str, element: &str) -> String {
 /// points each material at.
 pub fn store_dir(name: &str) -> String {
     format!("/{name}.arrow")
-}
-
-/// Which temperatures each nuclide is needed at, from the model's materials.
-///
-/// Labels are stripped of any `K`, as materials spell them. `None` means every
-/// temperature: some material holding the nuclide has no temperature set, and
-/// the loader then materialises every temperature the file carries, so the
-/// fetch has to bring them all. A nuclide two materials hold at two
-/// temperatures wants both.
-pub fn required_temperatures(model: &Model) -> BTreeMap<String, Option<BTreeSet<String>>> {
-    let mut wanted: BTreeMap<String, Option<BTreeSet<String>>> = BTreeMap::new();
-    for material in model.geometry.materials() {
-        let temperature = strip_k(material.temperature());
-        for nuclide in material.nuclides.keys() {
-            let entry = wanted
-                .entry(nuclide.clone())
-                .or_insert_with(|| Some(BTreeSet::new()));
-            match entry {
-                None => {}
-                Some(set) if temperature.is_empty() => {
-                    set.clear();
-                    *entry = None;
-                }
-                Some(set) => {
-                    set.insert(temperature.to_string());
-                }
-            }
-        }
-    }
-    wanted
 }
 
 /// The published labels a set of requested temperatures needs.

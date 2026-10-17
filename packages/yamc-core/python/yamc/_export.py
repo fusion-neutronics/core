@@ -62,6 +62,14 @@ _NUCLIDE_SUBDIR = "neutron"
 _ELEMENT_SUBDIR = "photon"
 _DIR_SUFFIX = ".arrow"
 
+# A transport load at named temperatures fetches `reactions.arrow` and
+# `energy.arrow` as byte ranges, the batches of the temperatures its materials
+# are at, and caches the spliced copy in this subfolder of the nuclide's
+# folder, beside a `<section stem>.json` naming the temperatures it holds. The
+# canonical name stays absent until the whole section is downloaded. Mirrors
+# `RANGED_DIR` in crates/yamc-nuclide/src/storage/url_cache.rs.
+_RANGED_DIR = "temperatures"
+
 
 def _default_release_dir() -> Path:
     """The newest cached release of the page's library.
@@ -142,11 +150,20 @@ def _resolve_embed_list(
 
 
 def _load_nuclide_files(name: str, cache_dir: Path, subdir: str) -> dict[str, bytes]:
-    """Read every file of one nuclide (``subdir="neutron"``) or element
+    """Read the files of one nuclide (``subdir="neutron"``) or element
     (``subdir="photon"``) from a cached release folder.
 
-    Returns {filename → raw bytes}. The wasm side will register each as
-    ``/<name>.arrow/<filename>``.
+    Returns {path relative to the nuclide folder → raw bytes}. The wasm side
+    registers each as ``/<name>.arrow/<path>``.
+
+    Every file in the folder itself, plus the temperature-ranged copy of any
+    section the folder holds only that way (``temperatures/<section>`` and the
+    ``temperatures/<section stem>.json`` record of the temperatures it holds),
+    under the same relative paths. The page's loader is the native one, so it
+    then reads the copy exactly as a native load from this folder does. Where
+    the whole section is present the copy is never read, so it stays out, and
+    so does an activation load's MT subset (``subset/``), which transport
+    never reads.
     """
     nuc_dir = cache_dir / subdir / f"{name}{_DIR_SUFFIX}"
     if not nuc_dir.is_dir():
@@ -160,19 +177,83 @@ def _load_nuclide_files(name: str, cache_dir: Path, subdir: str) -> dict[str, by
     for entry in sorted(nuc_dir.iterdir()):
         if entry.is_file():
             files[entry.name] = entry.read_bytes()
+    ranged = nuc_dir / _RANGED_DIR
+    if ranged.is_dir():
+        for entry in sorted(ranged.iterdir()):
+            if entry.is_file() and f"{entry.stem}{_DIR_SUFFIX}" not in files:
+                files[f"{_RANGED_DIR}/{entry.name}"] = entry.read_bytes()
     if not files:
         raise FileNotFoundError(f"Nuclide directory {nuc_dir} is empty")
     return files
 
 
-def _build_embedded_xs_json(nuclides: list[str], cache_dir: Path, subdir: str) -> str:
+def _page_temperatures(model, nuclides: list[str]) -> "dict[str, list[str] | None]":
+    """The temperatures the exported page loads each of ``nuclides`` at.
+
+    A nuclide a material holds is loaded at the temperatures of the materials
+    holding it (:meth:`Model.required_temperatures`, which the page's own fetch
+    ranges to as well), and ``None`` means every temperature. A nuclide no
+    material holds, embedded so the recipient can swap it in, may go into any
+    material, and the page shows material temperatures read-only, so it must
+    serve every temperature a material is at.
+    """
+    by_nuclide = model.required_temperatures()
+    if not by_nuclide or any(t is None for t in by_nuclide.values()):
+        anywhere = None
+    else:
+        anywhere = sorted({t for ts in by_nuclide.values() for t in ts}, key=float)
+    return {name: by_nuclide.get(name, anywhere) for name in nuclides}
+
+
+def _check_page_can_load(name: str, cache_dir: Path, temperatures: "list[str] | None") -> None:
+    """Fail unless the cached data serves the load the page makes.
+
+    The page reads each embedded nuclide with the native reader, compiled to
+    wasm, at the temperatures of its materials, and the embedded files are the
+    ones a native load of the cached folder reads. So that native load, made
+    here, succeeds exactly when the page's will, and its error says what is
+    missing: a section, or a temperature the ranged copy does not hold. Without
+    this an export from a cache the page cannot run on writes a page that
+    claims to be offline-ready, greys out its fetch button, and fails on
+    Simulate.
+    """
+    from yamc._core import Nuclide
+
+    nuc_dir = cache_dir / _NUCLIDE_SUBDIR / f"{name}{_DIR_SUFFIX}"
+    try:
+        Nuclide(name).read_nuclear_data(str(nuc_dir), temperatures=temperatures)
+    except Exception as err:
+        at = "every temperature" if temperatures is None else f"{', '.join(temperatures)} K"
+        fetch = (
+            f"yamc.Nuclide({name!r}).read_nuclear_data({_LIBRARY!r}"
+            + ("" if temperatures is None else f", temperatures={temperatures!r}")
+            + ")"
+        )
+        raise FileNotFoundError(
+            f"Cannot embed '{name}': the page loads it at {at}, and the cached data at "
+            f"{nuc_dir} cannot serve that load: {err}. Download what the page needs "
+            f"with {fetch}, or by running this model with simulate_transport, then "
+            f"re-export."
+        ) from err
+
+
+def _build_embedded_xs_json(
+    nuclides: list[str],
+    cache_dir: Path,
+    subdir: str,
+    temperatures: "dict[str, list[str] | None] | None" = None,
+) -> str:
     """JSON payload for the `EMBEDDED_XS` global.
 
-    Shape: ``{nuclide: {filename: base64_bytes, ...}, ...}``.
+    Shape: ``{nuclide: {path: base64_bytes, ...}, ...}``. With
+    ``temperatures`` (neutron data), each nuclide is first checked to serve the
+    load the page makes at its temperatures.
     """
     payload: dict[str, dict[str, str]] = {}
     for name in nuclides:
         files = _load_nuclide_files(name, cache_dir, subdir)
+        if temperatures is not None:
+            _check_page_can_load(name, cache_dir, temperatures[name])
         payload[name] = {
             filename: base64.b64encode(data).decode("ascii")
             for filename, data in files.items()
@@ -211,7 +292,18 @@ def to_html(
               either a nuclide name (``"Li6"``, kept as-is) or an element
               symbol (``"Li"``, expanded to every ``Li<digits>`` directory in
               the local cache). Use this to anticipate the recipient swapping
-              in a related isotope without needing network access.
+              in a related isotope without needing network access. A nuclide
+              no material holds must serve every temperature a material is
+              at, since it may be swapped into any of them.
+
+            Embedded data is read from the local cache as a native run left
+            it: whole sections, or, for a run at a set temperature, the
+            reactions and energy grids at just that temperature. Before
+            writing, each embedded nuclide is loaded the way the page loads
+            it, at the temperatures of its materials, and the export raises
+            ``FileNotFoundError`` naming the nuclide and what is missing if
+            the cache cannot serve that load, rather than writing a page whose
+            Simulate fails.
 
         show_geometry: When False, hides the geometry + source plot.
         show_surfaces: When False, hides the surfaces editor -- the
@@ -244,7 +336,9 @@ def to_html(
 
     Notes:
         Embedded data inflates the HTML size by ~the raw byte count × 1.33
-        for base64, and embeds every temperature the local cache holds.
+        for base64, and embeds every temperature the local cache holds: all
+        of them for a nuclide downloaded whole, or the ones its materials
+        were run at for one a transport run downloaded at a set temperature.
         ENDF/B-VIII.1 nuclides range from ~1.4 MB (Li-6) to ~75 MB (Fe-56)
         whole. Embedding everything in a heavy-element material produces a
         multi-hundred-MB HTML; choose ``embed_cross_sections`` accordingly,
@@ -273,7 +367,11 @@ def to_html(
     embed_list = _resolve_embed_list(embed_cross_sections, required, cache)
 
     embedded_xs_json = (
-        _build_embedded_xs_json(embed_list, cache, _NUCLIDE_SUBDIR) if embed_list else "{}"
+        _build_embedded_xs_json(
+            embed_list, cache, _NUCLIDE_SUBDIR, _page_temperatures(self, embed_list)
+        )
+        if embed_list
+        else "{}"
     )
 
     # Photon transport needs per-element data too. When the engineer asked
