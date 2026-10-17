@@ -81,9 +81,13 @@ pub struct Manifest {
     pub keyword: String,
     pub release: String,
     pub format_version: u32,
-    /// Version of the converter that wrote the release.
+    /// Every converter that wrote the release's files, with its version
+    /// (`yamc-convert 0.1.0`, `yani-convert 0.1.0`): the publishing scripts
+    /// list each distinct `converter_version` stamp in the tree, and the cross
+    /// sections and the transmutation chain are written by different
+    /// converters. Empty when the manifest lists none.
     #[serde(default)]
-    pub converter_version: Option<String>,
+    pub converter_versions: Vec<String>,
     /// When the release was built.
     #[serde(default)]
     pub created: Option<String>,
@@ -382,7 +386,7 @@ mod tests {
             "keyword": keyword,
             "release": release,
             "format_version": format_version,
-            "converter_version": "0.15.0",
+            "converter_versions": ["yamc-convert 0.15.0", "yani-convert 0.15.0"],
             "created": "2026-10-01T00:00:00Z",
             "files": [
                 {"path": "neutron/Fe56.arrow/version.json", "bytes": 3, "sha256": sha256_hex(b"abc")},
@@ -433,6 +437,52 @@ mod tests {
         assert_eq!(release.names_under("transmutation"), ["decay"]);
         assert!(release.has_dir("transmutation/decay.arrow"));
         assert!(!release.has_dir("transmutation/branching.arrow"));
+    }
+
+    /// The shape the publishing scripts write (nuclear_data_generation_scripts
+    /// `release_manifest.py`), with the values of the published endf-b8.1
+    /// release 2026-10-12.1 and two of its 5008 files: compact, sorted keys.
+    const PUBLISHED_MANIFEST: &str = concat!(
+        r#"{"converter_versions":["yamc-convert 0.1.0","yani-convert 0.1.0"],"#,
+        r#""created":"2026-10-12T23:24:22Z","file_count":5008,"files":["#,
+        r#"{"bytes":17932,"path":"neutron/Li6.arrow/version.json","#,
+        r#""sha256":"1245da86f7b99438ba860630a210b18277f3e0c6a81d96fc9457f12caa1711a9"},"#,
+        r#"{"bytes":21052,"path":"transmutation/decay.arrow/provenance.json","#,
+        r#""sha256":"43184e3209f2c49cb8ef41133701b83802d5044385cfb57ad5cdb3d4d28f7988"}],"#,
+        r#""format_version":2,"keyword":"endf-b8.1","particles":["neutron","photon"],"#,
+        r#""provenance":{"scripts_commit":"4fe9688493aefeb75c1a3a5d714c9f5b0a4c8439"},"#,
+        r#""release":"2026-10-12.1","schema":"yamc-data-manifest","schema_version":1,"#,
+        r#""total_bytes":5994239038}"#,
+    );
+
+    #[test]
+    fn a_published_manifest_records_every_converter_that_wrote_it() {
+        let bytes = PUBLISHED_MANIFEST.as_bytes();
+        let release = parse_manifest(
+            "endf-b8.1",
+            bytes,
+            Some(&pointer_for("2026-10-12.1", bytes)),
+        )
+        .unwrap();
+        assert_eq!(
+            release.manifest.converter_versions,
+            ["yamc-convert 0.1.0", "yani-convert 0.1.0"]
+        );
+        assert_eq!(release.manifest.release, "2026-10-12.1");
+        assert!(release.file("neutron/Li6.arrow/version.json").is_some());
+    }
+
+    #[test]
+    fn a_manifest_that_lists_no_converters_still_parses() {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "keyword": "endf-b8.1",
+            "release": "2026-10-01",
+            "format_version": 2,
+            "files": [],
+        }))
+        .unwrap();
+        let release = parse_manifest("endf-b8.1", &bytes, None).unwrap();
+        assert!(release.manifest.converter_versions.is_empty());
     }
 
     #[test]
