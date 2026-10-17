@@ -876,9 +876,13 @@ impl PySimulationResults {
     /// ``data_releases`` maps each library keyword the run downloaded data
     /// from to a dict with ``release`` (the published release identifier),
     /// ``manifest_sha256`` (the hash of that release's manifest, which pins
-    /// every file in it), ``format_version`` and ``offline`` (True when the
+    /// every file in it), ``format_version``, ``offline`` (True when the
     /// data origin was unreachable and the newest complete cached release was
-    /// used). Empty when all data came from local directories.
+    /// used) and ``converter_versions`` (every converter that wrote the
+    /// release's files, with its version, as its manifest lists them, e.g.
+    /// ``["yamc-convert 0.1.0", "yani-convert 0.1.0"]``; empty in results
+    /// saved before releases recorded them). Empty when all data came from
+    /// local directories.
     #[getter]
     fn runs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let items: Vec<Bound<'py, PyDict>> = self
@@ -1135,6 +1139,7 @@ pub(crate) fn data_releases_dict<'py>(
         d.set_item("manifest_sha256", &release.manifest_sha256)?;
         d.set_item("format_version", release.format_version)?;
         d.set_item("offline", release.offline)?;
+        d.set_item("converter_versions", &release.converter_versions)?;
         out.set_item(keyword, d)?;
     }
     Ok(out)

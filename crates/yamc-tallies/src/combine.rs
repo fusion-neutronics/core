@@ -639,6 +639,7 @@ mod tests {
                     manifest_sha256: format!("sha-of-{release}"),
                     format_version: 2,
                     offline: false,
+                    converter_versions: vec!["yamc-convert 0.1.0".into()],
                 },
             );
             r
