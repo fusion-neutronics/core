@@ -27,8 +27,11 @@ def _material():
     return m
 
 
-def _total_flux(geometry, source):
-    tally = yamc.Tally(scores=["flux"], name="flux")
+def _total_flux(geometry, material, source):
+    # Over the sphere's material only: the mesh model gets a void margin out
+    # to its vacuum box, which the CSG model (vacuum at the sphere) does not
+    # have, and an unfiltered tally would count the flux there too.
+    tally = yamc.Tally(scores=["flux"], materials=material, name="flux")
     model = yamc.Model(geometry=geometry, tallies=[tally], source=source)
     results = model.simulate_transport(total_particles=50_000, seed=42)
     return float(np.sum(results[tally].mean))
@@ -41,8 +44,9 @@ def test_sphere_mesh_matches_csg():
 
     # Analytic CSG sphere.
     s = yamc.Sphere(radius=10, boundary="vacuum")
-    csg = yamc.Geometry([yamc.Cell(name="s", region=s.below, material=_material())])
-    f_csg = _total_flux(csg, source)
+    csg_material = _material()
+    csg = yamc.Geometry([yamc.Cell(name="s", region=s.below, material=csg_material)])
+    f_csg = _total_flux(csg, csg_material, source)
 
     # Same sphere via CadQuery -> yamm scene mesher -> Arrow -> MeshGeometry.
     asm = cq.Assembly()
@@ -52,8 +56,9 @@ def test_sphere_mesh_matches_csg():
     c2y.mesh()
     path = os.path.join(tempfile.mkdtemp(), "sphere.arrow")
     c2y.to_arrow(path)
+    mesh_material = _material()
     f_mesh = _total_flux(
-        yamc.MeshGeometry(path, {"beryllium": _material()}), source
+        yamc.MeshGeometry(path, {"beryllium": mesh_material}), mesh_material, source
     )
 
     assert f_csg > 0.0 and f_mesh > 0.0
