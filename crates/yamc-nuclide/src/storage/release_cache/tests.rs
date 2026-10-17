@@ -114,7 +114,7 @@ impl Origin {
             "keyword": keyword,
             "release": release,
             "format_version": 2,
-            "converter_version": "test",
+            "converter_versions": ["test"],
             "created": "2026-10-01T00:00:00Z",
             "files": entries,
         }))
