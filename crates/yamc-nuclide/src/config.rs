@@ -89,6 +89,34 @@ impl From<Option<&str>> for SubsectionSource {
     }
 }
 
+/// The isomeric-branching sources, in the shape they were given.
+///
+/// One source on its own and a list of one name the same source, but each
+/// reads back as it was written: a setting shows what was assigned, so reading
+/// it and assigning the result again changes nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum BranchSources {
+    /// Nothing set: no branching overlay.
+    #[default]
+    Unset,
+    /// One source, given on its own.
+    One(String),
+    /// Sources given as a list, in the order a channel takes its split from
+    /// them. An empty list is no overlay.
+    List(Vec<String>),
+}
+
+impl BranchSources {
+    /// The sources in order, whatever shape they were given in.
+    pub fn sources(&self) -> Vec<String> {
+        match self {
+            Self::Unset => Vec::new(),
+            Self::One(source) => vec![source.clone()],
+            Self::List(sources) => sources.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Map of nuclide name -> absolute or relative path to its Arrow data directory.
@@ -107,9 +135,9 @@ pub struct Config {
     /// Sources for the isomeric branching overlay (`branching/` subsections),
     /// in the order a `(parent, reaction)` channel takes its split from them:
     /// the first source that evaluates the channel supplies all of it. Each is
-    /// a library keyword or a path. Empty means no branching overlay is
+    /// a library keyword or a path. None at all means no branching overlay is
     /// applied.
-    pub transmutation_branch_ratios: Vec<String>,
+    pub transmutation_branch_ratios: BranchSources,
 }
 
 impl Default for Config {
@@ -127,7 +155,7 @@ impl Config {
             transmutation_decay_data: None,
             transmutation_reactions: SubsectionSource::Default,
             transmutation_fission_yields: SubsectionSource::Default,
-            transmutation_branch_ratios: Vec::new(),
+            transmutation_branch_ratios: BranchSources::Unset,
         }
     }
 
@@ -225,18 +253,24 @@ impl Config {
     }
 
     /// The branching overlay's sources, in order; empty when none is set (no
-    /// branching overlay is applied).
+    /// branching overlay is applied). [`Config::transmutation_branch_ratios`]
+    /// keeps the shape they were set in.
     pub fn get_transmutation_branch_ratios(&self) -> Vec<String> {
-        self.transmutation_branch_ratios.clone()
+        self.transmutation_branch_ratios.sources()
     }
 
     /// Set the branching overlay's sources, in the order a channel takes its
-    /// split from them. Empty turns the overlay off.
+    /// split from them, in the shape they were given. No source turns the
+    /// overlay off.
     ///
     /// Refuses an empty name and a source given twice: the second entry of a
     /// source could never supply a channel, so listing it again is a mistake
     /// in the order rather than a request.
-    pub fn set_transmutation_branch_ratios(&mut self, sources: Vec<String>) -> Result<(), String> {
+    pub fn set_transmutation_branch_ratios(
+        &mut self,
+        setting: BranchSources,
+    ) -> Result<(), String> {
+        let sources = setting.sources();
         for (i, source) in sources.iter().enumerate() {
             if source.trim().is_empty() {
                 return Err(format!(
@@ -252,7 +286,7 @@ impl Config {
                 ));
             }
         }
-        self.transmutation_branch_ratios = sources;
+        self.transmutation_branch_ratios = setting;
         Ok(())
     }
 
@@ -263,7 +297,7 @@ impl Config {
         self.transmutation_decay_data = None;
         self.transmutation_reactions = SubsectionSource::Default;
         self.transmutation_fission_yields = SubsectionSource::Default;
-        self.transmutation_branch_ratios = Vec::new();
+        self.transmutation_branch_ratios = BranchSources::Unset;
     }
 }
 
@@ -402,27 +436,43 @@ mod subsection_source_tests {
         );
     }
 
-    /// The branching sources are an ordered list: kept in order, emptied by
-    /// `clear`, and refused where an entry is empty or repeated.
+    /// The branching sources are an ordered list: kept in order and in the
+    /// shape they were given, emptied by `clear`, and refused where an entry is
+    /// empty or repeated.
     #[test]
     fn branching_sources_are_an_ordered_list() {
         let mut config = Config::new();
         assert!(config.get_transmutation_branch_ratios().is_empty());
         let sources = vec!["irdff-ii".to_string(), "endf-b8.1".to_string()];
         config
-            .set_transmutation_branch_ratios(sources.clone())
+            .set_transmutation_branch_ratios(BranchSources::List(sources.clone()))
             .expect("two sources");
         assert_eq!(config.get_transmutation_branch_ratios(), sources);
         let twice = config
-            .set_transmutation_branch_ratios(vec!["irdff-ii".into(), "irdff-ii".into()])
+            .set_transmutation_branch_ratios(BranchSources::List(vec![
+                "irdff-ii".into(),
+                "irdff-ii".into(),
+            ]))
             .expect_err("a source listed twice");
         assert!(twice.contains("listed twice"), "{twice}");
         assert!(config
-            .set_transmutation_branch_ratios(vec![String::new()])
+            .set_transmutation_branch_ratios(BranchSources::One(String::new()))
             .is_err());
         // A refused list leaves the setting as it was.
         assert_eq!(config.get_transmutation_branch_ratios(), sources);
+        // A list of one keeps its shape; the sources are the same as one given
+        // on its own.
+        let one = BranchSources::List(vec!["endf-b8.1".to_string()]);
+        config
+            .set_transmutation_branch_ratios(one.clone())
+            .expect("a list of one");
+        assert_eq!(config.transmutation_branch_ratios, one);
+        assert_eq!(
+            config.get_transmutation_branch_ratios(),
+            BranchSources::One("endf-b8.1".to_string()).sources()
+        );
         config.clear();
+        assert_eq!(config.transmutation_branch_ratios, BranchSources::Unset);
         assert!(config.get_transmutation_branch_ratios().is_empty());
     }
 

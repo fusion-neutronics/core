@@ -40,5 +40,5 @@ transmutation_decay_data: str | None
 transmutation_reactions: str | typing.Literal[False] | None
 transmutation_fission_yields: str | typing.Literal[False] | None
 # `transmutation_branch_ratios` takes one isomeric-branching source or several
-# in order (a list), and reads back as the one source or the list.
+# in order (a list), and reads back as it was assigned.
 transmutation_branch_ratios: str | list[str] | None

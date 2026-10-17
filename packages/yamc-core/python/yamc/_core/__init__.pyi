@@ -7782,9 +7782,9 @@ def get_transmutation_branch_ratios() -> builtins.str | list[builtins.str] | Non
     Get the isomeric-branching sources of the transmutation network.
     
     Returns:
-        The one source as a string, several as a list in the order a reaction
-        takes its split from them, or ``None`` when none is set and no
-        isomeric-branching overlay is applied.
+        What was assigned: one source as a string, a list of sources (in the
+        order a reaction takes its split from them) as a list, or ``None``
+        when nothing is set and no isomeric-branching overlay is applied.
     """
 
 def get_transmutation_decay_data() -> typing.Optional[builtins.str]:
@@ -8130,6 +8130,9 @@ def set_transmutation_branch_ratios(value: typing.Optional[builtins.str | typing
     ``"irdff-ii"``, the IAEA dosimetry library IRDFF-II, supplies isomeric
     branching only, so it is only ever a source here, and only where it is
     named: it is never a default.
+    
+    It reads back as it was assigned: a string as a string, a list (even one
+    of one) as a list.
     
     Args:
         value: A source, a list of sources in order, or ``None`` (or an empty
