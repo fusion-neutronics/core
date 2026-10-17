@@ -302,6 +302,10 @@ class Monodirectional:
         
         Args:
             direction: Direction vector [u, v, w]. Will be normalized automatically.
+        
+        Raises:
+            ValueError: If ``direction`` is the zero vector or has a NaN or
+                infinite component. The direction is then left as it was.
         """
     def __new__(cls, direction: typing.Sequence[builtins.float]) -> Monodirectional:
         r"""
@@ -312,6 +316,10 @@ class Monodirectional:
         
         Returns:
             Monodirectional: A monodirectional angular distribution.
+        
+        Raises:
+            ValueError: If ``direction`` is the zero vector or has a NaN or
+                infinite component, so it points nowhere.
         
         Examples:
             >>> import yani

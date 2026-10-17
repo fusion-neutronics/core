@@ -48,7 +48,8 @@ mod tests {
             ),
             angle: yamc_source::distribution::angular::AngularDistribution::new_monodirectional(
                 0.0, 0.0, 1.0,
-            ),
+            )
+            .unwrap(),
             energy: yamc_source::source::SourceEnergyDistribution::Discrete(
                 yamc_source::distribution::energy::Discrete::new(vec![1e6], vec![1.0]).unwrap(),
             ),

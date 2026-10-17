@@ -101,7 +101,7 @@ fn build_model() -> Model {
 
     let source = ParticleSource::Neutron(Source {
         space: SourceSpatialDistribution::Point(Point::new([0.0, 0.0, 0.0])),
-        angle: AngularDistribution::new_monodirectional(0.0, 0.0, 1.0),
+        angle: AngularDistribution::new_monodirectional(0.0, 0.0, 1.0).unwrap(),
         energy: SourceEnergyDistribution::Discrete(
             Discrete::new(vec![ENERGY_EV], vec![1.0]).unwrap(),
         ),

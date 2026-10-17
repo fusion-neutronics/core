@@ -4067,7 +4067,7 @@ mod tests {
         // Monodirectional source: shoots particles in +z direction
         let source = ParticleSource::Neutron(Source {
             space: SourceSpatialDistribution::Point(Point::new([0.0, 0.0, 0.0])),
-            angle: AngularDistribution::new_monodirectional(0.0, 0.0, 1.0),
+            angle: AngularDistribution::new_monodirectional(0.0, 0.0, 1.0).unwrap(),
             energy: SourceEnergyDistribution::Discrete(
                 Discrete::new(vec![1_000_000.0], vec![1.0]).unwrap(),
             ),
@@ -4134,7 +4134,7 @@ mod tests {
 
         let source = ParticleSource::Neutron(Source {
             space: SourceSpatialDistribution::Point(Point::new([0.0, 0.0, 0.0])),
-            angle: AngularDistribution::new_monodirectional(0.0, 0.0, 1.0),
+            angle: AngularDistribution::new_monodirectional(0.0, 0.0, 1.0).unwrap(),
             energy: SourceEnergyDistribution::Discrete(
                 Discrete::new(vec![1_000_000.0], vec![1.0]).unwrap(),
             ),
