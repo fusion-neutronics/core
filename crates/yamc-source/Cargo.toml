@@ -14,3 +14,7 @@ path = "src/lib.rs"
 rand = "0.10"
 serde = { version = "1.0", features = ["derive"] }
 yamc-particle = { path = "../yamc-particle" }
+
+[dev-dependencies]
+# The model-file round trip of an angular distribution, in the tests.
+serde_json = "1.0"

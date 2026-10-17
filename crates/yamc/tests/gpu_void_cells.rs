@@ -157,7 +157,7 @@ fn build_solid_geometry() -> Geometry {
 fn neutron_source() -> ParticleSource {
     ParticleSource::Neutron(Source {
         space: SourceSpatialDistribution::Point(Point::new([0.0, 0.0, -10.0])),
-        angle: AngularDistribution::new_monodirectional(0.0, 0.0, 1.0),
+        angle: AngularDistribution::new_monodirectional(0.0, 0.0, 1.0).unwrap(),
         energy: SourceEnergyDistribution::Discrete(
             Discrete::new(vec![14.06e6], vec![1.0]).unwrap(),
         ),

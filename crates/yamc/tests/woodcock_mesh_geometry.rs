@@ -135,7 +135,7 @@ fn delta_tracking_reaches_a_mesh_from_a_source_outside_it() {
         let tally = Arc::new(t);
         let source = ParticleSource::Neutron(Source {
             space: SourceSpatialDistribution::Point(Point::new([-3.0, 0.0, 0.0])),
-            angle: AngularDistribution::new_monodirectional(1.0, 0.0, 0.0),
+            angle: AngularDistribution::new_monodirectional(1.0, 0.0, 0.0).unwrap(),
             energy: SourceEnergyDistribution::Discrete(
                 Discrete::new(vec![14.06e6], vec![1.0]).unwrap(),
             ),

@@ -110,7 +110,7 @@ fn nuclide_sphere(nuclide: &str, density: f64) -> Geometry {
 fn build_model_with(nuclide: &str, density: f64, energy_ev: f64, survival: bool) -> Model {
     let source = ParticleSource::Neutron(Source {
         space: SourceSpatialDistribution::Point(Point::new([0.0, 0.0, 0.0])),
-        angle: AngularDistribution::new_monodirectional(0.0, 0.0, 1.0),
+        angle: AngularDistribution::new_monodirectional(0.0, 0.0, 1.0).unwrap(),
         energy: SourceEnergyDistribution::Discrete(
             Discrete::new(vec![energy_ev], vec![1.0]).unwrap(),
         ),

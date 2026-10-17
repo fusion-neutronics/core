@@ -18,7 +18,8 @@ mod tests {
         s.space = SourceSpatialDistribution::Point(Point::new([1.0, 2.0, 3.0]));
         s.angle = yamc_source::distribution::angular::AngularDistribution::new_monodirectional(
             0.0, 0.0, 1.0,
-        );
+        )
+        .unwrap();
         s.energy = SourceEnergyDistribution::Discrete(Discrete::new(vec![2e6], vec![1.0]).unwrap());
 
         let p = neutron(s).sample(&mut rng);
@@ -98,14 +99,16 @@ mod tests {
         // Start with monodirectional
         s.angle = yamc_source::distribution::angular::AngularDistribution::new_monodirectional(
             1.0, 0.0, 0.0,
-        );
+        )
+        .unwrap();
         let p1 = neutron(s.clone()).sample(&mut rng);
         assert_eq!(p1.direction, [1.0, 0.0, 0.0]);
 
         // Switch to different monodirectional
         s.angle = yamc_source::distribution::angular::AngularDistribution::new_monodirectional(
             0.0, 1.0, 0.0,
-        );
+        )
+        .unwrap();
         let p2 = neutron(s.clone()).sample(&mut rng);
         assert_eq!(p2.direction, [0.0, 1.0, 0.0]);
 
@@ -142,7 +145,8 @@ mod tests {
         s.energy = SourceEnergyDistribution::Discrete(Discrete::new(vec![5e6], vec![1.0]).unwrap());
         s.angle = yamc_source::distribution::angular::AngularDistribution::new_monodirectional(
             0.0, 0.0, 1.0,
-        );
+        )
+        .unwrap();
 
         let ns = neutron(s);
         // Multiple samples should be consistent for monodirectional

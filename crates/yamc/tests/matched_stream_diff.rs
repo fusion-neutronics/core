@@ -179,7 +179,7 @@ fn sphere(case: &SphereCase) -> Geometry {
 fn build_model(case: &SphereCase, energy_ev: f64) -> Model {
     let source = ParticleSource::Neutron(Source {
         space: SourceSpatialDistribution::Point(Point::new([0.0, 0.0, 0.0])),
-        angle: AngularDistribution::new_monodirectional(0.0, 0.0, 1.0),
+        angle: AngularDistribution::new_monodirectional(0.0, 0.0, 1.0).unwrap(),
         energy: SourceEnergyDistribution::Discrete(
             Discrete::new(vec![energy_ev], vec![1.0]).unwrap(),
         ),

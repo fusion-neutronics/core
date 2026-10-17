@@ -52,6 +52,14 @@ impl PyIsotropic {
     }
 }
 
+/// The distribution along `direction`, normalized, or a `ValueError` saying
+/// why the vector points nowhere.
+fn monodirectional(direction: [f64; 3]) -> PyResult<AngularDistribution> {
+    let [u, v, w] = direction;
+    AngularDistribution::new_monodirectional(u, v, w)
+        .map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
 /// Monodirectional angular distribution (single fixed direction).
 #[gen_stub_pyclass]
 #[pyclass(name = "Monodirectional", from_py_object)]
@@ -71,19 +79,19 @@ impl PyMonodirectional {
     /// Returns:
     ///     Monodirectional: A monodirectional angular distribution.
     ///
+    /// Raises:
+    ///     ValueError: If ``direction`` is the zero vector or has a NaN or
+    ///         infinite component, so it points nowhere.
+    ///
     /// Examples:
     ///     >>> import yamc
     ///     >>> # Particles emitted in +z direction
     ///     >>> angle_dist = yamc.Monodirectional([0.0, 0.0, 1.0])
     #[new]
-    pub fn new(direction: [f64; 3]) -> Self {
-        PyMonodirectional {
-            inner: AngularDistribution::new_monodirectional(
-                direction[0],
-                direction[1],
-                direction[2],
-            ),
-        }
+    pub fn new(direction: [f64; 3]) -> PyResult<Self> {
+        Ok(PyMonodirectional {
+            inner: monodirectional(direction)?,
+        })
     }
 
     /// Sample a direction vector from the distribution.
@@ -112,10 +120,14 @@ impl PyMonodirectional {
     ///
     /// Args:
     ///     direction: Direction vector [u, v, w]. Will be normalized automatically.
+    ///
+    /// Raises:
+    ///     ValueError: If ``direction`` is the zero vector or has a NaN or
+    ///         infinite component. The direction is then left as it was.
     #[setter]
-    pub fn set_direction(&mut self, direction: [f64; 3]) {
-        self.inner =
-            AngularDistribution::new_monodirectional(direction[0], direction[1], direction[2]);
+    pub fn set_direction(&mut self, direction: [f64; 3]) -> PyResult<()> {
+        self.inner = monodirectional(direction)?;
+        Ok(())
     }
 
     /// Rich Jupyter display: the direction vector.

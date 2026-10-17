@@ -91,7 +91,7 @@ fn beam_source_14mev() -> ParticleSource {
         space: yamc_source::source::SourceSpatialDistribution::Point(
             yamc_source::distribution::spatial::Point::new([0.0, 0.0, 0.0]),
         ),
-        angle: AngularDistribution::new_monodirectional(1.0, 0.0, 0.0),
+        angle: AngularDistribution::new_monodirectional(1.0, 0.0, 0.0).unwrap(),
         energy: SourceEnergyDistribution::Discrete(
             Discrete::new(vec![14.06e6], vec![1.0]).unwrap(),
         ),
@@ -293,7 +293,7 @@ fn run_boxes(mode: TrackingMode) -> (f64, f64) {
         space: yamc_source::source::SourceSpatialDistribution::Point(
             yamc_source::distribution::spatial::Point::new([0.0, -3.0, 0.0]),
         ),
-        angle: AngularDistribution::new_monodirectional(0.0, 1.0, 0.0),
+        angle: AngularDistribution::new_monodirectional(0.0, 1.0, 0.0).unwrap(),
         energy: SourceEnergyDistribution::Discrete(
             Discrete::new(vec![14.06e6], vec![1.0]).unwrap(),
         ),
