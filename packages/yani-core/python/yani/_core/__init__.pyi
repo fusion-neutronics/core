@@ -2713,10 +2713,12 @@ class TransmutationResults:
         The published nuclear-data release each library keyword came from, as
         a dict keyed by keyword. Each value is a dict with ``release`` (the
         release identifier), ``manifest_sha256`` (the hash of that release's
-        manifest, which pins every file in it), ``format_version`` and
+        manifest, which pins every file in it), ``format_version``,
         ``offline`` (True when the data origin was unreachable and the newest
-        complete cached release was used). Empty when every data source was a
-        local directory.
+        complete cached release was used) and ``converter_versions`` (every
+        converter that wrote the release's files, with its version, as its
+        manifest lists them; empty in results recorded before releases
+        listed them). Empty when every data source was a local directory.
         """
     @property
     def num_steps(self) -> builtins.int:

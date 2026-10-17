@@ -135,6 +135,12 @@ pub struct DataRelease {
     /// Whether the origin was unreachable, so the release is the newest
     /// complete one in the cache rather than the one the origin names now.
     pub offline: bool,
+    /// Every converter that wrote the release's files, with its version, as
+    /// the release's manifest lists them (`yamc-convert 0.1.0`,
+    /// `yani-convert 0.1.0`). Empty when the manifest lists none, and when
+    /// reading results written before releases recorded them.
+    #[serde(default)]
+    pub converter_versions: Vec<String>,
 }
 
 /// A parsed manifest with its files indexed by path.
@@ -515,6 +521,24 @@ mod tests {
         );
         assert_eq!(release.manifest.release, "2026-10-12.1");
         assert!(release.file("neutron/Li6.arrow/version.json").is_some());
+    }
+
+    /// Results saved before releases recorded their converters read back
+    /// with an empty list.
+    #[test]
+    fn a_data_release_recorded_before_converter_versions_still_loads() {
+        let saved =
+            r#"{"release":"2026-10-01","manifest_sha256":"ab","format_version":2,"offline":false}"#;
+        let record: DataRelease = serde_json::from_str(saved).unwrap();
+        assert_eq!(record.release, "2026-10-01");
+        assert!(record.converter_versions.is_empty());
+
+        let record = DataRelease {
+            converter_versions: vec!["yamc-convert 0.1.0".into(), "yani-convert 0.1.0".into()],
+            ..record
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        assert_eq!(serde_json::from_str::<DataRelease>(&json).unwrap(), record);
     }
 
     #[test]
