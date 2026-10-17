@@ -2826,6 +2826,20 @@ class Model:
         Returns:
             list[str]: Sorted, de-duplicated nuclide names.
         """
+    def required_temperatures(self) -> builtins.dict[builtins.str, typing.Optional[builtins.list[builtins.str]]]:
+        r"""
+        The temperatures this model's materials load each nuclide at.
+        
+        A nuclide two materials hold at two temperatures is loaded at both. A
+        material with no temperature set loads every temperature the data
+        carries, so a nuclide any such material holds maps to ``None``.
+        
+        Returns:
+            dict[str, list[str] | None]: Keyed by nuclide name. Each value is the
+            temperature labels in Kelvin, spelled as materials spell them
+            (``"294"``) and in ascending order, or ``None`` for every
+            temperature.
+        """
     def required_elements(self) -> builtins.list[builtins.str]:
         r"""
         Element symbols this model needs photon data for.

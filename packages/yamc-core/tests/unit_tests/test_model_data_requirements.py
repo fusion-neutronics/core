@@ -59,6 +59,32 @@ def test_a_photon_source_needs_element_data_with_no_flag_set():
     assert model.required_elements() == ["Fe", "Li"]
 
 
+def test_required_temperatures_follow_the_materials_holding_each_nuclide():
+    """Each nuclide is loaded at the temperature of every material holding it,
+    in ascending order, and at every temperature (``None``) when one of those
+    materials has none set. This is what the browser fetch ranges each
+    nuclide's data to, and what ``to_html`` checks embedded data against."""
+    hot = yamc.Material(
+        composition={"Li6": 0.5, "Fe56": 0.5}, density=1.0, temperature=600, name="hot"
+    )
+    cold = yamc.Material(composition={"Li6": 1.0}, density=1.0, temperature=294, name="cold")
+    unset = yamc.Material(composition={"Fe56": 0.5, "O16": 0.5}, density=1.0, name="unset")
+    spheres = [yamc.Sphere(radius=r) for r in (1.0, 2.0)] + [
+        yamc.Sphere(radius=3.0, boundary="vacuum")
+    ]
+    cells = [
+        yamc.Cell(region=spheres[0].below, material=hot),
+        yamc.Cell(region=spheres[0].above & spheres[1].below, material=cold),
+        yamc.Cell(region=spheres[1].above & spheres[2].below, material=unset),
+    ]
+    model = yamc.Model(yamc.Geometry(cells), source=yamc.NeutronSource())
+    assert model.required_temperatures() == {
+        "Fe56": None,
+        "Li6": ["294", "600"],
+        "O16": None,
+    }
+
+
 def test_element_symbol_strips_the_mass_number():
     mat = _material("odd", {"Am241": 0.5, "H1": 0.5})
     sphere = yamc.Sphere(radius=1.0, boundary="vacuum")
@@ -109,3 +135,5 @@ def test_mesh_model_does_not_raise_on_data_queries(mesh_model):
     material store instead and must simply work."""
     assert mesh_model.has_photons() is False
     assert mesh_model.required_elements() == []
+    # Neither material sets a temperature, so both load every one.
+    assert mesh_model.required_temperatures() == {"Fe56": None, "Li6": None}
