@@ -35,7 +35,7 @@ fn photon_sources(tag: &str) -> Vec<DecaySourceDistribution> {
     let _ = std::fs::remove_dir_all(&dir);
     yani_convert::write_decay(&chain, &sources, &dir.join("decay")).expect("decay written");
     let (back, _branch) =
-        yani::parse_chain_parts(&dir.join("decay"), None, None, None).expect("yani reads it");
+        yani::parse_chain_parts(&dir.join("decay"), None, None, &[]).expect("yani reads it");
     let _ = std::fs::remove_dir_all(&dir);
     back["Cf252"]
         .sources

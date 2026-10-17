@@ -68,7 +68,7 @@ fn chain(data: &std::path::Path, reactions: &std::path::Path, library: &str) -> 
         &decay.to_string_lossy(),
         Some(&reactions.to_string_lossy()),
         None,
-        None,
+        &[],
     )
     .expect("chain loads")
 }
@@ -586,7 +586,7 @@ fn tendl_under_dt_is_unchanged() {
             &decay.to_string_lossy(),
             Some(&reactions.to_string_lossy()),
             Some(&yields.to_string_lossy()),
-            None,
+            &[],
         )
         .expect("chain loads")
     };

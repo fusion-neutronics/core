@@ -31,7 +31,7 @@ fn libraries() -> Vec<(&'static str, HashMap<String, ChainNuclide>)> {
             &split.join("decay"),
             Some(&split.join("reactions")),
             Some(&split.join("fission_yields")),
-            None,
+            &[],
         )
         .expect("parse the published chain");
         out.push(("split", chain));
@@ -148,7 +148,7 @@ fn a_chain_without_such_a_mode_builds_the_same_matrix_after_a_round_trip() {
     let dir = std::env::temp_dir().join(format!("yani-sf-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     export_chain_parts(&written, &dir, Some("test")).expect("export");
-    let (read, _branch) = parse_chain_parts(&dir.join("decay"), None, None, None).expect("read");
+    let (read, _branch) = parse_chain_parts(&dir.join("decay"), None, None, &[]).expect("read");
     let _ = std::fs::remove_dir_all(&dir);
 
     for name in ["Bi212", "Po212", "Tl208"] {

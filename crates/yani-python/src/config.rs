@@ -5,6 +5,17 @@ use pyo3_stub_gen::derive::gen_stub_pyfunction;
 use std::collections::HashMap;
 use yamc_nuclide::config::{SubsectionSource, CONFIG};
 
+/// Refuse a branching-only library keyword (`irdff-ii`) where `role` names
+/// what it was asked to be, before anything is stored or downloaded.
+fn refuse_branching_only(source: &str, role: &str) -> PyResult<()> {
+    if yamc_nuclide::url_cache::is_branching_only(source) {
+        return Err(PyValueError::new_err(
+            yamc_nuclide::url_cache::branching_only_error(source, role),
+        ));
+    }
+    Ok(())
+}
+
 /// Get the current cross-section data mapping.
 ///
 /// Returns ``None`` if nothing has been set, a string if a single global
@@ -100,11 +111,13 @@ pub fn set_cross_section_data(
                     for (k, val) in dict.iter() {
                         let key: String = k.extract()?;
                         let path: String = val.extract()?;
+                        refuse_branching_only(&path, CROSS_SECTION_ROLE)?;
                         rust_map.insert(key, path);
                     }
                     config.set_cross_sections(rust_map);
                 }
             } else if let Ok(string_val) = v.extract::<String>() {
+                refuse_branching_only(&string_val, CROSS_SECTION_ROLE)?;
                 config.set_cross_sections(string_val);
             } else {
                 return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
@@ -135,6 +148,7 @@ pub fn lookup_cross_section_data(nuclide: &str) -> Option<String> {
 #[pyfunction]
 #[pyo3(signature = (nuclide_or_keyword, path=None))]
 pub fn set_cross_section_data_entry(nuclide_or_keyword: &str, path: Option<&str>) -> PyResult<()> {
+    refuse_branching_only(path.unwrap_or(nuclide_or_keyword), CROSS_SECTION_ROLE)?;
     let mut config = CONFIG
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -146,7 +160,8 @@ pub fn set_cross_section_data_entry(nuclide_or_keyword: &str, path: Option<&str>
 // fission_yields, branch_ratios) is sourced independently by a library keyword
 // or a path; unset parts fall back to a built-in default at load time
 // (endf-b8.1 for decay/reactions/fission_yields; no branching overlay when
-// branch_ratios is unset). Getters return the raw setting (``None`` = default).
+// branch_ratios is unset). branch_ratios also takes several sources in order.
+// Getters return the raw setting (``None`` = default).
 
 /// What a subsection setter accepts from Python: a keyword or path, `None`,
 /// or `False`.
@@ -180,8 +195,9 @@ impl pyo3_stub_gen::PyStubType for SubsectionArg {
 }
 
 /// Read a subsection setter's argument, naming the three spellings when the
-/// caller reaches for a fourth.
-fn subsection_source(value: Option<SubsectionArg>) -> PyResult<SubsectionSource> {
+/// caller reaches for a fourth. `role` is what the source would be, for the
+/// refusal of a branching-only library.
+fn subsection_source(value: Option<SubsectionArg>, role: &str) -> PyResult<SubsectionSource> {
     match value {
         None => Ok(SubsectionSource::Default),
         Some(SubsectionArg::Toggle(false)) => Ok(SubsectionSource::Off),
@@ -190,9 +206,15 @@ fn subsection_source(value: Option<SubsectionArg>) -> PyResult<SubsectionSource>
              one, None to use the default library, or False to turn the \
              subsection off",
         )),
-        Some(SubsectionArg::Source(source)) => Ok(SubsectionSource::Set(source)),
+        Some(SubsectionArg::Source(source)) => {
+            refuse_branching_only(&source, role)?;
+            Ok(SubsectionSource::Set(source))
+        }
     }
 }
+
+/// What a cross-section source is, as a refusal names it.
+const CROSS_SECTION_ROLE: &str = "the neutron cross-section library";
 
 /// Get the decay-data source for the transmutation network, or ``None``.
 #[gen_stub_pyfunction]
@@ -209,6 +231,9 @@ pub fn get_transmutation_decay_data() -> Option<String> {
 #[gen_stub_pyfunction]
 #[pyfunction]
 pub fn set_transmutation_decay_data(value: Option<&str>) -> PyResult<()> {
+    if let Some(source) = value {
+        refuse_branching_only(source, "the decay-data source")?;
+    }
     CONFIG
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -242,7 +267,7 @@ pub fn get_transmutation_reactions() -> Option<String> {
 #[gen_stub_pyfunction]
 #[pyfunction]
 pub fn set_transmutation_reactions(value: Option<SubsectionArg>) -> PyResult<()> {
-    let source = subsection_source(value)?;
+    let source = subsection_source(value, "the reactions source")?;
     CONFIG
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -277,7 +302,7 @@ pub fn get_transmutation_fission_yields() -> Option<String> {
 #[gen_stub_pyfunction]
 #[pyfunction]
 pub fn set_transmutation_fission_yields(value: Option<SubsectionArg>) -> PyResult<()> {
-    let source = subsection_source(value)?;
+    let source = subsection_source(value, "the fission-yields source")?;
     CONFIG
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -285,26 +310,90 @@ pub fn set_transmutation_fission_yields(value: Option<SubsectionArg>) -> PyResul
     Ok(())
 }
 
-/// Get the isomeric branch-ratios source for the transmutation network, or ``None``.
-#[gen_stub_pyfunction]
-#[pyfunction]
-pub fn get_transmutation_branch_ratios() -> Option<String> {
-    CONFIG
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .transmutation_branch_ratios
-        .clone()
+/// What the branching setting accepts from Python: one source, or several in
+/// order.
+#[derive(FromPyObject)]
+pub enum BranchSourcesArg {
+    // Checked before the list arm: a str is a sequence of str, and PyO3
+    // refuses to read one as a list, so the order only makes the intent plain.
+    One(String),
+    Ordered(Vec<String>),
 }
 
-/// Set the isomeric branch-ratios source. Pass ``None`` to disable the overlay.
+impl pyo3_stub_gen::PyStubType for BranchSourcesArg {
+    fn type_input() -> pyo3_stub_gen::TypeInfo {
+        pyo3_stub_gen::TypeInfo::builtin("str")
+            | pyo3_stub_gen::TypeInfo::with_module(
+                "typing.Sequence[builtins.str]",
+                pyo3_stub_gen::ModuleRef::Named("typing".to_string()),
+            )
+    }
+
+    fn type_output() -> pyo3_stub_gen::TypeInfo {
+        pyo3_stub_gen::TypeInfo::builtin("str")
+            | pyo3_stub_gen::TypeInfo::builtin("list[builtins.str]")
+    }
+}
+
+/// Get the isomeric-branching sources of the transmutation network.
+///
+/// Returns:
+///     The one source as a string, several as a list in the order a reaction
+///     takes its split from them, or ``None`` when none is set and no
+///     isomeric-branching overlay is applied.
 #[gen_stub_pyfunction]
 #[pyfunction]
-pub fn set_transmutation_branch_ratios(value: Option<&str>) -> PyResult<()> {
+#[gen_stub(override_return_type(type_repr = "builtins.str | list[builtins.str] | None"))]
+pub fn get_transmutation_branch_ratios(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let sources = CONFIG
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get_transmutation_branch_ratios();
+    Ok(match sources.as_slice() {
+        [] => py.None(),
+        [one] => one.into_pyobject(py)?.into_any().unbind(),
+        _ => sources.into_pyobject(py)?.into_any().unbind(),
+    })
+}
+
+/// Set the isomeric-branching sources of the transmutation network.
+///
+/// A source is a library keyword or a path to a ``branching`` subsection.
+/// Give one, or several in order: each reaction of each parent (each
+/// channel) takes its isomeric split, and the MF=40 covariance of that
+/// split, from the first source that evaluates it, and the other sources'
+/// data for that channel are not used. The branching report
+/// (``TransmutationResults.get_branching_report``) names the source of every
+/// channel, and says whether the run mixes libraries.
+///
+/// ``"irdff-ii"``, the IAEA dosimetry library IRDFF-II, supplies isomeric
+/// branching only, so it is only ever a source here, and only where it is
+/// named: it is never a default.
+///
+/// Args:
+///     value: A source, a list of sources in order, or ``None`` (or an empty
+///         list) for no isomeric-branching overlay.
+///
+/// Raises:
+///     ValueError: If a source is empty or is listed twice.
+///
+/// Examples:
+///     >>> yani.transmutation_branch_ratios = ["irdff-ii", "endf-b8.1"]
+///     >>> yani.transmutation_branch_ratios
+///     ['irdff-ii', 'endf-b8.1']
+#[gen_stub_pyfunction]
+#[pyfunction]
+pub fn set_transmutation_branch_ratios(value: Option<BranchSourcesArg>) -> PyResult<()> {
+    let sources = match value {
+        None => Vec::new(),
+        Some(BranchSourcesArg::One(source)) => vec![source],
+        Some(BranchSourcesArg::Ordered(sources)) => sources,
+    };
     CONFIG
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .transmutation_branch_ratios = value.map(|s| s.to_string());
-    Ok(())
+        .set_transmutation_branch_ratios(sources)
+        .map_err(PyValueError::new_err)
 }
 
 /// Install the function every nuclear-data download goes through.

@@ -558,7 +558,7 @@ fn endf_b8_1_pa230_spreads_its_daughters_by_their_ratios() {
         std::env::var_os("YANI_DECAY_BRANCHING_DATA").expect("YANI_DECAY_BRANCHING_DATA"),
     );
     let decay = root.join("transmutation-endf-b8.1.arrow").join("decay");
-    let chain = yani::load_chain_parts(&decay.to_string_lossy(), None, None, None)
+    let chain = yani::load_chain_parts(&decay.to_string_lossy(), None, None, &[])
         .expect("chain loads")
         .chain;
     let mut material = Material::new(
@@ -687,7 +687,7 @@ fn endf_b8_1_small_branches_are_drawn_whole() {
     );
     let decay = root.join("transmutation-endf-b8.1.arrow").join("decay");
     let chain = Arc::new(
-        yani::load_chain_parts(&decay.to_string_lossy(), None, None, None)
+        yani::load_chain_parts(&decay.to_string_lossy(), None, None, &[])
             .expect("chain loads")
             .chain,
     );

@@ -107,6 +107,11 @@ impl Plan<'_> {
 /// if nothing in the process has yet, as the download would first.
 fn plan<'a>(registry: &Registry, request: &'a DataRequest<'a>) -> Option<Plan<'a>> {
     let ranging = ranged(request.kind, request.scope);
+    // A branching-only library has no particle data to plan, and the load
+    // that follows refuses it without a request.
+    if super::is_branching_only(request.source) {
+        return None;
+    }
     if is_keyword(request.source) {
         let pending =
             registry.pending(request.source, request.name, request.kind, request.scope)?;

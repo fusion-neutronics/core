@@ -1,0 +1,15 @@
+{
+  "converter_version": "yani-convert 0.1.0",
+  "created_utc": "",
+  "data_version": "2026-10-12.1",
+  "decay_library": "endf-b8.1",
+  "library": "endf-b8.1",
+  "mf40_partner_unresolved": [],
+  "mf40_states_placed_by_excitation": [
+    "Pb204 MT4: IZAP 82204 LFS 1 at 2185.8 keV is placed on Pb204_m1 by its excitation, MF=9 and MF=10 giving that IZAP and LFS no state"
+  ],
+  "mf40_unmatched_states": [],
+  "mf40_without_blocks": [],
+  "source": "endf",
+  "subsection": "branching"
+}

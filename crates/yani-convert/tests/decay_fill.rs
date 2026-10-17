@@ -62,7 +62,7 @@ fn convert(name: &str, fill: &[Material]) -> (std::path::PathBuf, serde_json::Va
 
 fn decay_energy(dir: &std::path::Path, nuclide: &str) -> f64 {
     let (chain, _) =
-        yani::parse_chain_parts(&dir.join("decay"), None, None, None).expect("yani reads it back");
+        yani::parse_chain_parts(&dir.join("decay"), None, None, &[]).expect("yani reads it back");
     chain[nuclide].decay_energy
 }
 

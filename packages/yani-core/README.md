@@ -51,6 +51,38 @@ elements E521 does not cover; override any of them with
 `displacement_energies={"Fe": 40.0}`. An element in neither source must be
 given, and is never guessed.
 
+## Isomeric branching
+
+Which state a reaction leaves its product in, In115 (n,n') making In115m
+rather than In115, comes from a branching evaluation laid over the chain with
+`transmutation_branch_ratios`: the branching evaluation gives each reaction's
+split and the cross-section library its total. It takes one source, or several
+in order, and each reaction takes its split, and the MF=40 covariance of that
+split, from the first source that evaluates it.
+
+```python
+yani.cross_section_data = "endf-b8.1"
+yani.transmutation_branch_ratios = ["irdff-ii", "endf-b8.1"]
+
+foil = yani.Material({"Nb93": 1.0}, density=8.57, volume=1.0)
+results = foil.transmute(schedule=schedule)
+report = results.get_branching_report(foil.id or 0, 0)
+[(c["reaction"], c["source"]) for c in report["channels"] if c["parent"] == "Nb93"]
+# [('(n,2n)', 'irdff-ii'), ('(n,gamma)', 'irdff-ii'), ("(n,n')", 'irdff-ii')]
+report["mixed"]  # True: IRDFF-II splits on ENDF/B-VIII.1 totals
+```
+
+`irdff-ii` is the IAEA International Reactor Dosimetry and Fusion File,
+IRDFF-II, whose isomer production is evaluated for dosimetry: In115 (n,n')
+In115m, In115 (n,2n) In114m, Nb93 (n,n') Nb93m and Nb93 (n,2n) Nb92m are among
+its 14 channels. It publishes isomeric branching and nothing else, so it is only
+ever a branching source (naming it as `cross_section_data` or any other
+transmutation source is refused), and it is used only where it is named.
+
+The branching report names the source of every channel, and `mixed` says
+whether a run takes its splits from more than one library, or a split from a
+library other than its total's.
+
 ## Relationship to yamc
 
 `yamc` is a superset: it ships

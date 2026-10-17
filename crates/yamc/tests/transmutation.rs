@@ -19,7 +19,7 @@ fn load_test_chain() -> Arc<HashMap<String, ChainNuclide>> {
         &format!("{base}/decay"),
         Some(&format!("{base}/reactions")),
         Some(&format!("{base}/fission_yields")),
-        None,
+        &[],
     )
     .unwrap()
     .chain

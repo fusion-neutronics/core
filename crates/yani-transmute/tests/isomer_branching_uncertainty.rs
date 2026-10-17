@@ -258,6 +258,9 @@ fn branch(complete: bool, rows: &[BranchingCovarianceRow]) -> BranchTable {
         "(n,n')".to_string(),
         vec![flat("In115_m1", 4, 1, 0.5, false)],
     );
+    let source = branch.add_source("synthetic", None).expect("a new source");
+    branch.set_source("In115", "(n,2n)", source);
+    branch.set_source("In115", "(n,n')", source);
     if !rows.is_empty() {
         let dir = tempfile::tempdir().expect("tmp");
         assert!(write_branching_covariance(rows, dir.path()).expect("write"));
@@ -265,7 +268,7 @@ fn branch(complete: bool, rows: &[BranchingCovarianceRow]) -> BranchTable {
             std::fs::File::open(dir.path().join("branching_covariance.arrow")).expect("written");
         let reader = arrow_ipc::reader::FileReader::try_new(file, None).expect("arrow");
         let batches: Vec<_> = reader.map(|b| b.expect("batch")).collect();
-        branch.set_covariance(batches);
+        branch.set_covariance(source, batches);
     }
     branch
 }
@@ -618,9 +621,17 @@ fn endf_b8_1_in115_isomers_move_by_their_mf40() {
         return;
     }
     let dir = |i: usize| dirs[i].to_string_lossy().into_owned();
-    let loaded = yani::load_chain_parts(&dir(0), Some(&dir(1)), Some(&dir(2)), Some(&dir(3)))
-        .expect("chain");
-    assert!(loaded.branch.covariance().is_some(), "the fixture's MF=40");
+    let loaded = yani::load_chain_parts(
+        &dir(0),
+        Some(&dir(1)),
+        Some(&dir(2)),
+        &[("endf-b8.1", &dir(3))],
+    )
+    .expect("chain");
+    assert!(
+        loaded.branch.sources()[0].covariance().is_some(),
+        "the fixture's MF=40"
+    );
     let mut material = Material::new(
         HashMap::from([("In115".to_string(), 3.8e-2)]),
         "atom",

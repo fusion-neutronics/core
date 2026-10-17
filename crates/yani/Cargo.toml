@@ -17,6 +17,9 @@ arrow-array = "60"
 arrow-ipc = { version = "60", features = ["lz4"] }
 arrow-schema = "60"
 nuclear-data-schema = { path = "../nuclear-data-schema" }
+# Reads the `library` a branching subsection's provenance.json names, which is
+# how a report tells which evaluation a branching source given as a path holds.
+serde_json = "1.0"
 
 # faer's `rayon` feature would enable internal parallelism in gemm and the
 # sparse-LU factor/solve, but nothing here collects it: `cram.rs` passes

@@ -85,11 +85,20 @@ fn bytes_and_paths_load_the_same_chain() {
         return;
     };
 
+    // A branching source only where the fixture has one, as `sections` reads
+    // the branching files only where they exist: a source must carry its
+    // branching.arrow.
+    let branching = root.join("branching");
+    let sources: Vec<(&str, &Path)> = if branching.join("branching.arrow").exists() {
+        vec![("branching", branching.as_path())]
+    } else {
+        Vec::new()
+    };
     let (from_paths, branch_from_paths) = parse_chain_parts(
         &root.join("decay"),
         Some(&root.join("reactions")),
         Some(&root.join("fission_yields")),
-        Some(&root.join("branching")),
+        &sources,
     )
     .expect("path load");
 
@@ -120,12 +129,19 @@ fn bytes_and_paths_load_the_same_chain() {
     );
     // The MF=40 covariance, when the fixture carries it, is the same rows by
     // either route.
-    let rows = |batches: Option<&[arrow_array::RecordBatch]>| {
-        batches.map(|b| b.iter().map(|batch| batch.num_rows()).sum::<usize>())
+    let rows = |table: &yani::BranchTable| -> Vec<Option<usize>> {
+        table
+            .sources()
+            .iter()
+            .map(|s| {
+                s.covariance()
+                    .map(|b| b.iter().map(|batch| batch.num_rows()).sum::<usize>())
+            })
+            .collect()
     };
     assert_eq!(
-        rows(branch_from_bytes.covariance()),
-        rows(branch_from_paths.covariance()),
+        rows(&branch_from_bytes),
+        rows(&branch_from_paths),
         "branching covariances differ",
     );
 }

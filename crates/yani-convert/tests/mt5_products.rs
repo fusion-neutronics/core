@@ -246,7 +246,7 @@ fn the_rows_reach_yanis_reader() {
     )
     .unwrap();
     let (chain, branch) =
-        yani::parse_chain_parts(&decay_dir, Some(&dir.join("reactions")), None, None)
+        yani::parse_chain_parts(&decay_dir, Some(&dir.join("reactions")), None, &[])
             .expect("yani reads the rows");
     let _ = std::fs::remove_dir_all(&dir);
 

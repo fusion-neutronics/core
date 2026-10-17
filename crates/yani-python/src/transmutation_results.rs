@@ -1953,6 +1953,14 @@ impl PyTransmutationResults {
     /// much of the parent's removal rate rests on anything the evaluation
     /// does not give.
     ///
+    /// It also says where each split came from. With several branching
+    /// sources (``transmutation_branch_ratios = ["irdff-ii", "endf-b8.1"]``)
+    /// each channel takes its split from the first source that evaluates it,
+    /// and its ``source`` names that one. ``mixed`` is True when the splits
+    /// come from more than one library, or a split from a library other than
+    /// its reaction's total, so a mixed run reads as one at the top of the
+    /// report.
+    ///
     /// MT=5, ``(n,anything)``, is the ``(n,X)`` reaction: its residuals, read
     /// from the reaction library's MF=6 MT=5, are shares of the MT=5 total
     /// at each energy (``file`` 6, ``representation`` ``"share"``), and its
@@ -1975,7 +1983,8 @@ impl PyTransmutationResults {
     ///     step: Schedule step index, as ``get_reaction_rates`` takes it.
     ///
     /// Returns:
-    ///     dict | None: ``channels``, ``dropped`` and ``unmodelled_mt5``, or
+    ///     dict | None: ``channels``, ``dropped``, ``unmodelled_mt5``,
+    ///     ``sources`` and ``mixed``, or
     ///     None if the material or the step is unknown. Each channel has
     ///     ``parent``, ``reaction``, ``mt``, ``file`` (6, 9 or 10),
     ///     ``representation`` (``"share"``, ``"absolute"`` or
@@ -1986,8 +1995,15 @@ impl PyTransmutationResults {
     ///     reaction's share of the parent's removal rate), ``clipped_share``
     ///     and ``extrapolated_share`` (of the same removal rate),
     ///     ``own_total_excess`` (``(energy_ev, ratio)`` where the listed values
-    ///     most exceed the evaluation's own total, or None) and
-    ///     ``normalisation``. Each dropped channel has ``parent``,
+    ///     most exceed the evaluation's own total, or None),
+    ///     ``normalisation``, ``source`` (the branching source the split came
+    ///     from, as named in ``transmutation_branch_ratios``, or None for an
+    ///     ``(n,X)`` channel, whose products come from the reactions
+    ///     subsection) and ``cross_section_library`` (where the reaction's
+    ///     total came from, or None where that is not known). ``sources`` lists
+    ///     the branching sources the channels used, in the configured order,
+    ///     and ``mixed`` says whether the run mixes libraries as above. Each
+    ///     dropped channel has ``parent``,
     ///     ``reaction``, ``target``, ``reason`` and ``removal_share`` (None
     ///     where it cannot be folded). ``unmodelled_mt5`` is
     ///     ``[(nuclide, share, reason)]``, MT=5's share of the removal rate
@@ -1998,6 +2014,11 @@ impl PyTransmutationResults {
     ///     >>> report = results.get_branching_report(material_id=1, step=0)
     ///     >>> report["channels"][0]["representation"]
     ///     'absolute'
+    ///     >>> # A Nb93 foil, transmutation_branch_ratios = ["irdff-ii", "endf-b8.1"]
+    ///     >>> [(c["reaction"], c["source"]) for c in report["channels"] if c["parent"] == "Nb93"]
+    ///     [('(n,2n)', 'irdff-ii'), ('(n,gamma)', 'irdff-ii'), ("(n,n')", 'irdff-ii')]
+    ///     >>> report["mixed"]
+    ///     True
     fn get_branching_report<'py>(
         &self,
         py: Python<'py>,
@@ -2035,9 +2056,13 @@ impl PyTransmutationResults {
             d.set_item("extrapolated_share", c.extrapolated_share)?;
             d.set_item("own_total_excess", c.own_total_excess)?;
             d.set_item("normalisation", c.normalisation.clone())?;
+            d.set_item("source", c.source.clone())?;
+            d.set_item("cross_section_library", c.cross_section_library.clone())?;
             channels.append(d)?;
         }
         out.set_item("channels", channels)?;
+        out.set_item("sources", report.sources.clone())?;
+        out.set_item("mixed", report.mixed)?;
         let dropped = PyList::empty(py);
         for c in &report.dropped {
             let d = PyDict::new(py);

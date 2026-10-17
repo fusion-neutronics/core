@@ -58,7 +58,7 @@ fn converted(compressed: &[u8], name: &str, tag: &str) -> (Decay, ChainNuclide) 
     assert_eq!(written, declared);
 
     let (back, _branch) =
-        yani::parse_chain_parts(&dir.join("decay"), None, None, None).expect("yani reads it");
+        yani::parse_chain_parts(&dir.join("decay"), None, None, &[]).expect("yani reads it");
     let _ = std::fs::remove_dir_all(&dir);
     (
         Decay::from_material(&decay[0]).expect("decay reads"),
@@ -276,7 +276,7 @@ fn a_stated_covariance_round_trips_through_the_file() {
     let _ = std::fs::remove_dir_all(&dir);
     yani_convert::write_decay(&chain, &sources, &dir.join("decay")).expect("decay written");
     let (back, _branch) =
-        yani::parse_chain_parts(&dir.join("decay"), None, None, None).expect("yani reads it");
+        yani::parse_chain_parts(&dir.join("decay"), None, None, &[]).expect("yani reads it");
     let _ = std::fs::remove_dir_all(&dir);
 
     let covariance = |tabular: bool| {
