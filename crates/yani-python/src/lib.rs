@@ -111,11 +111,13 @@ pub fn register_classes(py: Python<'_>, m: &Bound<'_, PyModule>, package: &str) 
     m.add_function(wrap_pyfunction!(convert::convert_neutron_xs, m)?)?;
     m.add_function(wrap_pyfunction!(convert::convert_neutron_transport, m)?)?;
     m.add_function(wrap_pyfunction!(convert::convert_photon, m)?)?;
+    m.add_function(wrap_pyfunction!(convert::convert_photonuclear, m)?)?;
     // Outside the `transport` gate with the converters: reading a written
     // directory back through the real loader is the gate on a conversion, and
     // both wheels convert.
     m.add_function(wrap_pyfunction!(read::read_nuclide_from_arrow, m)?)?;
     m.add_function(wrap_pyfunction!(read::read_element_from_arrow, m)?)?;
+    m.add_function(wrap_pyfunction!(read::read_photonuclear_from_arrow, m)?)?;
     m.add_function(wrap_pyfunction!(config::cache_dir, m)?)?;
     // The host's downloader on Pyodide, which has no sockets. Registered here
     // so the yamc and yani wheels share the one hook.

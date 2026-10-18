@@ -213,6 +213,31 @@ To force a full clean rebuild:
 mkdocs build -f mkdocs.yml --clean
 ```
 
+## Photonuclear Data Processing
+
+TENDL gamma evaluations are photonuclear (`NSUB=0`), not photoatomic
+(`NSUB=3`). `yamc.convert_photonuclear` and `yani.convert_photonuclear`
+preserve one ENDF evaluation as `{Nuclide}.arrow/`:
+
+* `photonuclear.arrow`: each MF=3 cross section, native energy grid, Q values,
+  and ENDF interpolation breakpoints and schemes, in eV and barns.
+* `photonuclear_sections.arrow`: every original (MF, MT) section, including
+  outgoing-particle distributions, retained as ENDF text.
+* `version.json`: release provenance, `particle="photonuclear"` and
+  `scope="evaluated"`, written last as the completion marker.
+
+`read_photonuclear_from_arrow` validates the tables against the preserved
+MF=3 sections and reports the nuclide identity, reaction MTs, per-reaction
+energy-point counts and preserved section keys. No NJOY or auxiliary atomic
+tabulations are needed. The sibling `nuclear_data_generation_scripts`
+repository downloads TENDL gamma archives and publishes these directories
+under `photonuclear/`, separately from photoatomic `photon/` data.
+
+This is evaluated-data processing, not photonuclear collision sampling.
+The neutron and photoatomic transport loaders cannot consume these sections.
+Photon-specific level-scattering kinematics and Kalbach-Mann sampling remain
+separate transport work.
+
 ## Workspace Layout
 
 ```
@@ -227,7 +252,7 @@ core/
                        compiles to native and wasm32
     yamc-nuclide/   -- Evaluated neutron nuclear data (Nuclide, Reaction,
                        reaction-product sampling)
-    yamc-element/   -- Evaluated photon nuclear data (Element, photon
+    yamc-element/   -- Photoatomic interaction data (Element, photon
                        interaction cross-sections, atomic transitions,
                        TTB table build)
     yamc-materials/ -- Material composition + macroscopic cross sections
@@ -241,8 +266,8 @@ core/
     yamc-plot/      -- Shared interactive-plot HTML/JS templating used by
                        Python's Model.plot() and the browser editor
     yamc-gpu/       -- GPU compute infra (Vulkan via cubecl, f64 required)
-    yamc-convert/   -- Converts ENDF and ACE evaluations into the transport
-                       Arrow format yamc reads
+    yamc-convert/   -- Converts ENDF and ACE evaluations into transport Arrow
+               data, and preserves evaluated photonuclear data
     yamc-python/    -- pyo3 bindings; built into
                        packages/yamc-core/python/yamc/_core.so
     yamt/           -- Mesh-based geometry runtime (BVH, Arrow IO)

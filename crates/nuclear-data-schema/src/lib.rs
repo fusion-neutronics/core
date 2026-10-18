@@ -63,6 +63,8 @@ pub fn all_sections() -> Vec<(&'static str, Schema)> {
         ),
         ("nubar_covariance.arrow", nubar_covariance()),
         ("nuclide.arrow", nuclide()),
+        ("photonuclear.arrow", photonuclear()),
+        ("photonuclear_sections.arrow", photonuclear_sections()),
         ("products.arrow", products()),
         ("reactions.arrow", reactions()),
         ("reactions/reactions.arrow", reactions_reactions()),
@@ -223,6 +225,39 @@ fn meta<const N: usize>(pairs: [(&str, &str); N]) -> Metadata {
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect()
+}
+
+/// `photonuclear.arrow`: evaluated cross sections on their native grids.
+pub fn photonuclear() -> Schema {
+    Schema::new(vec![
+        utf8("name", false),
+        i32("atomic_number", false),
+        i32("mass_number", false),
+        i32("metastable", false),
+        f64("atomic_weight_ratio", false),
+        i32("mt", false),
+        f64("Q_mass_difference", false),
+        f64("Q_value", false),
+        i32("lr", false),
+        f64s("energy", false),
+        f64s("xs", false),
+        i32s("breakpoints", false),
+        i32s("interpolation", false),
+    ])
+    .with_metadata(meta([("filetype", "photonuclear"), ("version", "1.0")]))
+}
+
+/// `photonuclear_sections.arrow`: the original ENDF sections, without loss.
+pub fn photonuclear_sections() -> Schema {
+    Schema::new(vec![
+        i32("mf", false),
+        i32("mt", false),
+        utf8("text", false),
+    ])
+    .with_metadata(meta([
+        ("filetype", "photonuclear-sections"),
+        ("version", "1.0"),
+    ]))
 }
 
 /// `branching/branching.arrow`
@@ -1079,7 +1114,7 @@ mod tests {
         let sections = all_sections();
         assert_eq!(
             sections.len(),
-            26,
+            28,
             "section count changed; update the manifest"
         );
         let mut paths: Vec<&str> = sections.iter().map(|(p, _)| *p).collect();

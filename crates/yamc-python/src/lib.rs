@@ -153,6 +153,14 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(yani_python::convert::convert_photon, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        yani_python::convert::convert_photonuclear,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        yani_python::read::read_photonuclear_from_arrow,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(simulation::combine_results, m)?)?;
     m.add_function(wrap_pyfunction!(tally_reduce::reduce_mesh_tally_block, m)?)?;
     m.add_class::<variance_reduction::PySurvivalBiasing>()?;

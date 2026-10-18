@@ -506,6 +506,36 @@ pub fn convert_neutron_transport(
     .map_err(|e| PyRuntimeError::new_err(e.to_string()))
 }
 
+/// Preserve a photonuclear ENDF evaluation as lossless Arrow tables.
+/// Writes native-grid MF=3 cross sections with their ENDF interpolation and
+/// every original section, including outgoing-particle data. Requires NSUB=0.
+/// No neutron Doppler broadening or photoatomic relaxation is applied. This
+/// processes evaluated data; it does not enable photonuclear transport.
+/// ``library``, ``data_version`` and ``created_utc`` are recorded in version.json.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (input_path, output_dir, library = "", data_version = "", created_utc = None))]
+pub fn convert_photonuclear(
+    input_path: &str,
+    output_dir: &str,
+    library: &str,
+    data_version: &str,
+    created_utc: Option<&str>,
+) -> PyResult<String> {
+    let provenance = yamc_convert::entry::Provenance {
+        library: library.to_string(),
+        data_version: data_version.to_string(),
+        created_utc: created_utc.map(str::to_string).unwrap_or_default(),
+    };
+    yamc_convert::photonuclear::convert_photonuclear(
+        &PathBuf::from(input_path),
+        &PathBuf::from(output_dir),
+        &provenance,
+    )
+    .map(|path| path.to_string_lossy().into_owned())
+    .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+}
+
 /// Convert a photoatomic evaluation into the per-element photon sections.
 ///
 /// Writes ``element.arrow`` always, and ``subshells.arrow``, ``compton.arrow``

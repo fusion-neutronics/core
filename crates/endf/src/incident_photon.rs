@@ -337,7 +337,7 @@ impl IncidentPhoton {
         self.get(photon_reaction_mt(name)?)
     }
 
-    /// Read photon data from a photoatomic evaluation.
+    /// Read MF=23 data from a photoatomic or electroatomic evaluation.
     ///
     /// `relaxation` is a separate atomic relaxation evaluation, for libraries
     /// that ship one apart from the photoatomic file. When the photoatomic
@@ -349,6 +349,11 @@ impl IncidentPhoton {
         let metadata = photoatomic.mf1_mt451().ok_or(Error::Unsupported {
             what: "a photoatomic evaluation with no MF=1 MT=451",
         })?;
+        if ![3, 113].contains(&metadata.nsub) {
+            return Err(Error::Unsupported {
+            what: "IncidentPhoton requires photoatomic (NSUB=3) or electroatomic (NSUB=113) data, not photonuclear data",
+            });
+        }
         let mut data = IncidentPhoton::new(metadata.za / 1000);
 
         for &(mf, mt) in photoatomic.section_data.keys() {
@@ -640,6 +645,33 @@ mod tests {
             if let Some(name) = photon_reaction_name(mt) {
                 assert_eq!(photon_reaction_mt(name), Some(mt), "{name} came back wrong");
             }
+        }
+    }
+
+    #[test]
+    fn rejects_non_photoatomic_evaluations() {
+        let evaluation = material(ATOM_H);
+        let error = IncidentPhoton::from_endf(&evaluation, None).unwrap_err();
+        assert!(error.to_string().contains("photoatomic (NSUB=3)"));
+    }
+
+    #[test]
+    fn reads_electroatomic_cross_sections() {
+        let evaluation = material(include_bytes!("../fixtures/e-001_H_000.endf.xz"));
+        assert_eq!(evaluation.mf1_mt451().unwrap().nsub, 113);
+        let data = IncidentPhoton::from_endf(&evaluation, None).unwrap();
+        let mts: Vec<i32> = evaluation
+            .section_data
+            .keys()
+            .filter_map(|&(mf, mt)| (mf == 23).then_some(mt))
+            .collect();
+        assert!(!mts.is_empty());
+        assert_eq!(data.reactions.keys().copied().collect::<Vec<_>>(), mts);
+        for mt in mts {
+            assert_eq!(
+                data.get(mt).unwrap().xs.as_ref().unwrap(),
+                &evaluation.mf23(mt).unwrap().sigma
+            );
         }
     }
 

@@ -82,6 +82,7 @@ __all__ = [
     "convert_neutron_transport",
     "convert_neutron_xs",
     "convert_photon",
+    "convert_photonuclear",
     "convert_transmutation",
     "cooldown_steps",
     "create_test_reaction_product",
@@ -102,6 +103,7 @@ __all__ = [
     "radionuclide_production",
     "read_element_from_arrow",
     "read_nuclide_from_arrow",
+    "read_photonuclear_from_arrow",
     "reduce_mesh_tally_block",
     "sample_scatter_cosine",
     "set_cross_section_data",
@@ -7711,6 +7713,16 @@ def convert_photon(photoatomic_path: builtins.str, output_dir: builtins.str, rel
         One path per element written.
     """
 
+def convert_photonuclear(input_path: builtins.str, output_dir: builtins.str, library: builtins.str = '', data_version: builtins.str = '', created_utc: typing.Optional[builtins.str] = None) -> builtins.str:
+    r"""
+    Preserve a photonuclear ENDF evaluation as lossless Arrow tables.
+    Writes native-grid MF=3 cross sections with their ENDF interpolation and
+    every original section, including outgoing-particle data. Requires NSUB=0.
+    No neutron Doppler broadening or photoatomic relaxation is applied. This
+    processes evaluated data; it does not enable photonuclear transport.
+    ``library``, ``data_version`` and ``created_utc`` are recorded in version.json.
+    """
+
 def convert_transmutation(decay_files: typing.Sequence[builtins.str], fpy_files: typing.Sequence[builtins.str], neutron_files: typing.Sequence[builtins.str], output_path: builtins.str, library: builtins.str = '', decay_library: builtins.str = '', data_version: builtins.str = '', created_utc: typing.Optional[builtins.str] = None, reactions: typing.Optional[typing.Sequence[builtins.str]] = None, branch_ratios: typing.Optional[builtins.str] = None, subsections: typing.Optional[typing.Sequence[builtins.str]] = None, decay_fill_files: typing.Sequence[builtins.str] = [], decay_fill_library: builtins.str = '') -> builtins.int:
     r"""
     Convert ENDF decay, fission product yield and neutron evaluations into a
@@ -8116,6 +8128,13 @@ def read_nuclide_from_arrow(path: builtins.str, scope: builtins.str = 'full') ->
         The directory is absent, is not the Arrow format version this build
         reads, or any section fails to parse, the stored MF=2 and MF=32 text
         included.
+    """
+
+def read_photonuclear_from_arrow(path: builtins.str) -> typing.Any:
+    r"""
+    Validate evaluated photonuclear Arrow tables against their preserved ENDF.
+    Returns the nuclide identity, MTs, per-MT energy-point counts and preserved
+    (MF, MT) section keys. Does not invoke neutron or photoatomic transport.
     """
 
 def reduce_mesh_tally_block(block_mean: typing.Sequence[builtins.float], block_std: typing.Sequence[builtins.float], n_parent: builtins.int, n_energy: builtins.int, n_mesh: builtins.int, parent_iter: typing.Sequence[typing.Optional[builtins.int]], energy_iter: typing.Sequence[typing.Optional[builtins.int]], vol: typing.Optional[typing.Sequence[builtins.float]] = None, scaling: builtins.float = 1.0) -> builtins.list[tuple[builtins.list[builtins.float], builtins.list[builtins.float], builtins.list[builtins.float]]]:
