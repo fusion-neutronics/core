@@ -438,16 +438,6 @@ pub fn branching_only_error(keyword: &str, role: &str) -> String {
     )
 }
 
-/// Library keyword used as the default PHOTON data source when the user has
-/// not explicitly specified one. endf-b8.1 is chosen because it ships full
-/// atomic-relaxation tables (binding energies + fluorescence / Auger
-/// transitions), so photon transport produces fluorescence and Auger
-/// electrons by default. Other libraries (e.g. fendl-3.2d) publish photon
-/// cross sections with no atomic relaxation, which would silently suppress
-/// fluorescence. Decoupling the photon default from the neutron library lets
-/// the neutron data stay tendl/fendl while photons still get relaxation.
-pub const DEFAULT_PHOTON_LIBRARY: &str = "endf-b8.1";
-
 /// Which particle's data file to resolve under a library keyword. Different
 /// libraries lay out their files differently; the loader uses this to pick
 /// the right per-particle subdirectory under `url_stem`.

@@ -4,6 +4,7 @@
 //! element fixtures that ship with the yamc test directory.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use yamc_materials::Material;
 
 /// Helper: create a pure-Fe material with density and nuclide data loaded.
@@ -95,6 +96,38 @@ fn test_sample_element_fe() {
         assert_eq!(element.atomic_number, 26);
         assert_eq!(idx, element.index);
     }
+}
+
+#[test]
+fn test_photon_cache_keeps_sources_separate() {
+    let original = yamc_element::photon::get_or_load_element("Fe", "tests/Fe.arrow").unwrap();
+    let temporary = tempfile::tempdir().unwrap();
+    let other_path = temporary.path().join("Fe.arrow");
+    std::fs::create_dir(&other_path).unwrap();
+    for entry in std::fs::read_dir("tests/Fe.arrow").unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() {
+            std::fs::copy(entry.path(), other_path.join(entry.file_name())).unwrap();
+        }
+    }
+    let other_source = other_path.to_str().unwrap();
+    let other = yamc_element::photon::get_or_load_element("Fe", other_source).unwrap();
+    assert!(!Arc::ptr_eq(&original, &other));
+    assert_ne!(original.index, other.index);
+    let cached = yamc_element::photon::get_or_load_element("Fe", other_source).unwrap();
+    assert!(Arc::ptr_eq(&other, &cached));
+}
+
+#[test]
+fn test_photon_cache_does_not_hide_a_different_source() {
+    let element = yamc_element::photon::get_or_load_element("Fe", "tests/Fe.arrow").unwrap();
+    assert_eq!(element.atomic_number, 26);
+    let missing =
+        yamc_element::photon::get_or_load_element("Fe", "tests/missing-photon-source/Fe.arrow");
+    assert!(
+        missing.is_err(),
+        "a cached element must not replace a different data source"
+    );
 }
 
 #[test]

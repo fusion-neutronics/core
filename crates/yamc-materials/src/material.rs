@@ -362,7 +362,7 @@ pub struct Material {
     pub cached_element_atom_densities: Vec<f64>,
     /// Paths to photon interaction Arrow data, keyed by element symbol.
     /// Example: {"Fe" => "path/to/Fe.arrow", "O" => "path/to/O.arrow"}
-    /// Set via `read_nuclear_data()` when photon data is provided.
+    /// Explicit photon sources or paths inherited from the global cross-section source.
     pub photon_data_paths: HashMap<String, String>,
     /// Thick-target bremsstrahlung data (electron and positron).
     /// Populated by `init_bremsstrahlung()` when TTB electron treatment is enabled.

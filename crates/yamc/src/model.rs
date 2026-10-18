@@ -1287,8 +1287,8 @@ impl Model {
             if !material_arc.nuclides.is_empty() && material_arc.photon_data_paths.is_empty() {
                 return Err(format!(
                     "photon transport requested but material slot {i} has no photon data. \
-                     Pass `photon_data` to `Material.read_nuclear_data` (e.g. \
-                     `read_nuclear_data('endf-b8.1')` populates it from the keyword), \
+                     Set `cross_section_data` to a library with photoatomic data \
+                     (e.g. `yamc.cross_section_data = 'endf-b8.1'`), \
                      or supply a per-element map: \
                      `read_nuclear_data(..., photon_data={{'Fe': '/path/to/Fe.arrow'}})`."
                 ));
@@ -1408,8 +1408,13 @@ impl Model {
     /// The downloads behind the loads go out together first; with `photons`
     /// that includes the photon data of each material's elements. Materials
     /// that already carry transport cross sections (`fast_xs`, e.g. from a
-    /// transmutation step) are left alone.
+    /// transmutation step) keep them; missing photon paths are still resolved.
     pub fn ensure_nuclear_data_loaded(&mut self, photons: bool) -> Result<(), String> {
+        if photons {
+            for material in self.geometry.materials_mut() {
+                Arc::make_mut(material).ensure_photon_data_paths();
+            }
+        }
         yamc_materials::Material::prefetch_nuclear_data(
             self.geometry
                 .materials()
@@ -1465,6 +1470,9 @@ impl Model {
         #[cfg(feature = "debug_timing")]
         let material_prep_start = std::time::Instant::now();
 
+        let data_load_start = crate::util::timer::Timer::start();
+        self.ensure_nuclear_data_loaded(self.transport_secondary_photons)?;
+
         // Validate photon data presence BEFORE acquiring the photon-init lock,
         // so that an explicit user error (forgot photon_data) doesn't poison
         // the global mutex and contaminate subsequent simulations in the same
@@ -1474,8 +1482,8 @@ impl Model {
                 if !material_arc.nuclides.is_empty() && material_arc.photon_data_paths.is_empty() {
                     return Err(format!(
                         "transport_secondary_photons=True but material slot {i} has no photon data. \
-                         Pass `photon_data` to `Material.read_nuclear_data` (e.g. \
-                         `read_nuclear_data('endf-b8.1')` populates it from the keyword), \
+                         Set `cross_section_data` to a library with photoatomic data \
+                         (e.g. `yamc.cross_section_data = 'endf-b8.1'`), \
                          or supply a per-element map: \
                          `read_nuclear_data(..., photon_data={{'Fe': '/path/to/Fe.arrow'}})`."
                     ));
@@ -1505,13 +1513,11 @@ impl Model {
             Self::ensure_global_ttb_grids();
         }
 
-        let data_load_start = crate::util::timer::Timer::start();
         let transport_secondary_photons = self.transport_secondary_photons;
         let ttb = self.electron_treatment.ttb();
         // `calculate_macroscopic_xs` borrows a `&Vec<i32>`; own the slice
         // once here so the per-material loop borrows it without reallocating.
         let mt_filter = mt_filter.to_vec();
-        self.ensure_nuclear_data_loaded(transport_secondary_photons)?;
         for (i, material_arc) in self.geometry.materials_mut().iter_mut().enumerate() {
             // Skip materials that already have transport XS computed (e.g., from transmutation step)
             if material_arc.fast_xs.is_some() {

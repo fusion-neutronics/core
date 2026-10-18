@@ -288,29 +288,8 @@ impl Material {
             source_map.insert(nuclide_name.clone(), source.to_string());
         }
 
-        // For keyword form, register a photon data source for each unique
-        // element symbol in this material's composition so that photon /
-        // coupled transport has cross sections (see `Model::initialize_xs`
-        // for the fail-loud check that depends on photon_data_paths being
-        // non-empty).
-        //
-        // The photon library is DECOUPLED from the neutron library: we
-        // default it to `endf-b8.1` regardless of the neutron keyword
-        // (`source`), because endf-b8.1 ships full atomic-relaxation tables
-        // (fluorescence + Auger) whereas other libraries (e.g. fendl-3.2d)
-        // publish photon cross sections with no relaxation, which would
-        // silently suppress fluorescence. The neutron data still comes from
-        // `source`. `or_insert_with` preserves any explicit per-element
-        // photon path the user already set (those win over the default).
         if is_keyword {
-            use yamc_element::element::element_symbol_from_nuclide;
-            let photon_source = yamc_nuclide::url_cache::DEFAULT_PHOTON_LIBRARY.to_string();
-            for nuclide_name in self.nuclides.keys() {
-                let elem = element_symbol_from_nuclide(nuclide_name);
-                self.photon_data_paths
-                    .entry(elem)
-                    .or_insert_with(|| photon_source.clone());
-            }
+            self.register_photon_data_source(source);
         }
 
         // Register the keyword / directory as the GLOBAL fallback source when
@@ -334,6 +313,30 @@ impl Material {
 
         self.read_nuclear_data(&source_map, None)?;
         Ok(())
+    }
+
+    fn register_photon_data_source(&mut self, source: &str) {
+        use yamc_element::element::element_symbol_from_nuclide;
+
+        for nuclide_name in self.nuclides.keys() {
+            let element = element_symbol_from_nuclide(nuclide_name);
+            self.photon_data_paths
+                .entry(element)
+                .or_insert_with(|| source.to_string());
+        }
+    }
+
+    /// Resolve missing element paths from the global cross-section source.
+    /// Explicit per-element photon paths are preserved.
+    pub fn ensure_photon_data_paths(&mut self) {
+        let source = CONFIG
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .default_cross_section
+            .clone();
+        if let Some(source) = source {
+            self.register_photon_data_source(&source);
+        }
     }
 
     /// Read nuclear data from a keyword string that will be applied to all nuclides in this material
@@ -577,5 +580,46 @@ impl Material {
         let temperatures = (!self.temperature.is_empty())
             .then(|| std::collections::HashSet::from([self.temperature.clone()]));
         LoadScope::full().with_temperatures(temperatures)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn material() -> Material {
+        Material::new(
+            HashMap::from([
+                ("Fe54".into(), 1.0),
+                ("Fe56".into(), 1.0),
+                ("O16".into(), 1.0),
+            ]),
+            "atom",
+            "g/cm3",
+            Some(1.0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn photon_sources_follow_the_selected_keyword() {
+        for keyword in ["endf-b8.1", "fendl-3.2d", "tendl-2025"] {
+            let mut material = material();
+            material.register_photon_data_source(keyword);
+            assert_eq!(material.photon_data_paths.len(), 2);
+            assert_eq!(material.photon_data_paths["Fe"], keyword);
+            assert_eq!(material.photon_data_paths["O"], keyword);
+        }
+    }
+
+    #[test]
+    fn explicit_photon_sources_are_preserved() {
+        let mut material = material();
+        material
+            .photon_data_paths
+            .insert("Fe".into(), "local/Fe.arrow".into());
+        material.register_photon_data_source("fendl-3.2d");
+        assert_eq!(material.photon_data_paths["Fe"], "local/Fe.arrow");
+        assert_eq!(material.photon_data_paths["O"], "fendl-3.2d");
     }
 }
