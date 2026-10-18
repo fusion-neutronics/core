@@ -1281,9 +1281,13 @@ impl PhotonInteraction {
 // GLOBAL ELEMENT CACHE
 // ============================================================================
 
-/// Map from element name to index in ELEMENTS vec.
-static ELEMENT_MAP: Lazy<RwLock<HashMap<String, usize>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
+#[derive(Default)]
+struct ElementCache {
+    by_source: HashMap<(String, String), usize>,
+    by_name: HashMap<String, usize>,
+}
+
+static ELEMENT_MAP: Lazy<RwLock<ElementCache>> = Lazy::new(|| RwLock::new(ElementCache::default()));
 
 /// Global storage for loaded photon element data.
 static ELEMENTS: Lazy<RwLock<Vec<Arc<PhotonInteraction>>>> = Lazy::new(|| RwLock::new(Vec::new()));
@@ -1353,7 +1357,7 @@ fn relaxation_warning(
 /// Load an element from an Arrow directory, or return a cached copy if already loaded.
 ///
 /// # Arguments
-/// * `name` - Element name (e.g., "Fe"). Used as the cache key.
+/// * `name` - Element name (e.g., "Fe"). Cached together with its resolved source.
 /// * `path` - Path to the Arrow directory containing photon data for this element.
 ///
 /// # Returns
@@ -1362,21 +1366,6 @@ pub fn get_or_load_element(
     name: &str,
     path: &str,
 ) -> Result<Arc<PhotonInteraction>, Box<dyn std::error::Error>> {
-    // Fast path: check if already cached
-    {
-        let map = ELEMENT_MAP
-            .read()
-            .map_err(|e| format!("ELEMENT_MAP read lock poisoned: {e}"))?;
-        if let Some(&idx) = map.get(name) {
-            let elems = ELEMENTS
-                .read()
-                .map_err(|e| format!("ELEMENTS read lock poisoned: {e}"))?;
-            if let Some(elem) = elems.get(idx) {
-                return Ok(Arc::clone(elem));
-            }
-        }
-    }
-
     // Resolve keywords / URLs / parent directories to a concrete Arrow directory,
     // mirroring the nuclide loader (see `nuclide.rs::load_nuclide_for_python`). This
     // is what makes `material.read_nuclear_data("endf-b8.1")` autodownload the
@@ -1388,6 +1377,21 @@ pub fn get_or_load_element(
         // Photon data has no transmutation path, so it is always fetched whole.
         &yamc_nuclide::LoadScope::full(),
     )?;
+    let key = (name.to_string(), resolved_path.clone());
+
+    {
+        let map = ELEMENT_MAP
+            .read()
+            .map_err(|e| format!("ELEMENT_MAP read lock poisoned: {e}"))?;
+        if let Some(&idx) = map.by_source.get(&key) {
+            let elems = ELEMENTS
+                .read()
+                .map_err(|e| format!("ELEMENTS read lock poisoned: {e}"))?;
+            if let Some(elem) = elems.get(idx) {
+                return Ok(Arc::clone(elem));
+            }
+        }
+    }
 
     // Slow path: load from Arrow directory
     let p = std::path::Path::new(&resolved_path);
@@ -1431,7 +1435,7 @@ pub fn get_or_load_element(
     // registered the same element while this one was reading the Arrow
     // directory. Without this, the loser registered a duplicate entry and
     // re-pointed the map at it.
-    if let Some(&idx) = map.get(name) {
+    if let Some(&idx) = map.by_source.get(&key) {
         let elems = ELEMENTS
             .read()
             .map_err(|e| format!("ELEMENTS read lock poisoned: {e}"))?;
@@ -1450,7 +1454,8 @@ pub fn get_or_load_element(
     let arc = Arc::new(interaction);
     elems.push(Arc::clone(&arc));
 
-    map.insert(name.to_string(), index);
+    map.by_source.insert(key, index);
+    map.by_name.insert(name.to_string(), index);
 
     Ok(arc)
 }
@@ -1461,21 +1466,21 @@ pub fn get_element_by_index(index: usize) -> Option<Arc<PhotonInteraction>> {
     elems.get(index).cloned()
 }
 
-/// Retrieve a cached element by name.
+/// Retrieve the most recently registered source for a cached element by name.
 pub fn get_element_by_name(name: &str) -> Option<Arc<PhotonInteraction>> {
     let map = ELEMENT_MAP.read().ok()?;
-    let &idx = map.get(name)?;
+    let &idx = map.by_name.get(name)?;
     let elems = ELEMENTS.read().ok()?;
     elems.get(idx).cloned()
 }
 
 /// Clear all cached element data. Useful for testing.
 pub fn clear_element_cache() {
-    if let Ok(mut elems) = ELEMENTS.write() {
+    if let Ok(mut map) = ELEMENT_MAP.write()
+        && let Ok(mut elems) = ELEMENTS.write()
+    {
         elems.clear();
-    }
-    if let Ok(mut map) = ELEMENT_MAP.write() {
-        map.clear();
+        *map = ElementCache::default();
     }
     if let Ok(mut pz) = COMPTON_PROFILE_PZ.write() {
         *pz = None;

@@ -197,11 +197,10 @@ impl Config {
     /// Why `nuclides` have no neutron cross-section source, saying how to give
     /// them one.
     ///
-    /// There is no default neutron library: unlike the photon data
-    /// (`url_cache::DEFAULT_PHOTON_LIBRARY`) and the transmutation chain
-    /// ([`DEFAULT_TRANSMUTATION_LIBRARY`]), which library the neutrons see is
-    /// the calculation's central choice, so it is made by the caller and a
-    /// calculation that needs it and finds none stops here.
+    /// There is no default cross-section library: neutron and photon data
+    /// follow the caller's selection. The transmutation chain has a default
+    /// ([`DEFAULT_TRANSMUTATION_LIBRARY`]), but a transport calculation that
+    /// needs cross sections and finds no source stops here.
     pub fn missing_cross_sections(&self, nuclides: &[&str]) -> String {
         let named = nuclides
             .iter()

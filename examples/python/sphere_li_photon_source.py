@@ -26,9 +26,8 @@ Outputs (open either in a browser and click Simulate):
 
 import yamc
 
-# Pull cross-section data from the R2 mirror; first run caches under
-# ~/.cache/yamc/. `read_nuclear_data('endf-b8.1')` loads both the neutron
-# (per-nuclide) and photon (per-element) data for each material.
+# Pull neutron and photon data from the same library automatically.
+# The first run caches the downloaded data locally.
 yamc.cross_section_data = "endf-b8.1"
 
 # --- Material: natural lithium ------------------------------------------
@@ -40,8 +39,6 @@ lithium = yamc.Material(
     temperature=294,
     name="lithium",
 )
-lithium.read_nuclear_data("endf-b8.1")
-
 # --- Geometry: single solid sphere --------------------------------------
 outer = yamc.Sphere(radius=10.0, boundary="vacuum")
 sphere_cell = yamc.Cell(region=outer.below, material=lithium, name="lithium_sphere")
