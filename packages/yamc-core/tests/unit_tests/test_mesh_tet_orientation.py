@@ -71,7 +71,7 @@ def _write_cube(path, invert_tet=None):
 
 
 def _material():
-    return yamc.Material(composition={"H": 1.0}, density=1.0, units="g/cc", name="a")
+    return yamc.Material(composition={"H": 1.0}, density=1.0, density_units="g/cc", name="a")
 
 
 def _path(name):

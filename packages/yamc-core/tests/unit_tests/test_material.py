@@ -1,3 +1,4 @@
+import inspect
 from pathlib import Path
 
 import yamc
@@ -218,10 +219,39 @@ def test_density_float():
     assert mat.density_units == "g/cm3"
 
 
+@pytest.mark.parametrize("density_units, expected", [
+    ("g/cm3", "g/cm3"),
+    ("g/cc", "g/cm3"),
+    ("kg/m3", "kg/m3"),
+    ("atom/barn-cm", "atom/barn-cm"),
+])
+def test_density_units_keyword(density_units, expected):
+    mat = Material(composition={"Fe56": 1.0}, density=1.0, density_units=density_units)
+    assert mat.density == 1.0
+    assert mat.density_units == expected
+
+
+def test_material_constructor_signature_uses_density_units():
+    parameters = inspect.signature(Material).parameters
+    assert "units" not in parameters
+    assert parameters["density_units"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameters["density_units"].default == "g/cm3"
+
+
+def test_material_constructor_rejects_old_units_keyword():
+    with pytest.raises(TypeError, match="unexpected keyword argument 'units'"):
+        Material(composition={"Fe56": 1.0}, density=1.0, units="g/cm3")
+
+
+def test_density_units_rejects_unknown_units():
+    with pytest.raises(ValueError, match="Unsupported density unit"):
+        Material(composition={"Fe56": 1.0}, density=1.0, density_units="unknown")
+
+
 def test_density_atom_per_barn_cm():
     # Total atom density + relative atom fractions.
     mat = Material(composition={"Li6": 0.625, "Li7": 0.375}, density=0.08,
-                   units="atom/barn-cm")
+                   density_units="atom/barn-cm")
     assert mat.density == 0.08
     assert mat.density_units == "atom/barn-cm"
     apbc = mat.get_atoms_per_barn_cm()
@@ -232,7 +262,7 @@ def test_density_atom_per_barn_cm():
 def test_atom_per_barn_cm_requires_atom_fractions():
     with pytest.raises(ValueError, match="atom"):
         Material(composition={"Li6": 1.0}, density=0.08,
-                 units="atom/barn-cm", fraction_type="mass")
+                 density_units="atom/barn-cm", fraction_type="mass")
 
 
 def test_from_atom_densities():
@@ -432,7 +462,7 @@ def test_contact_dose_rejects_a_non_positive_build_up():
 
 
 def test_density_kg_m3():
-    mat = Material(composition={"Fe56": 1.0}, density=7870.0, units="kg/m3")
+    mat = Material(composition={"Fe56": 1.0}, density=7870.0, density_units="kg/m3")
     assert mat.density == 7870.0
     assert mat.density_units == "kg/m3"
 

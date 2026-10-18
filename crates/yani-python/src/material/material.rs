@@ -11,7 +11,7 @@ use yamc_materials::material::Material;
 /// nuclide names (``"Fe56"``), element symbols (``"Fe"``), chemical formulas
 /// (``"H2O"``), or :class:`Nuclide` objects, and whose values are atom or
 /// weight fractions (or :func:`enriched` specifications). Density is always a
-/// float; ``units`` sets its meaning (``g/cm3`` by default, or
+/// float; ``density_units`` sets its meaning (``g/cm3`` by default, or
 /// ``atom/barn-cm`` for a total atom density). For absolute per-nuclide atom
 /// densities use :meth:`Material.from_atom_densities`.
 ///
@@ -256,10 +256,10 @@ impl PyMaterial {
     ///         Keys are element symbols ("Fe"), nuclide names ("Fe56"),
     ///         chemical formulas ("H2O"), or ``yamc.Nuclide`` objects.
     ///         Values are fractions (float) or enriched() objects.
-    ///     density (float): Density value, interpreted per ``units``. For
-    ///         ``units="atom/barn-cm"`` it is the total atom density and the
+    ///     density (float): Density value, interpreted per ``density_units``. For
+    ///         ``density_units="atom/barn-cm"`` it is the total atom density and the
     ///         composition values are relative atom fractions.
-    ///     units (str): Density units: "g/cm3", "g/cc", "kg/m3", or
+    ///     density_units (str): Density units: "g/cm3", "g/cc", "kg/m3", or
     ///         "atom/barn-cm" (total atom density; requires fraction_type="atom").
     ///     name (Optional[str]): Name for the material.
     ///     id (Optional[int]): ID for the material.
@@ -276,8 +276,8 @@ impl PyMaterial {
     ///     Material: A new material.
     #[new]
     #[pyo3(
-        signature = (composition, density, *, units="g/cm3".to_string(), name=None, id=None, fraction_type="atom".to_string(), transmutable=false, volume=None, temperature=None),
-        text_signature = "(composition, density, *, units='g/cm3', name=None, id=None, fraction_type='atom', transmutable=False, volume=None, temperature=None)"
+        signature = (composition, density, *, density_units="g/cm3".to_string(), name=None, id=None, fraction_type="atom".to_string(), transmutable=false, volume=None, temperature=None),
+        text_signature = "(composition, density, *, density_units='g/cm3', name=None, id=None, fraction_type='atom', transmutable=False, volume=None, temperature=None)"
     )]
     fn new(
         // `Enriched` is a pyclass in this crate, so it needs no package
@@ -286,7 +286,7 @@ impl PyMaterial {
         #[gen_stub(override_type(type_repr = "dict[str | Nuclide, float | Enriched]"))]
         composition: &Bound<'_, pyo3::types::PyDict>,
         density: f64,
-        units: String,
+        density_units: String,
         name: Option<String>,
         id: Option<u32>,
         fraction_type: String,
@@ -353,10 +353,10 @@ impl PyMaterial {
             yamc_nuclide::composition::merge_nuclides(&mut nuclides, &entry_nuclides);
         }
 
-        // `density` is always a numeric value; its meaning is set by `units`.
+        // `density` is always a numeric value; its meaning is set by `density_units`.
         // (The old `density="sum"` sentinel is gone -- pass absolute per-nuclide
         // atom densities via Material.from_atom_densities instead.)
-        let mut internal = Material::new(nuclides, &fraction_type, &units, Some(density))
+        let mut internal = Material::new(nuclides, &fraction_type, &density_units, Some(density))
             .map_err(PyValueError::new_err)?;
         internal.nuclide_input_order = Some(input_order);
 
@@ -612,7 +612,7 @@ impl PyMaterial {
         card(&format!("Material: {name}"), "", &body)
     }
 
-    /// Density value, in the material's ``units``. Always a float: for
+    /// Density value, in the material's ``density_units``. Always a float: for
     /// ``"atom/barn-cm"`` (and transmuted materials) it is the total atom
     /// density, otherwise the mass density.
     #[getter]

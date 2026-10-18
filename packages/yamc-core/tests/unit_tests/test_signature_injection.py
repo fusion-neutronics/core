@@ -15,7 +15,7 @@ def test_material_signature_is_typed():
     sig = inspect.signature(yamc.Material)
     density = sig.parameters["density"]
     assert density.annotation is not inspect.Parameter.empty
-    # density is a plain float (the units= kwarg carries its meaning).
+    # density is a plain float (the density_units= kwarg carries its meaning).
     assert "float" in str(density.annotation)
     composition = sig.parameters["composition"]
     assert "dict" in str(composition.annotation)

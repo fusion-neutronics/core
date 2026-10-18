@@ -15,7 +15,7 @@ def _dummy_materials(*names):
     for name in names:
         m = yamc.Material(
             composition={"H": 1.0},
-            density=1.0, units="g/cc",
+            density=1.0, density_units="g/cc",
             name=name,
         )
         mats[name] = m

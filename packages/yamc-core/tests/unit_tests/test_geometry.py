@@ -213,7 +213,7 @@ def test_cell_ids_stays_the_same():
 def test_material_object_retention():
     mat_air = yamc.Material(
         composition={"N": 0.784431, "O": 0.210748, "Ar": 0.0046},
-        density=0.001205, units="g/cc",
+        density=0.001205, density_units="g/cc",
         name="Air",
         id=33)
 

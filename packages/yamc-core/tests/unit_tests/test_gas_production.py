@@ -46,7 +46,7 @@ def _material(composition, density=0.08):
     return yamc.Material(
         composition=composition,
         density=density,
-        units="atom/barn-cm",
+        density_units="atom/barn-cm",
         volume=1.0,
         temperature=294,
     )

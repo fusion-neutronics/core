@@ -62,7 +62,7 @@ def test_geometry_bounding_box():
     zplane3 = yamc.Plane(axis="z", offset=8)
     region2 = (xplane2.above & xplane3.below & yplane2.above & yplane3.below & zplane2.above & zplane3.below)
 
-    mat = yamc.Material(composition={"H": 1.0}, density=1.0, units="g/cc", name="Test")
+    mat = yamc.Material(composition={"H": 1.0}, density=1.0, density_units="g/cc", name="Test")
     cell1 = yamc.Cell(region=region1, material=mat)
     cell2 = yamc.Cell(region=region2, material=mat)
 
