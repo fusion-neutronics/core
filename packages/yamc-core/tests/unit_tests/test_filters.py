@@ -11,7 +11,7 @@ def test_tally_cells_kwarg():
 
     material = mmc.Material(
         composition={"Li6": 1.0},
-        density=1.0, units="g/cc")
+        density=1.0, density_units="g/cc")
 
     cell = mmc.Cell(region, 42, "test_cell", material)
 
@@ -28,7 +28,7 @@ def test_tally_cells_kwarg_with_material_id():
 
     material = mmc.Material(
         composition={"Li6": 1.0},
-        density=1.0, units="g/cc",
+        density=1.0, density_units="g/cc",
         name="test_material",
         id=123)
 
@@ -48,7 +48,7 @@ def test_tally_materials_kwarg():
     """Test that Tally can be created with the materials keyword argument."""
     material = mmc.Material(
         composition={"Li6": 1.0},
-        density=1.0, units="g/cc",
+        density=1.0, density_units="g/cc",
         name="test_material",
         id=123)
 
@@ -62,7 +62,7 @@ def test_tally_materials_kwarg_no_id_fails():
     """Test Tally materials kwarg fails with a material that has no ID."""
     material = mmc.Material(
         composition={"Li6": 1.0},
-        density=1.0, units="g/cc",
+        density=1.0, density_units="g/cc",
         name="test_material")
 
     with pytest.raises(ValueError, match="no ID"):
@@ -73,7 +73,7 @@ def test_tally_materials_kwarg_readback():
     """Test Tally materials kwarg round-trips correctly."""
     material_with_id = mmc.Material(
         composition={"Li6": 1.0},
-        density=1.0, units="g/cc",
+        density=1.0, density_units="g/cc",
         name="test_material",
         id=123)
     tally = mmc.Tally(materials=material_with_id)
@@ -85,7 +85,7 @@ def test_tally_with_materials_kwarg_and_scores():
     """Test that Tally can use materials kwarg with scores."""
     material = mmc.Material(
         composition={"Li6": 1.0},
-        density=1.0, units="g/cc",
+        density=1.0, density_units="g/cc",
         name="test_material",
         id=123)
 
@@ -100,7 +100,7 @@ def test_tally_cells_and_materials_mutually_exclusive():
     region = sphere.below
     material = mmc.Material(
         composition={"Li6": 1.0},
-        density=1.0, units="g/cc",
+        density=1.0, density_units="g/cc",
         id=1)
     cell = mmc.Cell(region, 42, "test_cell", material)
 

@@ -28,7 +28,7 @@ def test_get_atoms_per_barn_cm():
     # Test with different density units (kg/m³)
     material = Material(
         composition={"Li6": 1.0},
-        density=1000.0, units="kg/m3",  # 1000 kg/m³ = 1 g/cm³
+        density=1000.0, density_units="kg/m3",  # 1000 kg/m³ = 1 g/cm³
         temperature=294,
     )
     material.read_nuclear_data({"Li6": "tests/Li6.arrow"})

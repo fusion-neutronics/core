@@ -20,7 +20,7 @@ TWO_REGION_ARROW = "crates/yamt/tests/data/two_region.arrow"
 
 def _material(name, composition):
     return yamc.Material(
-        composition=composition, density=1.0, units="g/cc", name=name
+        composition=composition, density=1.0, density_units="g/cc", name=name
     )
 
 

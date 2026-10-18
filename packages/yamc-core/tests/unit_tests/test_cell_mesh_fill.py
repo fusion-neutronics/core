@@ -16,7 +16,7 @@ TWO_REGION_ARROW = "crates/yamt/tests/data/two_region.arrow"
 def _dummy_material(name):
     """Minimal Material (no nuclear data): geometry-only tests."""
     return yamc.Material(
-        composition={"H": 1.0}, density=1.0, units="g/cc", name=name,
+        composition={"H": 1.0}, density=1.0, density_units="g/cc", name=name,
     )
 
 

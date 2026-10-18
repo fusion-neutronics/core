@@ -9,6 +9,7 @@ Skipped unless the standalone ``yani`` wheel is installed alongside ``yamc``;
 ``maturin develop -m packages/yani-core/pyproject.toml`` puts it there.
 """
 
+import inspect
 from pathlib import Path
 
 import pytest
@@ -81,3 +82,22 @@ def test_classes_report_their_own_package():
     so ``repr`` and pickling point at the package the user imported."""
     assert yamc.Material.__module__ == "yamc._core"
     assert yani.Material.__module__ == "yani._core"
+
+
+@pytest.mark.parametrize("density_units, expected", [
+    ("g/cm3", "g/cm3"),
+    ("g/cc", "g/cm3"),
+    ("kg/m3", "kg/m3"),
+    ("atom/barn-cm", "atom/barn-cm"),
+])
+def test_material_density_units_keyword_parity(density_units, expected):
+    for package in (yamc, yani):
+        parameters = inspect.signature(package.Material).parameters
+        assert "units" not in parameters
+        assert parameters["density_units"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameters["density_units"].default == "g/cm3"
+        material = package.Material(
+            composition={"Fe56": 1.0}, density=1.0, density_units=density_units,
+        )
+        assert material.density == 1.0
+        assert material.density_units == expected

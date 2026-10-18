@@ -43,7 +43,7 @@ def test_from_domain_region():
 
 def test_from_domain_cell():
     region = _sphere_region(5.0)
-    mat = yamc.Material(composition={"H": 1.0}, density=1.0, units="g/cc", name="dummy")
+    mat = yamc.Material(composition={"H": 1.0}, density=1.0, density_units="g/cc", name="dummy")
     cell = yamc.Cell(region=region, material=mat)
     mesh = yamc.RegularRectangularMesh.from_domain(cell, shape=100)
     assert mesh.lower_left == pytest.approx([-5, -5, -5])
@@ -57,7 +57,7 @@ def test_from_domain_cell():
 def test_from_domain_geometry():
     r1 = _box_region(0, 10, 0, 5, 0, 2)
     r2 = _box_region(20, 30, 10, 15, 5, 8)
-    mat = yamc.Material(composition={"H": 1.0}, density=1.0, units="g/cc", name="Test")
+    mat = yamc.Material(composition={"H": 1.0}, density=1.0, density_units="g/cc", name="Test")
     c1 = yamc.Cell(region=r1, material=mat)
     c2 = yamc.Cell(region=r2, material=mat)
     geom = yamc.Geometry([c1, c2])
@@ -143,7 +143,7 @@ def test_from_domain_invalid_type_raises():
 
 def test_from_domain_material_without_meshgeom_raises():
     region = _sphere_region(5.0)
-    mat = yamc.Material(composition={"H": 1.0}, density=1.0, units="g/cc", name="water")
+    mat = yamc.Material(composition={"H": 1.0}, density=1.0, density_units="g/cc", name="water")
     with pytest.raises(ValueError, match="MeshGeometry"):
         yamc.RegularRectangularMesh.from_domain(region, shape=100, material=mat)
 

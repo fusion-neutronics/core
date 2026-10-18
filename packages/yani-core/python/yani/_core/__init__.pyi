@@ -922,7 +922,7 @@ class Material:
     nuclide names (``"Fe56"``), element symbols (``"Fe"``), chemical formulas
     (``"H2O"``), or :class:`Nuclide` objects, and whose values are atom or
     weight fractions (or :func:`enriched` specifications). Density is always a
-    float; ``units`` sets its meaning (``g/cm3`` by default, or
+    float; ``density_units`` sets its meaning (``g/cm3`` by default, or
     ``atom/barn-cm`` for a total atom density). For absolute per-nuclide atom
     densities use :meth:`Material.from_atom_densities`.
     
@@ -1003,7 +1003,7 @@ class Material:
     @property
     def density(self) -> builtins.float:
         r"""
-        Density value, in the material's ``units``. Always a float: for
+        Density value, in the material's ``density_units``. Always a float: for
         ``"atom/barn-cm"`` (and transmuted materials) it is the total atom
         density, otherwise the mass density.
         """
@@ -1048,7 +1048,7 @@ class Material:
         Returns:
             Optional[float]: Sampled distance in cm, or None if total XS unavailable.
         """
-    def __new__(cls, composition: dict[str | Nuclide, float | Enriched], density: builtins.float, *, units: builtins.str = 'g/cm3', name: typing.Optional[builtins.str] = None, id: typing.Optional[builtins.int] = None, fraction_type: builtins.str = 'atom', transmutable: builtins.bool = False, volume: typing.Optional[builtins.float] = None, temperature: typing.Optional[builtins.float] = None) -> Material:
+    def __new__(cls, composition: dict[str | Nuclide, float | Enriched], density: builtins.float, *, density_units: builtins.str = 'g/cm3', name: typing.Optional[builtins.str] = None, id: typing.Optional[builtins.int] = None, fraction_type: builtins.str = 'atom', transmutable: builtins.bool = False, volume: typing.Optional[builtins.float] = None, temperature: typing.Optional[builtins.float] = None) -> Material:
         r"""
         Create a new material with a declarative composition and density.
         
@@ -1057,10 +1057,10 @@ class Material:
                 Keys are element symbols ("Fe"), nuclide names ("Fe56"),
                 chemical formulas ("H2O"), or ``yani.Nuclide`` objects.
                 Values are fractions (float) or enriched() objects.
-            density (float): Density value, interpreted per ``units``. For
-                ``units="atom/barn-cm"`` it is the total atom density and the
+            density (float): Density value, interpreted per ``density_units``. For
+                ``density_units="atom/barn-cm"`` it is the total atom density and the
                 composition values are relative atom fractions.
-            units (str): Density units: "g/cm3", "g/cc", "kg/m3", or
+            density_units (str): Density units: "g/cm3", "g/cc", "kg/m3", or
                 "atom/barn-cm" (total atom density; requires fraction_type="atom").
             name (Optional[str]): Name for the material.
             id (Optional[int]): ID for the material.

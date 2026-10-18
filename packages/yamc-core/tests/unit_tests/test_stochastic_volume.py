@@ -26,7 +26,7 @@ def test_geometry_populates_all_cells():
     """After geometry.calculate_volume(), all cell volumes should be set."""
     s1 = yamc.Sphere(x0=0, y0=0, z0=0, radius=3.0)
     s2 = yamc.Sphere(x0=10, y0=0, z0=0, radius=2.0)
-    mat = yamc.Material(composition={"H": 1.0}, density=1.0, units="g/cc", name="Test")
+    mat = yamc.Material(composition={"H": 1.0}, density=1.0, density_units="g/cc", name="Test")
     cell1 = yamc.Cell(region=s1.below, material=mat)
     cell2 = yamc.Cell(region=s2.below, material=mat)
     geometry = yamc.Geometry([cell1, cell2])
@@ -76,7 +76,7 @@ def test_concentric_shells():
     s_inner = yamc.Sphere(x0=0, y0=0, z0=0, radius=r_inner)
     s_outer = yamc.Sphere(x0=0, y0=0, z0=0, radius=r_outer)
 
-    mat = yamc.Material(composition={"H": 1.0}, density=1.0, units="g/cc", name="Test")
+    mat = yamc.Material(composition={"H": 1.0}, density=1.0, density_units="g/cc", name="Test")
 
     inner_cell = yamc.Cell(region=s_inner.below, material=mat)
     shell_cell = yamc.Cell(region=s_inner.above & s_outer.below, material=mat)
@@ -107,7 +107,7 @@ def test_geometry_propagates_material_volume():
     s = yamc.Sphere(x0=0, y0=0, z0=0, radius=r)
     mat = yamc.Material(
         composition={"Fe": 1.0},
-        density=7.87, units="g/cc",
+        density=7.87, density_units="g/cc",
         name="Iron",
         transmutable=True,
     )
@@ -132,7 +132,7 @@ def test_shared_transmutable_material_errors():
     s2 = yamc.Sphere(x0=10, y0=0, z0=0, radius=2.0)
     mat = yamc.Material(
         composition={"Fe": 1.0},
-        density=7.87, units="g/cc",
+        density=7.87, density_units="g/cc",
         name="Iron",
         transmutable=True,
     )
