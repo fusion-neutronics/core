@@ -24,6 +24,7 @@ pub mod marker;
 pub mod nubar_covariance;
 pub mod nuclide;
 pub mod photon;
+pub mod photonuclear;
 pub mod products;
 pub mod reaction_ranges;
 pub mod reactions;

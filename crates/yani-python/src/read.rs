@@ -23,6 +23,32 @@ use pyo3_stub_gen::derive::gen_stub_pyfunction;
 
 use yamc_nuclide::load_scope::{LoadScope, SectionScope};
 
+/// Validate evaluated photonuclear Arrow tables against their preserved ENDF.
+/// Returns the nuclide identity, MTs, per-MT energy-point counts and preserved
+/// (MF, MT) section keys. Does not invoke neutron or photoatomic transport.
+#[gen_stub_pyfunction]
+#[pyfunction]
+pub fn read_photonuclear_from_arrow(py: Python, path: &str) -> PyResult<Py<PyAny>> {
+    let summary = py
+        .detach(|| {
+            yamc_convert::photonuclear::inspect_photonuclear(std::path::Path::new(path))
+                .map_err(|error| error.to_string())
+        })
+        .map_err(|error| PyRuntimeError::new_err(format!("{path}: {error}")))?;
+    let dict = PyDict::new(py);
+    dict.set_item("name", summary.name)?;
+    dict.set_item("atomic_number", summary.atomic_number)?;
+    dict.set_item("mass_number", summary.mass_number)?;
+    dict.set_item(
+        "mts",
+        summary.energy_points.keys().copied().collect::<Vec<_>>(),
+    )?;
+    dict.set_item("energy_points", summary.energy_points)?;
+    dict.set_item("sections", summary.sections)?;
+    dict.set_item("scope_loaded", "evaluated")?;
+    Ok(dict.into())
+}
+
 /// Read a nuclide Arrow directory through yamc's own loader and describe it.
 ///
 /// Parameters

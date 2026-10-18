@@ -349,6 +349,11 @@ impl IncidentPhoton {
         let metadata = photoatomic.mf1_mt451().ok_or(Error::Unsupported {
             what: "a photoatomic evaluation with no MF=1 MT=451",
         })?;
+        if metadata.nsub != 3 {
+            return Err(Error::Unsupported {
+                what: "IncidentPhoton requires photoatomic data (NSUB=3), not photonuclear data",
+            });
+        }
         let mut data = IncidentPhoton::new(metadata.za / 1000);
 
         for &(mf, mt) in photoatomic.section_data.keys() {
@@ -641,6 +646,13 @@ mod tests {
                 assert_eq!(photon_reaction_mt(name), Some(mt), "{name} came back wrong");
             }
         }
+    }
+
+    #[test]
+    fn rejects_non_photoatomic_evaluations() {
+        let evaluation = material(ATOM_H);
+        let error = IncidentPhoton::from_endf(&evaluation, None).unwrap_err();
+        assert!(error.to_string().contains("photoatomic data (NSUB=3)"));
     }
 
     #[test]
