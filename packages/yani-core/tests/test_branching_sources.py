@@ -16,23 +16,20 @@ import pytest
 yani = pytest.importorskip("yani", reason="standalone yani wheel not installed")
 
 
-def test_one_source_reads_back_as_itself():
-    yani.transmutation_branch_ratios = "endf-b8.1"
-    assert yani.transmutation_branch_ratios == "endf-b8.1"
+@pytest.mark.parametrize(
+    "assigned",
+    ["endf-b8.1", ["endf-b8.1"], ["irdff-ii", "endf-b8.1"], [], None],
+)
+def test_the_setting_reads_back_as_it_was_assigned(assigned):
+    """A string stays a string and a list a list, a list of one included."""
+    yani.transmutation_branch_ratios = assigned
+    assert yani.transmutation_branch_ratios == assigned
+    assert type(yani.transmutation_branch_ratios) is type(assigned)
 
 
 def test_several_sources_keep_their_order():
-    yani.transmutation_branch_ratios = ["irdff-ii", "endf-b8.1"]
-    assert yani.transmutation_branch_ratios == ["irdff-ii", "endf-b8.1"]
     yani.transmutation_branch_ratios = ("endf-b8.1", "irdff-ii")
     assert yani.transmutation_branch_ratios == ["endf-b8.1", "irdff-ii"]
-
-
-@pytest.mark.parametrize("none", [None, []])
-def test_no_source_turns_the_overlay_off(none):
-    yani.transmutation_branch_ratios = "endf-b8.1"
-    yani.transmutation_branch_ratios = none
-    assert yani.transmutation_branch_ratios is None
 
 
 @pytest.mark.parametrize(

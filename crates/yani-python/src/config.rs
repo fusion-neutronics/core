@@ -3,7 +3,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3_stub_gen::derive::gen_stub_pyfunction;
 use std::collections::HashMap;
-use yamc_nuclide::config::{SubsectionSource, CONFIG};
+use yamc_nuclide::config::{BranchSources, SubsectionSource, CONFIG};
 
 /// Refuse a branching-only library keyword (`irdff-ii`) where `role` names
 /// what it was asked to be, before anything is stored or downloaded.
@@ -338,21 +338,22 @@ impl pyo3_stub_gen::PyStubType for BranchSourcesArg {
 /// Get the isomeric-branching sources of the transmutation network.
 ///
 /// Returns:
-///     The one source as a string, several as a list in the order a reaction
-///     takes its split from them, or ``None`` when none is set and no
-///     isomeric-branching overlay is applied.
+///     What was assigned: one source as a string, a list of sources (in the
+///     order a reaction takes its split from them) as a list, or ``None``
+///     when nothing is set and no isomeric-branching overlay is applied.
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[gen_stub(override_return_type(type_repr = "builtins.str | list[builtins.str] | None"))]
 pub fn get_transmutation_branch_ratios(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    let sources = CONFIG
+    let setting = CONFIG
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .get_transmutation_branch_ratios();
-    Ok(match sources.as_slice() {
-        [] => py.None(),
-        [one] => one.into_pyobject(py)?.into_any().unbind(),
-        _ => sources.into_pyobject(py)?.into_any().unbind(),
+        .transmutation_branch_ratios
+        .clone();
+    Ok(match setting {
+        BranchSources::Unset => py.None(),
+        BranchSources::One(source) => source.into_pyobject(py)?.into_any().unbind(),
+        BranchSources::List(sources) => sources.into_pyobject(py)?.into_any().unbind(),
     })
 }
 
@@ -370,6 +371,9 @@ pub fn get_transmutation_branch_ratios(py: Python<'_>) -> PyResult<Py<PyAny>> {
 /// branching only, so it is only ever a source here, and only where it is
 /// named: it is never a default.
 ///
+/// It reads back as it was assigned: a string as a string, a list (even one
+/// of one) as a list.
+///
 /// Args:
 ///     value: A source, a list of sources in order, or ``None`` (or an empty
 ///         list) for no isomeric-branching overlay.
@@ -384,15 +388,15 @@ pub fn get_transmutation_branch_ratios(py: Python<'_>) -> PyResult<Py<PyAny>> {
 #[gen_stub_pyfunction]
 #[pyfunction]
 pub fn set_transmutation_branch_ratios(value: Option<BranchSourcesArg>) -> PyResult<()> {
-    let sources = match value {
-        None => Vec::new(),
-        Some(BranchSourcesArg::One(source)) => vec![source],
-        Some(BranchSourcesArg::Ordered(sources)) => sources,
+    let setting = match value {
+        None => BranchSources::Unset,
+        Some(BranchSourcesArg::One(source)) => BranchSources::One(source),
+        Some(BranchSourcesArg::Ordered(sources)) => BranchSources::List(sources),
     };
     CONFIG
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .set_transmutation_branch_ratios(sources)
+        .set_transmutation_branch_ratios(setting)
         .map_err(PyValueError::new_err)
 }
 
