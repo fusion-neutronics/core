@@ -438,7 +438,7 @@ impl TokamakPlasma {
                     phi.clone(),
                     Univariate::Uniform(Uniform::new(z_edges[bin_z], z_edges[bin_z + 1])?),
                     [0.0, 0.0, 0.0],
-                );
+                )?;
                 sources.push(Source {
                     space: SourceSpatialDistribution::CylindricalRing(Box::new(space)),
                     angle: AngularDistribution::Isotropic,
@@ -497,6 +497,39 @@ impl TokamakPlasma {
     /// Check the parameters that [`TokamakPlasma::sources`] relies on, so a
     /// bad plasma fails before any sampling rather than producing NaNs.
     pub fn validate(&self) -> Result<(), String> {
+        // First, and every one of them: the range checks below are written as
+        // `value <= 0.0` and the like, which a NaN passes, and the peaking
+        // factors and beta are not range-checked at all.
+        for (name, value) in [
+            ("major_radius", self.major_radius),
+            ("minor_radius", self.minor_radius),
+            ("elongation", self.elongation),
+            ("triangularity", self.triangularity),
+            ("ion_density_centre", self.ion_density_centre),
+            (
+                "ion_density_peaking_factor",
+                self.ion_density_peaking_factor,
+            ),
+            ("ion_density_pedestal", self.ion_density_pedestal),
+            ("ion_density_separatrix", self.ion_density_separatrix),
+            ("ion_temperature_centre", self.ion_temperature_centre),
+            (
+                "ion_temperature_peaking_factor",
+                self.ion_temperature_peaking_factor,
+            ),
+            ("ion_temperature_beta", self.ion_temperature_beta),
+            ("ion_temperature_pedestal", self.ion_temperature_pedestal),
+            (
+                "ion_temperature_separatrix",
+                self.ion_temperature_separatrix,
+            ),
+            ("pedestal_radius", self.pedestal_radius),
+            ("shafranov_factor", self.shafranov_factor),
+            ("start_angle", self.start_angle),
+            ("rotation_angle", self.rotation_angle),
+        ] {
+            crate::distribution::check_finite(name, value)?;
+        }
         if self.major_radius <= 0.0 {
             return Err(format!(
                 "major_radius must be positive (got {})",
@@ -587,7 +620,7 @@ impl TokamakPlasma {
             return Err("fuel must contain at least one species".to_string());
         }
         for (species, fraction) in &self.fuel {
-            if *fraction <= 0.0 || *fraction > 1.0 {
+            if !fraction.is_finite() || *fraction <= 0.0 || *fraction > 1.0 {
                 return Err(format!(
                     "fuel fractions must be greater than 0 and at most 1 (got {fraction} for \
                      {species:?})"

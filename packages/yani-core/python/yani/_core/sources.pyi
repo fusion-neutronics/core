@@ -61,7 +61,9 @@ class Discrete:
         
         Raises:
             ValueError: If energies and probabilities have different lengths, if
-                        any probability is negative, or if all are zero.
+                        any energy or probability is NaN or infinite, if any
+                        probability is negative, or if all are zero. The
+                        message names the entry and its value.
         
         Examples:
             >>> import yani
@@ -180,7 +182,8 @@ class Uniform:
             Uniform: A uniform energy distribution.
         
         Raises:
-            ValueError: If low >= high (lower bound must be less than upper bound).
+            ValueError: If low or high is NaN or infinite, or if low >= high
+                (lower bound must be less than upper bound).
         
         Examples:
             >>> import yani
@@ -233,7 +236,8 @@ class Normal:
             Normal: A normal energy distribution.
         
         Raises:
-            ValueError: If std_dev is not positive.
+            ValueError: If mean or std_dev is NaN or infinite, or if std_dev is
+                not positive.
         
         Examples:
             >>> import yani
@@ -361,6 +365,10 @@ class CylindricalRing:
             for the midplane).
         origin: Center of the cylindrical reference frame [x, y, z] in cm.
             Defaults to [0, 0, 0].
+    
+    Raises:
+        ValueError: If ``origin`` has a NaN or infinite coordinate, or a
+            ``radius``, ``phi`` or ``z`` given as a number is NaN or infinite.
     
     Examples:
         >>> import yani, math
@@ -495,9 +503,10 @@ def tokamak_source(*, major_radius: builtins.float, minor_radius: builtins.float
         list[NeutronSource]: One ring source per (mesh voxel, reaction).
     
     Raises:
-        ValueError: If the plasma parameters are inconsistent (for example a
-                minor radius larger than the major radius), the fuel is not
-                D and/or T, or the plasma is too cold to make neutrons.
+        ValueError: If a parameter is NaN or infinite (the message names it),
+                the plasma parameters are inconsistent (for example a minor
+                radius larger than the major radius), the fuel is not D and/or
+                T, or the plasma is too cold to make neutrons.
     
     Examples:
         >>> import yani

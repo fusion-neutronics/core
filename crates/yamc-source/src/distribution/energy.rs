@@ -1,6 +1,8 @@
 use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
 
+use super::check_finite;
+
 /// Build Vose alias tables for O(1) weighted sampling over `weights`.
 ///
 /// `weights` are normalized internally (only their relative values matter), so
@@ -53,7 +55,12 @@ fn build_alias_tables(weights: &[f64]) -> (Vec<usize>, Vec<f64>) {
 ///   Variables with General Distributions", ACM TOMS 3(3), 253-256.
 /// - Vose, M.D. (1991). "A Linear Algorithm for Generating Random Numbers with
 ///   a Given Distribution", IEEE Trans. Softw. Eng. 17(9), 972-975.
+///
+/// A model file is read through [`Discrete::new`], so its energies and
+/// probabilities are checked as a constructed one's are, and the alias tables
+/// are rebuilt from them rather than trusted.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "DiscreteData")]
 pub struct Discrete {
     // Energy values
     energies: Vec<f64>,
@@ -82,8 +89,25 @@ impl Discrete {
                 probabilities.len()
             ));
         }
-        if probabilities.iter().any(|&p| p < 0.0) {
-            return Err("Probabilities cannot be negative".to_string());
+        if let Some(i) = energies.iter().position(|e| !e.is_finite()) {
+            return Err(format!(
+                "Discrete energies[{i}] must be a finite number (got {})",
+                energies[i]
+            ));
+        }
+        // A NaN probability passes the checks below, since every comparison
+        // with a NaN is false, and would make every alias weight NaN.
+        if let Some(i) = probabilities.iter().position(|p| !p.is_finite()) {
+            return Err(format!(
+                "Discrete probabilities[{i}] must be a finite number (got {})",
+                probabilities[i]
+            ));
+        }
+        if let Some(i) = probabilities.iter().position(|&p| p < 0.0) {
+            return Err(format!(
+                "Discrete probabilities[{i}] is {}: probabilities cannot be negative",
+                probabilities[i]
+            ));
         }
         if probabilities.iter().all(|&p| p == 0.0) {
             return Err("At least one probability must be non-zero".to_string());
@@ -141,6 +165,22 @@ impl Discrete {
     }
 }
 
+/// What a model file holds for a [`Discrete`]: the alias tables it also
+/// holds are rebuilt rather than read.
+#[derive(Deserialize)]
+struct DiscreteData {
+    energies: Vec<f64>,
+    probabilities: Vec<f64>,
+}
+
+impl TryFrom<DiscreteData> for Discrete {
+    type Error = String;
+
+    fn try_from(data: DiscreteData) -> Result<Self, String> {
+        Discrete::new(data.energies, data.probabilities)
+    }
+}
+
 /// Histogram (piecewise-constant) energy distribution.
 ///
 /// `boundaries` are `n + 1` strictly ascending bin edges in eV; `probabilities`
@@ -148,7 +188,11 @@ impl Discrete {
 /// internally (only their relative values matter, so a raw multigroup flux may
 /// be passed directly). Sampling draws a bin in proportion to its mass via the
 /// O(1) alias method, then a uniform energy within that bin.
+///
+/// A model file is read through [`Histogram::new`], so it is checked as a
+/// constructed one is.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "HistogramData")]
 pub struct Histogram {
     // Bin edges (eV), length n + 1, strictly ascending.
     boundaries: Vec<f64>,
@@ -246,8 +290,28 @@ impl Histogram {
     }
 }
 
+/// What a model file holds for a [`Histogram`]: the alias tables it also
+/// holds are rebuilt rather than read.
+#[derive(Deserialize)]
+struct HistogramData {
+    boundaries: Vec<f64>,
+    probabilities: Vec<f64>,
+}
+
+impl TryFrom<HistogramData> for Histogram {
+    type Error = String;
+
+    fn try_from(data: HistogramData) -> Result<Self, String> {
+        Histogram::new(data.boundaries, data.probabilities)
+    }
+}
+
 /// Uniform energy distribution
+///
+/// A model file is read through [`Uniform::new`], so it is checked as a
+/// constructed one is.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "UniformData")]
 pub struct Uniform {
     // Lower bound
     a: f64,
@@ -259,6 +323,9 @@ pub struct Uniform {
 impl Uniform {
     /// Create a new uniform distribution with lower and upper bounds
     pub fn new(a: f64, b: f64) -> Result<Self, String> {
+        // Named as the Python constructor names them, `Uniform(low, high)`.
+        check_finite("Uniform low", a)?;
+        check_finite("Uniform high", b)?;
         if a >= b {
             return Err(format!(
                 "Lower bound must be less than upper bound (got a={a}, b={b})"
@@ -285,8 +352,26 @@ impl Uniform {
     }
 }
 
+#[derive(Deserialize)]
+struct UniformData {
+    a: f64,
+    b: f64,
+}
+
+impl TryFrom<UniformData> for Uniform {
+    type Error = String;
+
+    fn try_from(data: UniformData) -> Result<Self, String> {
+        Uniform::new(data.a, data.b)
+    }
+}
+
 /// Normal (Gaussian) energy distribution
+///
+/// A model file is read through [`Normal::new`], so it is checked as a
+/// constructed one is.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "NormalData")]
 pub struct Normal {
     /// Mean energy in eV
     mean_val: f64,
@@ -297,6 +382,10 @@ pub struct Normal {
 impl Normal {
     /// Create a new normal distribution with mean and standard deviation
     pub fn new(mean_val: f64, std_dev: f64) -> Result<Self, String> {
+        // Named as the Python constructor names them, `Normal(mean, std_dev)`.
+        // A NaN standard deviation would pass the check below.
+        check_finite("Normal mean", mean_val)?;
+        check_finite("Normal std_dev", std_dev)?;
         if std_dev <= 0.0 {
             return Err(format!(
                 "Standard deviation must be positive (got {})",
@@ -328,6 +417,20 @@ impl Normal {
     /// Get the standard deviation
     pub fn std_dev(&self) -> f64 {
         self.std_dev
+    }
+}
+
+#[derive(Deserialize)]
+struct NormalData {
+    mean_val: f64,
+    std_dev: f64,
+}
+
+impl TryFrom<NormalData> for Normal {
+    type Error = String;
+
+    fn try_from(data: NormalData) -> Result<Self, String> {
+        Normal::new(data.mean_val, data.std_dev)
     }
 }
 

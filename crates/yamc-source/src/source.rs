@@ -45,12 +45,37 @@ impl SourceSpatialDistribution {
     }
 }
 
+/// Why `strength` cannot weight a source, if it cannot: NaN, infinite or
+/// negative. Zero is allowed, and such a source never emits.
+///
+/// Sources are picked by their cumulative strength, which a negative one makes
+/// non-monotonic and a NaN one makes every comparison false, so either would
+/// choose sources wrongly without a word.
+pub fn check_strength(strength: f64) -> Result<(), String> {
+    crate::distribution::check_finite("strength", strength)?;
+    if strength < 0.0 {
+        return Err(format!(
+            "strength must not be negative (got {strength}); a source of strength 0 never emits"
+        ));
+    }
+    Ok(())
+}
+
+/// A strength as a model file holds it, checked as [`check_strength`] checks
+/// one given to a source.
+fn checked_strength<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+    let strength = f64::deserialize(deserializer)?;
+    check_strength(strength).map_err(serde::de::Error::custom)?;
+    Ok(strength)
+}
+
 /// Source configuration: spatial, angular, and energy distributions plus strength.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
     pub space: SourceSpatialDistribution,
     pub angle: crate::distribution::angular::AngularDistribution,
     pub energy: SourceEnergyDistribution,
+    #[serde(deserialize_with = "checked_strength")]
     pub strength: f64,
 }
 

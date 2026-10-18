@@ -446,3 +446,56 @@ fn confinement_modes_and_fuel_species_parse() {
     assert_eq!(FuelIon::parse("T").unwrap(), FuelIon::Tritium);
     assert!(FuelIon::parse("He3").unwrap_err().contains("fuel species"));
 }
+
+/// A NaN passes the range checks written as `value <= 0.0` and the like, and
+/// the peaking factors and beta were not checked at all, so every float
+/// parameter is checked for being finite first, naming itself.
+#[test]
+fn a_parameter_that_is_not_a_finite_number_is_refused_naming_it() {
+    type Field = fn(&mut TokamakPlasma) -> &mut f64;
+    let fields: [(&str, Field); 17] = [
+        ("major_radius", |p| &mut p.major_radius),
+        ("minor_radius", |p| &mut p.minor_radius),
+        ("elongation", |p| &mut p.elongation),
+        ("triangularity", |p| &mut p.triangularity),
+        ("ion_density_centre", |p| &mut p.ion_density_centre),
+        ("ion_density_peaking_factor", |p| {
+            &mut p.ion_density_peaking_factor
+        }),
+        ("ion_density_pedestal", |p| &mut p.ion_density_pedestal),
+        ("ion_density_separatrix", |p| &mut p.ion_density_separatrix),
+        ("ion_temperature_centre", |p| &mut p.ion_temperature_centre),
+        ("ion_temperature_peaking_factor", |p| {
+            &mut p.ion_temperature_peaking_factor
+        }),
+        ("ion_temperature_beta", |p| &mut p.ion_temperature_beta),
+        ("ion_temperature_pedestal", |p| {
+            &mut p.ion_temperature_pedestal
+        }),
+        ("ion_temperature_separatrix", |p| {
+            &mut p.ion_temperature_separatrix
+        }),
+        ("pedestal_radius", |p| &mut p.pedestal_radius),
+        ("shafranov_factor", |p| &mut p.shafranov_factor),
+        ("start_angle", |p| &mut p.start_angle),
+        ("rotation_angle", |p| &mut p.rotation_angle),
+    ];
+    for (name, field) in fields {
+        for value in [f64::NAN, f64::INFINITY] {
+            let mut plasma = demo_plasma();
+            *field(&mut plasma) = value;
+            assert_eq!(
+                plasma.sources().unwrap_err(),
+                format!("{name} must be a finite number (got {value})")
+            );
+        }
+    }
+
+    let mut plasma = demo_plasma();
+    plasma.fuel = vec![(FuelIon::Deuterium, f64::NAN), (FuelIon::Tritium, 0.5)];
+    let err = plasma.sources().unwrap_err();
+    assert!(
+        err.contains("fuel fractions must be greater than 0 and at most 1") && err.contains("NaN"),
+        "{err}"
+    );
+}

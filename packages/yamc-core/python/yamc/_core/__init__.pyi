@@ -3350,7 +3350,15 @@ class NeutronSource:
         ``CylindricalRing`` distribution.
         """
     @position.setter
-    def position(self, value: typing.Any) -> None: ...
+    def position(self, value: typing.Any) -> None:
+        r"""
+        Set the birth location: an ``(x, y, z)`` point in cm, or a
+        ``CylindricalRing``.
+        
+        Raises:
+            ValueError: If a point has a NaN or infinite coordinate.
+                The position is then left as it was.
+        """
     @property
     def energy(self) -> typing.Any:
         r"""
@@ -3374,7 +3382,15 @@ class NeutronSource:
         Default is 1.0; only meaningful when multiple sources are passed to a Model.
         """
     @strength.setter
-    def strength(self, value: builtins.float) -> None: ...
+    def strength(self, value: builtins.float) -> None:
+        r"""
+        Set the relative strength of this source.
+        
+        Raises:
+            ValueError: If the strength is NaN, infinite or negative. It
+                is then left as it was. Zero is allowed, and such a
+                source never emits.
+        """
     def __new__(cls, *, position: typing.Optional[typing.Any] = None, energy: typing.Optional[typing.Any] = None, direction: typing.Optional[typing.Any] = None, strength: typing.Optional[builtins.float] = None) -> NeutronSource:
         r"""
         Create a neutron source.
@@ -3393,6 +3409,11 @@ class NeutronSource:
         
         Returns:
             NeutronSource: A neutron source.
+        
+        Raises:
+            ValueError: If ``position`` has a NaN or infinite coordinate, ``energy``
+                is a NaN or infinite number, or ``strength`` is NaN, infinite or
+                negative. The message names the parameter and its value.
         """
     def sample(self) -> Particle:
         r"""
@@ -3887,7 +3908,15 @@ class PhotonSource:
         ``CylindricalRing`` distribution.
         """
     @position.setter
-    def position(self, value: typing.Any) -> None: ...
+    def position(self, value: typing.Any) -> None:
+        r"""
+        Set the birth location: an ``(x, y, z)`` point in cm, or a
+        ``CylindricalRing``.
+        
+        Raises:
+            ValueError: If a point has a NaN or infinite coordinate.
+                The position is then left as it was.
+        """
     @property
     def energy(self) -> typing.Any:
         r"""
@@ -3911,7 +3940,15 @@ class PhotonSource:
         Default is 1.0; only meaningful when multiple sources are passed to a Model.
         """
     @strength.setter
-    def strength(self, value: builtins.float) -> None: ...
+    def strength(self, value: builtins.float) -> None:
+        r"""
+        Set the relative strength of this source.
+        
+        Raises:
+            ValueError: If the strength is NaN, infinite or negative. It
+                is then left as it was. Zero is allowed, and such a
+                source never emits.
+        """
     def __new__(cls, *, position: typing.Optional[typing.Any] = None, energy: typing.Optional[typing.Any] = None, direction: typing.Optional[typing.Any] = None, strength: typing.Optional[builtins.float] = None) -> PhotonSource:
         r"""
         Create a photon source.
@@ -3931,6 +3968,12 @@ class PhotonSource:
         
         Returns:
             PhotonSource: A photon source.
+        
+        Raises:
+            ValueError: If ``energy`` is omitted, ``position`` has a NaN or infinite
+                coordinate, ``energy`` is a NaN or infinite number, or ``strength`` is
+                NaN, infinite or negative. The message names the parameter and its
+                value.
         """
     def sample(self) -> Particle:
         r"""

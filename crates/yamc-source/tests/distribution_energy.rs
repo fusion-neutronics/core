@@ -32,7 +32,10 @@ mod tests {
         // Negative probabilities
         let result = Discrete::new(vec![1.0], vec![-0.5]);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Probabilities cannot be negative");
+        assert_eq!(
+            result.unwrap_err(),
+            "Discrete probabilities[0] is -0.5: probabilities cannot be negative"
+        );
     }
 
     #[test]

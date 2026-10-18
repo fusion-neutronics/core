@@ -152,7 +152,8 @@ fn build_source() -> ParticleSource {
         Univariate::Uniform(Uniform::new(0.0, std::f64::consts::TAU).unwrap()),
         Univariate::Discrete(Discrete::new(vec![0.0], vec![1.0]).unwrap()),
         [0.0, 0.0, 0.0],
-    );
+    )
+    .unwrap();
     ParticleSource::Neutron(Source {
         space: SourceSpatialDistribution::CylindricalRing(Box::new(ring)),
         angle: AngularDistribution::Isotropic,

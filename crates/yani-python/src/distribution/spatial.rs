@@ -25,6 +25,10 @@ use yamc_source::source::SourceEnergyDistribution;
 ///     origin: Center of the cylindrical reference frame [x, y, z] in cm.
 ///         Defaults to [0, 0, 0].
 ///
+/// Raises:
+///     ValueError: If ``origin`` has a NaN or infinite coordinate, or a
+///         ``radius``, ``phi`` or ``z`` given as a number is NaN or infinite.
+///
 /// Examples:
 ///     >>> import yamc, math
 ///     >>> # Ring source at radius=300 cm in the midplane
@@ -62,7 +66,8 @@ impl PyCylindricalRing {
         let z_dist = extract_univariate(z, "z")?;
         let origin = origin.unwrap_or([0.0, 0.0, 0.0]);
         Ok(Self {
-            inner: CylindricalRing::new(r_dist, phi_dist, z_dist, origin),
+            inner: CylindricalRing::new(r_dist, phi_dist, z_dist, origin)
+                .map_err(pyo3::exceptions::PyValueError::new_err)?,
         })
     }
 
@@ -148,6 +153,8 @@ fn extract_univariate(ob: &Bound<'_, PyAny>, name: &str) -> PyResult<Univariate>
     } else if let Ok(n) = ob.extract::<PyNormal>() {
         Ok(Univariate::Normal(n.inner.clone()))
     } else if let Ok(val) = ob.extract::<f64>() {
+        yamc_source::distribution::check_finite(name, val)
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
         let d = yamc_source::distribution::energy::Discrete::new(vec![val], vec![1.0]).map_err(
             |e| pyo3::exceptions::PyValueError::new_err(format!("Invalid {name} value: {e}")),
         )?;
