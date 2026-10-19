@@ -52,13 +52,14 @@ def gen_transmutation(nuclide):
         run_yamc_transmute,
     )
 
-    if nuclide in FULL_CHAIN_REFUSALS:
-        return {"expected_error": FULL_CHAIN_REFUSALS[nuclide]}
-    result = run_yamc_transmute(nuclide)
+    with_mt5 = nuclide not in FULL_CHAIN_REFUSALS
+    result = run_yamc_transmute(nuclide, with_anything=with_mt5)
     return {
         "steps": result["steps"],
         "timesteps": _config.TRANSMUTE_TIMESTEPS,
         "source_rates": _config.TRANSMUTE_SOURCE_RATES,
+        "with_mt5": with_mt5,
+        "full_chain_expected_error": FULL_CHAIN_REFUSALS.get(nuclide),
     }
 
 

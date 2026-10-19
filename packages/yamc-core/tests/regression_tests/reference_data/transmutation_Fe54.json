@@ -245,9 +245,11 @@
     0.0,
     0.0
   ],
+  "with_mt5": true,
+  "full_chain_expected_error": null,
   "generator": "yamc",
   "version": "0.16.1",
-  "source_commit": "f856ea27e3c3acb60d9381d64a6dea1e88714952",
+  "source_commit": "100fc00c0631d7cb9a27a01b8e703ae40f482273",
   "nuclide": "Fe54",
   "particles": 500000,
   "batches": 10,

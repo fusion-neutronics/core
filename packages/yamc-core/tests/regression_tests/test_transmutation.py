@@ -165,17 +165,13 @@ def compare_steps(nuclide, yamc_steps, expected_steps, skipped=None):
 
 @pytest.mark.parametrize("nuclide", ALL_NEUTRON_NUCLIDES)
 def test_transmutation(nuclide):
-    """Full-chain inventories retain their tightly checked yamc answers."""
+    """Inventories retain their answers, including the MT=5-refused cases."""
     ref = load_reference("transmutation", nuclide)
     skip_if_no_reference(ref, "transmutation", nuclide)
 
-    if nuclide in FULL_CHAIN_REFUSALS:
-        assert ref["expected_error"] == FULL_CHAIN_REFUSALS[nuclide]
-        with pytest.raises(ValueError, match=ref["expected_error"]):
-            run_yamc_transmute(nuclide)
-        return
-
-    result = run_yamc_transmute(nuclide)
+    assert ref["with_mt5"] == (nuclide not in FULL_CHAIN_REFUSALS)
+    assert ref["full_chain_expected_error"] == FULL_CHAIN_REFUSALS.get(nuclide)
+    result = run_yamc_transmute(nuclide, with_anything=ref["with_mt5"])
     assert_self_reference(ref["steps"], result["steps"], f"{nuclide}/inventories")
 
 
