@@ -15,7 +15,7 @@ def test_core_does_not_import_openmc():
     imports = []
     for directory in ("packages", "scripts", "examples", "pytests", "tools"):
         for path in (REPO_ROOT / directory).rglob("*.py"):
-            tree = ast.parse(path.read_text(), filename=str(path))
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
                 modules = []
                 if isinstance(node, ast.Import):
