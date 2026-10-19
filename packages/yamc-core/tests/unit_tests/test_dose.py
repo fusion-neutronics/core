@@ -159,20 +159,39 @@ class TestAmbientDoseCoefficients:
         with pytest.raises(ValueError, match="dose_quantity must be 'effective' or 'ambient'"):
             yamc.data.dose_coefficients("neutron", dose_quantity="H*(10)")
 
-    @pytest.mark.parametrize("particle", ["neutron", "photon"])
-    def test_matches_openmc(self, particle):
-        """Same ICRP-74 table as openmc.data.dose_coefficients(dose_quantity='ambient')."""
-        openmc_data = pytest.importorskip("openmc.data")
-        try:
-            energy, coeffs = openmc_data.dose_coefficients(
-                particle, data_source="icrp74", dose_quantity="ambient"
-            )
-        except TypeError:
-            pytest.skip("installed OpenMC has no dose_quantity argument")
-
-        dc = yamc.data.dose_coefficients(particle, dose_quantity="ambient")
-        assert dc.energy == pytest.approx(list(energy), rel=1e-12)
-        assert dc.coefficients == list(coeffs)
+    @pytest.mark.parametrize("particle, energies_mev, expected", [
+        ("neutron", [
+            1e-9, 1e-8, 2.53e-8, 1e-7, 2e-7, 5e-7, 1e-6, 2e-6, 5e-6,
+            1e-5, 2e-5, 5e-5, 1e-4, 2e-4, 5e-4, 1e-3, 2e-3, 5e-3,
+            0.01, 0.02, 0.03, 0.05, 0.07, 0.1, 0.15, 0.2, 0.3, 0.5,
+            0.7, 0.9, 1.0, 1.2, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+            9.0, 10.0, 12.0, 14.0, 15.0, 16.0, 18.0, 20.0,
+        ], [
+            6.6, 9.0, 10.6, 12.9, 13.5, 13.6, 13.3, 12.9, 12.0,
+            11.3, 10.6, 9.9, 9.4, 8.9, 8.3, 7.9, 7.7, 8.0, 10.5,
+            16.6, 23.7, 41.1, 60.0, 88.0, 132.0, 170.0, 233.0, 322.0,
+            375.0, 400.0, 416.0, 425.0, 420.0, 412.0, 408.0, 405.0,
+            400.0, 405.0, 409.0, 420.0, 440.0, 480.0, 520.0, 540.0,
+            555.0, 570.0, 600.0,
+        ]),
+        ("photon", [
+            0.01, 0.015, 0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.1,
+            0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.5, 2.0,
+            3.0, 4.0, 5.0, 6.0, 8.0, 10.0,
+        ], [
+            0.061, 0.83, 1.05, 0.81, 0.64, 0.55, 0.51, 0.53, 0.61,
+            0.89, 1.2, 1.8, 2.38, 2.93, 3.44, 4.38, 5.2, 6.9, 8.6,
+            11.1, 13.4, 15.5, 17.6, 21.6, 25.6,
+        ]),
+    ])
+    def test_complete_tables_match_icrp74(self, particle, energies_mev, expected):
+        """Every row of ICRP-74 Tables A.42 (neutrons) and A.21 (photons)."""
+        coefficients = yamc.data.dose_coefficients(particle, dose_quantity="ambient")
+        assert coefficients.energy == pytest.approx(
+            [energy * 1e6 for energy in energies_mev], rel=1e-12
+        )
+        assert coefficients.coefficients == expected
+        assert coefficients.units == "pSv cm2"
 
 
 class TestDoseTallyIntegration:

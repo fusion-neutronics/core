@@ -4,20 +4,11 @@ These values MUST match between the test fixtures (conftest.py) and the
 reference-data generator (generate_reference_data.py). They live here so the
 two stay in sync automatically.
 
-This module is imported two ways:
-  * conftest.py imports it as part of the package (relative import).
-  * generate_reference_data.py is run as a *script*, so it adds this
-    directory to sys.path and does ``import _config``.
-
-Deliberately NOT shared (kept per-file because they legitimately differ):
-  * NEUTRON_SCALAR_SCORES -- the generator includes 'heating-local' (a reference-code
-    score) while conftest omits it because yamc lacks that score.
-  * Chain/data paths -- conftest uses a "tests/" relative path; the generator
-    resolves an absolute Arrow path.
-  * reference HDF5 paths, REFERENCE_DIR mkdir, tolerance/source-energy helpers.
+Both the tests and generator use the same yamc runners and local Arrow
+fixtures. References must not depend on a developer's installed data libraries.
 """
 
-import os
+from pathlib import Path
 
 # Simulation parameters
 PARTICLES = 500_000
@@ -41,11 +32,7 @@ PHOTON_SCALAR_SCORES = [
 NEUTRON_GROUP_STRUCTURE = "VITAMIN-J-175"
 PHOTON_GROUP_STRUCTURE = "VITAMIN-J-42"
 
-# System-wide neutron data for transmutation daughter cross sections
-NEUTRON_DATA_DIR = os.environ.get(
-    "YAMC_NEUTRON_DATA_DIR",
-    os.path.expanduser("~/nuclear_data/endf-b8.0-arrow/neutron"),
-)
+NEUTRON_DATA_DIR = str(Path(__file__).resolve().parents[4] / "tests")
 
 # Transmutation parameters
 TRANSMUTE_ENERGY_GROUPS = [1e-5, 0.625, 1e5, 2e7]
