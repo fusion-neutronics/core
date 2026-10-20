@@ -45,27 +45,13 @@ TESTS_DATA_DIR = REPO_ROOT / "tests"  # symlink to crates/yamc/tests
 # Source energies (photon source energy is conftest-only)
 PHOTON_SOURCE_ENERGY = 1e6
 
-# Scores to test (excluding heating-local which yamc doesn't implement).
-# NOTE: intentionally differs from generate_reference_data.py, which includes
-# 'heating-local'. Do not share this list.
 NEUTRON_SCALAR_SCORES = [
     "flux", "heating", "total", "absorption",
     "H1-production", "H2-production", "H3-production",
     "He3-production", "He4-production",
 ]
 
-# Scores with known systematic differences (KERMA, etc.)
-# These get a wider tolerance
-# Scores held to the wide (10 %, 4 sigma) band instead of the tight (5 %,
-# 3 sigma) one. heating / heating-local: KERMA convention differences (see
-# assert_scalar_agreement). photoelectric: yamc carries a known +5-7 %
-# photoionization-rate residual against the OpenMC-derived references
-# (data-convention difference, identical on the CPU and GPU backends and
-# confirmed against a pre-change build by the V&V suite); under the old
-# 32-bit RNG stream the Fe56 coupled realization sat just under the tight
-# band by luck, and the 64-bit stream tipped it to 3.4 sigma /
-# 6.6 %.
-WIDE_TOLERANCE_SCORES = {"heating", "heating-local", "photoelectric"}
+WIDE_TOLERANCE_SCORES = {"heating"}
 
 # Transmutation chain (through the repo-root "tests/" symlink; absolute for the
 # same collection-time reason as TESTS_DATA_DIR above).
@@ -97,7 +83,7 @@ def canonical_library(label):
 
 
 def load_reference(sim_type, nuclide):
-    """Load reference data JSON. Returns None if not found.
+    """Load a yamc self-reference with matching nuclear-data provenance.
 
     Fails loudly when the reference was generated from a different
     nuclear-data library than the yamc fixture: evaluations
@@ -107,9 +93,11 @@ def load_reference(sim_type, nuclide):
     """
     path = REFERENCE_DIR / f"{sim_type}_{nuclide}.json"
     if not path.exists():
-        return None
+        pytest.fail(f"Missing self-reference {path.name}; run generate_reference_data.py")
     with open(path) as f:
         ref = json.load(f)
+    if ref.get("generator") != "yamc":
+        pytest.fail(f"{path.name} is not a yamc self-reference; run generate_reference_data.py")
     ref_lib = canonical_library(ref.get("library"))
     fix_lib = canonical_library(fixture_library(nuclide))
     if ref_lib is not None and fix_lib is not None and ref_lib != fix_lib:
@@ -120,6 +108,22 @@ def load_reference(sim_type, nuclide):
             f"(using matching {fix_lib} data)."
         )
     return ref
+
+
+def assert_self_reference(expected, actual, name):
+    """Compare same-seed results, allowing only floating-point reduction noise."""
+    if isinstance(expected, dict):
+        assert actual.keys() == expected.keys(), f"{name}: result keys changed"
+        for key, value in expected.items():
+            assert_self_reference(value, actual[key], f"{name}/{key}")
+    elif isinstance(expected, list):
+        assert len(actual) == len(expected), f"{name}: result length changed"
+        for index, value in enumerate(expected):
+            assert_self_reference(value, actual[index], f"{name}[{index}]")
+    else:
+        assert actual == pytest.approx(expected, rel=1e-9, abs=1e-30), (
+            f"{name}: yamc={actual!r} vs self-reference={expected!r}"
+        )
 
 
 def assert_scalar_agreement(ref_val, yamc_val, ref_std, yamc_std, name,
@@ -153,8 +157,6 @@ def assert_scalar_agreement(ref_val, yamc_val, ref_std, yamc_std, name,
         score_name = score_name[2:]
     std_factor = 3.0
     if score_name in WIDE_TOLERANCE_SCORES:
-        # 10% for heating (KERMA differences) and photoelectric (known
-        # photoionization-rate residual vs the OpenMC references).
         rel_tol = max(rel_tol, 0.10)
         std_factor = 4.0
 

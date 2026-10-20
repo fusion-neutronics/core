@@ -1,16 +1,9 @@
 """MT=5, ``(n,X)``, for the transmutation regression tests.
 
-The reference inventories come from OpenMC, whose depletion chain has no
-MT=5: it neither removes a parent by MT=5 nor makes MT=5's residuals and light
-particles. yamc carries both, from the ``(n,X)`` rows of the reactions
-subsection. Two things are checked against the references, and this module
-supplies what each needs:
-
-* the like-for-like comparison runs yamc on a reactions subsection with the
-  ``(n,X)`` rows taken out (:func:`write_without_anything`), so both codes
-  model the same reactions;
-* the full-chain comparison adds to the reference what MT=5 makes, computed
-  here from the data alone (:func:`predicted_mt5_densities`): the MT=5 cross
+The contribution of MT=5 is checked independently of stored reference values.
+The tests run yamc with and without the ``(n,X)`` reaction rows, then check
+the difference against what MT=5 makes, computed here from the data alone
+(:func:`predicted_mt5_densities`): the MT=5 cross
   section of the seed's own neutron data times each ``(n,X)`` row's curve,
   group-averaged flat in energy over the test spectrum (yamc's default
   within-group weight), and carried through the schedule with each product's
@@ -60,8 +53,8 @@ def _write(path, table, file_format):
 def write_without_anything(chain_dir):
     """Take the ``(n,X)`` rows out of an exported chain's reactions subsection.
 
-    What is left is the reactions every other row describes, which is what the
-    reference chain carries. The MT=5 columns stay, null on every row left.
+    The remaining reactions provide the baseline for the independent MT=5
+    contribution check. The MT=5 columns stay, null on every row left.
     """
     path = Path(chain_dir) / "reactions" / "reactions.arrow"
     table, file_format = _read(path)

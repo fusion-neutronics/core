@@ -14,8 +14,7 @@ from .conftest import (
     PARTICLES,
     SEED,
     TESTS_DATA_DIR,
-    assert_scalar_agreement,
-    assert_spectrum_agreement,
+    assert_self_reference,
     load_reference,
     skip_if_no_reference)
 
@@ -97,52 +96,20 @@ def test_neutron_flux(nuclide):
 
     result = get_result(nuclide)
 
-    assert_scalar_agreement(
+    assert_self_reference(
         ref["scalar_results"]["flux"], result["scalar_results"]["flux"],
-        ref["scalar_stds"]["flux"], result["scalar_stds"]["flux"],
-        name=f"{nuclide}/flux", rel_tol=0.05)
+        f"{nuclide}/flux")
 
 
 @pytest.mark.parametrize("nuclide", ALL_NEUTRON_NUCLIDES)
 def test_neutron_scalar_scores(nuclide):
-    """Test neutron scalar tallies broadly agree with reference.
-
-    Uses generous tolerances (50%) since there are known systematic
-    differences on secondary production and absorption channels.
-    Fails only if more than 25% of scores are off by > 50%.
-    """
+    """Every scalar, including rare production channels, retains its answer."""
     ref = load_reference("neutron", nuclide)
     skip_if_no_reference(ref, "neutron", nuclide)
 
     result = get_result(nuclide)
-    flux_ref = ref["scalar_results"].get("flux", 0.0)
-
-    failures = []
-    n_compared = 0
-    for score in NEUTRON_SCALAR_SCORES:
-        if score == "flux":
-            continue  # tested separately with tight tolerance
-        ref_val = ref["scalar_results"].get(score, 0.0)
-        yamc_val = result["scalar_results"].get(score, 0.0)
-
-        # Skip near-zero scores (< 0.1% of flux)
-        if flux_ref > 0:
-            magnitude = max(abs(ref_val), abs(yamc_val))
-            if magnitude < 1e-3 * flux_ref:
-                continue
-
-        n_compared += 1
-        denom = max(abs(ref_val), abs(yamc_val))
-        if denom > 0:
-            rel_diff = abs(yamc_val - ref_val) / denom
-            if rel_diff > 0.05:
-                failures.append(f"{score}: yamc={yamc_val:.4e} ref={ref_val:.4e} ({rel_diff:.0%})")
-
-    if n_compared > 0:
-        assert len(failures) == 0, (
-            f"{nuclide}: {len(failures)}/{n_compared} scores differ by >5%:\n"
-            + "\n".join(failures)
-        )
+    for field in ("scalar_results", "scalar_stds"):
+        assert_self_reference(ref[field], result[field], f"{nuclide}/{field}")
 
 
 @pytest.mark.parametrize("nuclide", ALL_NEUTRON_NUCLIDES)
@@ -153,6 +120,5 @@ def test_neutron_spectrum(nuclide):
 
     result = get_result(nuclide)
 
-    assert_spectrum_agreement(
-        ref["spectrum_mean"], result["spectrum_mean"],
-        ref["spectrum_std"], result["spectrum_std"])
+    for field in ("spectrum_mean", "spectrum_std"):
+        assert_self_reference(ref[field], result[field], f"{nuclide}/{field}")

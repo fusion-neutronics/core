@@ -3,7 +3,6 @@
 import shutil
 import tempfile
 
-import numpy as np
 import pytest
 import yamc
 
@@ -22,6 +21,7 @@ from .conftest import (
     PHOTON_GROUP_STRUCTURE,
     SEED,
     TESTS_DATA_DIR,
+    assert_self_reference,
     load_reference,
     skip_if_no_reference)
 
@@ -130,109 +130,20 @@ def test_decay_photons_total_flux(nuclide):
 
     result = get_result(nuclide)
 
-    if not result["spectra"]:
-        pytest.skip(f"{nuclide}: no D1S radionuclides from chain")
-
-    # Find peak total across all steps for noise floor calculation
-    peak_total = 0.0
-    for step_idx in range(len(DECAY_PHOTON_TIMESTEPS)):
-        ref_total = np.sum(ref["spectra"][step_idx])
-        yamc_total = np.sum(result["spectra"][step_idx])
-        peak_total = max(peak_total, abs(ref_total), abs(yamc_total))
-
-    noise_floor = peak_total * 1e-6
-    failures = []
-
-    for step_idx in range(len(DECAY_PHOTON_TIMESTEPS)):
-        ref_spec = np.array(ref["spectra"][step_idx])
-        yamc_spec = np.array(result["spectra"][step_idx])
-        ref_std = np.array(ref["spectra_std"][step_idx])
-        yamc_std = np.array(result["spectra_std"][step_idx])
-
-        ref_total = ref_spec.sum()
-        yamc_total = yamc_spec.sum()
-        ref_total_std = np.sqrt((ref_std**2).sum())
-        yamc_total_std = np.sqrt((yamc_std**2).sum())
-
-        # Skip steps below noise floor
-        if abs(ref_total) < noise_floor and abs(yamc_total) < noise_floor:
-            continue
-
-        # z-score: check statistical significance
-        combined_std = np.sqrt(ref_total_std**2 + yamc_total_std**2)
-        if combined_std > 0:
-            z_score = abs(yamc_total - ref_total) / combined_std
-        else:
-            z_score = 0.0
-
-        # Flag differences that are both practically (>2%, the "Excellent"
-        # quality bar) and statistically (z > 4) significant. The z gate keeps
-        # the check robust to the exact fixed-seed realization: a 2-3% gap that
-        # sits well inside the combined Monte Carlo error (e.g. z ~ 0.5) is
-        # noise, not a regression, and must not fail when an unrelated RNG
-        # stream change reshuffles which histories land where.
-        # The gate was z > 3 until the 64-bit stream landed the
-        # Fe57 realization at exactly 2.0% / z = 3.1: a 3-sigma bar on a
-        # fixed seed flips on realization luck (the same failure mode the
-        # heating band in conftest documents), so decay flux uses the same
-        # 4-sigma band. A real D1S normalization bug is enormous by
-        # comparison (a factor of 10 is hundreds of sigma).
-        denom = max(abs(ref_total), abs(yamc_total))
-        if denom > 0:
-            rel_diff_pct = abs(yamc_total - ref_total) / denom * 100.0
-            if rel_diff_pct > 2.0 and z_score > 4.0:
-                failures.append(
-                    f"  step {step_idx+1}: yamc={yamc_total:.4e} "
-                    f"ref={ref_total:.4e} rel={rel_diff_pct:.1f}% "
-                    f"z={z_score:.1f}"
-                )
-
-    assert not failures, (
-        f"{nuclide}: D1S total flux mismatch:\n" + "\n".join(failures)
+    assert_self_reference(
+        [sum(spectrum) for spectrum in ref["spectra"]],
+        [sum(spectrum) for spectrum in result["spectra"]],
+        f"{nuclide}/decay-photon totals",
     )
 
 
 @pytest.mark.parametrize("nuclide", COUPLED_NUCLIDES)
 def test_decay_photons_spectrum_shape(nuclide):
-    """Test D1S photon spectrum shape matches reference at peak step."""
+    """Every D1S spectrum bin and uncertainty retains its same-seed answer."""
     ref = load_reference("decay_photons", nuclide)
     skip_if_no_reference(ref, "decay_photons", nuclide)
 
     result = get_result(nuclide)
 
-    if not result["spectra"]:
-        pytest.skip(f"{nuclide}: no D1S radionuclides from chain")
-
-    # Find the step with largest total flux for best statistics
-    best_step = 0
-    best_total = 0.0
-    for step_idx in range(len(DECAY_PHOTON_TIMESTEPS)):
-        total = abs(np.sum(ref["spectra"][step_idx]))
-        if total > best_total:
-            best_total = total
-            best_step = step_idx
-
-    if best_total == 0:
-        pytest.skip(f"{nuclide}: no significant D1S flux")
-
-    # Compare spectrum shape at peak step using chi2
-    ref_mean = np.array(ref["spectra"][best_step])
-    yamc_mean = np.array(result["spectra"][best_step])
-    ref_std = np.array(ref["spectra_std"][best_step])
-    yamc_std = np.array(result["spectra_std"][best_step])
-
-    # Use relaxed chi2 for D1S (more stochastic noise)
-    chi2_terms = []
-    for i in range(len(ref_mean)):
-        diff = yamc_mean[i] - ref_mean[i]
-        combined_std = np.sqrt(ref_std[i]**2 + yamc_std[i]**2)
-        if combined_std > 0 and (abs(ref_mean[i]) > best_total * 1e-6
-                                  or abs(yamc_mean[i]) > best_total * 1e-6):
-            chi2_terms.append((diff / combined_std)**2)
-
-    if chi2_terms:
-        chi2_dof = np.sum(chi2_terms) / len(chi2_terms)
-        assert chi2_dof < 2.0, (
-            f"{nuclide} step {best_step+1}: D1S spectrum chi2/dof = "
-            f"{chi2_dof:.2f} > 2.0"
-        )
+    for field in ("spectra", "spectra_std"):
+        assert_self_reference(ref[field], result[field], f"{nuclide}/{field}")
