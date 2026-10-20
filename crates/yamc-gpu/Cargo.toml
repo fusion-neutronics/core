@@ -26,7 +26,7 @@ yamc-physics = { path = "../yamc-physics" }
 # `GpuContext::new()` returns `NoF64Adapter` and the kernels module
 # is omitted entirely.
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-# cubecl 0.11.0 from crates.io. Earlier this was pinned to a cubecl main
+# cubecl 0.11.1 from crates.io. Earlier this was pinned to a cubecl main
 # rev, which tracked an unreleased wgpu git rev and so forced our direct wgpu
 # dep onto the same rev or the wgpu types would not unify. 0.11 depends on
 # released wgpu, so the direct wgpu dep below is a plain version.
@@ -40,9 +40,9 @@ yamc-physics = { path = "../yamc-physics" }
 # We drive the wgpu backend through cubecl-wgpu directly. cubecl-runtime is
 # named only for the `Runtime` trait (`WgpuRuntime::client`), which cubecl-core
 # 0.11 no longer re-exports publicly.
-cubecl = { package = "cubecl-core", version = "=0.11.0" }
-cubecl-runtime = "=0.11.0"
-cubecl-wgpu = { version = "=0.11.0", features = ["spirv"] }
+cubecl = { package = "cubecl-core", version = "=0.11.1" }
+cubecl-runtime = "=0.11.1"
+cubecl-wgpu = { version = "=0.11.1", features = ["spirv"] }
 wgpu = "30"
 pollster = "0.4"
 
