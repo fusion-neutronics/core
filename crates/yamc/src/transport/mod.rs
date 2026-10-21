@@ -727,6 +727,7 @@ pub(crate) fn transport_particle<T: Tracker>(
                     photon_macro_xs.as_ref(),
                     ctx.tallies,
                     welford_worker,
+                    ctx.replica,
                 );
 
                 // ========== PHOTON COLLISION HANDLING ==========
@@ -764,29 +765,18 @@ pub(crate) fn transport_particle<T: Tracker>(
                         let heat_score =
                             (incoming_energy - e_out - bank_second_photon_energy) * incoming_weight;
                         if heat_score != 0.0 {
-                            for (tally_idx, tally) in ctx.tallies.iter().enumerate() {
-                                // TrackLength tallies score photon KERMA
-                                // along tracks instead.
-                                if tally.estimator != yamc_tallies::Estimator::Collision {
-                                    continue;
-                                }
-                                tally.score_collision(
-                                    welford_worker,
-                                    tally_idx,
-                                    incoming_weight,
-                                    0.0,
-                                    particle.position,
-                                    cell.cell_id,
-                                    Some(material),
-                                    material_id,
-                                    None, // photons have no URR
-                                    None, // PhotonXS scored pre-collision; this call only writes analog heating
-                                    incoming_energy,
-                                    ParticleType::Photon,
-                                    particle.parent_nuclide,
-                                    Some(heat_score),
-                                );
-                            }
+                            score_photon_heat_event(
+                                particle,
+                                cell,
+                                material,
+                                material_id,
+                                incoming_weight,
+                                incoming_energy,
+                                heat_score,
+                                ctx.tallies,
+                                welford_worker,
+                                ctx.replica,
+                            );
                         }
 
                         // Record collision for tracking
@@ -938,6 +928,7 @@ pub(crate) fn do_photon_collision<T: Tracker>(
     current_parent_id: Option<u64>,
     current_generation: u32,
     weight_windows: &[&crate::variance_reduction::WeightWindowBounds],
+    replica: Option<&replica::ReplicaContext>,
 ) {
     // Collision-estimator tallies at the collision site (flux = weight /
     // Σ_t), before the physics mutates state.
@@ -950,6 +941,7 @@ pub(crate) fn do_photon_collision<T: Tracker>(
         Some(photon_macro_xs),
         tallies,
         welford_worker,
+        replica,
     );
 
     let incoming_energy = particle.energy;
@@ -970,29 +962,18 @@ pub(crate) fn do_photon_collision<T: Tracker>(
     let e_out = particle.energy; // 0 if photon absorbed
     let heat_score = (incoming_energy - e_out - bank_second_photon_energy) * incoming_weight;
     if heat_score != 0.0 {
-        for (tally_idx, tally) in tallies.iter().enumerate() {
-            // TrackLength tallies score photon KERMA along tracks
-            // instead.
-            if tally.estimator != yamc_tallies::Estimator::Collision {
-                continue;
-            }
-            tally.score_collision(
-                welford_worker,
-                tally_idx,
-                incoming_weight,
-                0.0,
-                particle.position,
-                cell.cell_id,
-                Some(material),
-                material_id,
-                None,
-                None,
-                incoming_energy,
-                ParticleType::Photon,
-                particle.parent_nuclide,
-                Some(heat_score),
-            );
-        }
+        score_photon_heat_event(
+            particle,
+            cell,
+            material,
+            material_id,
+            incoming_weight,
+            incoming_energy,
+            heat_score,
+            tallies,
+            welford_worker,
+            replica,
+        );
     }
     tracker.record_collision(
         current_particle_id,
@@ -1316,6 +1297,7 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
                             current_parent_id,
                             current_generation,
                             ctx.weight_windows,
+                            ctx.replica,
                         );
                     } else {
                         score_collision_event(
@@ -1327,6 +1309,7 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
                             photon_macro_xs.as_ref(),
                             ctx.tallies,
                             welford_worker,
+                            ctx.replica,
                         );
                         handle_neutron_collision(
                             ctx,
@@ -1578,6 +1561,7 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
                 current_parent_id,
                 current_generation,
                 ctx.weight_windows,
+                ctx.replica,
             );
             continue;
         }
@@ -1682,6 +1666,7 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
             None, // photon macro XS not needed on the neutron path
             ctx.tallies,
             welford_worker,
+            ctx.replica,
         );
 
         // Pass the real photon flags so secondary (coupled) and D1S
@@ -2813,6 +2798,7 @@ mod tests {
             None,
             &tallies,
             &mut welford,
+            None,
         );
 
         assert!(
@@ -2849,6 +2835,7 @@ mod tests {
             None,
             &tallies,
             &mut welford,
+            None,
         );
         assert_eq!(bin0(&welford), 0.0);
     }
@@ -2864,7 +2851,17 @@ mod tests {
         let mut welford = WelfordWorkerState::new(&[tally.num_bins()]);
 
         let p = Particle::new([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 1.0e6);
-        score_collision_event(&p, &cell, &mat, None, None, None, &tallies, &mut welford);
+        score_collision_event(
+            &p,
+            &cell,
+            &mat,
+            None,
+            None,
+            None,
+            &tallies,
+            &mut welford,
+            None,
+        );
         assert_eq!(bin0(&welford), 0.0);
     }
 

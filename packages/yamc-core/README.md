@@ -90,10 +90,11 @@ Pick `yamc` when the neutron spectrum should come from a transport solve; pick
   - `simulate_transport(data_uncertainty=...)` gives every tally a nuclear-data
     standard deviation and a replica mean beside its unchanged nominal mean,
     from one run whose histories carry a weight per cross-section replica. It
-    supports CPU transport with track-length tallies in every tracking mode,
+    supports CPU transport with track-length and collision-estimator tallies
+    in every tracking mode,
     with survival biasing, weight windows, coupled and D1S photons (photon
     tallies carry the neutron data's uncertainty) and MPI, and refuses, with
-    the reason, GPU, collision-estimator tallies, overlay tallies, mesh tallies
+    the reason, GPU, overlay tallies, mesh tallies
     and per-nuclide bins.
   - `simulate_transmutation(method="independent", data_uncertainty=...)` gives
     a standard deviation on inventories, activity and decay heat. Its one

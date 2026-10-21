@@ -438,9 +438,6 @@ impl Model {
             if transmutation { &[] } else { &self.tallies };
         for tally in tallies {
             let name = tally.name.as_deref().unwrap_or("<unnamed>");
-            if tally.estimator == yamc_tallies::Estimator::Collision {
-                return refuse(&format!("collision-estimator tallies (tally '{name}')"));
-            }
             if !tally.multiply_density {
                 return refuse(&format!(
                     "overlay tallies, which read their own nominal data (tally '{name}')"

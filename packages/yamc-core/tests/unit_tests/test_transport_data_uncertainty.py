@@ -98,6 +98,26 @@ def test_a_convergence_target_is_refused_on_a_fixed_replica_count():
         )
 
 
+def test_collision_estimator_reports_evaluated_covariance():
+    if not _has_covariance():
+        pytest.skip("Fe56 fixture carries no covariance")
+    model, (_, capture) = _model([
+        yamc.Tally(scores=["flux"], name="flux", estimator="collision"),
+        yamc.Tally(scores=["(n,gamma)"], name="capture", estimator="collision"),
+    ])
+    results = model.simulate_transport(
+        total_particles=10000,
+        seed=2,
+        threads=1,
+        data_uncertainty=yamc.DataUncertainty(seed=5, samples=16),
+    )
+    result = results[capture]
+    assert result.mean[0] > 0.0
+    assert result.replica_mean[0] > 0.0
+    assert result.nuclear_data_standard_deviation is not None
+    assert result.nuclear_data_standard_deviation[0] > 0.0
+
+
 def test_unsupported_requests_are_refused_with_the_reason():
     if not _has_covariance():
         pytest.skip("Fe56 fixture carries no covariance")

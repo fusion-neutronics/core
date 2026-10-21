@@ -3146,7 +3146,7 @@ class Model:
                 do not reproduce (fission's share) stays nominal, per nuclide
                 in ``data_uncertainty_coverage()``. Not yet supported, and
                 refused with the reason:
-                ``compute='gpu'``, collision-estimator tallies, overlay tallies,
+                ``compute='gpu'``, overlay tallies,
                 mesh tallies and per-nuclide tally bins.
                 ``model.data_uncertainty_coverage()`` lists what the evaluations
                 cover. Default ``None``.
