@@ -87,9 +87,14 @@ library other than its total's.
 
 MT=5, `(n,anything)`, can remove a parent through several unresolved reaction
 channels. Its light-particle yields alone do not identify the residual nuclei
-or their isomeric states. If those products are missing, yani refuses a solve
-when the unmodelled MT=5 contribution exceeds 0.1% of the material's neutron
-removal rate. That fraction is not an estimate of the decay-heat error.
+or their isomeric states. If those products are missing, yani continues and
+prints a warning when the unmodelled MT=5 contribution exceeds 0.1% of the
+material's neutron removal rate. Parent removal and evaluated light-particle
+production are retained, but the missing residual nuclei are not produced.
+The returned inventory is incomplete; that fraction does not bound the error
+in activity or decay heat. No residuals are invented and no libraries are
+substituted. The impossible-yield and out-of-range branching guards still
+refuse invalid calculations as before.
 
 ENDF/B-VIII.1 gives no heavy MT=5 residual products for Tm169, Zr90, Zr91,
 Zr92, Zr94 or Zr96: their MF=6 MT=5 sections contain neutrons, light particles
@@ -101,10 +106,16 @@ the omissions, and republishing the same evaluations will not repair them.
 Raising the allowance, retaining removed parents or normalising the gas yields
 into residuals would not account for the missing inventory.
 
-These compositions cannot currently be solved with that ENDF/B-VIII.1 neutron
-and reaction-data configuration above the allowance. A supported alternative
-is to select a different neutron library together with its reaction and
-branching data. For example, use TENDL-2025 for all three, while retaining
+These compositions can be solved with that ENDF/B-VIII.1 configuration, with
+the warning and missing residuals recorded by
+`results.get_branching_report(material.id or 0, 0)["unmodelled_mt5"]` for the
+first irradiation interval. Inspect each interval's report when the spectrum
+changes. The 0.1% value is a warning threshold for missing MT=5 residuals,
+not permission to treat the returned inventory as complete.
+
+To use a different residual-production model, select a different neutron
+library together with its reaction and branching data. For example, use
+TENDL-2025 for all three, while retaining
 explicitly selected ENDF/B-VIII.1 decay data and fission yields:
 
 ```python
@@ -140,9 +151,10 @@ ENDF/B neutron result or an ENDF/B data repair. Changing only the reaction or
 branching source instead borrows a different residual-production model; it
 must not be presented as the original library's prediction.
 
-A comparison requiring a result for each neutron library must leave these
-ENDF/B cases unsupported. An alternative-library calculation cannot fill an
-ENDF/B-labelled result cell.
+An ENDF/B warning run remains ENDF/B-based, but its missing products and
+incomplete inventory must be stated in a comparison. An alternative-library
+calculation cannot fill an ENDF/B-labelled result cell. A comparison requiring
+complete residual production must still flag these ENDF/B cases as unsupported.
 
 Record `data_releases` and the branching report for each result. When a source
 changes, repeat the affected calculations rather than combining old and new

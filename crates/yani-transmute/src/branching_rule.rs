@@ -49,8 +49,8 @@
 //! evaluation sits in the network of every irradiation, what MT=5 clips or
 //! holds is refused by its share of the material's removal rather than of
 //! one parent's ([`refuse_clipped_or_held`]), as every list's is. Where the chain does not
-//! model MT=5's residuals at all, the rate is reported, and refused above the
-//! tolerance the same way by [`refuse_unmodelled_mt5`].
+//! model MT=5's residuals at all, the rate is reported, and a warning above the
+//! tolerance is returned by [`unmodelled_mt5_warning`]; the solve continues.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -58,27 +58,17 @@ use std::collections::HashMap;
 use yamc_nuclide::reaction::Reaction;
 use yani::{BranchCurve, BranchQuantity};
 
-/// The largest share of the material's neutron removal rate that may rest on
-/// a value the rule cannot represent, before a solve refuses to run.
+/// Material-weighted removal-share threshold for branching diagnostics.
 ///
-/// Three things are measured against it, each as a rate over the removal rate
-/// of the material's composition in the run's own spectrum, every parent
-/// weighted by its density: the production clipped because it was impossible
-/// (absolute partials above the transport total, isomer yields above one,
-/// negative partials, multiplicities above the nucleon bound), the production
-/// resting on a held fraction outside a list's tabulated range (see
-/// [`refuse_clipped_or_held`]), and MT=5 whose residuals the chain does not
-/// model (see [`refuse_unmodelled_mt5`]). The report gives each channel's
-/// share of its own parent's removal beside it. Weighting by the material
-/// keeps a bad list on a product present at a trace from refusing every
-/// irradiation whose network reaches it, while a material made of the parent
-/// is held to the same 0.1% as before.
+/// Clipped impossible production and held fractions outside a list's range
+/// still refuse a solve above this threshold ([`refuse_clipped_or_held`]).
+/// Missing MT=5 residuals only warn ([`unmodelled_mt5_warning`]); the solve
+/// continues with the missing production reported, not fabricated.
 ///
-/// It is the solver's tolerance for a rate it has no data for, the same
-/// 0.1% as [`crate::multigroup::ABOVE_EVALUATION_TOLERANCE`], which refuses a
-/// spectrum whose flux above an evaluation's last energy would understate a
-/// nuclide's rates by more than that. Below it the rate is carried and
-/// reported; above it the run stops and says which parent and how much.
+/// Every parent's contribution is weighted by its material density. This
+/// rate fraction is not a bound on inventory, activity or decay-heat error.
+/// The separate above-evaluation guard uses the same numerical threshold
+/// ([`crate::multigroup::ABOVE_EVALUATION_TOLERANCE`]) and remains a refusal.
 pub const BRANCHING_RATE_TOLERANCE: f64 = 1.0e-3;
 
 /// The reaction kind whose ground state is the parent itself.
@@ -907,7 +897,7 @@ pub struct UnmodelledRate {
     /// library has no MT=5 products for), or it carries one whose evaluation
     /// gives light particles and no residual.
     pub reason: String,
-    /// Whether [`refuse_unmodelled_mt5`] holds the run to it. False only on a
+    /// Whether [`unmodelled_mt5_warning`] includes it in the warning. False only on a
     /// reactions subsection that carries no `(n,X)` at all, one written
     /// before MT=5 was carried, which is reported as it always was until the
     /// library is re-converted: refusing there would stop every published
@@ -1042,7 +1032,7 @@ fn unmodelled_reason(
 /// The key is kept rather than removed now that MT=5 is modelled, because
 /// both cases are real and a run on them should say so; on a reactions
 /// subsection that carries `(n,X)` it lists only those. Whether the run
-/// refuses is [`refuse_unmodelled_mt5`]'s decision.
+/// warns is [`unmodelled_mt5_warning`]'s decision.
 ///
 /// `mt5` is each parent's MT=5 rate on the same footing as `rates`.
 pub(crate) fn measure_unmodelled_mt5(
@@ -1089,36 +1079,36 @@ fn removal_without_anything(rates: &yani::ReactionRates, parent: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Refuse a run where too much of the material's neutron removal rests on
+/// Warn when too much of the material's neutron removal rests on
 /// MT=5 residuals the chain does not model.
 ///
 /// What is weighed is the material's own composition, `densities` (atoms per
 /// barn-cm, those the rates were taken for): the removal those nuclides'
 /// unmodelled MT=5 carries, `sum N_i R_5,i`, over the removal of the whole
-/// composition, `sum N_i (R_removal,i + R_5,i)`, refused above
+/// composition, `sum N_i (R_removal,i + R_5,i)`, warned above
 /// [`BRANCHING_RATE_TOLERANCE`]. Not each parent's share on its own, which
 /// every other guard here uses, because a chain parent here can be a product
 /// present at a trace: ENDF/B-VIII.1 gives no MT=5 residuals for Al26_m1, V49
 /// or Ca41, whose MT=5 is half their removal under a D-T spectrum, and they
 /// are in the network of every iron irradiation at densities far below
 /// anything their residuals could matter for. A per-parent test would
-/// refuse every such run for nuclides that are not in the material; this
-/// one refuses a material whose own nuclides lose that much (ENDF/B-VIII.1
+/// warn for every such run for nuclides that are not in the material; this
+/// one warns for a material whose own nuclides lose that much (ENDF/B-VIII.1
 /// zirconium, whose MT=5 is 0.6% of its removal at 14 MeV), and lets natural
 /// iron through, whose Fe58 loses 1.5% of its own removal but is 0.28% of
 /// the atoms. Every parent's share is still reported.
 ///
 /// With no densities (a statistical replica, or a caller that gave none) it
-/// refuses nothing, and it passes over what [`UnmodelledRate::guarded`] says
+/// emits no warning, and it passes over what [`UnmodelledRate::guarded`] says
 /// predates the reactions subsection carrying MT=5. `library` names where a nuclide's cross sections came
 /// from, for the message.
-pub(crate) fn refuse_unmodelled_mt5(
+pub(crate) fn unmodelled_mt5_warning(
     unmodelled: &[UnmodelledRate],
     rates: &yani::ReactionRates,
     mt5: &HashMap<String, f64>,
     densities: &HashMap<String, f64>,
     library: &dyn Fn(&str) -> Option<String>,
-) -> Result<(), String> {
+) -> Option<String> {
     let mut names: Vec<&String> = densities.keys().collect();
     names.sort();
     let whole: f64 = names
@@ -1129,7 +1119,7 @@ pub(crate) fn refuse_unmodelled_mt5(
         })
         .sum();
     if whole <= 0.0 {
-        return Ok(());
+        return None;
     }
     let mut lost: Vec<(f64, &UnmodelledRate)> = unmodelled
         .iter()
@@ -1142,7 +1132,7 @@ pub(crate) fn refuse_unmodelled_mt5(
         .collect();
     let total: f64 = lost.iter().map(|(share, _)| share).sum();
     if total <= BRANCHING_RATE_TOLERANCE {
-        return Ok(());
+        return None;
     }
     lost.sort_by(|a, b| {
         b.0.total_cmp(&a.0)
@@ -1163,11 +1153,14 @@ pub(crate) fn refuse_unmodelled_mt5(
             )
         })
         .collect();
-    Err(format!(
-        "{:.3}% of this material's neutron removal rate is MT=5 (n,anything) whose \
-         residual nuclei the chain does not model, above the {:.1}% the solver carries \
-         without them: {}. The atoms MT=5 removes would leave the inventory unaccounted \
-         for. Re-converting a source evaluation that gives no residual products cannot \
+    Some(format!(
+        "yani: warning: continuing with an incomplete inventory. {:.3}% of this \
+         material's neutron removal rate is MT=5 (n,anything) whose residual nuclei \
+         the chain does not model, above the {:.1}% MT=5 warning threshold: {}. \
+         Parent removal and listed light-particle production are retained, but missing \
+         residual nuclei are not produced. This fraction does not bound the error in \
+         activity or decay heat. No residual products are invented and no libraries \
+         are substituted. Re-converting a source evaluation with no residual products cannot \
          recover them. Use compatible neutron cross-section and reaction data whose \
          evaluations model MT=5 residual production. Changing only the reaction data \
          changes the residual-production model rather than repairing the original \
@@ -1182,7 +1175,7 @@ pub(crate) fn refuse_unmodelled_mt5(
 /// production a branching list clipped as impossible or held beyond the
 /// evaluation's range.
 ///
-/// Weighed by the material, as [`refuse_unmodelled_mt5`] is and for the same
+/// Weighed by the material, as [`unmodelled_mt5_warning`] is and for the same
 /// reason: each channel's clipped and held production, as the report gives it
 /// (shares of its parent's removal), times the parent's density, over the
 /// removal of the whole composition, refused above
@@ -1531,7 +1524,7 @@ mod tests {
     /// removal refuses a material made of it, and passes one in which it is a
     /// trace, as natural iron's Fe58 is on ENDF/B-VIII.1.
     #[test]
-    fn unmodelled_mt5_is_refused_by_its_share_of_the_material() {
+    fn unmodelled_mt5_warns_by_its_share_of_the_material() {
         let rates: yani::ReactionRates = HashMap::from([
             (
                 "Fe58".to_string(),
@@ -1547,8 +1540,13 @@ mod tests {
         let report = measure_unmodelled_mt5(&chain, &rates, &mt5);
         let library = |_: &str| Some("endf-b8.1".to_string());
         let pure = HashMap::from([("Fe58".to_string(), 1.0)]);
-        let err = refuse_unmodelled_mt5(&report, &rates, &mt5, &pure, &library).unwrap_err();
+        let err = unmodelled_mt5_warning(&report, &rates, &mt5, &pure, &library).unwrap();
         assert!(err.contains("Fe58 (endf-b8.1): 25.000%"), "{err}");
+        assert!(
+            err.contains("continuing with an incomplete inventory"),
+            "{err}"
+        );
+        assert!(err.contains("does not bound the error"), "{err}");
         assert!(err.contains("cannot recover them"), "{err}");
         assert!(
             err.contains("neutron cross-section and reaction data"),
@@ -1556,17 +1554,17 @@ mod tests {
         );
         assert!(err.contains("Changing only the reaction data"), "{err}");
         let natural = HashMap::from([("Fe58".to_string(), 3.0e-4), ("Fe56".to_string(), 1.0)]);
-        assert!(refuse_unmodelled_mt5(&report, &rates, &mt5, &natural, &library).is_ok());
-        assert!(refuse_unmodelled_mt5(&report, &rates, &mt5, &HashMap::new(), &library).is_ok());
+        assert!(unmodelled_mt5_warning(&report, &rates, &mt5, &natural, &library).is_none());
+        assert!(unmodelled_mt5_warning(&report, &rates, &mt5, &HashMap::new(), &library).is_none());
         // A reactions subsection with no (n,X) anywhere predates MT=5, and is
         // reported, not refused.
         let old = measure_unmodelled_mt5(&HashMap::new(), &rates, &mt5);
         assert!(!old[0].guarded && old[0].reason.contains("re-convert"));
-        assert!(refuse_unmodelled_mt5(&old, &rates, &mt5, &pure, &library).is_ok());
+        assert!(unmodelled_mt5_warning(&old, &rates, &mt5, &pure, &library).is_none());
     }
 
     #[test]
-    fn tm_and_zr_source_gaps_still_refuse_materials_above_tolerance() {
+    fn tm_and_zr_source_gaps_warn_above_tolerance() {
         let template = parent_with(vec![(ANYTHING, Some("H1")), (ANYTHING, None)])
             .remove("Fe58")
             .unwrap();
@@ -1581,12 +1579,15 @@ mod tests {
             let mt5 = HashMap::from([(parent.to_string(), 1.0)]);
             let densities = HashMap::from([(parent.to_string(), 1.0)]);
             let report = measure_unmodelled_mt5(&chain, &rates, &mt5);
-            let error = refuse_unmodelled_mt5(&report, &rates, &mt5, &densities, &|_| {
+            let error = unmodelled_mt5_warning(&report, &rates, &mt5, &densities, &|_| {
                 Some("endf-b8.1".to_string())
             })
-            .unwrap_err();
+            .unwrap();
             assert!(error.contains("1.000%"), "{parent}: {error}");
-            assert!(error.contains("above the 0.1%"), "{parent}: {error}");
+            assert!(
+                error.contains("above the 0.1% MT=5 warning threshold"),
+                "{parent}: {error}"
+            );
             assert!(error.contains("cannot recover them"), "{parent}: {error}");
             assert!(error.contains("library provenance"), "{parent}: {error}");
         }
