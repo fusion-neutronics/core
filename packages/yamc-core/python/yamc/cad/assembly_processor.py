@@ -8,8 +8,12 @@ faces belong to which solids, shared faces, and face orientation per solid.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from threading import RLock
+from typing import Literal
 
 import cadquery as cq
+from cadquery.func import setThreads
+from OCP.OSD import OSD_Parallel, OSD_ThreadPool
 from OCP.TopAbs import (
     TopAbs_EDGE, TopAbs_FACE, TopAbs_FORWARD, TopAbs_INTERNAL, TopAbs_REVERSED,
     TopAbs_WIRE,
@@ -27,6 +31,9 @@ from OCP.GProp import GProp_GProps
 from OCP.TopLoc import TopLoc_Location
 from OCP.gp import gp_Trsf
 from OCP.TopoDS import TopoDS, TopoDS_Iterator
+
+
+_IMPRINT_THREAD_LOCK = RLock()
 
 
 class OverlappingSolidsError(ValueError):
@@ -141,7 +148,17 @@ def _bake_mirrored_parts(assembly):
     return parts
 
 
-def _imprint_assembly(assembly):
+def _resolve_imprint_threads(imprint_threads: int | Literal["all"]) -> int:
+    if isinstance(imprint_threads, str) and imprint_threads == "all":
+        return max(1, OSD_Parallel.NbLogicalProcessors_s())
+    if type(imprint_threads) is int and imprint_threads > 0:
+        return imprint_threads
+    raise ValueError(
+        f"imprint_threads must be 'all' or a positive integer, got {imprint_threads!r}"
+    )
+
+
+def _imprint_assembly(assembly, imprint_threads: int | Literal["all"] = "all"):
     """Imprint a CadQuery assembly into a connected compound.
 
     Uses the BOPAlgo_Builder based imprint with glue="partial" when the
@@ -156,14 +173,25 @@ def _imprint_assembly(assembly):
     """
     import inspect
 
+    threads = _resolve_imprint_threads(imprint_threads)
     if len(_assembly_solids(assembly)) < 2:
         return _compound_without_imprint(assembly)
 
     imprint = cq.occ_impl.assembly.imprint
-    if "glue" in inspect.signature(imprint).parameters:
-        compound, solids = imprint(assembly, glue="partial")
-    else:
-        compound, solids = imprint(assembly)
+    with _IMPRINT_THREAD_LOCK:
+        pool = OSD_ThreadPool.DefaultPool_s()
+        previous_threads = pool.NbThreads()
+        previous_launch_threads = pool.NbDefaultThreadsToLaunch()
+        try:
+            setThreads(threads)
+            pool.SetNbDefaultThreadsToLaunch(threads)
+            if "glue" in inspect.signature(imprint).parameters:
+                compound, solids = imprint(assembly, glue="partial")
+            else:
+                compound, solids = imprint(assembly)
+        finally:
+            setThreads(previous_threads)
+            pool.SetNbDefaultThreadsToLaunch(previous_launch_threads)
     return _strip_free_internal_edges(compound, solids)
 
 
@@ -327,7 +355,11 @@ def _refuse_lost_or_shared_inputs(assembly, imprinted_solids_with_ids):
 
 
 def process_assembly(
-    assembly: cq.Assembly, material_tags: list[str], imprint: bool = True
+    assembly: cq.Assembly,
+    material_tags: list[str],
+    imprint: bool = True,
+    *,
+    imprint_threads: int | Literal["all"] = "all",
 ) -> ProcessedAssembly:
     """Process a CadQuery assembly for meshing.
 
@@ -339,20 +371,27 @@ def process_assembly(
         assembly: CadQuery Assembly with named parts.
         material_tags: List of material tag strings, one per part.
         imprint: Imprint the assembly so touching solids share the face where
-            they meet. ``False`` skips the imprint (the slow, serial step on a
+            they meet. ``False`` skips the imprint (the expensive step on a
             large assembly) and keeps every solid whole, so each solid is
             meshed on its own.
+        imprint_threads: ``"all"`` uses all logical processors, or a positive
+            integer limits only imprinting. The prior OCC pool size and default
+            launch count are restored afterward, including on failure. The
+            value is validated even when no imprint operation is needed.
 
     Returns:
         ProcessedAssembly with topology data and imprinted compound.
     """
+    threads = _resolve_imprint_threads(imprint_threads)
     # Everything below only iterates the parts, and no mirrored solid may
     # reach any of it.
     assembly = _bake_mirrored_parts(assembly)
 
     # Step 1: Imprint the assembly (or gather its solids as they are)
     if imprint:
-        imprinted_compound, imprinted_solids_with_ids = _imprint_assembly(assembly)
+        imprinted_compound, imprinted_solids_with_ids = _imprint_assembly(
+            assembly, imprint_threads=threads
+        )
         _refuse_lost_or_shared_inputs(assembly, imprinted_solids_with_ids)
     else:
         imprinted_compound, imprinted_solids_with_ids = _compound_without_imprint(
