@@ -9,7 +9,7 @@ with per-face and per-volume metadata.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, Literal
 
 import math
 import os
@@ -257,6 +257,8 @@ class CadToYamc:
         imprint: bool = True,
         contact_tolerance: float | None = None,
         overlaps: str = "error",
+        *,
+        imprint_threads: int | Literal["all"] = "all",
     ) -> SurfaceMesh:
         """Mesh the assembly: surfaces + optional tet volumes.
 
@@ -281,6 +283,11 @@ class CadToYamc:
                 faceted surfaces that may overlap or leave a thin gap, and
                 :class:`yamc.MeshGeometry` tracks the exported mesh
                 discontinuously to suit. Default True.
+            imprint_threads: ``"all"`` (default) uses all logical processors
+                for imprinting, or pass a positive integer to limit its threads
+                and reduce peak RAM. Does not change subsequent meshing. The
+                prior OCC thread settings are restored even if imprinting fails.
+                Validated but unused when imprinting is skipped.
             contact_tolerance: Only with ``imprint=False``: the distance
                 (3D units) within which two solids count as touching. A
                 particle crosses an overlap or a gap thinner than this
@@ -323,6 +330,7 @@ class CadToYamc:
             imprint=imprint,
             contact_tolerance=contact_tolerance,
             overlaps=overlaps,
+            imprint_threads=imprint_threads,
         )
 
         if tet_volumes:
@@ -350,6 +358,8 @@ class CadToYamc:
         imprint: bool = True,
         contact_tolerance: float | None = None,
         overlaps: str = "error",
+        *,
+        imprint_threads: int | Literal["all"] = "all",
     ) -> SurfaceMesh:
         """Mesh all surfaces of the assembly.
 
@@ -358,6 +368,7 @@ class CadToYamc:
                 (3D units).
             angular_tolerance: Angular deflection tolerance (radians).
             imprint: Imprint the assembly first; see :meth:`mesh`.
+            imprint_threads: Threads for imprinting only; see :meth:`mesh`.
             contact_tolerance: See :meth:`mesh`.
             overlaps: See :meth:`mesh`.
 
@@ -374,6 +385,7 @@ class CadToYamc:
             imprint=imprint,
             contact_tolerance=contact_tolerance,
             overlaps=overlaps,
+            imprint_threads=imprint_threads,
         )
 
     def mesh_volumes(
@@ -425,6 +437,7 @@ class CadToYamc:
         imprint=True,
         contact_tolerance=None,
         overlaps="error",
+        imprint_threads="all",
     ):
         """Mesh surfaces with a hybrid backend, mirroring cad-to-dagmc-mesher.
 
@@ -467,7 +480,8 @@ class CadToYamc:
             )
 
         self._processed = process_assembly(
-            self._assembly, self._material_tags, imprint=imprint
+            self._assembly, self._material_tags, imprint=imprint,
+            imprint_threads=imprint_threads,
         )
         self._imprint = imprint
         self._contact_tolerance = None if imprint else float(contact_tolerance)

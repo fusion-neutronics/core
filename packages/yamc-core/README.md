@@ -43,6 +43,29 @@ results = model.simulate_transport(total_particles=250_000, seed=1)
 print(results[tally].mean)
 ```
 
+## CAD imprint threads
+
+The CAD extra uses stable CadQuery from PyPI. Limit imprinting to fewer
+threads to reduce its peak RAM usage, at the cost of speed:
+
+```python
+import cadquery
+from yamc.cad import CadToYamc
+
+assembly = cadquery.Assembly()
+assembly.add(cadquery.Workplane().box(1, 1, 1), name="left")
+assembly.add(cadquery.Workplane().box(1, 1, 1).translate((1, 0, 0)), name="right")
+mesher = CadToYamc()
+mesher.add_cadquery_object(assembly, ["steel", "aluminum"])
+mesh = mesher.mesh_surfaces(imprint_threads=2)
+```
+
+Both `mesh()` and `mesh_surfaces()` accept `imprint_threads="all"` (the
+default) or a positive integer. Only imprinting uses this setting: the prior
+OCC thread-pool size and default launch count are restored before meshing,
+including when imprinting fails. Skipped and single-solid imprints do not
+change the thread pool. Glue behavior is unchanged.
+
 ## Relationship to yani
 
 `yamc` is a superset: it ships everything

@@ -39,6 +39,146 @@ def test_single_box_faces():
         assert info.is_planar  # Box faces are planar
 
 
+@pytest.fixture
+def imprint_pool():
+    from OCP.OSD import OSD_ThreadPool
+
+    pool = OSD_ThreadPool.DefaultPool_s()
+    previous_threads = pool.NbThreads()
+    previous_launch_threads = pool.NbDefaultThreadsToLaunch()
+    pool.Init(3)
+    pool.SetNbDefaultThreadsToLaunch(2)
+    yield pool
+    pool.Init(previous_threads)
+    pool.SetNbDefaultThreadsToLaunch(previous_launch_threads)
+
+
+@pytest.mark.parametrize("threads", [1, 2, "all"])
+def test_imprint_threads_are_scoped_and_topology_is_preserved(
+    threads, imprint_pool, monkeypatch
+):
+    from OCP.OSD import OSD_Parallel
+    from yamc.cad import assembly_processor
+
+    expected = OSD_Parallel.NbLogicalProcessors_s() if threads == "all" else threads
+    original_imprint = cq.occ_impl.assembly.imprint
+    original_strip = assembly_processor._strip_free_internal_edges
+    calls = []
+
+    def imprint(assembly):
+        calls.append((imprint_pool.NbThreads(), imprint_pool.NbDefaultThreadsToLaunch()))
+        return original_imprint(assembly)
+
+    def strip(compound, solids):
+        assert imprint_pool.NbThreads() == 3
+        assert imprint_pool.NbDefaultThreadsToLaunch() == 2
+        return original_strip(compound, solids)
+
+    monkeypatch.setattr(cq.occ_impl.assembly, "imprint", imprint)
+    monkeypatch.setattr(assembly_processor, "_strip_free_internal_edges", strip)
+    result = process_assembly(
+        make_two_touching_boxes(), ["steel", "aluminum"], imprint_threads=threads
+    )
+    assert calls == [(expected, expected)]
+    assert imprint_pool.NbThreads() == 3
+    assert imprint_pool.NbDefaultThreadsToLaunch() == 2
+    assert len(result.solid_faces) == 2
+    assert len(result.shared_faces) == 1
+
+
+def test_imprint_threads_are_restored_on_error(imprint_pool, monkeypatch):
+    def fail(assembly):
+        assert imprint_pool.NbThreads() == 1
+        raise RuntimeError("imprint failed")
+
+    monkeypatch.setattr(cq.occ_impl.assembly, "imprint", fail)
+    with pytest.raises(RuntimeError, match="imprint failed"):
+        process_assembly(make_two_touching_boxes(), ["a", "b"], imprint_threads=1)
+    assert imprint_pool.NbThreads() == 3
+    assert imprint_pool.NbDefaultThreadsToLaunch() == 2
+
+
+def test_imprint_threads_preserve_partial_glue(imprint_pool, monkeypatch):
+    original_imprint = cq.occ_impl.assembly.imprint
+    calls = []
+
+    def imprint(assembly, glue=None):
+        calls.append((glue, imprint_pool.NbThreads()))
+        return original_imprint(assembly)
+
+    monkeypatch.setattr(cq.occ_impl.assembly, "imprint", imprint)
+    result = process_assembly(make_two_touching_boxes(), ["a", "b"], imprint_threads=2)
+    assert calls == [("partial", 2)]
+    assert len(result.shared_faces) == 1
+    assert imprint_pool.NbThreads() == 3
+    assert imprint_pool.NbDefaultThreadsToLaunch() == 2
+
+
+@pytest.mark.parametrize("imprint", [True, False])
+@pytest.mark.parametrize("threads", [0, -1, True, False, 1.5, "2", None])
+def test_invalid_imprint_threads_are_rejected_even_without_imprinting(imprint, threads):
+    with pytest.raises(ValueError, match="imprint_threads"):
+        process_assembly(
+            make_single_box_assembly(), ["steel"], imprint=imprint,
+            imprint_threads=threads,
+        )
+
+
+@pytest.mark.parametrize("imprint", [True, False])
+def test_skipped_imprints_leave_threads_untouched(imprint, imprint_pool, monkeypatch):
+    from yamc.cad import assembly_processor
+
+    def unexpected(threads):
+        pytest.fail("a skipped imprint must not change OCC thread settings")
+
+    monkeypatch.setattr(assembly_processor, "setThreads", unexpected)
+    process_assembly(
+        make_single_box_assembly(), ["steel"], imprint=imprint, imprint_threads=1
+    )
+    assert imprint_pool.NbThreads() == 3
+    assert imprint_pool.NbDefaultThreadsToLaunch() == 2
+
+
+@pytest.mark.parametrize("method", ["mesh", "mesh_surfaces"])
+def test_public_mesher_forwards_imprint_threads(method, monkeypatch):
+    from yamc.cad import CadToYamc
+
+    mesher = CadToYamc()
+    mesher.add_cadquery_object(make_two_touching_boxes(), ["a", "b"])
+    calls = []
+
+    def mesh_surfaces(**kwargs):
+        calls.append(kwargs["imprint_threads"])
+
+    monkeypatch.setattr(mesher, "_mesh_surfaces", mesh_surfaces)
+    getattr(mesher, method)(imprint_threads=2)
+    assert calls == [2]
+
+
+@pytest.mark.parametrize("method", ["mesh", "mesh_surfaces"])
+def test_public_mesher_imprint_threads_are_restored_before_meshing(
+    method, imprint_pool, monkeypatch
+):
+    from yamc.cad import CadToYamc
+    from yamc.cad import _brepmesh
+
+    original_mesh = _brepmesh.brepmesh_face_meshes
+    calls = []
+
+    def mesh_faces(*args, **kwargs):
+        calls.append((imprint_pool.NbThreads(), imprint_pool.NbDefaultThreadsToLaunch()))
+        return original_mesh(*args, **kwargs)
+
+    monkeypatch.setattr(_brepmesh, "brepmesh_face_meshes", mesh_faces)
+    mesher = CadToYamc()
+    mesher.add_cadquery_object(make_two_touching_boxes(), ["a", "b"])
+    result = getattr(mesher, method)(imprint_threads=1)
+    assert calls == [(3, 2)]
+    assert result.num_solids == 2
+    assert len(result.shared_faces) == 1
+    assert result.triangles
+
+
 def test_two_boxes_shared_face():
     assy = make_two_touching_boxes()
     result = process_assembly(assy, material_tags=["steel", "aluminum"])
