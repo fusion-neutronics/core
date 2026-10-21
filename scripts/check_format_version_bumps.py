@@ -16,6 +16,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+from packaging.version import Version
+
 ROOT = Path(__file__).resolve().parent.parent
 RELEASE_SOURCE = "crates/yamc-nuclide/src/storage/release.rs"
 BINDINGS = {
@@ -25,14 +27,14 @@ BINDINGS = {
 
 
 def supported_formats(source: str) -> tuple[int, int]:
-    match = re.search(
+    matches = re.findall(
         r"\bpub\s+const\s+SUPPORTED_FORMAT_VERSIONS\s*:\s*RangeInclusive<u32>"
         r"\s*=\s*(\d+)\s*\.\.=\s*(\d+)\s*;",
         source,
     )
-    if match is None:
+    if len(matches) != 1:
         raise ValueError("cannot read SUPPORTED_FORMAT_VERSIONS; update the format-bump check")
-    return int(match[1]), int(match[2])
+    return int(matches[0][0]), int(matches[0][1])
 
 
 def check_bumps(changed: set[str], before: dict[str, str], after: dict[str, str]) -> list[str]:
@@ -49,9 +51,10 @@ def check_bumps(changed: set[str], before: dict[str, str], after: dict[str, str]
     for distribution, path in BINDINGS.items():
         old = tomllib.loads(before[path])["package"]["version"]
         new = tomllib.loads(after[path])["package"]["version"]
-        if old == new:
+        if Version(new) <= Version(old):
             failures.append(
-                f"{distribution}: published data format changed but {path} remains at {old}; "
+            f"{distribution}: published data format changed but {path} changed from {old} "
+            f"to {new}, not a newer version; "
                 "bump the binding version and update Cargo.lock in this PR"
             )
     return failures

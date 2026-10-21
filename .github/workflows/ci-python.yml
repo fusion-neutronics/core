@@ -104,6 +104,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
+      - name: Install version-comparison tooling
+        run: python -m pip install packaging
       - name: Test the offline format-version guard
         run: python -m unittest discover -s scripts/tests -p test_format_version_bumps.py
       - name: Check this PR against its base

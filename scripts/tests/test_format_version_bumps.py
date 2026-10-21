@@ -45,6 +45,29 @@ class FormatVersionBumps(unittest.TestCase):
             check_bumps({RELEASE_SOURCE}, tree(), tree("0.16.3", "0.21.3", "2..=3")), []
         )
 
+    def test_a_downgrade_is_not_a_version_bump(self):
+        failures = check_bumps(
+            {RELEASE_SOURCE}, tree(), tree("0.16.1", "0.21.3", "2..=3")
+        )
+        self.assertEqual(len(failures), 1)
+        self.assertIn("yamc-core", failures[0])
+        self.assertIn("not a newer version", failures[0])
+
+    def test_numeric_versions_are_compared_not_lexicographically(self):
+        self.assertEqual(
+            check_bumps({RELEASE_SOURCE}, tree("0.9.9", "0.9.9"), tree("0.10.0", "0.10.0", "2..=3")),
+            [],
+        )
+
+    def test_final_release_is_newer_than_its_prerelease(self):
+        self.assertEqual(
+            check_bumps(
+                {RELEASE_SOURCE}, tree("0.16.3-rc.1", "0.21.3-rc.1"),
+                tree("0.16.3", "0.21.3", "2..=3"),
+            ),
+            [],
+        )
+
     def test_schema_change_requires_both_versions(self):
         failures = check_bumps({"crates/nuclear-data-schema/src/lib.rs"}, tree(), tree())
         self.assertEqual(len(failures), 2)
@@ -69,6 +92,11 @@ class FormatVersionBumps(unittest.TestCase):
     def test_unrecognised_format_definition_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "update the format-bump check"):
             supported_formats("pub const SUPPORTED_FORMAT_VERSIONS: &[u32] = &[2, 3];")
+
+    def test_multiple_matching_format_definitions_fail_closed(self):
+        source = tree()[RELEASE_SOURCE]
+        with self.assertRaisesRegex(ValueError, "update the format-bump check"):
+            supported_formats(source + "\n" + source)
 
     def test_real_git_base_and_head_comparison(self):
         with tempfile.TemporaryDirectory() as directory:
