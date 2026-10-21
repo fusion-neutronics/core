@@ -93,6 +93,24 @@ env:
   CARGO_NET_RETRY: 10
 
 jobs:
+  format-version-bumps:
+    name: Data format changes bump both binding versions
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Test the offline format-version guard
+        run: python -m unittest discover -s scripts/tests -p test_format_version_bumps.py
+      - name: Check this PR against its base
+        env:
+          BASE_COMMIT: ${{ github.event.pull_request.base.sha }}
+        run: python scripts/check_format_version_bumps.py --base "$BASE_COMMIT"
+
   # What this run builds and publishes, decided once, from the event.
   #
   # A release tag names every project it publishes, but only the publish jobs
