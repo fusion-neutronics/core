@@ -4692,7 +4692,7 @@ class StatisticalChecks:
     @property
     def passed(self) -> builtins.bool:
         r"""
-        True when every evaluated check passed.
+        True when the tail is estimable and every evaluated check passed.
         """
     @property
     def n_passed(self) -> builtins.int:
@@ -4706,6 +4706,12 @@ class StatisticalChecks:
         """
     @property
     def relative_error_ok(self) -> typing.Optional[builtins.bool]: ...
+    @property
+    def per_bin_relative_error_ok(self) -> typing.Optional[builtins.bool]:
+        r"""
+        Every populated bin has relative error below 0.10; no per-bin tail
+        or higher-moment state is allocated by this check.
+        """
     @property
     def variance_of_variance_ok(self) -> typing.Optional[builtins.bool]: ...
     @property

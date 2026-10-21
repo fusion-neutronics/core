@@ -191,7 +191,7 @@ pub const PDF_NBINS: usize = ((PDF_LOG_MAX - PDF_LOG_MIN) as usize) * PDF_BINS_P
 /// fixed (constants above) so independent runs combine by summing counts.
 /// Bin `i` spans `|x|` in `[10^(LOG_MIN + i/BPD), 10^(LOG_MIN + (i+1)/BPD))`.
 /// Number of largest history scores retained for the Hill tail-index fit.
-pub const PDF_TAIL_K: usize = 50;
+pub const PDF_TAIL_K: usize = 201;
 
 #[derive(Debug, Clone, Default)]
 pub struct ScorePdf {
@@ -202,8 +202,8 @@ pub struct ScorePdf {
     pub zero: u64,
     /// The [`PDF_TAIL_K`] largest positive history scores seen, kept sorted
     /// ascending. Used for a Hill tail-index estimate of the PDF tail slope
-    /// (far more robust than a histogram fit). Not exposed; a few hundred
-    /// bytes per tally.
+    /// (far more robust than a histogram fit). Not exposed; about 1.6 KiB
+    /// per tally, not per tally bin.
     pub top: Vec<f64>,
 }
 
