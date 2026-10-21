@@ -1,6 +1,6 @@
 use crate::branching_rule::{
-    build_lists, measure_unmodelled_mt5, refuse_clipped_or_held, refuse_unmodelled_mt5,
-    removal_rate, Bound, BranchingChannel, BranchingReport, BranchingState, Denominator,
+    build_lists, measure_unmodelled_mt5, refuse_clipped_or_held, removal_rate,
+    unmodelled_mt5_warning, Bound, BranchingChannel, BranchingReport, BranchingState, Denominator,
     DroppedChannel, ListRates, ListRule, Lists, ANYTHING, INELASTIC, MT_ANYTHING, MT_INELASTIC,
 };
 use crate::covariance_fold::{cell_fields, fold_rate_covariance, reachable_mts, FoldSpectrum};
@@ -3855,9 +3855,9 @@ type LoadOutcome = Result<Option<(String, std::sync::Arc<yamc_nuclide::Nuclide>)
 /// Refuses the spectrum where the rule would rest more than
 /// [`BRANCHING_RATE_TOLERANCE`](crate::branching_rule::BRANCHING_RATE_TOLERANCE) of a parent's removal rate on a clipped or
 /// held value, reports MT=5's share of each parent's removal where the chain
-/// does not model its residuals (see [`measure_unmodelled_mt5`]), and refuses
+/// does not model its residuals (see [`measure_unmodelled_mt5`]), and warns
 /// where that is more than the tolerance of the material's own removal (see
-/// [`refuse_unmodelled_mt5`]).
+/// [`unmodelled_mt5_warning`]).
 pub(crate) fn collapse_and_fold(
     material: &Material,
     spectrum: &MultigroupSpectrum,
@@ -3921,9 +3921,13 @@ pub(crate) fn collapse_and_fold(
     refuse_clipped_or_held(&report.channels, &rates, &densities, &|n| {
         library_of(material, n)
     })?;
-    refuse_unmodelled_mt5(&report.unmodelled_mt5, &rates, &mt5, &densities, &|n| {
-        library_of(material, n)
-    })?;
+    if let Some(warning) =
+        unmodelled_mt5_warning(&report.unmodelled_mt5, &rates, &mt5, &densities, &|n| {
+            library_of(material, n)
+        })
+    {
+        eprintln!("{warning}");
+    }
     Ok(((rates, fy_weights, folded_chain), info, report))
 }
 
@@ -4419,9 +4423,9 @@ pub struct CoupledDiagnostics {
     /// `parent -> MT=5 rate`.
     pub mt5: HashMap<String, f64>,
     /// The tallied material's composition, atoms per barn-cm, which the
-    /// unmodelled MT=5 guard weighs parents by (see
-    /// [`crate::branching_rule::refuse_unmodelled_mt5`]). Empty refuses
-    /// nothing; [`CoupledDiagnostics::with_material`] fills it.
+    /// unmodelled MT=5 warning weighs parents by (see
+    /// [`crate::branching_rule::unmodelled_mt5_warning`]). Empty emits no
+    /// warning; [`CoupledDiagnostics::with_material`] fills it.
     pub densities: HashMap<String, f64>,
     /// Where each of the material's nuclides' cross sections came from, for
     /// that guard's message.
@@ -4580,9 +4584,13 @@ pub fn apply_coupled_branching(
         refuse_clipped_or_held(&report.channels, rates, &d.densities, &|n| {
             d.libraries.get(n).cloned()
         })?;
-        refuse_unmodelled_mt5(&report.unmodelled_mt5, rates, &d.mt5, &d.densities, &|n| {
-            d.libraries.get(n).cloned()
-        })?;
+        if let Some(warning) =
+            unmodelled_mt5_warning(&report.unmodelled_mt5, rates, &d.mt5, &d.densities, &|n| {
+                d.libraries.get(n).cloned()
+            })
+        {
+            eprintln!("{warning}");
+        }
     }
     Ok((folded_chain, report))
 }
@@ -5584,10 +5592,10 @@ mod tests {
     /// removal: at 30 MeV it is half of In115's here, all of the material. On
     /// a reactions subsection written before MT=5 was carried that is
     /// reported, as it was; on one that carries MT=5 and says In115's
-    /// residual is not given the run is refused and says why. A D-T spectrum
+    /// residual is not given the run warns and reports it. A D-T spectrum
     /// below the 20 MeV threshold reports nothing and runs.
     #[test]
-    fn unmodelled_mt5_refuses_a_material_made_of_it() {
+    fn unmodelled_mt5_warns_and_reports_a_material_made_of_it() {
         let material = indium(vec![
             reaction(16, vec![1.0e7, 4.0e7], vec![1.0, 1.0]),
             reaction(5, vec![2.0e7, 4.0e7], vec![0.0, 2.0]),
@@ -5612,16 +5620,18 @@ mod tests {
             ..edge(ANYTHING, "", 0.0)
         });
         let chain = Arc::new(HashMap::from([("In115".to_string(), nuc)]));
-        let err = fold(
+        let (_, _, report) = fold(
             &material,
             &chain,
             &BranchTable::new(),
             &one_group(2.9e7, 3.1e7),
         )
-        .unwrap_err();
-        assert!(err.contains("In115"), "{err}");
-        assert!(err.contains("not its residuals"), "{err}");
-        assert!(err.contains("50.00% of its own"), "{err}");
+        .unwrap();
+        let mt5 = &report.unmodelled_mt5[0];
+        assert_eq!(mt5.nuclide, "In115");
+        assert!((mt5.share - 0.5).abs() < 1e-3, "{mt5:?}");
+        assert!(mt5.guarded);
+        assert!(mt5.reason.contains("not its residuals"), "{mt5:?}");
 
         let (_, _, report) = fold(
             &material,
@@ -5631,6 +5641,51 @@ mod tests {
         )
         .unwrap();
         assert!(report.unmodelled_mt5.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn coupled_unmodelled_mt5_warns_without_changing_rates_or_targets() {
+        let mut nuclide = indium_chain()["In115"].clone();
+        nuclide.reactions.push(ChainReaction {
+            target: None,
+            ..edge(ANYTHING, "", 0.0)
+        });
+        let chain = Arc::new(HashMap::from([("In115".to_string(), nuclide)]));
+        let mut rates = HashMap::from([(
+            "In115".to_string(),
+            HashMap::from([("(n,2n)".to_string(), 1.0), (ANYTHING.to_string(), 1.0)]),
+        )]);
+        let original_rates = rates.clone();
+        let diagnostics = CoupledDiagnostics {
+            mt5: HashMap::from([("In115".to_string(), 1.0)]),
+            densities: HashMap::from([("In115".to_string(), 1.0)]),
+            libraries: HashMap::from([("In115".to_string(), "endf-b8.1".to_string())]),
+            ..Default::default()
+        };
+        let (folded, report) = apply_coupled_branching(
+            &chain,
+            &BranchTable::new(),
+            &HashMap::new(),
+            &mut rates,
+            Some(&diagnostics),
+        )
+        .unwrap();
+        assert_eq!(rates, original_rates);
+        assert_eq!(
+            folded["In115"]
+                .reactions
+                .iter()
+                .map(|reaction| (&reaction.kind, &reaction.target))
+                .collect::<Vec<_>>(),
+            chain["In115"]
+                .reactions
+                .iter()
+                .map(|reaction| (&reaction.kind, &reaction.target))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(report.unmodelled_mt5.len(), 1);
+        assert_eq!(report.unmodelled_mt5[0].nuclide, "In115");
+        assert!((report.unmodelled_mt5[0].share - 0.5).abs() < 1e-12);
     }
 
     /// A complete list reproduces the evaluation's own partials where they

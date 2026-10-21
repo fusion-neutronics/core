@@ -83,6 +83,85 @@ The branching report names the source of every channel, and `mixed` says
 whether a run takes its splits from more than one library, or a split from a
 library other than its total's.
 
+## MT=5 residual data
+
+MT=5, `(n,anything)`, can remove a parent through several unresolved reaction
+channels. Its light-particle yields alone do not identify the residual nuclei
+or their isomeric states. If those products are missing, yani continues and
+prints a warning when the unmodelled MT=5 contribution exceeds 0.1% of the
+material's neutron removal rate. Parent removal and evaluated light-particle
+production are retained, but the missing residual nuclei are not produced.
+The returned inventory is incomplete; that fraction does not bound the error
+in activity or decay heat. No residuals are invented and no libraries are
+substituted. The impossible-yield and out-of-range branching guards still
+refuse invalid calculations as before.
+
+ENDF/B-VIII.1 gives no heavy MT=5 residual products for Tm169, Zr90, Zr91,
+Zr92, Zr94 or Zr96: their MF=6 MT=5 sections contain neutrons, light particles
+and photons, and none has MF=9 or MF=10 MT=5 production to supply the missing
+residuals. The `endf-b8.1` release `2026-10-12.1` records all six under
+`mt5.residual_not_given` in the reactions provenance. Re-converting these
+evaluations cannot recover absent products; the processed release preserves
+the omissions, and republishing the same evaluations will not repair them.
+Raising the allowance, retaining removed parents or normalising the gas yields
+into residuals would not account for the missing inventory.
+
+These compositions can be solved with that ENDF/B-VIII.1 configuration, with
+the warning and missing residuals recorded by
+`results.get_branching_report(material.id or 0, 0)["unmodelled_mt5"]` for the
+first irradiation interval. Inspect each interval's report when the spectrum
+changes. The 0.1% value is a warning threshold for missing MT=5 residuals,
+not permission to treat the returned inventory as complete.
+
+To use a different residual-production model, select a different neutron
+library together with its reaction and branching data. For example, use
+TENDL-2025 for all three, while retaining
+explicitly selected ENDF/B-VIII.1 decay data and fission yields:
+
+```python
+import yani
+
+yani.cross_section_data = "tendl-2025"
+yani.transmutation_reactions = "tendl-2025"
+yani.transmutation_branch_ratios = "tendl-2025"
+yani.transmutation_decay_data = "endf-b8.1"
+yani.transmutation_fission_yields = "endf-b8.1"
+
+source = yani.NeutronSource(
+  energy=yani.sources.Histogram([14.0e6, 14.2e6], [1.0])
+)
+schedule = yani.PulseSchedule([
+  yani.Pulse(duration=(300, "s"), rate=1.116e10, source=source),
+  yani.Cooldown(duration=(60, "s")),
+])
+zirconium = yani.Material(
+  {"Zr": 1.0}, fraction_type="mass", density=6.52, volume=1.0 / 6.52,
+  temperature=294.0,
+)
+results = zirconium.transmute(schedule)
+print(results.data_releases)
+print(results.get_branching_report(zirconium.id or 0, 0)["mixed"])
+```
+
+Make a new material after selecting the sources. The same selection applies to
+the thulium-oxide composition. Both nominal cases were checked with TENDL
+release `2026-10-18` and ENDF/B release `2026-10-12.1`. This is a TENDL
+neutron/reaction calculation with ENDF/B decay and fission-yield data, not an
+ENDF/B neutron result or an ENDF/B data repair. Changing only the reaction or
+branching source instead borrows a different residual-production model; it
+must not be presented as the original library's prediction.
+
+An ENDF/B warning run remains ENDF/B-based, but its missing products and
+incomplete inventory must be stated in a comparison. An alternative-library
+calculation cannot fill an ENDF/B-labelled result cell. A comparison requiring
+complete residual production must still flag these ENDF/B cases as unsupported.
+
+Record `data_releases` and the branching report for each result. When a source
+changes, repeat the affected calculations rather than combining old and new
+values under one library label. Unchanged solves may be retained only with
+their original provenance. A successful solve alone does not validate its
+decay-heat prediction.
+
 ## Relationship to yamc
 
 `yamc` is a superset: it ships
