@@ -29,11 +29,10 @@ from .conftest import (
 # Load chain once as a yamc Chain object (avoids re-parsing XML per nuclide)
 _chain = yamc.TransmutationChain(CHAIN_FILE)
 
-# With the (n,X) rows, a nuclide whose evaluation's MT=5 the solver cannot
-# carry is refused, and the refusal is what is checked. ENDF/B-VIII.1's Co58
-# and Fe58 give MT=5's light particles but no residual nucleus; its Cr52 gives
-# residual "multiplicities" (V51 at 4e4) that restate its (n,np) over a
-# vanishing MT=5.
+# Refusals recorded when the stored self-references were generated. Those
+# references omit MT=5 for these parents and must keep their original meaning.
+# Missing residuals for Co58 and Fe58 now warn and continue; Cr52's impossible
+# residual multiplicities still refuse the full-chain run.
 FULL_CHAIN_REFUSALS = {
     "Co58": r"MT=5 \(n,anything\) whose residual nuclei the chain does not model",
     "Fe58": r"MT=5 \(n,anything\) whose residual nuclei the chain does not model",
@@ -108,7 +107,12 @@ def run_yamc_transmute(nuclide, with_anything=True):
                 TRANSMUTE_ENERGY_GROUPS,
                 TRANSMUTE_MULTIGROUP_FLUX,
             )
-        return {"steps": steps, "mt5_rates": rates, "chain": reduced}
+        return {
+            "steps": steps,
+            "mt5_rates": rates,
+            "chain": reduced,
+            "branching_report": results.get_branching_report(material.id or 0, 0),
+        }
     finally:
         shutil.rmtree(tmp_chain, ignore_errors=True)
 
@@ -176,19 +180,28 @@ def test_transmutation(nuclide):
 
 
 @pytest.mark.parametrize("nuclide", ALL_NEUTRON_NUCLIDES)
-def test_transmutation_with_mt5(nuclide):
+def test_transmutation_with_mt5(nuclide, capfd):
     """The full chain against the MT=5-free solve plus its data-derived term.
 
     What MT=5 adds is computed from the data, not by yamc (see ``_mt5``), so
     this checks yamc's MT=5 residuals and light particles product by product.
-    A nuclide whose MT=5 the solver refuses is checked for the refusal.
+    Missing residuals warn but retain the known production checks. Impossible
+    multiplicities still refuse the full-chain calculation.
     """
-    if nuclide in FULL_CHAIN_REFUSALS:
+    missing_residuals = nuclide in {"Co58", "Fe58"}
+    if nuclide in FULL_CHAIN_REFUSALS and not missing_residuals:
         with pytest.raises(ValueError, match=FULL_CHAIN_REFUSALS[nuclide]):
             run_yamc_transmute(nuclide)
         return
 
     result = run_yamc_transmute(nuclide)
+    if missing_residuals:
+        warning = capfd.readouterr().err
+        assert "warning: continuing with an incomplete inventory" in warning
+        assert f"{nuclide} (endf-b8.1)" in warning
+        assert "does not bound the error in activity or decay heat" in warning
+        missing = result["branching_report"]["unmodelled_mt5"]
+        assert any(parent == nuclide and share > 0.0 for parent, share, _ in missing)
     baseline = run_yamc_transmute(nuclide, with_anything=False)
     chain = result["chain"]
     # The seed's density, taken after the first step, which removes less than
