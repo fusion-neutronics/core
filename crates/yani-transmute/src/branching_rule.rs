@@ -1167,8 +1167,11 @@ pub(crate) fn refuse_unmodelled_mt5(
         "{:.3}% of this material's neutron removal rate is MT=5 (n,anything) whose \
          residual nuclei the chain does not model, above the {:.1}% the solver carries \
          without them: {}. The atoms MT=5 removes would leave the inventory unaccounted \
-         for. Use a reaction library whose evaluations give MT=5's residuals (MF=6 MT=5), \
-         or a reactions subsection converted with MT=5 carried.",
+         for. Re-converting a source evaluation that gives no residual products cannot \
+         recover them. Use compatible neutron cross-section and reaction data whose \
+         evaluations model MT=5 residual production. Changing only the reaction data \
+         changes the residual-production model rather than repairing the original \
+         evaluation; retain all library provenance and inspect the branching report.",
         100.0 * total,
         100.0 * BRANCHING_RATE_TOLERANCE,
         named.join("; ")
@@ -1546,6 +1549,12 @@ mod tests {
         let pure = HashMap::from([("Fe58".to_string(), 1.0)]);
         let err = refuse_unmodelled_mt5(&report, &rates, &mt5, &pure, &library).unwrap_err();
         assert!(err.contains("Fe58 (endf-b8.1): 25.000%"), "{err}");
+        assert!(err.contains("cannot recover them"), "{err}");
+        assert!(
+            err.contains("neutron cross-section and reaction data"),
+            "{err}"
+        );
+        assert!(err.contains("Changing only the reaction data"), "{err}");
         let natural = HashMap::from([("Fe58".to_string(), 3.0e-4), ("Fe56".to_string(), 1.0)]);
         assert!(refuse_unmodelled_mt5(&report, &rates, &mt5, &natural, &library).is_ok());
         assert!(refuse_unmodelled_mt5(&report, &rates, &mt5, &HashMap::new(), &library).is_ok());
@@ -1554,6 +1563,33 @@ mod tests {
         let old = measure_unmodelled_mt5(&HashMap::new(), &rates, &mt5);
         assert!(!old[0].guarded && old[0].reason.contains("re-convert"));
         assert!(refuse_unmodelled_mt5(&old, &rates, &mt5, &pure, &library).is_ok());
+    }
+
+    #[test]
+    fn tm_and_zr_source_gaps_still_refuse_materials_above_tolerance() {
+        let template = parent_with(vec![(ANYTHING, Some("H1")), (ANYTHING, None)])
+            .remove("Fe58")
+            .unwrap();
+        for parent in ["Tm169", "Zr90", "Zr91", "Zr92", "Zr94", "Zr96"] {
+            let mut nuclide = template.clone();
+            nuclide.name = parent.to_string();
+            let chain = HashMap::from([(parent.to_string(), nuclide)]);
+            let rates = HashMap::from([(
+                parent.to_string(),
+                HashMap::from([("(n,p)".to_string(), 99.0)]),
+            )]);
+            let mt5 = HashMap::from([(parent.to_string(), 1.0)]);
+            let densities = HashMap::from([(parent.to_string(), 1.0)]);
+            let report = measure_unmodelled_mt5(&chain, &rates, &mt5);
+            let error = refuse_unmodelled_mt5(&report, &rates, &mt5, &densities, &|_| {
+                Some("endf-b8.1".to_string())
+            })
+            .unwrap_err();
+            assert!(error.contains("1.000%"), "{parent}: {error}");
+            assert!(error.contains("above the 0.1%"), "{parent}: {error}");
+            assert!(error.contains("cannot recover them"), "{parent}: {error}");
+            assert!(error.contains("library provenance"), "{parent}: {error}");
+        }
     }
 
     #[test]

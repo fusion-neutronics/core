@@ -141,6 +141,14 @@ fn a_residual_not_given_is_written_as_such() {
         "n-040_Zr_096_endfb81_mt5.endf.xz"
     )))
     .expect("Zr96 has MT=5");
+    let zaps: Vec<i64> = evaluation
+        .products
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|product| product.zap)
+        .collect();
+    assert_eq!(zaps, [1, 1003, 2003, 2004]);
     let (rows, record) = named(evaluation, &decay(&[]));
     let marker: Vec<&Row> = rows.iter().filter(|r| r.target.is_none()).collect();
     assert_eq!(marker.len(), 1);
@@ -155,6 +163,47 @@ fn a_residual_not_given_is_written_as_such() {
         entry["charge_share_carried"].as_f64().unwrap() < 0.1,
         "{entry}"
     );
+}
+
+#[test]
+#[ignore = "reads local ENDF/B-VIII.1 evaluations; set YANI_MT5_ENDF"]
+fn tm_and_zr_source_evaluations_do_not_supply_mt5_residuals() {
+    let root = std::path::PathBuf::from(
+        std::env::var_os("YANI_MT5_ENDF").expect("set YANI_MT5_ENDF to the raw library root"),
+    )
+    .join("endfb-viii.1-endf/neutrons-version.VIII.1");
+    for (parent, filename) in [
+        ("Tm169", "n-069_Tm_169.endf"),
+        ("Zr90", "n-040_Zr_090.endf"),
+        ("Zr91", "n-040_Zr_091.endf"),
+        ("Zr92", "n-040_Zr_092.endf"),
+        ("Zr94", "n-040_Zr_094.endf"),
+        ("Zr96", "n-040_Zr_096.endf"),
+    ] {
+        let path = root.join(filename);
+        let source = std::fs::read_to_string(&path).expect("source evaluation is readable");
+        let material = Material::from_str(&source).expect("source evaluation parses");
+        let products = &material.mf6(5).expect("source has MF=6 MT=5").products;
+        let zaps: Vec<i64> = products.iter().map(|product| product.zap).collect();
+        assert!(
+            zaps.iter()
+                .all(|zap| matches!(zap, 0 | 1 | 1001 | 1002 | 1003 | 2003 | 2004)),
+            "{parent}: unexpected heavy residual in the source: {zaps:?}"
+        );
+        assert!(material.mf9(5).is_none(), "{parent}: MF=9 MT=5 is present");
+        assert!(
+            material.mf10(5).is_none(),
+            "{parent}: MF=10 MT=5 is present"
+        );
+        let evaluation = anything::read(&material).expect("source has nonzero MT=5");
+        assert_eq!(evaluation.parent, parent);
+        let (rows, record) = named(evaluation, &decay(&[parent]));
+        assert!(rows.iter().any(|row| row.target.is_none()), "{parent}");
+        let entry = &record["residual_not_given"][0];
+        assert_eq!(entry["nuclide"], parent);
+        assert_eq!(entry["residual_multiplicity"], 0.0);
+        println!("{parent}: MF=6 MT=5 ZAP={zaps:?}; no MF=9/10 MT=5; {entry}");
+    }
 }
 
 /// TENDL-2025's Ni58 gives Co58 at LIP 0 and 1. With Co58_m1 in the decay
