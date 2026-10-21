@@ -2036,23 +2036,30 @@ fn finalize_per_history_tallies(
 /// path's neutron/photon source-strength split is non-empty on both sides.
 const INITIAL_TRANSLATE_SAMPLE: usize = 2;
 
+fn default_launch_chunk_size(mem_safe_max: usize, max_steps: u32) -> usize {
+    const MAX_LAUNCH_HISTORIES: usize = 100_000;
+    const MAX_LAUNCH_STEPS: usize = 100_000_000;
+    let step_limited_max = (MAX_LAUNCH_STEPS / max_steps.max(1) as usize).max(1);
+    mem_safe_max
+        .clamp(1, MAX_LAUNCH_HISTORIES)
+        .min(step_limited_max)
+}
+
 /// GPU launch chunk size (histories / source neutrons per launch) for the
 /// per-history variance paths. Fixed and total-INDEPENDENT so
 /// `total_particles` stays out of the RNG key. Capped at `mem_safe_max` (the
-/// tally-shape memory bound -- a fine tally launches smaller chunks) and the
-/// watchdog-safe 100k per-dispatch size. `YAMC_GPU_LAUNCH_CHUNK` overrides it
+/// tally-shape memory bound) and a worst-case particle-step budget, so long
+/// histories use smaller launches. `YAMC_GPU_LAUNCH_CHUNK` overrides the default
 /// (still capped at `mem_safe_max`) for tuning and for exercising the
 /// multi-chunk path in tests; the override is a fixed value, so results stay
 /// total-independent.
-fn launch_chunk_size(mem_safe_max: usize) -> usize {
-    const FIXED_LAUNCH_CHUNK: usize = 100_000;
-    let cap = mem_safe_max.max(1);
+fn launch_chunk_size(mem_safe_max: usize, max_steps: u32) -> usize {
     match std::env::var("YAMC_GPU_LAUNCH_CHUNK")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
     {
-        Some(c) => c.max(1).min(cap),
-        None => FIXED_LAUNCH_CHUNK.min(cap),
+        Some(chunk) => chunk.max(1).min(mem_safe_max.max(1)),
+        None => default_launch_chunk_size(mem_safe_max, max_steps),
     }
 }
 
@@ -2070,16 +2077,8 @@ fn launch_chunk_size(mem_safe_max: usize) -> usize {
 ///
 /// Bound: the 64Mi-word spill budget divided by the capacity actually
 /// ALLOCATED, which is the tight `per_history_spill_cap` (at most one flat bin
-/// per tally per step). It used to be additionally clamped by a
-/// `WATCHDOG_STEP_BUDGET / max_steps` term, on the theory that a bigger chunk
-/// runs proportionally longer and could trip the driver watchdog. That clamp
-/// was doing no useful work: it bounded only this one enlargement path, while
-/// the very same model with a COARSER tally already launches the full
-/// `FIXED_LAUNCH_CHUNK` of 100,000 histories at the same `max_steps` -- a
-/// worst-case step count orders of magnitude past anything the clamp allowed
-/// here. Since the value returned here is always `<= FIXED_LAUNCH_CHUNK`, no
-/// launch this sizes can be longer than one the coarse-tally path already runs
-/// routinely for the same model.
+/// per tally per step). `launch_chunk_size` separately bounds the default
+/// dispatch work by `max_steps`, for coarse tallies as well as fine ones.
 ///
 /// The remaining limit is the provisioning itself: `per_history_spill_cap` is a
 /// worst case (a history that touched a distinct bin on every one of its
@@ -2276,7 +2275,7 @@ fn run_neutron_per_history(
     let total_out_len = pack.total_out_len() as usize;
     let mem_safe_max =
         spill_bounded_mem_safe_max(total_out_len, max_steps, pack.n_tallies() as usize);
-    let chunk = launch_chunk_size(mem_safe_max);
+    let chunk = launch_chunk_size(mem_safe_max, max_steps);
 
     // No fission on this path (checked by the caller), so the device bank never
     // fires: keep it OFF (a size-1 bank), byte-identical transport.
@@ -2684,7 +2683,7 @@ fn run_neutron_per_history_fissile(
     // `chunk_sources * total_out_len` inside u32.
     let per_thread_words = total_out_len.max(spill_cap).max(1);
     let mem_safe_max = ((64usize * 1024 * 1024) / per_thread_words).max(1);
-    let chunk = launch_chunk_size(mem_safe_max);
+    let chunk = launch_chunk_size(mem_safe_max, max_steps);
     // A mesh tally switches every launch of this loop to the direct per-source
     // mode: each voxel crossing scores straight into `src_acc`
     // under the history's SOURCE index, which the generation launches carry
@@ -3390,7 +3389,7 @@ pub(super) fn run_on_gpu_photon(
     // photon kernel host for the actual spill allocation + indexing.
     let mem_safe_max =
         spill_bounded_mem_safe_max(total_out_len, max_steps, pack.n_tallies() as usize);
-    let chunk = launch_chunk_size(mem_safe_max);
+    let chunk = launch_chunk_size(mem_safe_max, max_steps);
     // A model carrying a mesh tally routes through the per-source direct path,
     // exactly like the neutron host: the kernel fans each voxel
     // crossing straight into `src_acc` (no touched-list) and the host folds each
@@ -3761,7 +3760,7 @@ fn run_on_gpu_coupled(
         .max(total_out_len_p.saturating_sub(k))
         .max(1);
     let mem_safe_max = ((64usize * 1024 * 1024) / per_thread_words).max(1);
-    let chunk = launch_chunk_size(mem_safe_max);
+    let chunk = launch_chunk_size(mem_safe_max, max_steps);
 
     // Per-final-tally accumulators (tally 7D bin order), summed across chunks.
     let mut sum_n: Vec<Vec<f64>> = validated_n[..n_neutron_only]
@@ -4287,7 +4286,7 @@ fn run_on_gpu_mixed(
         .max(total_out_len_p.saturating_sub(k))
         .max(1);
     let mem_safe_max = ((64usize * 1024 * 1024) / per_thread_words).max(1);
-    let chunk = launch_chunk_size(mem_safe_max).max(2);
+    let chunk = launch_chunk_size(mem_safe_max, max_steps).max(2);
     // Fixed per-type split of the source chunk (total-independent).
     let chunk_n = (((chunk as f64) * (s_n / s_total)).round() as usize).clamp(1, chunk - 1);
     let chunk_p = chunk - chunk_n;
@@ -5619,6 +5618,31 @@ mod tests {
     use yamc_tallies::filter::energy::EnergyFilter;
     use yamc_tallies::filter::particle_type::ParticleTypeFilter;
     use yamc_tallies::tally::Tally;
+
+    #[test]
+    fn default_launch_chunk_size_bounds_particle_steps() {
+        for (max_steps, expected) in [
+            (1, 100_000),
+            (1_000, 100_000),
+            (10_000, 10_000),
+            (100_000, 1_000),
+        ] {
+            assert_eq!(default_launch_chunk_size(usize::MAX, max_steps), expected);
+        }
+    }
+
+    #[test]
+    fn default_launch_chunk_size_respects_tally_memory() {
+        assert_eq!(default_launch_chunk_size(32, 100_000), 32);
+        assert_eq!(default_launch_chunk_size(500, 1_000), 500);
+        assert_eq!(default_launch_chunk_size(0, 100_000), 1);
+    }
+
+    #[test]
+    fn default_launch_chunk_size_handles_extreme_step_caps() {
+        assert_eq!(default_launch_chunk_size(usize::MAX, 0), 100_000);
+        assert_eq!(default_launch_chunk_size(usize::MAX, u32::MAX), 1);
+    }
 
     fn flux_tally_cell_energy(cell_ids: Vec<u32>, e_bins: Vec<f64>) -> Arc<Tally> {
         let mut t = Tally::new();
