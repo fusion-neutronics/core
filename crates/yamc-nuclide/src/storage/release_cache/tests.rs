@@ -20,6 +20,8 @@ enum Behaviour {
     /// Serve whole objects and ignore every `Range` header, as a proxy that
     /// drops it does.
     IgnoreRanges,
+    /// Accept the connection and close it without answering.
+    Disconnect,
     /// Accept the connection and never answer, as a black-holed network does.
     Silent,
 }
@@ -211,6 +213,9 @@ fn answer(mut stream: TcpStream, state: &State) {
     let path = target.split('?').next().unwrap_or("").to_string();
     state.hits.lock().unwrap().push(target.clone());
     let behaviour = *state.behaviour.lock().unwrap();
+    if behaviour == Behaviour::Disconnect {
+        return;
+    }
     if behaviour == Behaviour::Silent {
         std::thread::sleep(Duration::from_secs(20));
         return;
@@ -343,12 +348,24 @@ fn registry(origin: &str, root: &Scratch) -> Registry {
     Registry::new(origin, Some(root.0.clone()), FAST)
 }
 
-/// An origin that refuses connections: a port that was bound and released.
+/// An origin that closes connections without answering, keeping its port bound.
 fn dead_origin() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}/", listener.local_addr().unwrap());
-    drop(listener);
-    url
+    let origin = Origin::start();
+    origin.set(Behaviour::Disconnect);
+    origin.url
+}
+
+#[test]
+fn an_offline_origin_keeps_its_port_reserved() {
+    let origin = dead_origin();
+    let address = origin
+        .strip_prefix("http://")
+        .unwrap()
+        .trim_end_matches('/');
+    assert!(
+        TcpListener::bind(address).is_err(),
+        "another test must not be able to serve responses from the offline origin"
+    );
 }
 
 /// The required neutron sections of a transport load, with contents that say

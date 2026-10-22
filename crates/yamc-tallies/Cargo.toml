@@ -18,6 +18,7 @@ rustc-hash = "2"
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 smallvec = "1"
+statrs = { version = "0.18", default-features = false }
 yamc-element = { path = "../yamc-element", default-features = false }
 yamc-materials = { path = "../yamc-materials", default-features = false }
 yamc-nuclide = { path = "../yamc-nuclide", default-features = false }

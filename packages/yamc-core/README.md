@@ -82,6 +82,12 @@ Pick `yamc` when the neutron spectrum should come from a transport solve; pick
 
 ## What it does not do
 
+- Tally reliability checks include a relative-error check of every populated
+  bin. Higher moments and the 201-sample tail fit remain aggregate checks,
+  not per-bin tail guarantees. An unestimable tail gives an incomplete
+  verdict, not a pass. Both figure-of-merit checks need at least 0.1 s of
+  last-half history; mean stability uses a 95% Student-t slope test on
+  disjoint block means rather than monotonic cumulative snapshots.
 - Fixed-source transport only. No criticality or eigenvalue calculations.
 - One transmutation stepper (`ForwardEulerStepper`, beginning-of-step rates).
   No predictor-corrector.

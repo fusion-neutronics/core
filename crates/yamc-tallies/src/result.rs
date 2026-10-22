@@ -315,6 +315,7 @@ impl TallyResult {
             rate_checks(&self.convergence_history);
         StatisticalChecks {
             relative_error_ok,
+            per_bin_relative_error_ok: self.per_bin_relative_error_check(),
             variance_of_variance_ok,
             tail_slope_ok,
             mean_stable,
@@ -325,6 +326,25 @@ impl TallyResult {
             figure_of_merit_stable: fom_stable,
             figure_of_merit_no_trend,
         }
+    }
+
+    fn per_bin_relative_error_check(&self) -> Option<bool> {
+        if self.n_histories < 2 {
+            return None;
+        }
+        let mut populated = false;
+        let mut passed = true;
+        for (&mean, &error) in self.mean.iter().zip(&self.standard_deviation) {
+            if mean != 0.0 || error != 0.0 {
+                populated = true;
+                passed &= mean.is_finite()
+                    && error.is_finite()
+                    && error >= 0.0
+                    && mean != 0.0
+                    && error / mean.abs() < 0.10;
+            }
+        }
+        populated.then_some(passed)
     }
 
     /// A multi-line, human-readable summary: headline mean ± std, figure of
@@ -501,6 +521,9 @@ pub struct ConvergencePoint {
 pub struct StatisticalChecks {
     /// Relative error below the 0.10 reliability threshold.
     pub relative_error_ok: Option<bool>,
+    /// Every populated bin has relative error below 0.10. Higher-moment and
+    /// tail checks remain aggregate-only; this uses existing per-bin data.
+    pub per_bin_relative_error_ok: Option<bool>,
     /// Variance of the variance below 0.10.
     pub variance_of_variance_ok: Option<bool>,
     /// Large-score tail slope above 3 (finite variance).
@@ -524,10 +547,14 @@ pub struct StatisticalChecks {
 
 impl StatisticalChecks {
     /// The checks in display order: `(label, outcome)`.
-    pub fn items(&self) -> [(&'static str, Option<bool>); 10] {
+    pub fn items(&self) -> [(&'static str, Option<bool>); 11] {
         [
             ("mean stable", self.mean_stable),
             ("relative error < 0.10", self.relative_error_ok),
+            (
+                "per-bin relative error < 0.10",
+                self.per_bin_relative_error_ok,
+            ),
             ("relative error decreasing", self.relative_error_decreasing),
             (
                 "relative error falls as 1/sqrt(N)",
@@ -564,9 +591,10 @@ impl StatisticalChecks {
         self.items().iter().filter(|(_, v)| v.is_some()).count()
     }
 
-    /// True when every evaluated check passed (unevaluated checks don't fail).
+    /// True when the tail is estimable and every evaluated check passed.
+    /// Unavailable optional trend checks remain n/a, not evidence of a pass.
     pub fn passed(&self) -> bool {
-        self.items().iter().all(|(_, v)| v.unwrap_or(true))
+        self.tail_slope_ok == Some(true) && self.items().iter().all(|(_, v)| v.unwrap_or(true))
     }
 
     /// A plain-text pass / FAIL / n/a table of the checks.
@@ -580,7 +608,13 @@ impl StatisticalChecks {
             };
             s.push_str(&format!("  {label:.<34} {status}\n"));
         }
-        let verdict = if self.passed() { "PASSED" } else { "FAILED" };
+        let verdict = if self.passed() {
+            "PASSED"
+        } else if self.items().iter().any(|(_, value)| *value == Some(false)) {
+            "FAILED"
+        } else {
+            "INCOMPLETE"
+        };
         s.push_str(&format!(
             "  result: {verdict} ({}/{})\n",
             self.n_passed(),
@@ -603,15 +637,15 @@ fn trend_checks(
     if half.len() < 3 {
         return (None, None, None, None);
     }
-    let means: Vec<f64> = half.iter().map(|p| p.mean).collect();
     let res: Vec<f64> = half.iter().map(|p| p.relative_error).collect();
     let vovs: Vec<f64> = half.iter().map(|p| p.variance_of_variance).collect();
     let foms: Vec<f64> = half.iter().map(|p| p.figure_of_merit).collect();
+    let fom_span = half.last().unwrap().elapsed_secs - half.first().unwrap().elapsed_secs;
     (
-        Some(!is_monotonic(&means)),
+        mean_drift_check(half),
         Some(is_non_increasing(&res)),
         Some(is_non_increasing(&vovs)),
-        Some(is_roughly_constant(&foms)),
+        (fom_span >= FOM_MIN_SPAN_SECS).then(|| is_roughly_constant(&foms)),
     )
 }
 
@@ -677,13 +711,61 @@ fn log_log_slope(points: &[ConvergencePoint], y: impl Fn(&ConvergencePoint) -> f
     (sxx > 0.0).then(|| sxy / sxx)
 }
 
-/// True only for a consistent one-directional drift (strictly increasing or
-/// strictly decreasing). A constant or wandering series is not monotonic, so
-/// `mean_stable = !is_monotonic` treats those as stable.
-fn is_monotonic(v: &[f64]) -> bool {
-    let inc = v.windows(2).all(|w| w[1] > w[0]);
-    let dec = v.windows(2).all(|w| w[1] < w[0]);
-    inc || dec
+fn mean_drift_check(points: &[ConvergencePoint]) -> Option<bool> {
+    use statrs::distribution::{ContinuousCDF, StudentsT};
+
+    let last_count = points.last()?.n_histories as f64;
+    if last_count <= 0.0 {
+        return None;
+    }
+    let mut blocks = Vec::with_capacity(points.len().saturating_sub(1));
+    for pair in points.windows(2) {
+        let count = pair[1].n_histories.checked_sub(pair[0].n_histories)?;
+        if count == 0 {
+            return None;
+        }
+        let start = pair[0].n_histories as f64;
+        let end = pair[1].n_histories as f64;
+        let mean = (end * pair[1].mean - start * pair[0].mean) / count as f64;
+        if !mean.is_finite() {
+            return None;
+        }
+        blocks.push(((start + end) / (2.0 * last_count), mean, count as f64));
+    }
+    if blocks.len() < 3 {
+        return None;
+    }
+    let total_weight: f64 = blocks.iter().map(|point| point.2).sum();
+    let mean_x = blocks.iter().map(|point| point.2 * point.0).sum::<f64>() / total_weight;
+    let mean_y = blocks.iter().map(|point| point.2 * point.1).sum::<f64>() / total_weight;
+    let spread: f64 = blocks
+        .iter()
+        .map(|point| point.2 * (point.0 - mean_x).powi(2))
+        .sum();
+    if spread <= 0.0 || !spread.is_finite() {
+        return None;
+    }
+    let slope = blocks
+        .iter()
+        .map(|point| point.2 * (point.0 - mean_x) * (point.1 - mean_y))
+        .sum::<f64>()
+        / spread;
+    let residual: f64 = blocks
+        .iter()
+        .map(|point| point.2 * (point.1 - mean_y - slope * (point.0 - mean_x)).powi(2))
+        .sum();
+    let degrees = (blocks.len() - 2) as f64;
+    let standard_error = (residual / (degrees * spread)).sqrt();
+    if !slope.is_finite() || !standard_error.is_finite() {
+        return None;
+    }
+    if standard_error == 0.0 {
+        return Some(slope == 0.0);
+    }
+    let critical = StudentsT::new(0.0, 1.0, degrees)
+        .expect("positive degrees of freedom")
+        .inverse_cdf(0.975);
+    Some(slope.abs() <= critical * standard_error)
 }
 
 fn is_non_increasing(v: &[f64]) -> bool {
@@ -1076,7 +1158,7 @@ mod tests {
     }
 
     /// With no per-history samples the magnitude/slope checks are "not
-    /// evaluated" (None) and the verdict passes vacuously.
+    /// evaluated" (None) and the verdict is incomplete, not a vacuous pass.
     #[test]
     fn statistical_checks_not_evaluated_without_samples() {
         let r = flux_result();
@@ -1085,7 +1167,102 @@ mod tests {
         assert_eq!(c.variance_of_variance_ok, None);
         assert_eq!(c.tail_slope_ok, None);
         assert_eq!(c.n_evaluated(), 0);
-        assert!(c.passed());
+        assert!(!c.passed());
+        assert!(c.summary().contains("INCOMPLETE"));
+    }
+
+    #[test]
+    fn too_few_tail_samples_do_not_pass_otherwise_healthy_checks() {
+        let mut result = flux_result();
+        result.agg = crate::welford::AggMoments {
+            n: 100_000,
+            mean: 2.0,
+            m2: 1.0e-3,
+            m3: 0.0,
+            m4: 1.0e-9,
+        };
+        result.score_pdf = crate::welford::ScorePdf::new();
+        for _ in 0..4 {
+            result.score_pdf.record(2.0);
+        }
+        let checks = result.statistical_checks();
+        assert_eq!(checks.relative_error_ok, Some(true));
+        assert_eq!(checks.variance_of_variance_ok, Some(true));
+        assert_eq!(checks.tail_slope_ok, None);
+        assert!(!checks.passed());
+        assert!(checks.summary().contains("INCOMPLETE"));
+    }
+
+    #[test]
+    fn a_noisy_bin_is_not_hidden_by_the_tally_total() {
+        let mut result = flux_result();
+        result.n_histories = 100_000;
+        result.mean = vec![100.0, 1.0, 0.0];
+        result.standard_deviation = vec![0.01, 0.5, 0.0];
+        assert_eq!(
+            result.statistical_checks().per_bin_relative_error_ok,
+            Some(false)
+        );
+        result.standard_deviation[1] = 0.01;
+        assert_eq!(
+            result.statistical_checks().per_bin_relative_error_ok,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn per_bin_relative_error_does_not_pass_zero_mean_variance() {
+        let mut result = flux_result();
+        result.n_histories = 1_000;
+        result.mean = vec![0.0];
+        result.standard_deviation = vec![1.0];
+        assert_eq!(
+            result.statistical_checks().per_bin_relative_error_ok,
+            Some(false)
+        );
+        result.standard_deviation[0] = 0.0;
+        assert_eq!(result.statistical_checks().per_bin_relative_error_ok, None);
+    }
+
+    #[test]
+    fn mean_trend_detects_drift_hidden_by_noisy_snapshots() {
+        let make_history = |drift: f64| {
+            let mut total = 0.0;
+            (1..=1_000)
+                .map(|index| {
+                    let noise = if index % 2 == 0 { 0.1 } else { -0.1 };
+                    total += 1_000.0 * (1.0 + drift * index as f64 + noise);
+                    ConvergencePoint {
+                        n_histories: index * 1_000,
+                        mean: total / (index * 1_000) as f64,
+                        relative_error: 0.01,
+                        variance_of_variance: 0.01,
+                        figure_of_merit: 1.0,
+                        tail_slope: 8.0,
+                        elapsed_secs: index as f64,
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let drifting = make_history(1.0e-4);
+        let half = &drifting[drifting.len() / 2..];
+        assert!(half.windows(2).any(|pair| pair[1].mean < pair[0].mean));
+        assert!(half.windows(2).any(|pair| pair[1].mean > pair[0].mean));
+        assert_eq!(mean_drift_check(half), Some(false));
+        let stationary = make_history(0.0);
+        assert_eq!(
+            mean_drift_check(&stationary[stationary.len() / 2..]),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn mean_trend_does_not_pass_nonfinite_block_statistics() {
+        let mut points = history(|_| 0.01, |_| 0.01, |_| 1.0, 1.0);
+        for (index, point) in points.iter_mut().enumerate() {
+            point.mean = if index % 2 == 0 { 1.0e200 } else { -1.0e200 };
+        }
+        assert_eq!(mean_drift_check(&points), None);
     }
 
     /// Trend checks read the last half of the convergence history: a constant
@@ -1149,6 +1326,26 @@ mod tests {
         assert_eq!(c.relative_error_rate_ok, Some(true));
         assert_eq!(c.variance_of_variance_rate_ok, Some(true));
         assert_eq!(c.figure_of_merit_no_trend, Some(true));
+    }
+
+    #[test]
+    fn both_fom_checks_ignore_short_timer_spans() {
+        let mut result = flux_result();
+        result.convergence_history = history(
+            |count| 3.0 / count.sqrt(),
+            |count| 10.0 / count,
+            |count| count.powi(4),
+            0.001,
+        );
+        let checks = result.statistical_checks();
+        assert_eq!(checks.figure_of_merit_stable, None);
+        assert_eq!(checks.figure_of_merit_no_trend, None);
+        for point in &mut result.convergence_history {
+            point.elapsed_secs *= 1_000.0;
+        }
+        let checks = result.statistical_checks();
+        assert_eq!(checks.figure_of_merit_stable, Some(false));
+        assert_eq!(checks.figure_of_merit_no_trend, Some(false));
     }
 
     /// A relative error and variance of the variance that stall (as when a

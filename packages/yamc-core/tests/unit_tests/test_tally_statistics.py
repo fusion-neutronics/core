@@ -14,7 +14,7 @@ import pytest
 import yamc
 
 
-def _build_model(particles=5000):
+def _build_model(particles=5000, score_void=False):
     inner = yamc.Sphere(x0=0, y0=0, z0=0, radius=1.0)
     outer = yamc.Sphere(x0=0, y0=0, z0=0, radius=200.0, boundary="vacuum")
     breeder = yamc.Material(
@@ -29,7 +29,9 @@ def _build_model(particles=5000):
     source = yamc.NeutronSource(
         energy=yamc.sources.fusion_neutron_spectrum(20000.0), position=(0, 0, 0)
     )
-    tally = yamc.Tally(name="tbr", cells=cell, scores=["H3-production"])
+    tally = yamc.Tally(
+        name="tbr", cells=void if score_void else cell, scores=["H3-production"]
+    )
     model = yamc.Model(
         geometry=geometry,
         tallies=[tally],
@@ -68,6 +70,7 @@ def test_statistical_checks_verdict():
     assert 0 <= c.n_passed <= c.n_evaluated
     for value in (
         c.relative_error_ok,
+        c.per_bin_relative_error_ok,
         c.variance_of_variance_ok,
         c.tail_slope_ok,
         c.mean_stable,
@@ -75,8 +78,17 @@ def test_statistical_checks_verdict():
     ):
         assert value is None or isinstance(value, bool)
     assert isinstance(c.summary(), str)
+    assert "per-bin relative error" in c.summary()
     # Printing a result includes the verdict (the discoverability feature).
     assert "statistical checks" in repr(_tbr_result())
+
+
+def test_unscored_tally_does_not_claim_reliability():
+    model, arguments = _build_model(particles=100, score_void=True)
+    checks = model.simulate_transport(**arguments)["tbr"].statistical_checks
+    assert checks.tail_slope_ok is None
+    assert checks.passed is False
+    assert "INCOMPLETE" in checks.summary()
 
 
 def test_convergence_history():

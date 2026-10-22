@@ -420,7 +420,7 @@ pub struct PyStatisticalChecks {
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyStatisticalChecks {
-    /// True when every evaluated check passed.
+    /// True when the tail is estimable and every evaluated check passed.
     #[getter]
     fn passed(&self) -> bool {
         self.inner.passed()
@@ -438,6 +438,12 @@ impl PyStatisticalChecks {
     #[getter]
     fn relative_error_ok(&self) -> Option<bool> {
         self.inner.relative_error_ok
+    }
+    /// Every populated bin has relative error below 0.10; no per-bin tail
+    /// or higher-moment state is allocated by this check.
+    #[getter]
+    fn per_bin_relative_error_ok(&self) -> Option<bool> {
+        self.inner.per_bin_relative_error_ok
     }
     #[getter]
     fn variance_of_variance_ok(&self) -> Option<bool> {
