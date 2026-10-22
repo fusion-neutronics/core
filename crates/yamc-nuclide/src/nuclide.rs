@@ -584,6 +584,46 @@ impl FastXSGrid {
         (i_grid, f)
     }
 
+    /// [`FastXSGrid::lookup`] and [`FastXSGrid::lookup_grid_index`] at the same
+    /// energy from one grid search, for the callers that need both: each call
+    /// takes a logarithm and searches the grid, and a URR band or a reaction
+    /// split asked for both on every collision. Returns exactly what the two
+    /// would.
+    #[inline]
+    pub fn lookup_with_index(&self, energy: f64) -> ((f64, f64, f64, f64), (usize, f64)) {
+        let (i_grid, f) = self.lookup_grid_index(energy);
+        let n = self.energy.len();
+        if n == 0 {
+            return ((0.0, 0.0, 0.0, 0.0), (i_grid, f));
+        }
+        // At and beyond either end `lookup` returns that end point's values
+        // rather than interpolating, and `lookup_grid_index` puts `i_grid` on
+        // that end point.
+        if energy <= self.energy[0] || energy >= self.energy[n - 1] {
+            let xs = &self.xs[i_grid];
+            return (
+                (
+                    xs[XS_TOTAL],
+                    xs[XS_ABSORPTION],
+                    xs[XS_SCATTERING],
+                    xs[XS_FISSION],
+                ),
+                (i_grid, f),
+            );
+        }
+        let xs0 = &self.xs[i_grid];
+        let xs1 = &self.xs[i_grid + 1];
+        (
+            (
+                xs0[XS_TOTAL] + f * (xs1[XS_TOTAL] - xs0[XS_TOTAL]),
+                xs0[XS_ABSORPTION] + f * (xs1[XS_ABSORPTION] - xs0[XS_ABSORPTION]),
+                xs0[XS_SCATTERING] + f * (xs1[XS_SCATTERING] - xs0[XS_SCATTERING]),
+                xs0[XS_FISSION] + f * (xs1[XS_FISSION] - xs0[XS_FISSION]),
+            ),
+            (i_grid, f),
+        )
+    }
+
     /// Look up n_gamma (MT=102) cross-section at given grid index and interpolation factor.
     /// Returns 0.0 if xs_ngamma is empty (MT=102 not available).
     #[inline]

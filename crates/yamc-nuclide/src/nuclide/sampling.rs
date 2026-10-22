@@ -46,8 +46,8 @@ impl Nuclide {
         }
         let fast_grid = self.fast_xs.get(temp_idx)?;
 
-        let (xs_total, xs_absorption, xs_scattering, xs_fission) = fast_grid.lookup(energy);
-        let (i_grid, f) = fast_grid.lookup_grid_index(energy);
+        let ((xs_total, xs_absorption, xs_scattering, xs_fission), (i_grid, f)) =
+            fast_grid.lookup_with_index(energy);
         let xs_elastic = fast_grid
             .elastic_idx
             .map(|idx| fast_grid.scatter_xs_interp(i_grid, f, idx))
@@ -794,15 +794,14 @@ impl Nuclide {
         let temp_idx = self.get_temp_idx(temperature)?;
         let fast_grid = self.fast_xs.get(temp_idx)?;
 
-        let (mut total_xs, mut xs_absorption, xs_scattering, mut xs_fission) =
-            fast_grid.lookup(energy);
+        let ((mut total_xs, mut xs_absorption, xs_scattering, mut xs_fission), (i_grid, f)) =
+            fast_grid.lookup_with_index(energy);
         if total_xs <= 0.0 {
             return None;
         }
 
         // Smooth elastic (MT 2) via the cached scatter-table column -- the same
         // value `sample_scattering_constituent` walks for the constituent split.
-        let (i_grid, f) = fast_grid.lookup_grid_index(energy);
         let smooth_elastic = fast_grid
             .elastic_idx
             .map(|idx| fast_grid.scatter_xs_interp(i_grid, f, idx))

@@ -457,7 +457,7 @@ pub(super) fn build_urr_buffers(
 
     for (nuc, density) in nuclides {
         // A nuclide contributes a URR slab only if it has URR data loaded for
-        // this temperature (mirrors the CPU `urr_sample_for_nuclide` guards);
+        // this temperature (mirrors the CPU `Nuclide::urr_band` guards);
         // otherwise it gets a PRESENT = 0 row and a zero-length table.
         let urr = if nuc.urr_present && nuc.get_temp_idx(temperature).is_some() {
             nuc.urr_for_temp(temperature)

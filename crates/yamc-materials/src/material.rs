@@ -1,5 +1,6 @@
 use crate::interpolate_linear;
 use rand::RngExt;
+use smallvec::SmallVec;
 use std::collections::HashMap;
 use yamc_element::bremsstrahlung::Bremsstrahlung;
 use yamc_element::photon::PhotonInteraction;
@@ -387,6 +388,92 @@ pub struct Material {
     /// Access XS at (energy index i, MT index j) via
     /// `macroscopic_xs_flat[i * n_mts + j]`.
     pub macroscopic_xs_flat: Vec<f64>,
+    /// The URR queries' view of the nuclides, resolved once per cross-section
+    /// build; see [`UrrLookup`]. Built and dropped with `fast_xs`.
+    pub urr_lookup: Option<UrrLookup>,
+}
+
+/// What the per-step URR queries read, resolved once when the macroscopic
+/// cross sections are built rather than on every step.
+///
+/// Each query used to walk `nuclide_data` (a `HashMap<String, _>`) and
+/// resolve every nuclide's temperature index by comparing labels, and
+/// [`Material::compute_urr_macro_xs`] also hashed every nuclide's name up to
+/// seven times to find its atom density and its cross sections. On a
+/// 24-nuclide steel that was most of the transport time. Built at the
+/// material's own temperature by `calculate_macroscopic_xs`, or on the fly by
+/// a query on a material without one, so the two read the same data.
+#[derive(Debug, Clone)]
+pub struct UrrLookup {
+    /// `(lo, hi)` of every loaded nuclide's probability tables at the
+    /// material's temperature. A table applies strictly inside its range, as
+    /// [`yamc_nuclide::urr::UrrData::energy_in_bounds`] tests.
+    windows: Vec<(f64, f64)>,
+    /// Per entry of `sorted_nuclide_keys`, the nuclide's probability tables
+    /// when it has any at this temperature. `None` for every other nuclide,
+    /// which [`Material::nuclide_total_with_urr`] then answers with its smooth
+    /// total without consulting the nuclide.
+    by_sorted: Vec<Option<UrrNuclide>>,
+    /// The nuclides [`Material::compute_urr_macro_xs`] sums, in name order:
+    /// every loaded nuclide with an atom density and data at the material's
+    /// temperature.
+    scoring: Vec<ScoringNuclide>,
+}
+
+/// A nuclide with probability tables at the material's temperature.
+#[derive(Debug, Clone)]
+struct UrrNuclide {
+    nuclide: Arc<Nuclide>,
+    temp_idx: usize,
+    lo: f64,
+    hi: f64,
+}
+
+/// A nuclide [`Material::compute_urr_macro_xs`] sums over.
+#[derive(Debug, Clone)]
+struct ScoringNuclide {
+    nuclide: Arc<Nuclide>,
+    atoms_per_barn_cm: f64,
+    temp_idx: usize,
+}
+
+impl UrrLookup {
+    /// True if any nuclide's probability tables cover `energy`.
+    #[inline]
+    fn in_range(&self, energy: f64) -> bool {
+        self.windows
+            .iter()
+            .any(|&(lo, hi)| energy > lo && energy < hi)
+    }
+}
+
+/// The energy range of `nuclide`'s probability tables at `temp_idx`, when it
+/// has any. An empty table covers nothing, as `energy_in_bounds` decides.
+fn urr_window(nuclide: &Nuclide, temp_idx: usize) -> Option<(f64, f64)> {
+    if !nuclide.urr_present {
+        return None;
+    }
+    let urr = nuclide.urr_data.get(temp_idx)?.as_ref()?;
+    Some((*urr.energy.first()?, *urr.energy.last()?))
+}
+
+/// One nuclide's macroscopic total in the probability-table band
+/// `urr_random` selects for it: `smooth_macro_total` scaled by the band's
+/// microscopic total over the smooth one. Unchanged where the nuclide has no
+/// table covering `energy` at `temp_idx`.
+fn perturbed_macro_total(
+    nuclide: &Nuclide,
+    temp_idx: usize,
+    smooth_macro_total: f64,
+    energy: f64,
+    urr_random: f64,
+) -> f64 {
+    match nuclide.urr_band(temp_idx, energy, urr_random) {
+        Some(band) if band.smooth_total > 1e-20 => {
+            smooth_macro_total * (band.total / band.smooth_total)
+        }
+        _ => smooth_macro_total,
+    }
 }
 
 /// Macroscopic photon cross sections computed per-collision.
@@ -415,27 +502,6 @@ pub struct UrrMacroXs {
     /// perturbed value (the tables' capture factor multiplies the smooth
     /// disappearance, as OpenMC's does), and the rest contribute MT 101.
     pub absorption: f64,
-}
-
-/// Result of sampling the URR probability table for a single nuclide at one energy.
-///
-/// Produced by [`Material::urr_sample_for_nuclide`]; bundles the smooth microscopic
-/// values the callers still need alongside the URR-sampled microscopic cross-sections.
-struct UrrNuclideSample {
-    /// Smooth microscopic total from `fast_xs.lookup` (used to scale the macroscopic total).
-    xs_total: f64,
-    /// Smooth microscopic inelastic = (scattering - elastic).max(0); unmodified by URR.
-    xs_inelastic: f64,
-    /// `true` when this nuclide's URR table includes an inelastic contribution.
-    inelastic_in_table: bool,
-    /// URR-sampled microscopic total.
-    urr_total: f64,
-    /// URR-sampled microscopic elastic.
-    urr_elastic: f64,
-    /// URR-sampled microscopic capture (n,gamma).
-    urr_capture: f64,
-    /// URR-sampled microscopic fission.
-    urr_fission: f64,
 }
 
 /// On-disk shape of [`Material`]. Only the user-supplied configuration --
@@ -588,6 +654,7 @@ impl Material {
             sorted_nuclides: None,
             macroscopic_xs_mt_numbers: Vec::new(),
             macroscopic_xs_flat: Vec::new(),
+            urr_lookup: None,
         })
     }
 
@@ -651,6 +718,7 @@ impl Material {
             sorted_nuclides: None,
             macroscopic_xs_mt_numbers: Vec::new(),
             macroscopic_xs_flat: Vec::new(),
+            urr_lookup: None,
         }
     }
 
@@ -767,6 +835,7 @@ impl Material {
         self.sorted_nuclides = None;
         self.unified_energy_grid_neutron.clear();
         self.fast_xs = None;
+        self.urr_lookup = None;
         self.cached_atoms_per_barn_cm = None;
         self.cached_element_atom_densities.clear();
         self.cached_microscopic_xs = None;
@@ -795,6 +864,7 @@ impl Material {
         self.sorted_nuclides = None;
         self.unified_energy_grid_neutron.clear();
         self.fast_xs = None;
+        self.urr_lookup = None;
         self.cached_microscopic_xs = None;
         self.macroscopic_xs_mt_numbers.clear();
         self.macroscopic_xs_flat.clear();
@@ -809,6 +879,7 @@ impl Material {
         self.sorted_nuclide_keys = None;
         self.sorted_nuclides = None;
         self.fast_xs = None;
+        self.urr_lookup = None;
         self.cached_atoms_per_barn_cm = None;
         self.cached_element_atom_densities.clear();
         self.macroscopic_xs_mt_numbers.clear();
@@ -916,22 +987,16 @@ impl Material {
         if self.has_urr_in_range(energy) {
             // URR path: one per-collision base seed, from which each in-range URR
             // nuclide derives an *independent* probability-table band (see
-            // `nuclide_macro_total_with_urr` -> `urr_sample_for_nuclide`).
+            // `nuclide_total_with_urr` -> `Nuclide::urr_band`).
             // Pass 1 computes URR-modified per-nuclide contributions and Σ_t_urr;
             // Pass 2 samples the struck nuclide using those URR-modified contributions.
             let urr_random = cached_urr_random.unwrap_or_else(|| rng.random::<f64>());
 
-            let n = sorted_keys.len();
-            let mut per_nuclide_urr: Vec<f64> = Vec::with_capacity(n);
+            let mut per_nuclide_urr: SmallVec<[f64; 64]> =
+                SmallVec::with_capacity(sorted_keys.len());
             let mut sigma_t_urr = 0.0;
-            for (idx, name) in sorted_keys.iter().enumerate() {
-                let xs_smooth = smooth_nuc_xs(idx);
-                let xs_urr = match lookup_nuclide(idx, name) {
-                    Some(nuc) => {
-                        self.nuclide_macro_total_with_urr(nuc, xs_smooth, energy, urr_random)
-                    }
-                    None => xs_smooth,
-                };
+            for idx in 0..sorted_keys.len() {
+                let xs_urr = self.nuclide_total_with_urr(energy, idx, i_grid, f, urr_random);
                 per_nuclide_urr.push(xs_urr);
                 sigma_t_urr += xs_urr;
             }
@@ -995,17 +1060,25 @@ impl Material {
     /// `xi1` every step, `xi_n` only on a real collision.
     ///
     /// Returns `None` -- **without consuming a PCG draw** -- when the fast path
-    /// or per-nuclide tables are unavailable, or URR is in range at `energy`.
-    /// The caller then falls back to the legacy fused `sample_collision_data` on
-    /// the FastRng stream. The PCG sample is taken only once all preconditions
-    /// hold, so a fallback never desynchronises the PCG stream.
+    /// or per-nuclide tables are unavailable. The caller then falls back to the
+    /// legacy fused `sample_collision_data` on the FastRng stream. The PCG
+    /// sample is taken only once all preconditions hold, so a fallback never
+    /// desynchronises the PCG stream.
+    ///
+    /// When a URR band applies, `urr_totals` receives every nuclide's
+    /// perturbed macroscopic total, in `sorted_nuclide_keys` order, for
+    /// [`Material::select_nuclide_smooth`] to weight the struck nuclide with at
+    /// this flight's collision instead of evaluating each probability table
+    /// again. It is left empty otherwise.
     #[inline]
     pub fn smooth_flight(
         &self,
         energy: f64,
         held_urr: Option<f64>,
         state: &mut u64,
+        urr_totals: &mut Vec<f64>,
     ) -> Option<SmoothFlight> {
+        urr_totals.clear();
         let fast_xs = self.fast_xs.as_ref()?;
         // Per-nuclide tables are required by `select_nuclide_smooth`; bail to the
         // legacy path together if they are absent.
@@ -1029,7 +1102,14 @@ impl Material {
                 None => yamc_rng::next_xi(state),
             };
             urr_random = Some(band);
-            let s = self.urr_macro_total(energy, i_grid, f, band);
+            // The material total with every in-range URR nuclide perturbed by
+            // the band it derives from the shared base, so isotopes stay
+            // uncorrelated.
+            urr_totals.extend(
+                (0..self.nuclide_count_for_selection())
+                    .map(|idx| self.nuclide_total_with_urr(energy, idx, i_grid, f, band)),
+            );
+            let s: f64 = urr_totals.iter().sum();
             // A non-positive URR total would be unphysical; fall back to the
             // smooth total rather than bailing, because the band draw above has
             // already advanced the stream and a bail here would desync it.
@@ -1046,15 +1126,6 @@ impl Material {
             sigma_t,
             urr_random,
         })
-    }
-
-    /// Material macroscopic total with every in-range URR nuclide perturbed by
-    /// the band `urr_random` selects for it. Each nuclide derives its own band
-    /// from the shared base, so isotopes stay uncorrelated.
-    fn urr_macro_total(&self, energy: f64, i_grid: usize, f: f64, urr_random: f64) -> f64 {
-        (0..self.nuclide_count_for_selection())
-            .map(|idx| self.nuclide_total_with_urr(energy, idx, i_grid, f, urr_random))
-            .sum()
     }
 
     /// Number of nuclides the selection walk sees, i.e. the length of the
@@ -1087,6 +1158,17 @@ impl Material {
         } else {
             0.0
         };
+        if let Some(lookup) = &self.urr_lookup {
+            // Only a nuclide whose tables cover `energy` is perturbed; for
+            // every other one `urr_band` would answer `None`, so its smooth
+            // total stands without consulting it.
+            return match lookup.by_sorted.get(idx) {
+                Some(Some(u)) if energy > u.lo && energy < u.hi => {
+                    perturbed_macro_total(&u.nuclide, u.temp_idx, smooth, energy, urr_random)
+                }
+                _ => smooth,
+            };
+        }
         let Some(keys) = self.sorted_nuclide_keys.as_ref() else {
             return smooth;
         };
@@ -1117,13 +1199,15 @@ impl Material {
     /// block (yamc-gpu shared.rs): `xi_n = next_xi * sigma_t_nuc`, then the first
     /// nuclide whose cumulative total exceeds `xi_n` (clamped to the last on a
     /// floating-point overshoot).
+    ///
+    /// `urr_totals` is what the flight left in its `urr_totals` when a URR
+    /// band applied, and `None` when none did.
     #[inline]
     pub fn select_nuclide_smooth(
         &self,
-        energy: f64,
         i_grid: usize,
         f: f64,
-        urr_random: Option<f64>,
+        urr_totals: Option<&[f64]>,
         state: &mut u64,
     ) -> Option<SelectedNuclide<'_>> {
         let by_nuclide = self.macroscopic_xs_neutron_total_by_nuclide.as_ref()?;
@@ -1138,11 +1222,11 @@ impl Material {
         };
         // A nuclide's share of the collision density follows the cross section
         // that actually governed the flight, so an in-range URR nuclide is
-        // weighted by its PERTURBED total. Without a band this is
-        // the plain smooth total.
+        // weighted by its PERTURBED total: the flight's own, at the same energy,
+        // bracket and band. Without a band this is the plain smooth total.
         let smooth_nuc_xs = |idx: usize| -> f64 {
-            match urr_random {
-                Some(band) => self.nuclide_total_with_urr(energy, idx, i_grid, f, band),
+            match urr_totals {
+                Some(totals) => totals[idx],
                 None => {
                     let xs_vec = &by_nuclide[idx];
                     if xs_vec.len() > i_grid + 1 {
@@ -1189,13 +1273,12 @@ impl Material {
 
     /// URR-modified macroscopic total contribution for a single nuclide at this energy.
     ///
-    /// Returns `smooth_macro_total` unchanged if the nuclide has no URR data, the energy is
-    /// outside the URR range, or per-temperature fast XS is unavailable. Otherwise samples
-    /// the URR probability table (using the supplied `urr_random`) and returns the URR-modified
-    /// macroscopic total = `smooth_macro_total * (urr_micro_total / smooth_micro_total)`.
+    /// Returns `smooth_macro_total` unchanged if the nuclide has no URR data at the
+    /// material's temperature or its tables do not cover `energy`; otherwise scales it
+    /// through [`perturbed_macro_total`], the primitive both paths share.
     ///
-    /// This is the per-nuclide primitive used by [`Material::sample_collision_data`] to compute
-    /// the URR-consistent Σ_t and per-nuclide contributions for nuclide selection.
+    /// The fallback [`Material::nuclide_total_with_urr`] takes for a material without
+    /// a [`UrrLookup`], resolving the nuclide's temperature index on every call.
     fn nuclide_macro_total_with_urr(
         &self,
         nuclide: &Nuclide,
@@ -1203,47 +1286,58 @@ impl Material {
         energy: f64,
         urr_random: f64,
     ) -> f64 {
-        let Some(sample) = self.urr_sample_for_nuclide(nuclide, energy, urr_random) else {
-            return smooth_macro_total;
-        };
-
-        if sample.xs_total > 1e-20 {
-            smooth_macro_total * (sample.urr_total / sample.xs_total)
-        } else {
-            smooth_macro_total
+        match nuclide.get_temp_idx(&self.temperature) {
+            Some(temp_idx) => {
+                perturbed_macro_total(nuclide, temp_idx, smooth_macro_total, energy, urr_random)
+            }
+            None => smooth_macro_total,
         }
     }
 
-    /// Shared per-nuclide URR probability-table sampling, through
-    /// [`Nuclide::urr_band`] at the material's temperature.
-    ///
-    /// Returns `None` when the
-    /// nuclide has no applicable URR contribution at this energy (the early-return
-    /// semantics callers rely on); otherwise returns the smooth values the callers
-    /// still need alongside the URR-sampled cross-sections.
-    fn urr_sample_for_nuclide(
-        &self,
-        nuclide: &Nuclide,
-        energy: f64,
-        urr_random: f64,
-    ) -> Option<UrrNuclideSample> {
-        let temp_idx = nuclide.get_temp_idx(&self.temperature)?;
-        let band = nuclide.urr_band(temp_idx, energy, urr_random)?;
-        Some(UrrNuclideSample {
-            xs_total: band.smooth_total,
-            xs_inelastic: band.smooth_inelastic,
-            inelastic_in_table: band.inelastic_in_table,
-            urr_total: band.total,
-            urr_elastic: band.elastic,
-            urr_capture: band.capture,
-            urr_fission: band.fission,
-        })
+    /// Resolve the nuclides the URR queries walk; see [`UrrLookup`].
+    fn build_urr_lookup(&self) -> UrrLookup {
+        let temperature = self.temperature.as_str();
+        let windows = self
+            .nuclide_data
+            .values()
+            .filter_map(|n| urr_window(n, n.get_temp_idx(temperature)?))
+            .collect();
+        let by_sorted = match self.sorted_nuclide_keys.as_ref() {
+            Some(keys) => keys
+                .iter()
+                .enumerate()
+                .map(|(idx, name)| {
+                    let nuclide = self
+                        .sorted_nuclides
+                        .as_deref()
+                        .and_then(|v| v.get(idx))
+                        .or_else(|| self.nuclide_data.get(name))?;
+                    let temp_idx = nuclide.get_temp_idx(temperature)?;
+                    let (lo, hi) = urr_window(nuclide, temp_idx)?;
+                    Some(UrrNuclide {
+                        nuclide: Arc::clone(nuclide),
+                        temp_idx,
+                        lo,
+                        hi,
+                    })
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        UrrLookup {
+            windows,
+            by_sorted,
+            scoring: self.urr_scoring_nuclides(),
+        }
     }
 
-    /// Compute URR-modified macroscopic cross-sections for tally scoring.
-    /// Returns per-MT macroscopic values (total, elastic, fission, capture, absorption)
-    /// with URR probability table modifications applied, or None if no nuclide has URR.
-    pub fn compute_urr_macro_xs(&self, energy: f64, urr_random: f64) -> Option<UrrMacroXs> {
+    /// The nuclides [`Material::compute_urr_macro_xs`] sums, in name order.
+    ///
+    /// Name order rather than `nuclide_data`'s: a `HashMap` iterates in an
+    /// order seeded per map instance, and the summation order moved the last
+    /// bit of every URR reaction-rate score from one run to the next (the
+    /// defect `calculate_macroscopic_xs_at` fixed for the material totals).
+    fn urr_scoring_nuclides(&self) -> Vec<ScoringNuclide> {
         let owned_atoms;
         let atoms_per_bcm = if let Some(ref cached) = self.cached_atoms_per_barn_cm {
             cached
@@ -1253,7 +1347,42 @@ impl Material {
                 .unwrap_or_else(|e| panic!("{e}"));
             &owned_atoms
         };
-        let temperature = &self.temperature;
+        let mut named: Vec<(&String, ScoringNuclide)> = self
+            .nuclide_data
+            .iter()
+            .filter_map(|(name, nuclide)| {
+                Some((
+                    name,
+                    ScoringNuclide {
+                        nuclide: Arc::clone(nuclide),
+                        atoms_per_barn_cm: *atoms_per_bcm.get(name)?,
+                        temp_idx: nuclide.get_temp_idx(&self.temperature)?,
+                    },
+                ))
+            })
+            .collect();
+        named.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        named.into_iter().map(|(_, s)| s).collect()
+    }
+
+    /// Compute URR-modified macroscopic cross-sections for tally scoring.
+    /// Returns per-MT macroscopic values (total, elastic, fission, capture, absorption)
+    /// with URR probability table modifications applied, or None if no nuclide has URR.
+    pub fn compute_urr_macro_xs(&self, energy: f64, urr_random: f64) -> Option<UrrMacroXs> {
+        // No table covers `energy`, so no nuclide below can be perturbed and
+        // the answer is `None`; this is the common case, and it costs a few
+        // comparisons instead of a walk over every nuclide.
+        if !self.has_urr_in_range(energy) {
+            return None;
+        }
+        let owned_scoring;
+        let scoring = match &self.urr_lookup {
+            Some(lookup) => lookup.scoring.as_slice(),
+            None => {
+                owned_scoring = self.urr_scoring_nuclides();
+                owned_scoring.as_slice()
+            }
+        };
 
         let mut macro_total = 0.0;
         let mut macro_elastic = 0.0;
@@ -1262,59 +1391,46 @@ impl Material {
         let mut macro_disappearance = 0.0;
         let mut any_urr = false;
 
-        for (name, nuclide) in &self.nuclide_data {
-            let n_density = match atoms_per_bcm.get(name) {
-                Some(&n) => n,
-                None => continue,
-            };
-
-            // Skip nuclides with no matching temperature (matches the per-nuclide
-            // temperature guard inside `urr_sample_for_nuclide`, but here a missing
-            // index drops the nuclide entirely rather than falling back to smooth XS).
-            if nuclide.get_temp_idx(temperature).is_none() {
-                continue;
-            }
-
-            // Check if this nuclide has URR data in range
-            let urr_applied =
-                if let Some(sample) = self.urr_sample_for_nuclide(nuclide, energy, urr_random) {
-                    // Accumulate URR-modified microscopic XS * atom density
-                    // Total is sum of partials + inelastic (inelastic is unmodified by URR)
-                    let urr_inelastic = if sample.inelastic_in_table {
-                        sample.xs_inelastic
-                    } else {
-                        0.0
-                    };
-                    macro_total += n_density
-                        * (sample.urr_elastic
-                            + urr_inelastic
-                            + sample.urr_capture
-                            + sample.urr_fission);
-                    macro_elastic += n_density * sample.urr_elastic;
-                    macro_fission += n_density * sample.urr_fission;
-                    // The same perturbed value on both accumulators. Inside the
-                    // band the table's capture factor multiplies the smooth
-                    // DISAPPEARANCE (`urr.sample` is handed
-                    // `smooth_absorption - smooth_fission`, which is what
-                    // OpenMC's `capture *= (micro.absorption - micro.fission)`
-                    // does), and OpenMC scores an (n,gamma) tally from exactly
-                    // that for a nuclide whose tables are in range. The
-                    // charged-particle channels it folds in are negligible for
-                    // the heavy nuclides that have tables, which is the
-                    // approximation both codes make.
-                    macro_capture += n_density * sample.urr_capture;
-                    macro_disappearance += n_density * sample.urr_capture;
-                    any_urr = true;
-                    true
+        for s in scoring {
+            let n_density = s.atoms_per_barn_cm;
+            let nuclide = s.nuclide.as_ref();
+            if let Some(band) = nuclide.urr_band(s.temp_idx, energy, urr_random) {
+                // Accumulate URR-modified microscopic XS * atom density
+                // Total is sum of partials + inelastic (inelastic is unmodified by URR)
+                let urr_inelastic = if band.inelastic_in_table {
+                    band.smooth_inelastic
                 } else {
-                    false
+                    0.0
                 };
-
-            // Non-URR nuclide (or URR not applicable): accumulate smooth contributions
-            if !urr_applied {
-                macro_total += self.lookup_nuclide_macro_xs_by_mt(name, n_density, 1, energy);
-                macro_elastic += self.lookup_nuclide_macro_xs_by_mt(name, n_density, 2, energy);
-                macro_fission += self.lookup_nuclide_macro_xs_by_mt(name, n_density, 18, energy);
+                macro_total +=
+                    n_density * (band.elastic + urr_inelastic + band.capture + band.fission);
+                macro_elastic += n_density * band.elastic;
+                macro_fission += n_density * band.fission;
+                // The same perturbed value on both accumulators. Inside the
+                // band the table's capture factor multiplies the smooth
+                // DISAPPEARANCE (`urr.sample` is handed
+                // `smooth_absorption - smooth_fission`, which is what
+                // OpenMC's `capture *= (micro.absorption - micro.fission)`
+                // does), and OpenMC scores an (n,gamma) tally from exactly
+                // that for a nuclide whose tables are in range. The
+                // charged-particle channels it folds in are negligible for
+                // the heavy nuclides that have tables, which is the
+                // approximation both codes make.
+                macro_capture += n_density * band.capture;
+                macro_disappearance += n_density * band.capture;
+                any_urr = true;
+            } else if let Some(fast_grid) = nuclide.fast_xs.get(s.temp_idx) {
+                // Non-URR nuclide (or URR not applicable): accumulate smooth
+                // contributions, all from one grid search.
+                let ((total, absorption, _, fission), (i_grid, f)) =
+                    fast_grid.lookup_with_index(energy);
+                let elastic = fast_grid
+                    .elastic_idx
+                    .map(|idx| fast_grid.scatter_xs_interp(i_grid, f, idx))
+                    .unwrap_or(0.0);
+                macro_total += n_density * total;
+                macro_elastic += n_density * elastic;
+                macro_fission += n_density * fission;
                 // Two accumulators, because the two scores want different
                 // things from a nuclide whose tables are not in range. MT 27
                 // is built below as `disappearance + fission`, OpenMC's
@@ -1325,9 +1441,24 @@ impl Material {
                 // only for the nuclide whose `use_ptable` is set, so a Be9 or a
                 // Cr52 beside a URR nuclide keeps its own capture rather than
                 // donating its (n,alpha) to the material's.
-                macro_capture += self.lookup_nuclide_macro_xs_by_mt(name, n_density, 102, energy);
-                macro_disappearance +=
-                    self.lookup_nuclide_macro_xs_by_mt(name, n_density, 101, energy);
+                //
+                // MT 102 is the library's own radiative-capture column. It used
+                // to be derived as `(absorption - fission).max(0.0)`, which is
+                // OpenMC's expression but not OpenMC's input: `absorption` here
+                // is the disappearance partial, which already excludes fission,
+                // so that read zero for every fissile nuclide (U235 at 10 keV:
+                // 1.06 b against fission 2.91 b) and, without fission, still
+                // counted the charged-particle channels as capture (149x high
+                // for Fe56 at 14 MeV). A library without an MT 102 column
+                // stands disappearance in for it, which equals capture wherever
+                // the charged-particle channels are closed.
+                let capture = if fast_grid.xs_ngamma.is_empty() {
+                    absorption
+                } else {
+                    fast_grid.lookup_ngamma(i_grid, f)
+                };
+                macro_capture += n_density * capture;
+                macro_disappearance += n_density * absorption;
             }
         }
 
@@ -1522,104 +1653,20 @@ impl Material {
 
     /// True if any nuclide in this material has URR probability-table data
     /// covering `energy` at the material's temperature.
+    ///
+    /// Called on every neutron step, so it reads the table ranges
+    /// [`UrrLookup`] resolved at the cross-section build; a material without
+    /// one walks its nuclides instead.
     pub fn has_urr_in_range(&self, energy: f64) -> bool {
-        for nuclide in self.nuclide_data.values() {
-            if !nuclide.urr_present {
-                continue;
-            }
-            let Some(temp_idx) = nuclide.get_temp_idx(&self.temperature) else {
-                continue;
-            };
-            if let Some(urr) = nuclide.urr_data.get(temp_idx).and_then(|opt| opt.as_ref())
-                && urr.energy_in_bounds(energy)
-            {
-                return true;
-            }
+        match &self.urr_lookup {
+            Some(lookup) => lookup.in_range(energy),
+            None => self.nuclide_data.values().any(|nuclide| {
+                nuclide
+                    .get_temp_idx(&self.temperature)
+                    .and_then(|temp_idx| urr_window(nuclide, temp_idx))
+                    .is_some_and(|(lo, hi)| energy > lo && energy < hi)
+            }),
         }
-        false
-    }
-
-    /// Helper: compute N * sigma_mt for a single nuclide using the material's macroscopic XS grid.
-    /// Falls back to micro XS * atom density if the nuclide has fast_xs data.
-    fn lookup_nuclide_macro_xs_by_mt(
-        &self,
-        name: &str,
-        n_density: f64,
-        mt: i32,
-        energy: f64,
-    ) -> f64 {
-        // Use nuclide microscopic XS from fast_xs if available
-        if let Some(nuclide) = self.nuclide_data.get(name) {
-            let temp_idx = nuclide.get_temp_idx(&self.temperature);
-            if let Some(idx) = temp_idx
-                && let Some(fast_grid) = nuclide.fast_xs.get(idx)
-            {
-                let (total, absorption, scattering, fission) = fast_grid.lookup(energy);
-                let micro = match mt {
-                    1 => total,
-                    2 => {
-                        // Elastic from scatter_mt_xs via elastic_idx
-                        let (i_grid, f) = fast_grid.lookup_grid_index(energy);
-                        fast_grid
-                            .elastic_idx
-                            .map(|idx| fast_grid.scatter_xs_interp(i_grid, f, idx))
-                            .unwrap_or(0.0)
-                    }
-                    18 => fission,
-                    // MT 27 is ENDF absorption = MT 18 + MT 101, so it
-                    // INCLUDES fission, and that is what OpenMC's
-                    // `"absorption"` score reports: `nuclide.cpp` sets
-                    // `micro.absorption = capture + fission` and the tally
-                    // scores `macro_xs().absorption * flux`. `absorption`
-                    // from `lookup` is the disappearance PARTIAL (its four
-                    // partials sum to the total), so fission is added back
-                    // here.
-                    27 => absorption + fission,
-                    // MT 101, neutron disappearance: the partial as stored.
-                    101 => absorption,
-                    // MT 102 is RADIATIVE CAPTURE specifically, which the
-                    // library carries as its own column. It used to be
-                    // derived as `(absorption - fission).max(0.0)`, which is
-                    // OpenMC's expression but not OpenMC's input: OpenMC
-                    // subtracts fission from an absorption that includes it,
-                    // while this one excludes it. That read ZERO for every
-                    // fissile nuclide (U235 at 10 keV: absorption 1.06 b
-                    // against fission 2.91 b) and, where fission is absent,
-                    // still conflated capture with the charged-particle
-                    // channels the partial also holds -- 149x high for Fe56
-                    // at 14 MeV, 5x for W184.
-                    102 => {
-                        let (i_grid, f) = fast_grid.lookup_grid_index(energy);
-                        if fast_grid.xs_ngamma.is_empty() {
-                            // No MT 102 column in this library: the
-                            // disappearance partial is the closest stand-in,
-                            // and equals capture wherever the
-                            // charged-particle channels are closed.
-                            absorption
-                        } else {
-                            fast_grid.lookup_ngamma(i_grid, f)
-                        }
-                    }
-                    _ => {
-                        // For other MTs, fall back to scattering or 0
-                        if mt == 4 {
-                            let elastic = {
-                                let (i_grid, f) = fast_grid.lookup_grid_index(energy);
-                                fast_grid
-                                    .elastic_idx
-                                    .map(|idx| fast_grid.scatter_xs_interp(i_grid, f, idx))
-                                    .unwrap_or(0.0)
-                            };
-                            (scattering - elastic).max(0.0)
-                        } else {
-                            return 0.0;
-                        }
-                    }
-                };
-                return n_density * micro;
-            }
-        }
-        0.0
     }
 
     pub fn volume(&mut self, value: Option<f64>) -> Result<Option<f64>, String> {
@@ -2539,6 +2586,11 @@ mod tests {
         m.cached_microscopic_xs = Some((vec![1], Arc::new(HashMap::new())));
         m.macroscopic_xs_neutron_total_by_nuclide = Some(vec![vec![2.0, 2.0, 2.0]]);
         m.macroscopic_xs_neutron_by_nuclide = Some(vec![HashMap::new()]);
+        m.urr_lookup = Some(UrrLookup {
+            windows: vec![(1.0, 2.0)],
+            by_sorted: Vec::new(),
+            scoring: Vec::new(),
+        });
 
         m.set_temperature("900");
 
@@ -2566,6 +2618,10 @@ mod tests {
         assert!(
             m.macroscopic_xs_neutron_by_nuclide.is_none(),
             "per-nuclide per-MT"
+        );
+        assert!(
+            m.urr_lookup.is_none(),
+            "the URR lookup holds each nuclide's temperature index and table range"
         );
     }
 
@@ -2667,5 +2723,26 @@ mod tests {
             yamc_nuclide::temperature::label_to_kelvin_or_default(derived.temperature()),
             "the copied pair must still agree"
         );
+    }
+
+    /// `UrrMacroXs::covers_mt` decides whether the transport loop computes the
+    /// URR values for a tally at all, so it has to name exactly the MTs
+    /// `macro_xs_by_mt` answers from them. The material is empty, so its
+    /// smooth answer is zero for every MT and only a covered one changes.
+    #[test]
+    fn covers_mt_names_exactly_the_mts_macro_xs_by_mt_reads() {
+        let material = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
+        let urr = UrrMacroXs {
+            total: 1.0,
+            elastic: 2.0,
+            fission: 3.0,
+            capture: 4.0,
+            absorption: 5.0,
+        };
+        for mt in -10..=1100 {
+            let reads = material.macro_xs_by_mt(mt, 1.0e4, Some(&urr))
+                != material.macro_xs_by_mt(mt, 1.0e4, None);
+            assert_eq!(reads, UrrMacroXs::covers_mt(mt), "MT {mt}");
+        }
     }
 }

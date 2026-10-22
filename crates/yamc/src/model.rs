@@ -2352,6 +2352,7 @@ impl Model {
                 weight_cutoff: survival.weight_cutoff,
                 weight_survive: survival.weight_survive,
                 tallies: &tallies,
+                score_urr_xs: tallies.iter().any(|t| t.reads_urr_xs()),
                 woodcock_tl_mesh_eligible: &woodcock_tl_mesh_eligible,
                 weight_windows: &weight_window_refs,
                 transmutation_tallies: transmutation_tallies.as_deref(),

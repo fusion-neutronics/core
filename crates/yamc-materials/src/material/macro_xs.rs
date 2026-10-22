@@ -1,5 +1,14 @@
 use super::*;
 
+impl UrrMacroXs {
+    /// Whether [`Material::macro_xs_by_mt`] answers `mt` from these values
+    /// rather than from the smooth table. A tally scoring any other MT never
+    /// reads them.
+    pub fn covers_mt(mt: i32) -> bool {
+        matches!(mt, 1 | 2 | 18 | 27 | 102)
+    }
+}
+
 impl Material {
     /// Fast lookup of macroscopic heating cross section (MT 301) at given energy.
     /// Uses the same O(1) fast_xs grid index as total cross section.
@@ -507,6 +516,9 @@ impl Material {
                 self.macroscopic_xs_mt_numbers = mt_numbers;
                 self.macroscopic_xs_flat = flat;
             }
+
+            // After the sorted nuclides and the atom densities it reads.
+            self.urr_lookup = Some(self.build_urr_lookup());
         }
 
         // All hierarchical MTs are now constructed in Python and present in the JSON files.
