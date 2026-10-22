@@ -530,6 +530,13 @@ jobs do not have to install cargo-edit on three platforms).
 
 Bump in the PR that earns the bump.
 
+Pull requests that change `SUPPORTED_FORMAT_VERSIONS` or Rust source in
+`crates/nuclear-data-schema/src/` must change both binding versions in the
+same PR. The offline `Data format changes bump both binding versions` check
+compares the PR base and head; ordinary release-reader comments do not require
+a bump. Update `Cargo.lock` alongside the manifests. This guard does not
+decide whether old and new data formats may replace one another on the server.
+
 ### Tagging a release
 
 A release tag **names every project it publishes and the version each goes out
