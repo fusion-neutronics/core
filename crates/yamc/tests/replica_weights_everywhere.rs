@@ -394,6 +394,55 @@ fn collision_photon_flux_and_heating_match_replica_reruns() {
     }
 }
 
+#[test]
+fn collision_replica_scores_agree_with_analog_under_variance_reduction() {
+    let Some(material) = iron(false) else {
+        eprintln!("skipping: Fe56 covariance fixture missing");
+        return;
+    };
+    let moments = |tally: &Arc<Tally>, score: usize, replica_index: usize| {
+        let sums = tally.get_replica_sums().expect("replica scores");
+        let count = tally.finalize().n_histories as f64;
+        let width = sums.sums.len() / tally.get_mean().len();
+        let row = &sums.sums[score * width..];
+        let mean = row[replica_index] / count;
+        let variance =
+            (row[REPLICAS + replica_index] - row[replica_index].powi(2) / count) / (count - 1.0);
+        (mean, (variance.max(0.0) / count).sqrt())
+    };
+    let analog = run_estimator(
+        Target::Iron,
+        material.clone(),
+        Mode::Analog,
+        20_000,
+        211,
+        uq(),
+        Estimator::Collision,
+    );
+    for mode in [Mode::SurvivalBiasing, Mode::WeightWindows, Mode::Everything] {
+        let weighted = run_estimator(
+            Target::Iron,
+            material.clone(),
+            mode,
+            20_000,
+            307,
+            uq(),
+            Estimator::Collision,
+        );
+        for score in 0..2 {
+            for replica_index in 0..REPLICAS {
+                let (mean, error) = moments(&weighted[0], score, replica_index);
+                let (reference, reference_error) = moments(&analog[0], score, replica_index);
+                assert!(mean > 0.0 && reference > 0.0);
+                assert!(
+                    (mean - reference).abs() <= 5.0 * error.hypot(reference_error),
+                    "{mode:?}, score {score}, replica {replica_index}: {mean} +/- {error} vs {reference} +/- {reference_error}"
+                );
+            }
+        }
+    }
+}
+
 /// Per score of a tally, the nominal mean and each replica's mean.
 fn means(t: &Arc<Tally>) -> Vec<(f64, Vec<f64>)> {
     let sums = t.get_replica_sums().expect("replica sums");
