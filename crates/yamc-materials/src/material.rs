@@ -1059,17 +1059,25 @@ impl Material {
     /// `xi1` every step, `xi_n` only on a real collision.
     ///
     /// Returns `None` -- **without consuming a PCG draw** -- when the fast path
-    /// or per-nuclide tables are unavailable, or URR is in range at `energy`.
-    /// The caller then falls back to the legacy fused `sample_collision_data` on
-    /// the FastRng stream. The PCG sample is taken only once all preconditions
-    /// hold, so a fallback never desynchronises the PCG stream.
+    /// or per-nuclide tables are unavailable. The caller then falls back to the
+    /// legacy fused `sample_collision_data` on the FastRng stream. The PCG
+    /// sample is taken only once all preconditions hold, so a fallback never
+    /// desynchronises the PCG stream.
+    ///
+    /// When a URR band applies, `urr_totals` receives every nuclide's
+    /// perturbed macroscopic total, in `sorted_nuclide_keys` order, for
+    /// [`Material::select_nuclide_smooth`] to weight the struck nuclide with at
+    /// this flight's collision instead of evaluating each probability table
+    /// again. It is left empty otherwise.
     #[inline]
     pub fn smooth_flight(
         &self,
         energy: f64,
         held_urr: Option<f64>,
         state: &mut u64,
+        urr_totals: &mut Vec<f64>,
     ) -> Option<SmoothFlight> {
+        urr_totals.clear();
         let fast_xs = self.fast_xs.as_ref()?;
         // Per-nuclide tables are required by `select_nuclide_smooth`; bail to the
         // legacy path together if they are absent.
@@ -1093,7 +1101,14 @@ impl Material {
                 None => yamc_rng::next_xi(state),
             };
             urr_random = Some(band);
-            let s = self.urr_macro_total(energy, i_grid, f, band);
+            // The material total with every in-range URR nuclide perturbed by
+            // the band it derives from the shared base, so isotopes stay
+            // uncorrelated.
+            urr_totals.extend(
+                (0..self.nuclide_count_for_selection())
+                    .map(|idx| self.nuclide_total_with_urr(energy, idx, i_grid, f, band)),
+            );
+            let s: f64 = urr_totals.iter().sum();
             // A non-positive URR total would be unphysical; fall back to the
             // smooth total rather than bailing, because the band draw above has
             // already advanced the stream and a bail here would desync it.
@@ -1110,15 +1125,6 @@ impl Material {
             sigma_t,
             urr_random,
         })
-    }
-
-    /// Material macroscopic total with every in-range URR nuclide perturbed by
-    /// the band `urr_random` selects for it. Each nuclide derives its own band
-    /// from the shared base, so isotopes stay uncorrelated.
-    fn urr_macro_total(&self, energy: f64, i_grid: usize, f: f64, urr_random: f64) -> f64 {
-        (0..self.nuclide_count_for_selection())
-            .map(|idx| self.nuclide_total_with_urr(energy, idx, i_grid, f, urr_random))
-            .sum()
     }
 
     /// Number of nuclides the selection walk sees, i.e. the length of the
@@ -1192,13 +1198,15 @@ impl Material {
     /// block (yamc-gpu shared.rs): `xi_n = next_xi * sigma_t_nuc`, then the first
     /// nuclide whose cumulative total exceeds `xi_n` (clamped to the last on a
     /// floating-point overshoot).
+    ///
+    /// `urr_totals` is what the flight left in its `urr_totals` when a URR
+    /// band applied, and `None` when none did.
     #[inline]
     pub fn select_nuclide_smooth(
         &self,
-        energy: f64,
         i_grid: usize,
         f: f64,
-        urr_random: Option<f64>,
+        urr_totals: Option<&[f64]>,
         state: &mut u64,
     ) -> Option<SelectedNuclide<'_>> {
         let by_nuclide = self.macroscopic_xs_neutron_total_by_nuclide.as_ref()?;
@@ -1213,11 +1221,11 @@ impl Material {
         };
         // A nuclide's share of the collision density follows the cross section
         // that actually governed the flight, so an in-range URR nuclide is
-        // weighted by its PERTURBED total. Without a band this is
-        // the plain smooth total.
+        // weighted by its PERTURBED total: the flight's own, at the same energy,
+        // bracket and band. Without a band this is the plain smooth total.
         let smooth_nuc_xs = |idx: usize| -> f64 {
-            match urr_random {
-                Some(band) => self.nuclide_total_with_urr(energy, idx, i_grid, f, band),
+            match urr_totals {
+                Some(totals) => totals[idx],
                 None => {
                     let xs_vec = &by_nuclide[idx];
                     if xs_vec.len() > i_grid + 1 {
@@ -1242,15 +1250,12 @@ impl Material {
         // Multi-nuclide: sample proportional to per-nuclide macroscopic totals at
         // the bracket. Scale `xi_n` by the sum of those totals (the GPU's
         // `sigma_t_nuc`), not the flight's `sigma_t`, so the two backends share
-        // the exact selection arithmetic. Each total is evaluated once, for the
-        // sum and the walk both: in a URR band it is a probability-table
-        // lookup.
-        let totals: SmallVec<[f64; 64]> = (0..by_nuclide.len()).map(smooth_nuc_xs).collect();
-        let sigma_t_nuc: f64 = totals.iter().sum();
+        // the exact selection arithmetic.
+        let sigma_t_nuc: f64 = (0..by_nuclide.len()).map(smooth_nuc_xs).sum();
         let xi_n = yamc_rng::next_xi(state) * sigma_t_nuc;
         let mut accum = 0.0;
         for (idx, name) in sorted_keys.iter().enumerate() {
-            accum += totals[idx];
+            accum += smooth_nuc_xs(idx);
             if xi_n < accum {
                 let nuclide = lookup_nuclide(idx, name)?;
                 let nuc_id = sorted_ids.and_then(|ids| ids.get(idx).copied());

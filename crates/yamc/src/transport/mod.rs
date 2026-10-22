@@ -527,6 +527,9 @@ pub(crate) fn transport_particle<T: Tracker>(
     welford_worker: &mut yamc_tallies::welford::WelfordWorkerState,
 ) {
     let geometry = ctx.geometry;
+    // Each nuclide's URR-perturbed total from the current flight, which the
+    // nuclide selection at its collision reads rather than recomputes.
+    let mut urr_totals: Vec<f64> = Vec::new();
     while particle.alive {
         let cell_index = match find_or_lose_cell(
             particle,
@@ -578,7 +581,7 @@ pub(crate) fn transport_particle<T: Tracker>(
                     } else {
                         None
                     };
-                    m.smooth_flight(particle.energy, held, pcg)
+                    m.smooth_flight(particle.energy, held, pcg, &mut urr_totals)
                 }
                 None => None,
             }
@@ -839,10 +842,9 @@ pub(crate) fn transport_particle<T: Tracker>(
                         Some(sf) => {
                             let selected = match cell_material {
                                 Some(m) => m.select_nuclide_smooth(
-                                    particle.energy,
                                     sf.i_grid,
                                     sf.f,
-                                    sf.urr_random,
+                                    sf.urr_random.map(|_| urr_totals.as_slice()),
                                     pcg,
                                 ),
                                 None => None,

@@ -145,9 +145,15 @@ fn flight_and_nuclide_selection_match_the_walk_bit_for_bit() {
             let held = (i % 2 == 0).then(|| (i as f64 + 0.5) / 25.0);
             let seed = 0x9E37_79B9_7F4A_7C15_u64.wrapping_mul(i + 1);
             let (mut s_got, mut s_want) = (seed, seed);
-            let got = material.smooth_flight(e, held, &mut s_got);
-            let want = walk.smooth_flight(e, held, &mut s_want);
+            let (mut totals_got, mut totals_want) = (Vec::new(), Vec::new());
+            let got = material.smooth_flight(e, held, &mut s_got, &mut totals_got);
+            let want = walk.smooth_flight(e, held, &mut s_want, &mut totals_want);
             assert_eq!(s_got, s_want, "flight draws at {e:e}");
+            assert_eq!(
+                totals_got.iter().map(|t| t.to_bits()).collect::<Vec<_>>(),
+                totals_want.iter().map(|t| t.to_bits()).collect::<Vec<_>>(),
+                "per-nuclide URR totals at {e:e}"
+            );
             let (Some(got), Some(want)) = (got, want) else {
                 assert_eq!(got.is_some(), want.is_some(), "flight at {e:e}");
                 continue;
@@ -172,10 +178,28 @@ fn flight_and_nuclide_selection_match_the_walk_bit_for_bit() {
                 "band at {e:e}"
             );
 
-            let picked =
-                material.select_nuclide_smooth(e, got.i_grid, got.f, got.urr_random, &mut s_got);
-            let expected =
-                walk.select_nuclide_smooth(e, want.i_grid, want.f, want.urr_random, &mut s_want);
+            // The flight's total is the sum of what it hands the selection.
+            if got.urr_random.is_some() {
+                let sum: f64 = totals_got.iter().sum();
+                if sum > 0.0 {
+                    assert_eq!(got.sigma_t.to_bits(), sum.to_bits(), "sigma_t at {e:e}");
+                }
+            } else {
+                assert!(totals_got.is_empty(), "no band, no totals, at {e:e}");
+            }
+
+            let picked = material.select_nuclide_smooth(
+                got.i_grid,
+                got.f,
+                got.urr_random.map(|_| totals_got.as_slice()),
+                &mut s_got,
+            );
+            let expected = walk.select_nuclide_smooth(
+                want.i_grid,
+                want.f,
+                want.urr_random.map(|_| totals_want.as_slice()),
+                &mut s_want,
+            );
             assert_eq!(s_got, s_want, "selection draws at {e:e}");
             assert_eq!(
                 picked.map(|(name, _, id)| (name.to_string(), id)),
