@@ -125,9 +125,11 @@ pub(crate) struct TransportCtx<'a> {
     /// Tallies scored over the transport.
     pub(crate) tallies: &'a [&'a Tally],
     /// Whether any of `tallies` reads the URR-perturbed macroscopic cross
-    /// sections ([`Tally::reads_urr_xs`]). When none does, the transport loop
-    /// does not compute them: they cost a probability-table lookup per URR
-    /// nuclide on every step inside a table's range.
+    /// sections ([`Tally::reads_urr_xs`]). When none does, surface tracking
+    /// and Woodcock's hybrid surface step skip computing them: inside a
+    /// table's range that walks every nuclide of the material. Woodcock delta
+    /// collisions compute them regardless, because the rejection reads their
+    /// total.
     pub(crate) score_urr_xs: bool,
     /// Per-tally flag, parallel to `tallies`: eligible for TRUE
     /// track-length scoring along Woodcock flight segments

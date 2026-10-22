@@ -403,7 +403,7 @@ pub struct Material {
 /// 24-nuclide steel that was most of the transport time. Built at the
 /// material's own temperature by `calculate_macroscopic_xs`, or on the fly by
 /// a query on a material without one, so the two read the same data.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct UrrLookup {
     /// `(lo, hi)` of every loaded nuclide's probability tables at the
     /// material's temperature. A table applies strictly inside its range, as
@@ -992,7 +992,8 @@ impl Material {
             // Pass 2 samples the struck nuclide using those URR-modified contributions.
             let urr_random = cached_urr_random.unwrap_or_else(|| rng.random::<f64>());
 
-            let mut per_nuclide_urr: SmallVec<[f64; 64]> = SmallVec::new();
+            let mut per_nuclide_urr: SmallVec<[f64; 64]> =
+                SmallVec::with_capacity(sorted_keys.len());
             let mut sigma_t_urr = 0.0;
             for idx in 0..sorted_keys.len() {
                 let xs_urr = self.nuclide_total_with_urr(energy, idx, i_grid, f, urr_random);
@@ -1272,13 +1273,12 @@ impl Material {
 
     /// URR-modified macroscopic total contribution for a single nuclide at this energy.
     ///
-    /// Returns `smooth_macro_total` unchanged if the nuclide has no URR data, the energy is
-    /// outside the URR range, or per-temperature fast XS is unavailable. Otherwise samples
-    /// the URR probability table (using the supplied `urr_random`) and returns the URR-modified
-    /// macroscopic total = `smooth_macro_total * (urr_micro_total / smooth_micro_total)`.
+    /// Returns `smooth_macro_total` unchanged if the nuclide has no URR data at the
+    /// material's temperature or its tables do not cover `energy`; otherwise scales it
+    /// through [`perturbed_macro_total`], the primitive both paths share.
     ///
-    /// This is the per-nuclide primitive used by [`Material::sample_collision_data`] to compute
-    /// the URR-consistent Σ_t and per-nuclide contributions for nuclide selection.
+    /// The fallback [`Material::nuclide_total_with_urr`] takes for a material without
+    /// a [`UrrLookup`], resolving the nuclide's temperature index on every call.
     fn nuclide_macro_total_with_urr(
         &self,
         nuclide: &Nuclide,
@@ -1334,9 +1334,9 @@ impl Material {
     /// The nuclides [`Material::compute_urr_macro_xs`] sums, in name order.
     ///
     /// Name order rather than `nuclide_data`'s: a `HashMap` iterates in an
-    /// order seeded per process, and the summation order moved the last bit
-    /// of every URR reaction-rate score from one run to the next (the defect
-    /// `calculate_macroscopic_xs_at` fixed for the material totals).
+    /// order seeded per map instance, and the summation order moved the last
+    /// bit of every URR reaction-rate score from one run to the next (the
+    /// defect `calculate_macroscopic_xs_at` fixed for the material totals).
     fn urr_scoring_nuclides(&self) -> Vec<ScoringNuclide> {
         let owned_atoms;
         let atoms_per_bcm = if let Some(ref cached) = self.cached_atoms_per_barn_cm {
@@ -2586,6 +2586,11 @@ mod tests {
         m.cached_microscopic_xs = Some((vec![1], Arc::new(HashMap::new())));
         m.macroscopic_xs_neutron_total_by_nuclide = Some(vec![vec![2.0, 2.0, 2.0]]);
         m.macroscopic_xs_neutron_by_nuclide = Some(vec![HashMap::new()]);
+        m.urr_lookup = Some(UrrLookup {
+            windows: vec![(1.0, 2.0)],
+            by_sorted: Vec::new(),
+            scoring: Vec::new(),
+        });
 
         m.set_temperature("900");
 
@@ -2613,6 +2618,10 @@ mod tests {
         assert!(
             m.macroscopic_xs_neutron_by_nuclide.is_none(),
             "per-nuclide per-MT"
+        );
+        assert!(
+            m.urr_lookup.is_none(),
+            "the URR lookup holds each nuclide's temperature index and table range"
         );
     }
 

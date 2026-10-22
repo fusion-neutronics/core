@@ -3,7 +3,9 @@
 //! and comparing temperature labels on every step. That walk is still what a
 //! material without the lookup runs, so clearing the lookup on a clone gives
 //! the reference: every query must answer exactly what it does, to the bit,
-//! and draw exactly the same random numbers.
+//! and draw exactly the same random numbers. The nuclide selection, which
+//! reads the flight's per-nuclide totals rather than the lookup, is checked
+//! against a replay of its draw and walk instead.
 //!
 //! The material mixes three nuclides with probability tables, whose ranges
 //! overlap and leave gaps (Fe58 from 350 keV, W184 and Mo92 in the keV range),
@@ -188,22 +190,52 @@ fn flight_and_nuclide_selection_match_the_walk_bit_for_bit() {
                 assert!(totals_got.is_empty(), "no band, no totals, at {e:e}");
             }
 
+            // The selection reads only the flight's totals, which are equal on
+            // both sides by now, so it is replayed from first principles
+            // instead: one draw scaled by the sum of the per-nuclide totals
+            // (the flight's own inside a band, the smooth ones otherwise),
+            // then the first nuclide whose running total exceeds it, clamped
+            // to the last.
+            let weights: Vec<f64> = match got.urr_random {
+                Some(_) => totals_got.clone(),
+                None => material
+                    .macroscopic_xs_neutron_total_by_nuclide
+                    .as_ref()
+                    .expect("built with by_nuclide")
+                    .iter()
+                    .map(|xs| {
+                        if xs.len() > got.i_grid + 1 {
+                            xs[got.i_grid] + got.f * (xs[got.i_grid + 1] - xs[got.i_grid])
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect(),
+            };
+            let mut s_replay = s_got;
+            let target = yamc_rng::next_xi(&mut s_replay) * weights.iter().sum::<f64>();
+            let mut accum = 0.0;
+            let idx = weights
+                .iter()
+                .position(|w| {
+                    accum += w;
+                    target < accum
+                })
+                .unwrap_or(weights.len() - 1);
+
             let picked = material.select_nuclide_smooth(
                 got.i_grid,
                 got.f,
                 got.urr_random.map(|_| totals_got.as_slice()),
                 &mut s_got,
             );
-            let expected = walk.select_nuclide_smooth(
-                want.i_grid,
-                want.f,
-                want.urr_random.map(|_| totals_want.as_slice()),
-                &mut s_want,
-            );
-            assert_eq!(s_got, s_want, "selection draws at {e:e}");
+            assert_eq!(s_got, s_replay, "the selection draws once at {e:e}");
             assert_eq!(
-                picked.map(|(name, _, id)| (name.to_string(), id)),
-                expected.map(|(name, _, id)| (name.to_string(), id)),
+                picked.map(|(name, _, _)| name),
+                material
+                    .sorted_nuclide_keys
+                    .as_ref()
+                    .map(|keys| keys[idx].as_str()),
                 "struck nuclide at {e:e}"
             );
         }

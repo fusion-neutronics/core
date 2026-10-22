@@ -7,9 +7,10 @@
 //! five sums, so the last bit of each depended on the map's iteration order
 //! and moved between runs. It now sums in name order.
 //!
-//! Rebuilt rather than compared with itself, from a FRESH composition each
-//! time: a cloned map iterates in its source's order, which would hold the
-//! order fixed and let the unfixed code pass.
+//! Rebuilt rather than cloned: `Material::new` gives every material a fresh
+//! `nuclide_data` map with its own hasher, while a cloned material's map
+//! iterates in its source's order, which would hold the order fixed and let
+//! the unfixed code pass.
 
 use std::collections::HashMap;
 
