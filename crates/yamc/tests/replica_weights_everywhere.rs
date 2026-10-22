@@ -353,6 +353,15 @@ fn collision_photon_flux_and_heating_match_replica_reruns() {
         let sums = photon.get_replica_sums().expect("photon replica scores");
         let count = photon.finalize().n_histories as f64;
         let width = sums.sums.len() / photon.get_mean().len();
+        for (score_index, nominal) in photon.get_mean().iter().enumerate() {
+            let row = &sums.sums[score_index * width..];
+            assert!(
+                row[..REPLICAS]
+                    .iter()
+                    .any(|sum| (sum / count - nominal).abs() > 1e-6 * nominal.abs()),
+                "{mode:?} photon score {score_index}: every replica stayed nominal"
+            );
+        }
         for replica_index in 0..REPLICAS {
             let draw = sampler.draw(SEED, replica_index as u64);
             let changed = perturbed_material(&material, &fields, &draw, &Default::default())
