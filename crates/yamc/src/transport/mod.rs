@@ -124,6 +124,11 @@ pub(crate) struct TransportCtx<'a> {
     pub(crate) weight_survive: f64,
     /// Tallies scored over the transport.
     pub(crate) tallies: &'a [&'a Tally],
+    /// Whether any of `tallies` reads the URR-perturbed macroscopic cross
+    /// sections ([`Tally::reads_urr_xs`]). When none does, the transport loop
+    /// does not compute them: they cost a probability-table lookup per URR
+    /// nuclide on every step inside a table's range.
+    pub(crate) score_urr_xs: bool,
     /// Per-tally flag, parallel to `tallies`: eligible for TRUE
     /// track-length scoring along Woodcock flight segments
     /// instead of the delta-collision collision-density equivalent.
@@ -628,8 +633,10 @@ pub(crate) fn transport_particle<T: Tracker>(
             }
         }
 
-        // Compute URR-modified macroscopic XS for tally scoring (neutrons only)
+        // Compute URR-modified macroscopic XS for tally scoring (neutrons only),
+        // when a tally reads them.
         let urr_macro_xs = if particle.particle_type == ParticleType::Neutron
+            && ctx.score_urr_xs
             && !particle.urr_random.is_nan()
         {
             cell_material.and_then(|m| m.compute_urr_macro_xs(particle.energy, particle.urr_random))
@@ -1195,7 +1202,7 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
                     particle.urr_random = yamc_particle::particle::urr_from_option(Some(*band));
                     particle.urr_energy = particle.energy;
                 }
-                if !particle.urr_random.is_nan() {
+                if ctx.score_urr_xs && !particle.urr_random.is_nan() {
                     cell_material
                         .and_then(|m| m.compute_urr_macro_xs(particle.energy, particle.urr_random))
                 } else {
@@ -1600,6 +1607,8 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
             // survives a void / non-URR excursion at the same energy.
             None
         };
+        // Computed whatever the tallies read: its total is also the rejection's
+        // Σ_t below.
         let new_urr_macro_xs = if let (Some(u), Some(m)) = (new_cached_urr, new_cell_material) {
             m.compute_urr_macro_xs(particle.energy, u)
         } else {
@@ -1637,8 +1646,15 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
         };
         let new_material = new_material_arc.as_ref();
 
-        // Σ_t at the new position (URR-consistent via new cached random).
-        let (sigma_t, _) = new_material.total_xs_with_urr(particle.energy, new_cached_urr, rng);
+        // Σ_t at the new position (URR-consistent via new cached random): the
+        // held band's total the tallies above were scored with, else the
+        // smooth total. `Material::total_xs_with_urr` would compute exactly
+        // this a second time, and draws nothing when the band is held, as it
+        // always is inside a table's range here.
+        let sigma_t = match &new_urr_macro_xs {
+            Some(urr) => urr.total,
+            None => new_material.lookup_xs_by_mt(1, particle.energy),
+        };
         let p_real = (sigma_t / sigma_maj).clamp(0.0, 1.0);
         let reject_xi: f64 = rng.random();
         if reject_xi >= p_real {

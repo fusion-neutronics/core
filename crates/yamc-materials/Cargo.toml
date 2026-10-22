@@ -13,6 +13,7 @@ path = "src/lib.rs"
 [dependencies]
 rand = "0.10"
 serde = { version = "1.0", features = ["derive", "rc"] }
+smallvec = "1"
 yamc-element = { path = "../yamc-element", default-features = false }
 yamc-nuclide = { path = "../yamc-nuclide", default-features = false }
 yamc-rng = { path = "../yamc-rng" }

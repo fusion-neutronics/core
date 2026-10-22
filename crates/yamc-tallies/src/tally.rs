@@ -497,6 +497,33 @@ impl Tally {
         })
     }
 
+    /// True if scoring this tally can read the URR-perturbed macroscopic
+    /// cross sections the transport loop hands it as `urr_xs`. A collision
+    /// estimator divides by the perturbed total whatever it scores; a
+    /// track-length estimator reads them only for a reaction rate on an MT
+    /// [`yamc_materials::UrrMacroXs::covers_mt`] covers.
+    ///
+    /// The transport loop computes them only when some tally answers true,
+    /// because on a flux-only model they were most of the cost of a step. Both
+    /// matches are exhaustive so that a new estimator or score does not
+    /// compile until it is classified here: answer true unless it provably
+    /// never reads `urr_xs`, or it is handed `None` and silently falls back to
+    /// the smooth cross sections.
+    pub fn reads_urr_xs(&self) -> bool {
+        match self.estimator {
+            crate::Estimator::Collision => true,
+            crate::Estimator::TrackLength => self.scores.iter().any(|score| match score {
+                Score::ReactionRate(r) => yamc_materials::UrrMacroXs::covers_mt(r.mt.as_i32()),
+                Score::Flux(_)
+                | Score::Heating(_)
+                | Score::HeatingLocal(_)
+                | Score::Production(_)
+                | Score::DamageEnergy(_)
+                | Score::PhotonXS(_) => false,
+            }),
+        }
+    }
+
     /// Score a track-length contribution into a per-rayon-worker
     /// per-history scratch. Hot path called once per cell crossing
     /// per tally. Per-bin contributions are routed into the worker's
@@ -3544,5 +3571,40 @@ mod tests {
         assert!(!json.contains("overlay_material"));
         let restored: Tally = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.overlay_material, None);
+    }
+
+    /// The transport loop skips the URR-perturbed cross sections unless a
+    /// tally reads them, so a tally that does and answers false would quietly
+    /// score smooth cross sections inside every probability-table band.
+    #[test]
+    fn reads_urr_xs_exactly_when_a_score_can_read_them() {
+        let tally = |scores: &[&str], estimator: crate::Estimator| {
+            let mut t = Tally::new();
+            t.scores = scores.iter().map(|s| s.parse().unwrap()).collect();
+            t.estimator = estimator;
+            t
+        };
+        let track = crate::Estimator::TrackLength;
+        let collision = crate::Estimator::Collision;
+
+        // Track length: only a reaction rate on an MT the URR values cover.
+        for score in ["total", "elastic", "fission", "absorption", "(n,gamma)"] {
+            assert!(tally(&[score], track).reads_urr_xs(), "{score}");
+        }
+        for score in [
+            "flux",
+            "heating",
+            "heating-local",
+            "H3-production",
+            "inelastic",
+            "(n,2n)",
+        ] {
+            assert!(!tally(&[score], track).reads_urr_xs(), "{score}");
+        }
+        assert!(tally(&["flux", "(n,gamma)"], track).reads_urr_xs());
+
+        // A collision estimator divides by the perturbed total, even for flux.
+        assert!(tally(&["flux"], collision).reads_urr_xs());
+        assert!(tally(&["heating"], collision).reads_urr_xs());
     }
 }
