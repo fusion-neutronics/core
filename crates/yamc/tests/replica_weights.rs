@@ -129,6 +129,31 @@ fn run_scores(
     data: Option<TransportDataUncertainty>,
     scores: &[&str],
 ) -> Vec<Arc<Tally>> {
+    run_estimator(
+        material,
+        radius,
+        energy,
+        particles,
+        seed,
+        data,
+        scores,
+        Estimator::TrackLength,
+        TrackingMode::Surface,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_estimator(
+    material: Material,
+    radius: f64,
+    energy: f64,
+    particles: usize,
+    seed: u64,
+    data: Option<TransportDataUncertainty>,
+    scores: &[&str],
+    estimator: Estimator,
+    tracking: TrackingMode,
+) -> Vec<Arc<Tally>> {
     let sphere = Surface {
         surface_id: Some(1),
         kind: SurfaceKind::Sphere {
@@ -143,7 +168,16 @@ fn run_scores(
     let region = Region::new_from_halfspace(HalfspaceType::Below(Arc::new(sphere)));
     let cell = Cell::new(Some(1), region, Some("c".into()), Some(0));
     let geometry = Geometry::new(vec![cell], vec![Arc::new(material)]).expect("geometry");
-    let tallies: Vec<Arc<Tally>> = scores.iter().map(|s| tally(s)).collect();
+    let tallies: Vec<Arc<Tally>> = scores
+        .iter()
+        .map(|score| {
+            let mut configured = tally(score);
+            Arc::get_mut(&mut configured)
+                .expect("new tally has one owner")
+                .estimator = estimator;
+            configured
+        })
+        .collect();
     let source = ParticleSource::Neutron(Source {
         space: SourceSpatialDistribution::Point(Point::new([0.0, 0.0, 0.0])),
         angle: AngularDistribution::Isotropic,
@@ -156,7 +190,7 @@ fn run_scores(
         tallies.iter().map(Arc::clone).collect(),
     );
     model.verbose = Verbose::silent();
-    model.tracking_mode = TrackingMode::Surface;
+    model.tracking_mode = tracking;
     model
         .simulate_transport(&TransportSettings {
             total_particles: Some(particles),
@@ -218,6 +252,100 @@ fn the_nominal_tally_is_unchanged_by_the_replicas() {
         assert_eq!(a.get_std_dev(), b.get_std_dev(), "the nominal error moved");
         assert!(a.get_replica_sums().is_none());
         assert!(b.get_replica_sums().is_some());
+    }
+}
+
+#[test]
+fn collision_estimator_nominal_scores_are_unchanged_by_replicas() {
+    let Some(directory) = fixture() else {
+        eprintln!("skipping: Fe56 fixture carries no covariance");
+        return;
+    };
+    let material = iron(&directory);
+    let scores = ["flux", "(n,gamma)"];
+    let nominal = run_estimator(
+        material.clone(),
+        5.0,
+        14.1e6,
+        2_000,
+        3,
+        None,
+        &scores,
+        Estimator::Collision,
+        TrackingMode::Surface,
+    );
+    let weighted = run_estimator(
+        material,
+        5.0,
+        14.1e6,
+        2_000,
+        3,
+        Some(TransportDataUncertainty {
+            seed: SEED,
+            replicas: 4,
+        }),
+        &scores,
+        Estimator::Collision,
+        TrackingMode::Surface,
+    );
+    for (plain, with_replicas) in nominal.iter().zip(&weighted) {
+        assert_eq!(plain.get_mean(), with_replicas.get_mean());
+        assert_eq!(plain.get_std_dev(), with_replicas.get_std_dev());
+        assert!(with_replicas.get_replica_sums().is_some());
+    }
+}
+
+#[test]
+fn collision_estimator_replicas_match_independent_reruns() {
+    let Some(directory) = fixture() else {
+        eprintln!("skipping: Fe56 fixture carries no covariance");
+        return;
+    };
+    let material = iron(&directory);
+    let scores = ["flux", "(n,gamma)"];
+    for tracking in [
+        TrackingMode::Surface,
+        TrackingMode::Woodcock,
+        TrackingMode::Hybrid,
+    ] {
+        let weighted = run_estimator(
+            material.clone(),
+            0.2,
+            0.0253,
+            40_000,
+            7,
+            Some(TransportDataUncertainty {
+                seed: SEED,
+                replicas: 4,
+            }),
+            &scores,
+            Estimator::Collision,
+            tracking,
+        );
+        for replica_index in 0..4 {
+            let rerun = run_estimator(
+                rerun_material(&material, replica_index as u64),
+                0.2,
+                0.0253,
+                40_000,
+                101 + replica_index as u64,
+                None,
+                &scores,
+                Estimator::Collision,
+                tracking,
+            );
+            for (score_index, score) in scores.iter().enumerate() {
+                let (mean, error) = replica(&weighted[score_index], replica_index);
+                let reference = rerun[score_index].get_mean()[0];
+                let reference_error = rerun[score_index].get_std_dev()[0];
+                let combined = error.hypot(reference_error);
+                assert!(reference > 0.0 && mean > 0.0);
+                assert!(
+                    (mean - reference).abs() <= 5.0 * combined + 1e-12 * reference.abs(),
+                    "{tracking:?} {score} replica {replica_index}: weights {mean} +/- {error}, rerun {reference} +/- {reference_error}"
+                );
+            }
+        }
     }
 }
 

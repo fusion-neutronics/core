@@ -1,5 +1,10 @@
 //! Tally scoring helpers: track-length segment, collision-event, and the
 //! Woodcock flight (collision-density) estimator.
+//!
+//! Real collision scores use the arrival likelihood before the sampled
+//! reaction updates it. The collision density's total cross-section ratio
+//! cancels the estimator's inverse-total ratio; only the score response's
+//! own ratio remains. Photon analog heating carries its inherited ratio.
 
 use super::*;
 
@@ -128,6 +133,7 @@ pub(crate) fn score_collision_event(
     photon_macro_xs: Option<&yamc_materials::MacroPhotonXS>,
     tallies: &[&Tally],
     welford_worker: &mut yamc_tallies::welford::WelfordWorkerState,
+    replica: Option<&super::replica::ReplicaContext>,
 ) {
     // Quick pre-check: avoid the lookup if no tally needs it.
     if !tallies
@@ -151,8 +157,46 @@ pub(crate) fn score_collision_event(
     if total_xs <= 0.0 {
         return;
     }
+    let point = replica.and_then(|context| {
+        super::replica::ReplicaSegment::at_point(context, particle, cell.material_idx)
+    });
     for (tally_idx, tally) in tallies.iter().enumerate() {
         if tally.estimator != yamc_tallies::Estimator::Collision {
+            continue;
+        }
+        if let Some(point) = point
+            .as_ref()
+            .filter(|_| welford_worker.has_replicas(tally_idx))
+        {
+            let factors: Vec<Vec<f64>> = tally
+                .scores
+                .iter()
+                .map(|score| point.factors_for(score, particle.energy))
+                .collect();
+            tally.score_collision_with(
+                &mut |bin_idx, value| {
+                    welford_worker.add_contribution(tally_idx, bin_idx, value);
+                    let score = tally.score_index_of_bin(bin_idx);
+                    welford_worker.add_replica_contribution(
+                        tally_idx,
+                        bin_idx,
+                        value,
+                        &factors[score],
+                    );
+                },
+                particle.weight,
+                total_xs,
+                particle.position,
+                cell.cell_id,
+                Some(material),
+                material_id,
+                urr_macro_xs,
+                photon_macro_xs,
+                particle.energy,
+                particle.particle_type,
+                particle.parent_nuclide,
+                None,
+            );
             continue;
         }
         tally.score_collision(
@@ -171,6 +215,80 @@ pub(crate) fn score_collision_event(
             particle.parent_nuclide,
             None, // analog photon heat -- supplied post-photon-collision instead
         );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn score_photon_heat_event(
+    particle: &yamc_particle::particle::Particle,
+    cell: &crate::geometry::cell::Cell,
+    material: &Material,
+    material_id: Option<u32>,
+    incoming_weight: f64,
+    incoming_energy: f64,
+    heat_score: f64,
+    tallies: &[&Tally],
+    welford_worker: &mut yamc_tallies::welford::WelfordWorkerState,
+    replica: Option<&super::replica::ReplicaContext>,
+) {
+    let point = replica.and_then(|context| {
+        super::replica::ReplicaSegment::at_point(context, particle, cell.material_idx)
+    });
+    for (tally_idx, tally) in tallies.iter().enumerate() {
+        if tally.estimator != yamc_tallies::Estimator::Collision {
+            continue;
+        }
+        if let Some(point) = point
+            .as_ref()
+            .filter(|_| welford_worker.has_replicas(tally_idx))
+        {
+            let factors: Vec<Vec<f64>> = tally
+                .scores
+                .iter()
+                .map(|score| point.factors_for(score, incoming_energy))
+                .collect();
+            tally.score_collision_with(
+                &mut |bin_idx, value| {
+                    welford_worker.add_contribution(tally_idx, bin_idx, value);
+                    let score = tally.score_index_of_bin(bin_idx);
+                    welford_worker.add_replica_contribution(
+                        tally_idx,
+                        bin_idx,
+                        value,
+                        &factors[score],
+                    );
+                },
+                incoming_weight,
+                0.0,
+                particle.position,
+                cell.cell_id,
+                Some(material),
+                material_id,
+                None,
+                None,
+                incoming_energy,
+                yamc_particle::ParticleType::Photon,
+                particle.parent_nuclide,
+                Some(heat_score),
+            );
+        } else {
+            tally.score_collision(
+                welford_worker,
+                tally_idx,
+                incoming_weight,
+                0.0,
+                particle.position,
+                cell.cell_id,
+                Some(material),
+                material_id,
+                None,
+                None,
+                incoming_energy,
+                yamc_particle::ParticleType::Photon,
+                particle.parent_nuclide,
+                Some(heat_score),
+            );
+        }
     }
 }
 

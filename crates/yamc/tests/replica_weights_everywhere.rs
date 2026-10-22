@@ -215,6 +215,26 @@ fn run(
     seed: u64,
     data: Option<TransportDataUncertainty>,
 ) -> Vec<Arc<Tally>> {
+    run_estimator(
+        target,
+        material,
+        mode,
+        particles,
+        seed,
+        data,
+        Estimator::TrackLength,
+    )
+}
+
+fn run_estimator(
+    target: Target,
+    material: Material,
+    mode: Mode,
+    particles: usize,
+    seed: u64,
+    data: Option<TransportDataUncertainty>,
+    estimator: Estimator,
+) -> Vec<Arc<Tally>> {
     let sphere = Surface {
         surface_id: Some(1),
         kind: SurfaceKind::Sphere {
@@ -232,6 +252,11 @@ fn run(
     let mut tallies = vec![tally(&["flux", "(n,gamma)"], ParticleType::Neutron)];
     if mode.photons() {
         tallies.push(tally(&["flux", "heating"], ParticleType::Photon));
+    }
+    for tally in &mut tallies {
+        Arc::get_mut(tally)
+            .expect("new tally has one owner")
+            .estimator = estimator;
     }
     let source = ParticleSource::Neutron(Source {
         space: SourceSpatialDistribution::Point(Point::new([0.0, 0.0, 0.0])),
@@ -285,6 +310,137 @@ fn uq() -> Option<TransportDataUncertainty> {
         seed: SEED,
         replicas: REPLICAS,
     })
+}
+
+#[test]
+fn collision_photon_flux_and_heating_match_replica_reruns() {
+    let Some(material) = iron(true) else {
+        eprintln!("skipping: Fe56 covariance or Fe photon fixture missing");
+        return;
+    };
+    let (fields, _) = transport_fields(&material, &Default::default());
+    let cells = fields
+        .iter()
+        .filter_map(|(name, field)| field.field.clone().map(|field| (name.clone(), field)))
+        .collect();
+    let sampler = Sampler::new(&cells, &[]);
+    for mode in [Mode::Photons, Mode::WoodcockPhotons] {
+        let weighted = run_estimator(
+            Target::Iron,
+            material.clone(),
+            mode,
+            10_000,
+            31,
+            uq(),
+            Estimator::Collision,
+        );
+        if mode == Mode::Photons {
+            let nominal = run_estimator(
+                Target::Iron,
+                material.clone(),
+                mode,
+                10_000,
+                31,
+                None,
+                Estimator::Collision,
+            );
+            for (plain, with_replicas) in nominal.iter().zip(&weighted) {
+                assert_eq!(plain.get_mean(), with_replicas.get_mean());
+                assert_eq!(plain.get_std_dev(), with_replicas.get_std_dev());
+            }
+        }
+        let photon = &weighted[1];
+        let sums = photon.get_replica_sums().expect("photon replica scores");
+        let count = photon.finalize().n_histories as f64;
+        let width = sums.sums.len() / photon.get_mean().len();
+        for (score_index, nominal) in photon.get_mean().iter().enumerate() {
+            let row = &sums.sums[score_index * width..];
+            assert!(
+                row[..REPLICAS]
+                    .iter()
+                    .any(|sum| (sum / count - nominal).abs() > 1e-6 * nominal.abs()),
+                "{mode:?} photon score {score_index}: every replica stayed nominal"
+            );
+        }
+        for replica_index in 0..REPLICAS {
+            let draw = sampler.draw(SEED, replica_index as u64);
+            let changed = perturbed_material(&material, &fields, &draw, &Default::default())
+                .expect("perturb evaluated covariance")
+                .0;
+            let rerun = run_estimator(
+                Target::Iron,
+                changed,
+                mode,
+                10_000,
+                101 + replica_index as u64,
+                None,
+                Estimator::Collision,
+            );
+            for score_index in 0..2 {
+                let row = &sums.sums[score_index * width..];
+                let mean = row[replica_index] / count;
+                let variance = (row[REPLICAS + replica_index] - row[replica_index].powi(2) / count)
+                    / (count - 1.0);
+                let error = (variance.max(0.0) / count).sqrt();
+                let reference = rerun[1].get_mean()[score_index];
+                let reference_error = rerun[1].get_std_dev()[score_index];
+                assert!(mean > 0.0 && reference > 0.0);
+                assert!(
+                    (mean - reference).abs() <= 5.0 * error.hypot(reference_error) + 1e-12 * reference.abs(),
+                    "{mode:?} photon score {score_index}, replica {replica_index}: {mean} +/- {error} vs {reference} +/- {reference_error}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn collision_replica_scores_agree_with_analog_under_variance_reduction() {
+    let Some(material) = iron(false) else {
+        eprintln!("skipping: Fe56 covariance fixture missing");
+        return;
+    };
+    let moments = |tally: &Arc<Tally>, score: usize, replica_index: usize| {
+        let sums = tally.get_replica_sums().expect("replica scores");
+        let count = tally.finalize().n_histories as f64;
+        let width = sums.sums.len() / tally.get_mean().len();
+        let row = &sums.sums[score * width..];
+        let mean = row[replica_index] / count;
+        let variance =
+            (row[REPLICAS + replica_index] - row[replica_index].powi(2) / count) / (count - 1.0);
+        (mean, (variance.max(0.0) / count).sqrt())
+    };
+    let analog = run_estimator(
+        Target::Iron,
+        material.clone(),
+        Mode::Analog,
+        20_000,
+        211,
+        uq(),
+        Estimator::Collision,
+    );
+    for mode in [Mode::SurvivalBiasing, Mode::WeightWindows, Mode::Everything] {
+        let weighted = run_estimator(
+            Target::Iron,
+            material.clone(),
+            mode,
+            20_000,
+            307,
+            uq(),
+            Estimator::Collision,
+        );
+        for score in 0..2 {
+            for replica_index in 0..REPLICAS {
+                let (mean, error) = moments(&weighted[0], score, replica_index);
+                let (reference, reference_error) = moments(&analog[0], score, replica_index);
+                assert!(mean > 0.0 && reference > 0.0);
+                assert!(
+                    (mean - reference).abs() <= 5.0 * error.hypot(reference_error),
+                    "{mode:?}, score {score}, replica {replica_index}: {mean} +/- {error} vs {reference} +/- {reference_error}"
+                );
+            }
+        }
+    }
 }
 
 /// Per score of a tally, the nominal mean and each replica's mean.
