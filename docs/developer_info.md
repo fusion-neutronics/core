@@ -613,7 +613,9 @@ library's current published release, once per process:
    `format_version`, and its manifest with the manifest's size and sha256. A
    build reads the `format_version`s in
    `yamc_nuclide::storage::release::SUPPORTED_FORMAT_VERSIONS` and refuses any
-   other with a message saying to upgrade. A data fix that keeps the format
+   other with a message saying to upgrade. The converters stamp
+   `nuclear_data_schema::FORMAT_VERSION`, and that range must end at it
+   (checked at compile time). A data fix that keeps the format
    needs no yamc release. The pointer is asked for with a cache-busting query,
    `latest.json?release-check=<16 random hex digits>`, by the native and
    Pyodide downloader and by the browser fetcher alike

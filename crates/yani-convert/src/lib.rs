@@ -750,7 +750,7 @@ fn merge_manifest(
             .is_some_and(|p| out.join(p).is_dir())
     });
     let manifest = serde_json::json!({
-        "format_version": 2,
+        "format_version": nuclear_data_schema::FORMAT_VERSION,
         "library": provenance.library,
         "data_version": provenance.data_version,
         "converter_version": concat!("yani-convert ", env!("CARGO_PKG_VERSION")),
