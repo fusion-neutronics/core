@@ -4,12 +4,31 @@
 //! `pip install yani` and calls this: no `endf` package from a git branch, no
 //! separate converter distribution, no NJOY. The parser is an implementation
 //! detail this module never names in its signature.
+//!
+//! Every function here does its work with the GIL released. One call can take
+//! minutes (NJOY over an evaluation, or a whole sublibrary through the chain
+//! builder), and holding the GIL for it stopped every other Python thread, so
+//! a thread pool over evaluations ran them one at a time. The arguments are
+//! extracted and checked first, only Rust values go into the work, and its
+//! result becomes Python objects again afterwards.
 
+use std::error::Error;
 use std::path::PathBuf;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3_stub_gen::derive::gen_stub_pyfunction;
+
+/// Run `convert` with the GIL released, raising its error as `RuntimeError`.
+fn detached<T: Send>(
+    py: Python<'_>,
+    convert: impl Send + FnOnce() -> Result<T, Box<dyn Error>>,
+) -> PyResult<T> {
+    // `Box<dyn Error>` is not `Send`, so it cannot come back out through
+    // `detach`; the message is what the caller sees anyway.
+    py.detach(|| convert().map_err(|e| e.to_string()))
+        .map_err(PyRuntimeError::new_err)
+}
 
 /// Convert ENDF decay, fission product yield and neutron evaluations into a
 /// transmutation Arrow directory.
@@ -87,6 +106,7 @@ use pyo3_stub_gen::derive::gen_stub_pyfunction;
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn convert_transmutation(
+    py: Python<'_>,
     decay_files: Vec<String>,
     fpy_files: Vec<String>,
     neutron_files: Vec<String>,
@@ -135,19 +155,20 @@ pub fn convert_transmutation(
         created_utc: created_utc.map(str::to_string).unwrap_or_default(),
     };
 
-    yani_convert::convert_transmutation_files(
-        &decay_files,
-        &fpy_files,
-        &neutron_files,
-        &decay_fill_files,
-        decay_fill_library,
-        reactions.as_deref(),
-        branch_ratios.map(PathBuf::from).as_deref(),
-        subsections.as_deref(),
-        &PathBuf::from(output_path),
-        &provenance,
-    )
-    .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    detached(py, || {
+        yani_convert::convert_transmutation_files(
+            &decay_files,
+            &fpy_files,
+            &neutron_files,
+            &decay_fill_files,
+            decay_fill_library,
+            reactions.as_deref(),
+            branch_ratios.map(PathBuf::from).as_deref(),
+            subsections.as_deref(),
+            &PathBuf::from(output_path),
+            &provenance,
+        )
+    })
 }
 
 /// Extract isomeric branching from neutron evaluations and write the
@@ -276,15 +297,16 @@ pub fn convert_branching(
         created_utc: created_utc.map(str::to_string).unwrap_or_default(),
     };
 
-    let stats = yani_convert::convert_branching_files(
-        &neutron_files,
-        &decay_files,
-        &PathBuf::from(output_path),
-        &provenance,
-        tol_ev,
-        linearize_tol,
-    )
-    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let stats = detached(py, || {
+        yani_convert::convert_branching_files(
+            &neutron_files,
+            &decay_files,
+            &PathBuf::from(output_path),
+            &provenance,
+            tol_ev,
+            linearize_tol,
+        )
+    })?;
 
     let out = pyo3::types::PyDict::new(py);
     out.set_item("parents", stats.parents)?;
@@ -382,6 +404,7 @@ pub fn convert_branching(
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn convert_neutron_xs(
+    py: Python<'_>,
     input_path: &str,
     output_dir: &str,
     source_format: &str,
@@ -413,14 +436,15 @@ pub fn convert_neutron_xs(
         created_utc: created_utc.map(str::to_string).unwrap_or_default(),
     };
 
-    yamc_convert::entry::convert_neutron_xs(
-        &source,
-        &PathBuf::from(output_dir),
-        &provenance,
-        covariance,
-    )
+    detached(py, || {
+        yamc_convert::entry::convert_neutron_xs(
+            &source,
+            &PathBuf::from(output_dir),
+            &provenance,
+            covariance,
+        )
+    })
     .map(|p| p.to_string_lossy().into_owned())
-    .map_err(|e| PyRuntimeError::new_err(e.to_string()))
 }
 
 /// Convert an ENDF evaluation into the full neutron transport data set.
@@ -475,6 +499,7 @@ pub fn convert_neutron_xs(
     covariance = false,
 ))]
 pub fn convert_neutron_transport(
+    py: Python<'_>,
     input_path: &str,
     output_dir: &str,
     njoy_exec: &str,
@@ -496,14 +521,15 @@ pub fn convert_neutron_transport(
         created_utc: created_utc.map(str::to_string).unwrap_or_default(),
     };
 
-    yamc_convert::entry::convert_neutron_transport(
-        &source,
-        &PathBuf::from(output_dir),
-        &provenance,
-        covariance,
-    )
+    detached(py, || {
+        yamc_convert::entry::convert_neutron_transport(
+            &source,
+            &PathBuf::from(output_dir),
+            &provenance,
+            covariance,
+        )
+    })
     .map(|p| p.to_string_lossy().into_owned())
-    .map_err(|e| PyRuntimeError::new_err(e.to_string()))
 }
 
 /// Preserve a photonuclear ENDF evaluation as lossless Arrow tables.
@@ -516,6 +542,7 @@ pub fn convert_neutron_transport(
 #[pyfunction]
 #[pyo3(signature = (input_path, output_dir, library = "", data_version = "", created_utc = None))]
 pub fn convert_photonuclear(
+    py: Python<'_>,
     input_path: &str,
     output_dir: &str,
     library: &str,
@@ -527,13 +554,14 @@ pub fn convert_photonuclear(
         data_version: data_version.to_string(),
         created_utc: created_utc.map(str::to_string).unwrap_or_default(),
     };
-    yamc_convert::photonuclear::convert_photonuclear(
-        &PathBuf::from(input_path),
-        &PathBuf::from(output_dir),
-        &provenance,
-    )
+    detached(py, || {
+        yamc_convert::photonuclear::convert_photonuclear(
+            &PathBuf::from(input_path),
+            &PathBuf::from(output_dir),
+            &provenance,
+        )
+    })
     .map(|path| path.to_string_lossy().into_owned())
-    .map_err(|error| PyRuntimeError::new_err(error.to_string()))
 }
 
 /// Convert a photoatomic evaluation into the per-element photon sections.
@@ -580,6 +608,7 @@ pub fn convert_photonuclear(
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn convert_photon(
+    py: Python<'_>,
     photoatomic_path: &str,
     output_dir: &str,
     relaxation_path: Option<&str>,
@@ -619,19 +648,20 @@ pub fn convert_photon(
         created_utc: created_utc.map(str::to_string).unwrap_or_default(),
     };
 
-    yamc_convert::entry::convert_photon(
-        &photoatomic,
-        relaxation.as_deref(),
-        tabulations.as_ref(),
-        &PathBuf::from(output_dir),
-        &provenance,
-    )
+    detached(py, || {
+        yamc_convert::entry::convert_photon(
+            &photoatomic,
+            relaxation.as_deref(),
+            tabulations.as_ref(),
+            &PathBuf::from(output_dir),
+            &provenance,
+        )
+    })
     .map(|dirs| {
         dirs.into_iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect()
     })
-    .map_err(|e| PyRuntimeError::new_err(e.to_string()))
 }
 
 /// List the final states each reaction of an evaluation can leave its product
@@ -700,8 +730,9 @@ pub fn radionuclide_production(
              evaluations, so there is nothing to read without them",
         ));
     }
-    let channels = yani_convert::production::production_from_files(&neutron_files)
-        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let channels = detached(py, || {
+        yani_convert::production::production_from_files(&neutron_files)
+    })?;
 
     let out = pyo3::types::PyList::empty(py);
     for channel in channels {
