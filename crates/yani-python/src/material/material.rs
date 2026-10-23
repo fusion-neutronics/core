@@ -15,12 +15,12 @@ use yamc_materials::material::Material;
 /// ``atom/barn-cm`` for a total atom density). For absolute per-nuclide atom
 /// densities use :meth:`Material.from_atom_densities`.
 ///
-/// Every Material has an ``id``, unique in the process: the one passed to the
-/// constructor, or else one assigned when it is built, so a :class:`Tally` can
-/// filter on it before any geometry exists. Materials may also carry a name,
-/// volume (cm³), temperature (K), and a ``transmutable`` flag that marks them
-/// for depletion by ``Model.simulate_transmutation`` (not needed for
-/// ``Material.transmute()``).
+/// Every Material has an ``id`` from construction: the one passed to the
+/// constructor, or else a fresh one that no earlier material in the process
+/// was given, so a ``yamc.Tally`` can filter on it before any geometry exists.
+/// Materials may also carry a name, volume (cm³), temperature (K), and a
+/// ``transmutable`` flag that marks them for depletion by
+/// ``Model.simulate_transmutation`` (not needed for ``Material.transmute()``).
 ///
 /// Examples:
 ///     >>> import yamc
@@ -203,13 +203,16 @@ impl PyMaterial {
         self.internal.name = Some(name);
     }
 
-    /// The material's ID, unique in the process.
+    /// The material's ID.
     ///
     /// Assigned when the material is built: the ``id`` given to the
-    /// constructor, or else a fresh one that no material in the process has
-    /// been given. Setting it replaces it; two different materials with one
-    /// ID are refused when they meet in a :class:`Geometry`,
-    /// :class:`MeshGeometry` or :class:`Tally`.
+    /// constructor, or else a fresh one that no earlier material in the
+    /// process was given. Copies keep it, as do the materials a transmutation
+    /// result returns, which keep their original's. Setting it replaces it,
+    /// but a tally keeps the IDs it was built with. Two different Material
+    /// objects with one ID are refused where they meet, in a ``yamc.Geometry``
+    /// (its cells and their mesh fills) or a ``yamc.MeshGeometry``, and a
+    /// ``yamc.Tally`` refuses one ID listed twice.
     #[getter]
     fn id(&self) -> PyResult<u32> {
         self.material_id()
@@ -279,8 +282,8 @@ impl PyMaterial {
     ///     density_units (str): Density units: "g/cm3", "g/cc", "kg/m3", or
     ///         "atom/barn-cm" (total atom density; requires fraction_type="atom").
     ///     name (Optional[str]): Name for the material.
-    ///     id (Optional[int]): ID for the material. If omitted, a fresh one
-    ///         unique in the process is assigned.
+    ///     id (Optional[int]): ID for the material. Defaults to a fresh one,
+    ///         which no earlier material was given.
     ///     fraction_type (str): "atom" for atom fractions or "mass" for mass fractions.
     ///     transmutable (bool): Mark this material for depletion by
     ///         ``Model.simulate_transmutation``. Not needed for
@@ -410,8 +413,8 @@ impl PyMaterial {
     /// Args:
     ///     atom_densities (dict[str, float]): nuclide name -> atoms/barn-cm.
     ///     name (Optional[str]): Name for the material.
-    ///     id (Optional[int]): ID for the material. If omitted, a fresh one
-    ///         unique in the process is assigned.
+    ///     id (Optional[int]): ID for the material. Defaults to a fresh one,
+    ///         which no earlier material was given.
     ///     transmutable (bool): Mark this material for depletion by
     ///         ``Model.simulate_transmutation``. Not needed for
     ///         ``Material.transmute()``, which depletes whatever it is called on.
@@ -1557,8 +1560,8 @@ impl PyMaterial {
     ///     name (Optional[str]): Name for the new material. If omitted, one
     ///         is built from the components' names and fractions, such as
     ///         ``"steel(0.9000)_unnamed(0.1000)"``.
-    ///     id (Optional[int]): ID for the new material. If omitted, a fresh
-    ///         one unique in the process is assigned.
+    ///     id (Optional[int]): ID for the new material. Defaults to a fresh
+    ///         one, which no earlier material was given.
     ///
     /// Returns:
     ///     Material: A new material with the mixed composition and density.

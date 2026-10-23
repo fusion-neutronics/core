@@ -1615,12 +1615,12 @@ class Material:
     ``atom/barn-cm`` for a total atom density). For absolute per-nuclide atom
     densities use :meth:`Material.from_atom_densities`.
     
-    Every Material has an ``id``, unique in the process: the one passed to the
-    constructor, or else one assigned when it is built, so a :class:`Tally` can
-    filter on it before any geometry exists. Materials may also carry a name,
-    volume (cm³), temperature (K), and a ``transmutable`` flag that marks them
-    for depletion by ``Model.simulate_transmutation`` (not needed for
-    ``Material.transmute()``).
+    Every Material has an ``id`` from construction: the one passed to the
+    constructor, or else a fresh one that no earlier material in the process
+    was given, so a ``yamc.Tally`` can filter on it before any geometry exists.
+    Materials may also carry a name, volume (cm³), temperature (K), and a
+    ``transmutable`` flag that marks them for depletion by
+    ``Model.simulate_transmutation`` (not needed for ``Material.transmute()``).
     
     Examples:
         >>> import yamc
@@ -1643,13 +1643,16 @@ class Material:
     @property
     def id(self) -> builtins.int:
         r"""
-        The material's ID, unique in the process.
+        The material's ID.
         
         Assigned when the material is built: the ``id`` given to the
-        constructor, or else a fresh one that no material in the process has
-        been given. Setting it replaces it; two different materials with one
-        ID are refused when they meet in a :class:`Geometry`,
-        :class:`MeshGeometry` or :class:`Tally`.
+        constructor, or else a fresh one that no earlier material in the
+        process was given. Copies keep it, as do the materials a transmutation
+        result returns, which keep their original's. Setting it replaces it,
+        but a tally keeps the IDs it was built with. Two different Material
+        objects with one ID are refused where they meet, in a ``yamc.Geometry``
+        (its cells and their mesh fills) or a ``yamc.MeshGeometry``, and a
+        ``yamc.Tally`` refuses one ID listed twice.
         """
     @id.setter
     def id(self, value: builtins.int) -> None:
@@ -1761,8 +1764,8 @@ class Material:
             density_units (str): Density units: "g/cm3", "g/cc", "kg/m3", or
                 "atom/barn-cm" (total atom density; requires fraction_type="atom").
             name (Optional[str]): Name for the material.
-            id (Optional[int]): ID for the material. If omitted, a fresh one
-                unique in the process is assigned.
+            id (Optional[int]): ID for the material. Defaults to a fresh one,
+                which no earlier material was given.
             fraction_type (str): "atom" for atom fractions or "mass" for mass fractions.
             transmutable (bool): Mark this material for depletion by
                 ``Model.simulate_transmutation``. Not needed for
@@ -1788,8 +1791,8 @@ class Material:
         Args:
             atom_densities (dict[str, float]): nuclide name -> atoms/barn-cm.
             name (Optional[str]): Name for the material.
-            id (Optional[int]): ID for the material. If omitted, a fresh one
-                unique in the process is assigned.
+            id (Optional[int]): ID for the material. Defaults to a fresh one,
+                which no earlier material was given.
             transmutable (bool): Mark this material for depletion by
                 ``Model.simulate_transmutation``. Not needed for
                 ``Material.transmute()``, which depletes whatever it is called on.
@@ -2336,8 +2339,8 @@ class Material:
             name (Optional[str]): Name for the new material. If omitted, one
                 is built from the components' names and fractions, such as
                 ``"steel(0.9000)_unnamed(0.1000)"``.
-            id (Optional[int]): ID for the new material. If omitted, a fresh
-                one unique in the process is assigned.
+            id (Optional[int]): ID for the new material. Defaults to a fresh
+                one, which no earlier material was given.
         
         Returns:
             Material: A new material with the mixed composition and density.
@@ -3341,12 +3344,13 @@ class Model:
             ... ])
             >>> results = model.simulate_transmutation(
             ...     method="coupled", schedule=schedule, total_particles=1000)
-            >>> co60 = results.get_nuclide_evolution(1, "Co60")
+            >>> # keyed by the id of the transmutable material, here steel
+            >>> co60 = results.get_nuclide_evolution(steel.id, "Co60")
             >>> results = model.simulate_transmutation(
             ...     method="independent", schedule=schedule, total_particles=100_000,
             ...     data_uncertainty=yamc.DataUncertainty(seed=1))
-            >>> results.get_nuclide_uncertainty(1, "Co60", 1)
-            >>> results.get_data_uncertainty_info(1)["flux_response"]
+            >>> results.get_nuclide_uncertainty(steel.id, "Co60", 1)
+            >>> results.get_data_uncertainty_info(steel.id)["flux_response"]
             'replica_weights'
         """
     def to_vtkhdf(self, filename: builtins.str, **kwargs: typing.Any) -> None:
@@ -6715,6 +6719,10 @@ class TransmutationResults:
         r"""
         Get material composition at a specific timestep.
         
+        The material keeps ``material_id``, so it can stand in for the
+        original in a model. Placed beside the original it needs an id of its
+        own, since a geometry refuses two different materials with one id.
+        
         Args:
             material_id: Material ID number.
             step: Timestep index (0 = initial).
@@ -6728,7 +6736,8 @@ class TransmutationResults:
         
         Indexed as ``timesteps``, so entry ``i`` is the state at the end of step
         ``i`` and pairs with ``get_reaction_rates(material_id, i)``. This is the
-        list ``Material.transmute`` used to return on its own.
+        list ``Material.transmute`` used to return on its own. Each keeps
+        ``material_id``, as ``get_material`` says.
         
         Args:
             material_id: Material ID number.
@@ -6739,7 +6748,8 @@ class TransmutationResults:
         """
     def get_final_material(self, material_id: builtins.int) -> typing.Optional[Material]:
         r"""
-        Final composition for a material, after the last step.
+        Final composition for a material, after the last step. It keeps
+        ``material_id``, as ``get_material`` says.
         
         Args:
             material_id: Material ID number.
@@ -8364,9 +8374,11 @@ def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | t
     were shared. The materials' solves then run in parallel.
     
     Args:
-        materials (list[Material]): The materials. The results are keyed by
-            their ``id``, which every material is given when it is built, so
-            two clash only if one was given the other's explicitly. As with
+        materials (list[Material]): The materials, each with a distinct
+            ``id``, since the results are keyed by it. Every material has one
+            from construction; two share one only when one was given the
+            other's explicitly or is a copy of it, as a material a
+            transmutation result returns is of its original. As with
             ``Material.transmute``, the cross sections each needs are loaded
             into it and kept, and the composition is not modified.
         schedules (PulseSchedule | list[PulseSchedule]): One schedule for every

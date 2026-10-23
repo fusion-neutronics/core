@@ -29,11 +29,7 @@ pub fn parse_colors_ids_cells_materials(
                 .map(|id| id as i32)
                 .ok_or_else(|| PyValueError::new_err("Cell has no ID"))?
         } else if let Ok(material) = key.extract::<PyMaterial>() {
-            material
-                .internal
-                .get_material_id()
-                .map(|id| id as i32)
-                .ok_or_else(|| PyValueError::new_err("Material has no ID"))?
+            material.material_id()? as i32
         } else {
             return Err(PyTypeError::new_err(
                 "colors keys must be integers, Cell objects, or Material objects",

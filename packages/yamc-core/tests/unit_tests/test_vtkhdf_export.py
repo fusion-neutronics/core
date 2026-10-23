@@ -656,7 +656,7 @@ def test_geometry_voxelize_matches_find_cell():
                     ref_cell[iz, iy, ix] = c.id if c.id is not None else -1
                     m = c.material
                     if m is not None:
-                        ref_mat[iz, iy, ix] = m.id if m.id is not None else -1
+                        ref_mat[iz, iy, ix] = m.id
 
     np.testing.assert_array_equal(cell_ids, ref_cell)
     np.testing.assert_array_equal(mat_ids, ref_mat)

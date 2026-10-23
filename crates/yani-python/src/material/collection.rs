@@ -147,8 +147,8 @@ impl PyMaterialCollection {
     ///     volume (Optional[float]): Volume in cm³.
     ///     transmutable (bool): Mark for depletion by
     ///         ``Model.simulate_transmutation``.
-    ///     id (Optional[int]): Material ID. If omitted, a fresh one unique in
-    ///         the process is assigned.
+    ///     id (Optional[int]): Material ID. Defaults to a fresh one, which no
+    ///         earlier material was given.
     ///
     /// Returns:
     ///     Material: The material with the overrides applied.

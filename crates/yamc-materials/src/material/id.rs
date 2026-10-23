@@ -1,4 +1,5 @@
-//! Material ids, unique within the process.
+//! Material ids, and the process-wide allocator that hands out the automatic
+//! ones.
 //!
 //! The user-facing constructors (the Python `Material`, `from_atom_densities`,
 //! `mix_materials` and the material collections) give each material an id
@@ -8,8 +9,14 @@
 //! use already: an earlier automatic id, or an explicit one given earlier to a
 //! constructor, to [`Material::set_material_id`] or by deserialization.
 //!
-//! An explicit id set later can still repeat an automatic one. That is caught
-//! where it matters: a geometry refuses two different materials with one id.
+//! An id is a label, and two materials can still share one: an explicit id
+//! set later can repeat an automatic one, and a copy keeps the id of the
+//! material it copies. A Python geometry refuses two different `Material`
+//! objects with one id wherever they meet, in its cells or their mesh fills,
+//! and a material filter refuses one id twice. No computed result goes by an
+//! id's value, since an automatic id depends on what else the process built:
+//! the model fingerprint, `combine_results` and the statistical uncertainty
+//! draw go by the slot a material holds in the geometry.
 //!
 //! Internal constructors do not allocate. [`Material::new`], clones and the
 //! materials a transmutation step produces keep the id they were given (an

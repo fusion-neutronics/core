@@ -3,8 +3,9 @@
 ``Tally(materials=...)`` used to print a Rust panic and raise for a material
 made without ``id=``, because ids were only handed out when a Geometry was
 built. The ids come from one allocator per process, so these tests assert
-uniqueness, stability and how explicit ids are treated, never absolute values:
-those depend on what else ran earlier in the pytest session.
+uniqueness, stability and how explicit ids are treated. An absolute value is
+asserted only in a fresh interpreter: in the pytest session it depends on what
+else ran earlier.
 """
 
 import json
@@ -302,10 +303,21 @@ def test_runs_whose_material_filters_name_different_materials_do_not_combine():
 
 def test_a_failed_construction_takes_no_id():
     """The id is assigned once the material is valid, so a constructor that
-    raises neither hands out nor reserves one."""
-    before = _material().id
-    with pytest.raises(ValueError, match="finite"):
-        _material(temperature=float("nan"))
-    with pytest.raises(ValueError, match="positive"):
-        _material(id=before + 1, volume=-1.0)
-    assert _material().id == before + 1
+    raises neither hands out nor reserves one. Run in a fresh interpreter,
+    where nothing has taken an id yet, so the next automatic one is 1."""
+    script = (
+        "import pytest, yamc\n"
+        "def material(**kwargs):\n"
+        "    return yamc.Material(composition={'Fe56': 1.0}, density=7.9, **kwargs)\n"
+        "with pytest.raises(ValueError, match='finite'):\n"
+        "    material(temperature=float('nan'))\n"
+        "with pytest.raises(ValueError, match='positive'):\n"
+        "    material(id=1, volume=-1.0)\n"
+        "print(material().id)\n"
+    )
+    run = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True, text=True, env=os.environ.copy(), timeout=120,
+    )
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.split() == ["1"], run.stdout

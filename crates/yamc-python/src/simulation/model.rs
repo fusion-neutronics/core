@@ -1716,12 +1716,13 @@ impl PyModel {
     ///     ... ])
     ///     >>> results = model.simulate_transmutation(
     ///     ...     method="coupled", schedule=schedule, total_particles=1000)
-    ///     >>> co60 = results.get_nuclide_evolution(1, "Co60")
+    ///     >>> # keyed by the id of the transmutable material, here steel
+    ///     >>> co60 = results.get_nuclide_evolution(steel.id, "Co60")
     ///     >>> results = model.simulate_transmutation(
     ///     ...     method="independent", schedule=schedule, total_particles=100_000,
     ///     ...     data_uncertainty=yamc.DataUncertainty(seed=1))
-    ///     >>> results.get_nuclide_uncertainty(1, "Co60", 1)
-    ///     >>> results.get_data_uncertainty_info(1)["flux_response"]
+    ///     >>> results.get_nuclide_uncertainty(steel.id, "Co60", 1)
+    ///     >>> results.get_data_uncertainty_info(steel.id)["flux_response"]
     ///     'replica_weights'
     #[pyo3(signature = (method, schedule, total_particles=None, seed=1, threads=None, max_runtime=None, compute="cpu", data_uncertainty=None, product_threshold=1e-12))]
     #[allow(clippy::too_many_arguments)]
