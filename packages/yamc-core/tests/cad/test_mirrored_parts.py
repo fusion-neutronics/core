@@ -8,6 +8,7 @@ wrong as well: the result had an extra solid, and every solid was named after
 the mirrored part.
 """
 
+import math
 import os
 
 import pytest
@@ -16,7 +17,9 @@ import yamc
 cq = pytest.importorskip("cadquery")
 from OCP.gp import gp_Ax2, gp_Ax3, gp_Dir, gp_Pnt, gp_Trsf  # noqa: E402
 from yamc.cad import CadToYamc  # noqa: E402
-from yamc.cad._fidelity import MeshFidelityError, check_mesh_fidelity  # noqa: E402
+from yamc.cad._fidelity import (  # noqa: E402
+    MeshFidelityError, _occ_signed_volume, check_mesh_fidelity,
+)
 from yamc.cad.assembly_processor import process_assembly  # noqa: E402
 
 
@@ -130,6 +133,24 @@ def test_a_lone_mirrored_part_is_meshed_facing_out(placement):
     assert _signed_volumes(mesh) == pytest.approx({1: 1000.0})
     xs = [v[0] for v in mesh.vertices]
     assert (min(xs), max(xs)) == pytest.approx((-10.0, 0.0))
+
+
+def test_a_mirrored_spline_solid_is_baked_facing_out():
+    """Half a turn of a dense spline profile, placed by a mirror. OCC's
+    default volume integration gets the sign of such a solid wrong, and
+    baking the mirror into it turned it inside out."""
+    angles = [2 * math.pi * i / 150 for i in range(150)]
+    radii = [50 + 8 * math.cos(15 * a) for a in angles]
+    profile = [(300 + r * math.cos(a), r * math.sin(a)) for r, a in zip(radii, angles)]
+    solid = (
+        cq.Workplane("XZ").spline(profile, periodic=True).close()
+        .revolve(180, (0, 0, 0), (0, 1, 0)).val()
+    )
+    trsf, _ = _placements()["mirror in a plane"]
+    assembly = cq.Assembly()
+    assembly.add(solid, name="blanket", loc=cq.Location(trsf))
+    baked = process_assembly(assembly, ["steel"], imprint=False).solid_shapes[1]
+    assert _occ_signed_volume(baked) == pytest.approx(_occ_signed_volume(solid))
 
 
 def _box_mesh():

@@ -88,12 +88,6 @@ def _compound_without_imprint(assembly):
     return compound, {s: (id_map[s],) for s in solids}
 
 
-def _signed_volume(shape):
-    props = GProp_GProps()
-    BRepGProp.VolumeProperties_s(shape, props)
-    return props.Mass()
-
-
 def _is_mirrored(solid):
     """Whether *solid* is placed by a mirroring (negative determinant) location.
 
@@ -115,7 +109,7 @@ def _unmirrored(solid):
     trsf.SetValues(*(placed.Value(r, c) for r in (1, 2, 3) for c in (1, 2, 3, 4)))
     bare = solid.wrapped.Located(TopLoc_Location())
     baked = BRepBuilderAPI_Transform(bare, trsf, True).Shape()
-    if _signed_volume(baked) < 0.0:
+    if _occ_signed_volume(baked) < 0.0:
         # It was inside out under its mirror too: a reversed solid.
         baked = baked.Reversed()
     return cq.Solid(baked)
