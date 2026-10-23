@@ -81,7 +81,8 @@ pub fn compute_single_volume(
 /// description for transport. Cell IDs are auto-assigned where the user did
 /// not set them; every :class:`Material` already has one from construction.
 /// The geometry validates that surface IDs are unique, and that no two
-/// different materials share an ID, on construction.
+/// different Material objects share an ID, across the cells and their mesh
+/// fills, on construction.
 ///
 /// For mesh-based geometry (an Arrow IPC mesh, e.g. from CAD), use
 /// :class:`MeshGeometry` instead.
@@ -167,26 +168,20 @@ impl PyGeometry {
             next_cell_id += 1;
         }
 
-        // Step 2: every Material has an id from construction, but two
-        // different Material objects can still share one, when an explicit id
-        // repeats another material's. The same object in several cells is one
-        // material, so materials are told apart by Python object identity.
-        let mut used_material_ids: HashSet<u32> = HashSet::new();
-        let mut seen_material_ptrs: HashSet<usize> = HashSet::new();
+        // Step 2: two different Material objects with one id are refused
+        // wherever they meet, in the cells or in their mesh fills: a tally
+        // tells materials apart by id. The same object in several places is
+        // one material, so materials are told apart by Python object identity.
+        let mut material_ids = super::DistinctMaterialIds::default();
         for py_cell_ref in py_cell_refs.iter() {
             let cell = py_cell_ref.try_borrow()?;
-            if let Some(py_mat_ref) = &cell.py_material {
-                if !seen_material_ptrs.insert(py_mat_ref.as_ptr() as usize) {
-                    continue;
-                }
-                let mat = py_mat_ref.bind(py).try_borrow()?;
-                if let Some(id) = mat.internal.get_material_id()
-                    && !used_material_ids.insert(id)
-                {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "Duplicate Material id {id} found. All material IDs must be unique \
-                         across all cells."
-                    )));
+            if let Some(material) = &cell.py_material {
+                material_ids.check(material.bind(py))?;
+            }
+            #[cfg(feature = "mesh")]
+            if let Some(py_fill) = &cell.py_fill {
+                for material in py_fill.bind(py).try_borrow()?.py_materials.iter() {
+                    material_ids.check(material.bind(py))?;
                 }
             }
         }

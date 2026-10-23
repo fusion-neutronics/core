@@ -215,8 +215,32 @@ def test_two_fills_with_default_ids_are_allowed():
 def test_two_fills_with_colliding_ids_are_rejected():
     """A different material given the id of another fill's material must fail
     fast instead of silently conflating the two."""
-    with pytest.raises(ValueError, match="distinct ids"):
+    with pytest.raises(ValueError, match='materials "fuel" and "water" are different'):
         yamc.Geometry(_two_fills(collide=True))
+
+
+@pytest.mark.parametrize("name", [None, "iron"], ids=["unnamed", "same_name"])
+def test_a_fill_material_given_the_host_material_id_is_rejected(name):
+    """The host material keeps its automatic id and a different fill material
+    is given the same id explicitly. Accepted, the two would share one tally
+    bin and one transmutation result."""
+    host = _dummy_material(name)
+    fuel = yamc.Material(composition={"H": 1.0}, density=7.0, name=name, id=host.id)
+    sphere = yamc.Sphere(x0=0.5, y0=0.5, z0=0.5, radius=3.0, boundary="vacuum")
+    cell = yamc.Cell(region=sphere.below, material=host, fill=_mesh(fuel=fuel))
+    with pytest.raises(ValueError, match=f"Duplicate Material id {host.id} found"):
+        yamc.Geometry([cell])
+
+
+def test_the_host_material_can_also_fill_the_mesh():
+    """One Material object as the host cell's material and a fill material is
+    one material, under its one id."""
+    shared = _dummy_material("shared")
+    sphere = yamc.Sphere(x0=0.5, y0=0.5, z0=0.5, radius=3.0, boundary="vacuum")
+    cell = yamc.Cell(region=sphere.below, material=shared, fill=_mesh(fuel=shared))
+    geometry = yamc.Geometry([cell])
+    assert geometry.find_cell(0.5, 0.5, 2.0).material.id == shared.id
+    assert geometry.find_cell(0.25, 0.5, 0.5).material.id == shared.id
 
 
 def test_two_fills_sharing_materials_are_allowed():

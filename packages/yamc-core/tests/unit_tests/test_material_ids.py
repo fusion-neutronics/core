@@ -160,9 +160,41 @@ def test_a_shared_id_is_refused_by_the_tally_and_geometry(capfd):
         yamc.Cell(region=yamc.Sphere(radius=1.0).below, material=steel),
         yamc.Cell(region=yamc.Sphere(x0=3.0, radius=1.0).below, material=clash),
     ]
-    with pytest.raises(ValueError, match=f"Duplicate Material id {steel.id}"):
+    with pytest.raises(ValueError, match=f"Duplicate Material id {steel.id} found: two unnamed"):
         yamc.Geometry(cells)
     assert "panicked" not in capfd.readouterr().err
+
+
+def test_a_cell_gives_back_the_material_it_was_given():
+    """Not a copy: a copy carries the same id, so placing it beside the
+    original would be two materials with one id."""
+    steel = _material(name="steel")
+    inner = yamc.Cell(region=yamc.Sphere(radius=1.0).below, material=steel)
+    assert inner.material is steel
+    outer = yamc.Cell(
+        region=yamc.Sphere(radius=1.0).above & yamc.Sphere(radius=2.0, boundary="vacuum").below,
+        material=inner.material,
+    )
+    geometry = yamc.Geometry([inner, outer])
+    assert [c.material.id for c in geometry.cells] == [steel.id, steel.id]
+
+
+def test_a_copy_beside_its_original_is_refused_with_the_reason():
+    """The geometry's copies (and a transmutation result's materials) keep the
+    original's id; next to the original they are two materials with one id."""
+    steel = _material(name="steel")
+    first = yamc.Geometry([yamc.Cell(region=yamc.Sphere(radius=1.0).below, material=steel)])
+    copy = first.cells[0].material
+    cells = [
+        yamc.Cell(region=yamc.Sphere(radius=1.0).below, material=steel),
+        yamc.Cell(region=yamc.Sphere(x0=3.0, radius=1.0).below, material=copy),
+    ]
+    with pytest.raises(
+        ValueError, match=f'id {steel.id} found: materials "steel" and "steel".*kept by its copies'
+    ):
+        yamc.Geometry(cells)
+    copy.id = _material().id + 1
+    yamc.Geometry(cells)
 
 
 def test_a_material_tallied_before_its_geometry_is_scored():

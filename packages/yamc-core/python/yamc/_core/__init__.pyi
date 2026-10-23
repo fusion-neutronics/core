@@ -256,7 +256,8 @@ class Cell:
         Material assigned to this cell.
         
         Returns:
-            Material object or None for void cells
+            The Material object the cell was given (not a copy), or None for
+            void cells
         """
     @property
     def fill(self) -> MeshGeometry | None:
@@ -1189,7 +1190,8 @@ class Geometry:
     description for transport. Cell IDs are auto-assigned where the user did
     not set them; every :class:`Material` already has one from construction.
     The geometry validates that surface IDs are unique, and that no two
-    different materials share an ID, on construction.
+    different Material objects share an ID, across the cells and their mesh
+    fills, on construction.
     
     For mesh-based geometry (an Arrow IPC mesh, e.g. from CAD), use
     :class:`MeshGeometry` instead.

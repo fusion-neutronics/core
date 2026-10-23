@@ -3,7 +3,7 @@ use crate::material::PyMaterial;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use yamc::geometry::mesh::MeshGeometry;
 
@@ -108,6 +108,10 @@ pub struct PyMeshGeometry {
     mat_map: HashMap<String, Arc<yamc_materials::material::Material>>,
     /// Implicit complement material stored for rebuild.
     ic_mat: Option<Arc<yamc_materials::material::Material>>,
+    /// The Material objects given (the dict's values, then the implicit
+    /// complement), so a Geometry this fills can refuse two different
+    /// objects with one id across its cells and fills.
+    pub(crate) py_materials: Arc<Vec<Py<PyMaterial>>>,
     /// Current graveyard offset.
     graveyard_offset: Option<f64>,
     /// Contact tolerance passed by the caller, re-applied on rebuild.
@@ -133,30 +137,19 @@ impl PyMeshGeometry {
                 "contact_tolerance must be a non-negative number of cm, got {tol}"
             )));
         }
-        // Every Material has an id from construction, but two different
-        // Material objects can still share one, when an explicit id repeats
-        // another material's. One object under several names (or also as the
-        // implicit complement) is one material, so materials are told apart
-        // by Python object identity.
-        let mut used_material_ids: HashSet<u32> = HashSet::new();
-        let mut seen_ptrs: HashSet<usize> = HashSet::new();
-        let mut check = |py_mat: &Bound<'py, PyMaterial>| -> PyResult<()> {
-            if seen_ptrs.insert(py_mat.as_ptr() as usize)
-                && let Some(id) = py_mat.try_borrow()?.internal.get_material_id()
-                && !used_material_ids.insert(id)
-            {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "Duplicate Material id {id} found. All material IDs must be unique."
-                )));
-            }
-            Ok(())
-        };
+        // Two different Material objects with one id are refused. One object
+        // under several names (or also as the implicit complement) is one
+        // material, so materials are told apart by Python object identity.
+        let mut material_ids = crate::geometry::DistinctMaterialIds::default();
+        let mut py_materials: Vec<Py<PyMaterial>> = Vec::with_capacity(materials.len() + 1);
         for (_key, value) in materials.iter() {
             let py_mat: Bound<'py, PyMaterial> = value.cast_into()?;
-            check(&py_mat)?;
+            material_ids.check(&py_mat)?;
+            py_materials.push(py_mat.unbind());
         }
         if let Some(ic) = implicit_complement_material {
-            check(ic)?;
+            material_ids.check(ic)?;
+            py_materials.push(ic.clone().unbind());
         }
 
         let mut mat_map: HashMap<String, Arc<yamc_materials::material::Material>> = HashMap::new();
@@ -229,6 +222,7 @@ impl PyMeshGeometry {
             arrow_data,
             mat_map,
             ic_mat,
+            py_materials: Arc::new(py_materials),
             graveyard_offset,
             contact_tolerance,
         })
