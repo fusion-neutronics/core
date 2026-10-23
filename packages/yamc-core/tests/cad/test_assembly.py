@@ -309,6 +309,27 @@ def test_imprinting_a_revolved_spline_solid_keeps_its_volume():
     assert len(result.solid_faces) == 3
 
 
+def test_imprinting_a_dense_spline_extrusion_keeps_its_volume():
+    """A 150-point spline extruded, with a box on part of its top: the
+    imprint splits that face. OCC's adaptive integration put the extrusion
+    69% high before the split and 33% high after it, which read as a fifth
+    of it absorbed into the box."""
+    import math
+
+    angles = [2 * math.pi * i / 150 for i in range(150)]
+    radii = [50 + 8 * math.cos(15 * a) for a in angles]
+    profile = [(r * math.cos(a), r * math.sin(a)) for r, a in zip(radii, angles)]
+    extrusion = cq.Workplane("XY").spline(profile, periodic=True).close().extrude(100)
+    box = cq.Workplane("XY").box(40, 40, 30, centered=(True, True, False)).translate(
+        (0, 0, 100)
+    )
+    assy = cq.Assembly()
+    assy.add(extrusion, name="extrusion")
+    assy.add(box, name="box")
+    result = process_assembly(assy, material_tags=["a", "b"])
+    assert len(result.solid_faces) == 2
+
+
 def test_a_mirrored_part_is_not_read_as_absorbed():
     """A mirroring location turns OCC's integrated volume negative."""
     from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt, gp_Trsf

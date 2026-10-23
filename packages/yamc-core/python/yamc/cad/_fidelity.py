@@ -6,7 +6,8 @@ cleanly, loses no particles, and produces confident wrong tallies (a
 reactor radial build meshed into 2.6k twisted triangles at a 0.1 cm tolerance
 request ran at full speed with the thermal shield flux low by 2.3x). This gate makes such failures loud at meshing time.
 
-Two deterministic checks, both against exact OCC properties:
+Two deterministic checks, both against the face areas and solid volumes OCC
+integrates from the CAD (see _occ_face_area and _occ_signed_volume):
 
 - per-face area: the triangulated area of every face against the OCC face
   area. Chordal meshes inscribe, so a correct mesh is low by O(d/r); the
@@ -22,8 +23,35 @@ Tolerances scale with the requested deflection so legitimately coarse
 meshes of small parts do not trip the gate.
 """
 
-from OCP.BRepGProp import BRepGProp
+from OCP.Bnd import Bnd_Box
+from OCP.BRepAdaptor import BRepAdaptor_Surface
+from OCP.BRepBndLib import BRepBndLib
+from OCP.BRepBuilderAPI import BRepBuilderAPI_NurbsConvert
+from OCP.BRepGProp import (
+    BRepGProp, BRepGProp_Domain, BRepGProp_Face, BRepGProp_VinertGK,
+)
+from OCP.GeomAbs import (
+    GeomAbs_BezierSurface, GeomAbs_BSplineSurface, GeomAbs_Cone, GeomAbs_Cylinder,
+    GeomAbs_Plane, GeomAbs_Sphere, GeomAbs_Torus,
+)
 from OCP.GProp import GProp_GProps
+from OCP.TopAbs import TopAbs_FACE, TopAbs_FORWARD, TopAbs_REVERSED
+from OCP.TopExp import TopExp_Explorer
+from OCP.TopoDS import TopoDS
+from OCP.gp import gp_Pnt
+
+# OCC's default integration is a fixed Gauss rule, which misses dense spline
+# faces badly (a stellarator coil casing came out 31% low in volume), so every
+# face is integrated adaptively to this relative precision instead.
+_GPROP_RELATIVE_PRECISION = 1e-6
+
+# Surfaces OCC integrates piece by piece: the analytic ones, and splines,
+# which it splits at their knots. Any other face (swept, offset) it
+# integrates as a single piece.
+_PIECEWISE_SURFACES = frozenset({
+    GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Cone, GeomAbs_Sphere, GeomAbs_Torus,
+    GeomAbs_BezierSurface, GeomAbs_BSplineSurface,
+})
 
 
 class MeshFidelityError(ValueError):
@@ -32,15 +60,82 @@ class MeshFidelityError(ValueError):
 
 def _occ_face_area(occ_face):
     props = GProp_GProps()
-    BRepGProp.SurfaceProperties_s(occ_face, props)
+    BRepGProp.SurfaceProperties_s(occ_face, props, _GPROP_RELATIVE_PRECISION)
+    if BRepAdaptor_Surface(occ_face).GetType() in _PIECEWISE_SURFACES:
+        return props.Mass()
+    # A single piece over a dense profile can settle on a value tens of
+    # percent off that no tighter precision moves (a spline swept into a
+    # wall comes out 1.8% high). Where OCC's fixed rule agrees to 1e-3, as it
+    # does on smooth faces, the value is kept: right to about that, well
+    # inside what the gate allows. Elsewhere the face is integrated again as
+    # a B-spline surface, which OCC splits at its knots. Converting projects
+    # every edge onto the new surface, up to a second a face on a reactor
+    # model, so only the faces that need it are converted.
+    fixed = GProp_GProps()
+    BRepGProp.SurfaceProperties_s(occ_face, fixed)
+    if abs(fixed.Mass() - props.Mass()) <= 1e-3 * props.Mass():
+        return props.Mass()
+    spline = TopoDS.Face_s(BRepBuilderAPI_NurbsConvert(occ_face, True).Shape())
+    props = GProp_GProps()
+    BRepGProp.SurfaceProperties_s(spline, props, _GPROP_RELATIVE_PRECISION)
     return props.Mass()
 
 
 def _occ_signed_volume(shape):
+    """Volume of *shape*, negative when its faces point into it.
+
+    Summed over the faces, each contributing the cone it spans to an apex,
+    integrated by Gauss-Kronrod on every knot span (the adaptive form of
+    VolumeProperties can settle on a wrong value for dense splines: 19% high
+    on a test surface, 69% on an extruded spline profile). An offset face is
+    integrated in one piece, which on some dense ones takes seconds (9 s for
+    the inner wall of a shelled 32-point spline extrusion). A B-spline copy,
+    as the area uses, only approximates it (3e-3 off on a thickened dense
+    spline face), too loosely for the overlap check, which compares volumes
+    to 1e-4.
+    """
     occ = getattr(shape, "wrapped", shape)
-    props = GProp_GProps()
-    BRepGProp.VolumeProperties_s(occ, props)
-    return props.Mass()
+    # Gauss-Kronrod meets its relative precision face by face, so it never
+    # converges on a face whose cone is flat, such as a planar face through
+    # the apex. OCC's own apex, the centroid of the vertices, lies in the
+    # flat face of a half cylinder or of a half turn, and tilted off the axes
+    # those took from 20 s to 3 min. The middle of the bounding box, moved off
+    # by a few percent in an arbitrary direction, lies in the plane of no face
+    # of ordinary CAD.
+    box = Bnd_Box()
+    BRepBndLib.Add_s(occ, box, False)
+    if box.IsVoid():  # no faces, so no volume
+        return 0.0
+    x0, y0, z0, x1, y1, z1 = box.Get()
+    size = ((x1 - x0) ** 2 + (y1 - y0) ** 2 + (z1 - z0) ** 2) ** 0.5
+    apex = gp_Pnt(
+        0.5 * (x0 + x1) + 0.0137 * size,
+        0.5 * (y0 + y1) + 0.0291 * size,
+        0.5 * (z0 + z1) + 0.0213 * size,
+    )
+    volume = 0.0
+    faces = TopExp_Explorer(occ, TopAbs_FACE)
+    while faces.More():
+        face = TopoDS.Face_s(faces.Current())
+        faces.Next()
+        if face.Orientation() not in (TopAbs_FORWARD, TopAbs_REVERSED):
+            continue
+        cone = BRepGProp_VinertGK()
+        cone.SetLocation(apex)
+        surface = BRepGProp_Face(face, True)  # split splines at their knots
+        if face.NbChildren() == 0:  # no boundary: the whole surface
+            error = cone.Perform(surface, _GPROP_RELATIVE_PRECISION)
+        else:
+            error = cone.Perform(
+                surface, BRepGProp_Domain(face), _GPROP_RELATIVE_PRECISION
+            )
+        if error < 0.0:
+            raise ValueError(
+                "OCC could not integrate the volume of a CAD solid: Gauss-Kronrod "
+                "failed on one of its faces"
+            )
+        volume += cone.Mass()
+    return volume
 
 
 def check_mesh_fidelity(mesh, pa, tolerance):
@@ -48,8 +143,8 @@ def check_mesh_fidelity(mesh, pa, tolerance):
 
     Args:
         mesh: SurfaceMesh from the assembler.
-        pa: ProcessedAssembly (provides face_to_occ, solid_shapes,
-            face_solid_reversed).
+        pa: ProcessedAssembly (provides face_to_occ, solid_shapes and,
+            when the imprint ran, solid_volumes).
         tolerance: the chordal deflection the mesh was requested at
             (3D units), one for every solid or ``{solid_id: deflection}``;
             fidelity thresholds scale with it. A solid's volume is held to
@@ -119,7 +214,9 @@ def check_mesh_fidelity(mesh, pa, tolerance):
         shape = pa.solid_shapes.get(sid)
         if shape is None:
             continue
-        vol_occ = _occ_signed_volume(shape)
+        vol_occ = pa.solid_volumes.get(sid)
+        if vol_occ is None:
+            vol_occ = _occ_signed_volume(shape)
         if vol_occ < 0.0:
             problems.append(
                 f"solid {sid}: inside out in the CAD (volume {vol_occ:.6g}), "

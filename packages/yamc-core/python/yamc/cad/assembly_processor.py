@@ -32,6 +32,8 @@ from OCP.TopLoc import TopLoc_Location
 from OCP.gp import gp_Trsf
 from OCP.TopoDS import TopoDS, TopoDS_Iterator
 
+from ._fidelity import _occ_signed_volume
+
 
 _IMPRINT_THREAD_LOCK = RLock()
 
@@ -62,6 +64,8 @@ class ProcessedAssembly:
     # (i.e. the UV surface normal points inward to the solid)
     imprinted_compound: object = None  # OCC compound (source of the global edge map)
     solid_shapes: dict = field(default_factory=dict)  # solid_id -> CadQuery Shape
+    # solid_id -> signed CAD volume, for the solids the imprint check integrated
+    solid_volumes: dict = field(default_factory=dict)
 
 
 def _assembly_solids(assembly):
@@ -86,12 +90,6 @@ def _compound_without_imprint(assembly):
     return compound, {s: (id_map[s],) for s in solids}
 
 
-def _signed_volume(shape):
-    props = GProp_GProps()
-    BRepGProp.VolumeProperties_s(shape, props)
-    return props.Mass()
-
-
 def _is_mirrored(solid):
     """Whether *solid* is placed by a mirroring (negative determinant) location.
 
@@ -113,7 +111,7 @@ def _unmirrored(solid):
     trsf.SetValues(*(placed.Value(r, c) for r in (1, 2, 3) for c in (1, 2, 3, 4)))
     bare = solid.wrapped.Located(TopLoc_Location())
     baked = BRepBuilderAPI_Transform(bare, trsf, True).Shape()
-    if _signed_volume(baked) < 0.0:
+    if _occ_signed_volume(baked) < 0.0:
         # It was inside out under its mirror too: a reversed solid.
         baked = baked.Reversed()
     return cq.Solid(baked)
@@ -293,24 +291,31 @@ def _refuse_lost_or_shared_inputs(assembly, imprinted_solids_with_ids):
     its solids had, a piece counted once per time the name is among its
     origins (two overlapping solids under one name share a piece that lists
     the name twice). That also catches one of several solids under a name
-    being absorbed while the others survive. Volumes are integrated to a
-    relative precision of 1e-7: OCC's default integration is off by up to a
-    few percent on revolved and spline solids, and differently once the
-    imprint splits their faces. Assembly nodes without solids (a face, a
-    wire) are not inputs.
+    being absorbed while the others survive. Volumes are integrated the way
+    the fidelity gate integrates them: OCC's default and adaptive integrations
+    can be off by tens of percent or more on dense spline solids (the default
+    one even in sign), and differently once the imprint splits their faces.
+    Assembly nodes without solids (a face, a wire) are not inputs.
 
     Overlaps whose surfaces cross without coinciding are not split by the
     imprint at all: both solids come back whole, each with its own origin,
     and are not caught here.
+
+    Returns:
+        ``{imprinted solid: its signed volume}``, for the fidelity gate. A
+        solid the imprint left as it was is integrated once.
     """
     def short(name):
         return name.rsplit("/", 1)[-1]
 
+    volumes = {}  # (solid, orientation) -> signed volume
+
     def volume_of(solid):
-        # A mirroring location turns the integrated volume negative.
-        props = GProp_GProps()
-        BRepGProp.VolumeProperties_s(getattr(solid, "wrapped", solid), props, 1e-7)
-        return abs(props.Mass())
+        key = (solid, solid.wrapped.Orientation())
+        if key not in volumes:
+            volumes[key] = _occ_signed_volume(solid)
+        # A reversed solid integrates negative.
+        return abs(volumes[key])
 
     volume_in = {}
     for obj, name, loc, _ in assembly:
@@ -336,7 +341,10 @@ def _refuse_lost_or_shared_inputs(assembly, imprinted_solids_with_ids):
                 "(part of it was absorbed into another solid)"
             )
     if not lost and not shared:
-        return
+        return {
+            solid: volumes[(solid, solid.wrapped.Orientation())]
+            for solid in imprinted_solids_with_ids
+        }
     lines = lost + [
         f"{' and '.join(repr(n) for n in names)} came out as one region of "
         f"volume {volume:.6g}"
@@ -388,11 +396,12 @@ def process_assembly(
     assembly = _bake_mirrored_parts(assembly)
 
     # Step 1: Imprint the assembly (or gather its solids as they are)
+    volumes = {}
     if imprint:
         imprinted_compound, imprinted_solids_with_ids = _imprint_assembly(
             assembly, imprint_threads=threads
         )
-        _refuse_lost_or_shared_inputs(assembly, imprinted_solids_with_ids)
+        volumes = _refuse_lost_or_shared_inputs(assembly, imprinted_solids_with_ids)
     else:
         imprinted_compound, imprinted_solids_with_ids = _compound_without_imprint(
             assembly
@@ -430,6 +439,7 @@ def process_assembly(
     face_to_occ = {}
     solid_faces = {}
     solid_shapes = {}  # solid_id -> CadQuery Shape (for tet meshing)
+    solid_volumes = {}
     face_id_counter = 1
 
     seen_faces = {}  # hash -> face_id
@@ -492,6 +502,8 @@ def process_assembly(
 
         solid_faces[solid_id] = solid_face_ids
         solid_shapes[solid_id] = solid
+        if solid in volumes:
+            solid_volumes[solid_id] = volumes[solid]
 
     # Step 4: Identify shared faces. A face bounds at most two solids; a third
     # is an imprint left in a broken state (a zero-thickness sliver split off
@@ -520,4 +532,5 @@ def process_assembly(
         face_solid_reversed=face_solid_reversed,
         imprinted_compound=occ_compound,
         solid_shapes=solid_shapes,
+        solid_volumes=solid_volumes,
     )
