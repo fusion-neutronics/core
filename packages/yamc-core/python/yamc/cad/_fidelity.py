@@ -141,8 +141,8 @@ def check_mesh_fidelity(mesh, pa, tolerance):
 
     Args:
         mesh: SurfaceMesh from the assembler.
-        pa: ProcessedAssembly (provides face_to_occ, solid_shapes,
-            face_solid_reversed).
+        pa: ProcessedAssembly (provides face_to_occ, solid_shapes and,
+            when the imprint ran, solid_volumes).
         tolerance: the chordal deflection the mesh was requested at
             (3D units); fidelity thresholds scale with it.
 
@@ -203,7 +203,9 @@ def check_mesh_fidelity(mesh, pa, tolerance):
         shape = pa.solid_shapes.get(sid)
         if shape is None:
             continue
-        vol_occ = _occ_signed_volume(shape)
+        vol_occ = pa.solid_volumes.get(sid)
+        if vol_occ is None:
+            vol_occ = _occ_signed_volume(shape)
         if vol_occ < 0.0:
             problems.append(
                 f"solid {sid}: inside out in the CAD (volume {vol_occ:.6g}), "
