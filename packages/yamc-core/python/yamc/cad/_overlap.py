@@ -5,8 +5,8 @@ solids whose surfaces cross: a rod poking out of a box comes back as the whole
 box and the whole rod, overlapping. Transport then gives the overlap to
 whichever solid a particle was already in, and the tallies come out
 confidently wrong with no lost particles. So :meth:`CadToYamc.mesh` checks the
-mesh for overlaps deeper than twice the deflection and refuses them by
-default.
+mesh for overlaps deeper than the two solids' facetings explain (twice the
+larger of their deflections) and refuses them by default.
 
 Without imprinting, a particle leaving one solid is placed in whichever
 touching solid contains it, and an overlap belongs to the solid the particle
@@ -15,7 +15,8 @@ surface leave between them, which is what the contact tolerance is sized for.
 It is not harmless for a real overlap: a solid sitting inside another one
 (a part embedded in a body that was never cut) is not touching it anywhere, so
 a particle reaching it from the outside never enters it. Overlaps deeper than
-the contact tolerance are refused by default, or resolved by rank: with
+the facetings explain, or than a contact tolerance the caller gives, are
+refused by default, or resolved by rank: with
 ``overlaps="smaller_wins"`` each overlapping pair is recorded in the mesh
 file, the smaller solid takes the shared region wherever a particle comes
 from, and the larger solid's volume is reduced by what it gives up.
@@ -86,11 +87,15 @@ def find_overlaps(mesh, depth_tolerance):
     return solid_overlaps(mesh.vertices, solids, depth_tolerance)
 
 
-def describe(mesh, found):
-    """Human-readable lines for :func:`find_overlaps` results."""
+def describe(mesh, found, deflection=None):
+    """Human-readable lines for :func:`find_overlaps` results; with
+    *deflection* (``{solid_id: deflection}``), each also gives the depth the
+    two solids' facetings explain, twice the larger deflection."""
     return [
-        f"{_name(mesh, a)} and {_name(mesh, b)} overlap {depth:.4g} deep "
-        f"(roughly {100 * exposure:.2g}% of tracks cross the overlap)"
+        f"{_name(mesh, a)} and {_name(mesh, b)} overlap {depth:.4g} deep"
+        + (f", more than the {2 * max(deflection[a], deflection[b]):.4g} their "
+           "facetings explain" if deflection else "")
+        + f" (roughly {100 * exposure:.2g}% of tracks cross the overlap)"
         for a, b, depth, exposure in found
     ]
 

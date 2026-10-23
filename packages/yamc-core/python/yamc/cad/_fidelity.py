@@ -51,13 +51,22 @@ def check_mesh_fidelity(mesh, pa, tolerance):
         pa: ProcessedAssembly (provides face_to_occ, solid_shapes,
             face_solid_reversed).
         tolerance: the chordal deflection the mesh was requested at
-            (3D units); fidelity thresholds scale with it.
+            (3D units), one for every solid or ``{solid_id: deflection}``;
+            fidelity thresholds scale with it. A solid's volume is held to
+            its own deflection, a face's area to the finest of the solids
+            it bounds (it was meshed at that or finer).
 
     Returns:
         List of human-readable problem strings (empty when the mesh is
         faithful).
     """
     problems = []
+    if not isinstance(tolerance, dict):
+        tolerance = {sid: tolerance for sid in mesh.solid_faces}
+    face_tolerance = {
+        fid: min(tolerance[sid] for sid in info.owning_solids)
+        for fid, info in pa.faces.items()
+    }
 
     # Group triangle areas and signed volume contributions per face.
     face_area = {}
@@ -93,7 +102,7 @@ def check_mesh_fidelity(mesh, pa, tolerance):
             continue
         area_mesh = face_area.get(fid, 0.0)
         scale = area_occ ** 0.5
-        allowed = max(0.02, 4.0 * tolerance / max(scale, 1e-12))
+        allowed = max(0.02, 4.0 * face_tolerance[fid] / max(scale, 1e-12))
         rel = abs(area_mesh - area_occ) / area_occ
         if rel > allowed:
             problems.append(
@@ -126,7 +135,7 @@ def check_mesh_fidelity(mesh, pa, tolerance):
             total += sign * face_signed_vol.get(fid, 0.0)
             area_sum += face_area.get(fid, 0.0)
         r_eff = 3.0 * vol_occ / max(area_sum, 1e-12)
-        allowed = max(0.02, 8.0 * tolerance / max(r_eff, 1e-12))
+        allowed = max(0.02, 8.0 * tolerance[sid] / max(r_eff, 1e-12))
         if total < 0.0:
             # Transport would read the solid from the wrong side of its
             # facets. A mesh pointing the wrong way everywhere has the right
