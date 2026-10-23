@@ -73,12 +73,28 @@ def _triangle_area(vertices, triangles):
 _MIN_AREA_COVERAGE = 0.5
 
 
-def _extract_wire_uv(occ_face, occ_wire, edge_map, params_cache,
-                     tolerance, angular_tolerance):
+def face_edge_ids(pa, face_ids):
+    """The imprinted compound's edge map, and ``{face_id: [edge index, ...]}``
+    for *face_ids*: an edge two faces share has one index."""
+    edge_map = TopTools_IndexedMapOfShape()
+    TopExp.MapShapes_s(pa.imprinted_compound, TopAbs_EDGE, edge_map)
+    face_edges = {}
+    for fid in face_ids:
+        gids = []
+        explorer = TopExp_Explorer(pa.face_to_occ[fid], TopAbs_EDGE)
+        while explorer.More():
+            gids.append(edge_map.FindIndex(explorer.Current()))
+            explorer.Next()
+        face_edges[fid] = gids
+    return edge_map, face_edges
+
+
+def _extract_wire_uv(occ_face, occ_wire, edge_map, params_cache, edge_tolerances):
     """Walk a wire -> list of ``(edge_gid, reversed, uv_points)``.
 
     Shared edges reuse cached 3D parameters (keyed by global edge index) so
-    every face discretizes a shared edge identically.
+    every face discretizes a shared edge identically, at the edge's
+    ``(tolerance, angular_tolerance)`` in *edge_tolerances*.
     """
     edges = []
     explorer = BRepTools_WireExplorer(occ_wire, occ_face)
@@ -94,6 +110,7 @@ def _extract_wire_uv(occ_face, occ_wire, edge_map, params_cache,
         gid = edge_map.FindIndex(occ_edge)
         params = params_cache.get(gid)
         if params is None:
+            tolerance, angular_tolerance = edge_tolerances[gid]
             disc = GCPnts_TangentialDeflection(curve3d, tolerance, angular_tolerance)
             params = [disc.Parameter(i) for i in range(1, disc.NbPoints() + 1)]
             params_cache[gid] = params
@@ -143,8 +160,12 @@ def _structured_grid_face(surf, tolerance, angular_tolerance):
     return verts, triangles
 
 
-def scene_face_meshes(pa, tolerance, angular_tolerance, face_ids=None):
+def scene_face_meshes(pa, face_tolerances, face_ids=None):
     """Mesh the given faces with the scene CDT (default: all faces).
+
+    *face_tolerances* maps each face id to its ``(tolerance,
+    angular_tolerance)``. An edge is discretized once for every face on it, at
+    the smallest deflection and the smallest angle among those faces.
 
     Returns ``{face_id: (vertices_3d, triangles_local)}`` -- per-face meshes with
     0-based, face-local triangle indices. Non-planar faces the CDT can't close
@@ -159,16 +180,21 @@ def scene_face_meshes(pa, tolerance, angular_tolerance, face_ids=None):
     if not face_ids:
         return {}
 
-    edge_map = TopTools_IndexedMapOfShape()
-    TopExp.MapShapes_s(pa.imprinted_compound, TopAbs_EDGE, edge_map)
+    edge_map, face_edges = face_edge_ids(pa, face_ids)
     params_cache = {}
+    edge_tolerances = {}
+    for fid in face_ids:
+        tolerance, angular_tolerance = face_tolerances[fid]
+        for gid in face_edges[fid]:
+            lin, ang = edge_tolerances.get(gid, (tolerance, angular_tolerance))
+            edge_tolerances[gid] = (min(lin, tolerance), min(ang, angular_tolerance))
 
-    pre_faces = []
+    pre_faces = {}  # (tolerance, angular_tolerance) -> faces meshed at it
     for fid in face_ids:
         occ_face = pa.face_to_occ[fid]
         outer = BRepTools.OuterWire_s(occ_face)
         boundary = _extract_wire_uv(
-            occ_face, outer, edge_map, params_cache, tolerance, angular_tolerance
+            occ_face, outer, edge_map, params_cache, edge_tolerances
         )
         holes = []
         wire_exp = TopExp_Explorer(occ_face, TopAbs_WIRE)
@@ -176,16 +202,21 @@ def scene_face_meshes(pa, tolerance, angular_tolerance, face_ids=None):
             wire = TopoDS.Wire(wire_exp.Current())
             if not wire.IsSame(outer):
                 holes.append(_extract_wire_uv(
-                    occ_face, wire, edge_map, params_cache,
-                    tolerance, angular_tolerance,
+                    occ_face, wire, edge_map, params_cache, edge_tolerances
                 ))
             wire_exp.Next()
-        pre_faces.append(
+        pre_faces.setdefault(face_tolerances[fid], []).append(
             (int(fid), boundary, holes, bool(pa.faces[fid].is_planar), "coarse")
         )
 
-    outputs = mesh_faces_scene_resolved(pre_faces, tolerance, angular_tolerance)
-    out_by_fid = {o.face_id: o for o in outputs}
+    # The mesher takes one tolerance per call. With every edge resolved here
+    # it meshes each face on its own (and uses the tolerance only on edges it
+    # discretizes itself, none here), so one call per value is the same.
+    out_by_fid = {
+        o.face_id: o
+        for (tolerance, angular_tolerance), faces in pre_faces.items()
+        for o in mesh_faces_scene_resolved(faces, tolerance, angular_tolerance)
+    }
 
     result = {}
     for fid in face_ids:
@@ -211,7 +242,7 @@ def scene_face_meshes(pa, tolerance, angular_tolerance, face_ids=None):
                 and _triangle_area(face_verts, kept) < _MIN_AREA_COVERAGE * true_area
             ):
                 face_verts, kept = _structured_grid_face(
-                    surf, tolerance, angular_tolerance
+                    surf, *face_tolerances[fid]
                 )
 
         if kept:

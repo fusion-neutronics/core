@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING, Literal
 
 import math
+import numbers
 import os
 import warnings
 
@@ -22,6 +23,11 @@ from . import weld_mesh as _weld_mesh
 
 if TYPE_CHECKING:
     import cadquery
+
+# Surface meshing tolerances of a solid that the caller does not set: the
+# chordal deflection (3D units) and the angular deflection (radians).
+_DEFAULT_TOLERANCE = 0.1
+_DEFAULT_ANGULAR_TOLERANCE = 0.1
 
 
 @dataclass
@@ -78,6 +84,133 @@ def _resolve_material_tags(assembly, shortcut):
         f"material_tags string must be 'assembly_names' or "
         f"'assembly_materials', got {shortcut!r}"
     )
+
+
+def _positive_finite(value, label, expected="a number"):
+    """*value* as a float, refusing anything but a positive finite number."""
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise TypeError(f"{label} must be {expected}, got {type(value).__name__}")
+    if not (value > 0 and math.isfinite(value)):
+        raise ValueError(f"{label} must be positive and finite, got {value!r}")
+    return float(value)
+
+
+def _check_per_solid(value, name, material_tags):
+    """Check a per-solid setting before the imprint, so a mistake fails fast.
+
+    *value* is a number for every solid, or a dict from 1-based solid id or
+    material tag to a number. Returns it with its keys as int or str and its
+    numbers as floats. Solid ids are only checked to be positive here: how
+    many solids there are is known after the imprint, see :func:`_per_solid`.
+    """
+    if not isinstance(value, dict):
+        return _positive_finite(
+            value, name, "a number, or a dict from solid id or material tag to a number"
+        )
+    checked = {}
+    for key, number in value.items():
+        if isinstance(key, bool) or not isinstance(key, (numbers.Integral, str)):
+            raise TypeError(
+                f"{name} keys must be int (solid id) or str (material tag), "
+                f"got {type(key).__name__}"
+            )
+        if isinstance(key, str):
+            key = str(key)
+            if key not in material_tags:
+                raise ValueError(
+                    f"Material tag {key!r} in {name} not found. Available material "
+                    f"tags are: {sorted(set(material_tags))}"
+                )
+        else:
+            key = int(key)
+            if key < 1:
+                raise ValueError(f"{name} key {key} is not a solid id: solid ids start at 1")
+        checked[key] = _positive_finite(number, f"{name}[{key!r}]")
+    return checked
+
+
+def _per_solid(value, name, default, solid_tags):
+    """``{solid_id: value}`` for every solid, from a setting checked by
+    :func:`_check_per_solid`.
+
+    *solid_tags* is each solid's material tag in solid id order. A material
+    tag sets every solid with that tag; solids the dict does not name take
+    *default*.
+    """
+    count = len(solid_tags)
+    if not isinstance(value, dict):
+        return {sid: value for sid in range(1, count + 1)}
+    resolved = {}
+    for key, number in value.items():
+        if isinstance(key, int):
+            if key > count:
+                raise ValueError(
+                    f"{name} key {key} is not a solid id: the largest solid id is {count}"
+                )
+            sids = [key]
+        else:
+            sids = [i + 1 for i, tag in enumerate(solid_tags) if tag == key]
+            if not sids:
+                raise ValueError(
+                    f"Material tag {key!r} in {name} is on no solid. The solids' "
+                    f"material tags are: {sorted(set(solid_tags))}"
+                )
+        for sid in sids:
+            if resolved.setdefault(sid, number) != number:
+                raise ValueError(
+                    f"Solid {sid} ({solid_tags[sid - 1]!r}) is given two {name} "
+                    f"values, {resolved[sid]!r} and {number!r}, by solid id and "
+                    "by material tag. Give each solid one value."
+                )
+    return {sid: resolved.get(sid, default) for sid in range(1, count + 1)}
+
+
+# A solid's surfaces are meshed at its own values, except those it shares with
+# a finer solid, at that one's. Where a solid is thin and has curved surfaces of
+# both kinds, its own facets sag toward the finer ones by up to the difference,
+# which comes off its thickness (one value everywhere sags both sides alike),
+# and they can cross. So such a solid is meshed no coarser than this fraction
+# of 3V/A, 1.5 times the thickness of a thin wall, which keeps what it loses
+# (of its volume, and of the area of a flat rim between a fine and a coarse
+# edge) within the fidelity gate's 2%; a solid too thin for that takes the
+# finest values of its curved surfaces, as if meshed at one value.
+_THIN_WALL_FRACTION = 0.02
+
+
+def _cap_thin_solids(pa, solid_tolerance, solid_angular_tolerance):
+    """``(deflections, angles)`` per solid, with every solid whose curved faces
+    are meshed at different values held to a fraction of its thickness; see
+    :data:`_THIN_WALL_FRACTION`."""
+    from ._fidelity import _occ_signed_volume
+
+    lin, ang = dict(solid_tolerance), dict(solid_angular_tolerance)
+    thickness = {}
+    changed = True
+    while changed:
+        changed = False
+        for sid, fids in pa.solid_faces.items():
+            curved = {
+                (min(lin[s] for s in pa.faces[fid].owning_solids),
+                 min(ang[s] for s in pa.faces[fid].owning_solids))
+                for fid in fids
+                if not pa.faces[fid].is_planar
+            }
+            if len(curved) < 2:
+                continue
+            if sid not in thickness:
+                area = sum(pa.faces[fid].surface_area for fid in dict.fromkeys(fids))
+                volume = abs(_occ_signed_volume(pa.solid_shapes[sid]))
+                thickness[sid] = 3.0 * volume / max(area, 1e-300)
+            cap = _THIN_WALL_FRACTION * thickness[sid]
+            finest = min(v[0] for v in curved)
+            if cap > finest:
+                capped = (min(lin[sid], cap), ang[sid])
+            else:
+                capped = (min(lin[sid], finest), min(ang[sid], *(v[1] for v in curved)))
+            if capped != (lin[sid], ang[sid]):
+                lin[sid], ang[sid] = capped
+                changed = True
+    return lin, ang
 
 
 def _weld_solid_boundary(vertices, triangles, rel_tol=1e-6):
@@ -251,8 +384,8 @@ class CadToYamc:
         self,
         tet_volumes: list[str] | None = None,
         target_edge_length: float | None = None,
-        tolerance: float = 0.1,
-        angular_tolerance: float = 0.1,
+        tolerance: float | dict[int | str, float] = _DEFAULT_TOLERANCE,
+        angular_tolerance: float | dict[int | str, float] = _DEFAULT_ANGULAR_TOLERANCE,
         fidelity_check: bool = True,
         imprint: bool = True,
         contact_tolerance: float | None = None,
@@ -272,9 +405,28 @@ class CadToYamc:
                 when *tet_volumes* is set.
             tolerance: Chordal deflection tolerance for surface meshing
                 (3D units).  Smaller values produce more triangles on
-                curved surfaces.  Default 0.1.
+                curved surfaces.  A number applies to every solid. A dict
+                sets it per solid, keyed by material tag (every solid with
+                that tag), for instance ``{"first_wall": 0.01, "coil": 1.0}``,
+                or by 1-based solid id (the keys of ``SurfaceMesh.solid_faces``,
+                in the order of ``SurfaceMesh.material_tags``, which has an
+                entry per solid, so a part holding several solids takes
+                consecutive ids); solids it does not name take 0.1. A surface
+                two solids share is meshed at the finer of their values, and
+                an edge at the finest of its surfaces', so the mesh stays
+                watertight. Some solids are meshed finer than they ask. A
+                solid whose curved surfaces end up at different values is
+                held to a fiftieth of 3V/A (a measure of its thickness), so
+                its own facets cannot sag through a thin wall, and takes the
+                finest of those values if thinner still. The placements of
+                one shape (``assembly.add(shape, loc=...)``) can share their
+                triangles, and then all take the finest of their values.
+                Where OCC cannot keep touching surfaces watertight at
+                different values, the surfaces joined to them are meshed at
+                the finest value among them. Default 0.1.
             angular_tolerance: Angular deflection tolerance for surface
-                meshing (radians).  Default 0.1 (~5.7 degrees).
+                meshing (radians), a number or a per-solid dict as for
+                *tolerance*.  Default 0.1 (~5.7 degrees).
             imprint: Imprint the assembly first, so solids that touch share
                 one surface where they meet (a conformal mesh). ``False``
                 skips the imprint and meshes every solid on its own: much
@@ -289,21 +441,25 @@ class CadToYamc:
                 prior OCC thread settings are restored even if imprinting fails.
                 Validated but unused when imprinting is skipped.
             contact_tolerance: Only with ``imprint=False``: the distance
-                (3D units) within which two solids count as touching. A
-                particle crosses an overlap or a gap thinner than this
-                straight into the next solid. Defaults to twice *tolerance*,
-                which covers the slivers two facetings of one CAD surface
-                leave between them; raise it to accept sloppier CAD. A gap
-                that is in the CAD stays a gap whatever the tolerance: the
-                solids either side are checked against the CAD and recorded
-                as separated.
+                (3D units) within which two solids count as touching, one for
+                the whole model. A particle crosses an overlap or a gap
+                thinner than this straight into the next solid. Defaults to
+                twice *tolerance* (with per-solid values, twice the largest
+                deflection of any solid, those the dict does not name
+                counting at 0.1), which covers the slivers two facetings of
+                one CAD surface leave between them; raise it to accept
+                sloppier CAD. A gap that is in the CAD stays a gap whatever
+                the tolerance: the solids either side are checked against
+                the CAD and recorded as separated.
             overlaps: What to do when two solids of the mesh overlap deeper
-                than twice *tolerance* (with ``imprint=False``, deeper than
-                *contact_tolerance*). The imprint shares the surfaces where
-                solids coincide, but it does not split solids whose surfaces
-                cross (a rod poking out of a box), so both come out of it
-                whole and still overlap; without imprinting, a part embedded
-                in a body that was never cut overlaps it in the same way.
+                than their facetings explain, twice the larger deflection of
+                the two (twice *tolerance* when it is a number), or deeper
+                than *contact_tolerance* when that is given. The imprint
+                shares the surfaces where solids coincide, but it does not
+                split solids whose surfaces cross (a rod poking out of a
+                box), so both come out of it whole and still overlap;
+                without imprinting, a part embedded in a body that was never
+                cut overlaps it in the same way.
                 Transport would give each overlap to whichever solid a
                 particle was already in. ``"error"`` (default) raises
                 :class:`OverlappingSolidsError`. ``"smaller_wins"``, only with
@@ -334,15 +490,7 @@ class CadToYamc:
         )
 
         if tet_volumes:
-            solids_to_tet = set()
-            for i, tag in enumerate(self._material_tags):
-                if tag in tet_volumes:
-                    solids_to_tet.add(i + 1)  # solid IDs are 1-indexed
-
-            self._mesh_volumes(
-                solids_to_tet,
-                tet_target_edge_length=target_edge_length,
-            )
+            self.mesh_volumes(tet_volumes, target_edge_length)
 
         return self._surface_mesh
 
@@ -352,8 +500,8 @@ class CadToYamc:
 
     def mesh_surfaces(
         self,
-        tolerance: float = 0.1,
-        angular_tolerance: float = 0.1,
+        tolerance: float | dict[int | str, float] = _DEFAULT_TOLERANCE,
+        angular_tolerance: float | dict[int | str, float] = _DEFAULT_ANGULAR_TOLERANCE,
         fidelity_check: bool = True,
         imprint: bool = True,
         contact_tolerance: float | None = None,
@@ -365,8 +513,10 @@ class CadToYamc:
 
         Args:
             tolerance: Chordal deflection tolerance for surface meshing
-                (3D units).
-            angular_tolerance: Angular deflection tolerance (radians).
+                (3D units): a number for every solid, or a dict from solid
+                id or material tag to a number; see :meth:`mesh`.
+            angular_tolerance: Angular deflection tolerance (radians), a
+                number or a per-solid dict; see :meth:`mesh`.
             imprint: Imprint the assembly first; see :meth:`mesh`.
             imprint_threads: Threads for imprinting only; see :meth:`mesh`.
             contact_tolerance: See :meth:`mesh`.
@@ -431,8 +581,8 @@ class CadToYamc:
 
     def _mesh_surfaces(
         self,
-        tolerance=0.1,
-        angular_tolerance=0.1,
+        tolerance=_DEFAULT_TOLERANCE,
+        angular_tolerance=_DEFAULT_ANGULAR_TOLERANCE,
         fidelity_check=True,
         imprint=True,
         contact_tolerance=None,
@@ -469,38 +619,71 @@ class CadToYamc:
                 "is tracked across the surfaces its solids share, which cannot "
                 "give an overlap to one of them"
             )
-        if contact_tolerance is None:
-            # Two facetings of one CAD surface each stay within the chordal
-            # deflection of it, so they sit at most twice that apart.
-            contact_tolerance = 2.0 * tolerance
-        elif not (contact_tolerance >= 0.0 and math.isfinite(contact_tolerance)):
-            raise ValueError(
-                f"contact_tolerance must be a non-negative distance, got "
-                f"{contact_tolerance!r}"
-            )
+        if contact_tolerance is not None:
+            if isinstance(contact_tolerance, bool) or not isinstance(
+                contact_tolerance, numbers.Real
+            ):
+                raise TypeError(
+                    "contact_tolerance must be a number, one distance for the "
+                    f"whole model, got {type(contact_tolerance).__name__}"
+                )
+            if not (contact_tolerance >= 0.0 and math.isfinite(contact_tolerance)):
+                raise ValueError(
+                    f"contact_tolerance must be a non-negative distance, got "
+                    f"{contact_tolerance!r}"
+                )
+        tolerance = _check_per_solid(tolerance, "tolerance", self._material_tags)
+        angular_tolerance = _check_per_solid(
+            angular_tolerance, "angular_tolerance", self._material_tags
+        )
 
         self._processed = process_assembly(
             self._assembly, self._material_tags, imprint=imprint,
             imprint_threads=imprint_threads,
         )
+        pa = self._processed
+        solid_tolerance, solid_angular_tolerance = _cap_thin_solids(
+            pa,
+            _per_solid(tolerance, "tolerance", _DEFAULT_TOLERANCE, pa.material_tags),
+            _per_solid(
+                angular_tolerance, "angular_tolerance", _DEFAULT_ANGULAR_TOLERANCE,
+                pa.material_tags,
+            ),
+        )
+        # A face bounding two solids is meshed at the finer of their values,
+        # the deflection and the angle each on its own.
+        face_tolerances = {
+            fid: (
+                min(solid_tolerance[sid] for sid in info.owning_solids),
+                min(solid_angular_tolerance[sid] for sid in info.owning_solids),
+            )
+            for fid, info in pa.faces.items()
+        }
+        # Two facetings of one CAD surface each stay within the coarser of
+        # their chordal deflections of it, so they sit at most twice that
+        # apart. An overlap between two solids deeper than that is in the CAD,
+        # unless the caller accepts slack up to contact_tolerance.
+        overlap_limit = {}
+        if contact_tolerance is None:
+            overlap_limit = solid_tolerance
+            contact_tolerance = 2.0 * max(
+                solid_tolerance.values(), default=_DEFAULT_TOLERANCE
+            )
         self._imprint = imprint
         self._contact_tolerance = None if imprint else float(contact_tolerance)
         self._overlaps = []
         self._volume_measures = None
         self._separated = []
-        pa = self._processed
+        self._tet_data = {}
+        self._tet_index_maps = {}
 
         brep_fids, scene_fids = _route_faces(pa)
 
         per_face = {}
         per_face.update(
-            brepmesh_face_meshes(
-                pa, brep_fids, tolerance, angular_tolerance, parallel=not imprint
-            )
+            brepmesh_face_meshes(pa, brep_fids, face_tolerances, parallel=not imprint)
         )
-        per_face.update(
-            scene_face_meshes(pa, tolerance, angular_tolerance, scene_fids)
-        )
+        per_face.update(scene_face_meshes(pa, face_tolerances, scene_fids))
 
         (vertices, triangles, triangle_face_ids, triangle_surface_ids,
          face_to_surface_id) = assemble_surface_mesh(pa, per_face)
@@ -522,7 +705,7 @@ class CadToYamc:
         if fidelity_check:
             from ._fidelity import MeshFidelityError, check_mesh_fidelity
 
-            problems = check_mesh_fidelity(self._surface_mesh, pa, tolerance)
+            problems = check_mesh_fidelity(self._surface_mesh, pa, solid_tolerance)
             if problems:
                 detail = "\n  ".join(problems)
                 raise MeshFidelityError(
@@ -536,14 +719,24 @@ class CadToYamc:
             from ._overlap import describe, find_overlaps, resolve_smaller_wins
             from .assembly_processor import OverlappingSolidsError
 
-            # With the imprint, contact_tolerance is its default, twice the
-            # deflection.
-            found = find_overlaps(self._surface_mesh, contact_tolerance)
+            if overlap_limit:
+                # One pass at the smallest limit finds every pair deeper than
+                # its own.
+                found = [
+                    pair
+                    for pair in find_overlaps(
+                        self._surface_mesh, 2.0 * min(overlap_limit.values())
+                    )
+                    if pair[2] > 2.0 * max(overlap_limit[pair[0]], overlap_limit[pair[1]])
+                ]
+                limit = "twice the larger deflection of the two solids"
+            else:
+                found = find_overlaps(self._surface_mesh, contact_tolerance)
+                limit = f"the contact tolerance ({contact_tolerance:g})"
             if found and imprint:
-                detail = "\n  ".join(describe(self._surface_mesh, found))
+                detail = "\n  ".join(describe(self._surface_mesh, found, overlap_limit))
                 raise OverlappingSolidsError(
-                    f"Solids overlap deeper than twice the deflection "
-                    f"({contact_tolerance:g}):\n  {detail}\n"
+                    f"Solids overlap deeper than {limit}:\n  {detail}\n"
                     "The imprint shares the surfaces where solids coincide, but "
                     "does not split solids whose surfaces cross: both come out "
                     "whole and still overlap. Transport then gives the overlap "
@@ -555,15 +748,14 @@ class CadToYamc:
                     "overlaps='ignore' to bypass this gate."
                 )
             if found and overlaps == "error":
-                detail = "\n  ".join(describe(self._surface_mesh, found))
+                detail = "\n  ".join(describe(self._surface_mesh, found, overlap_limit))
                 raise OverlappingSolidsError(
-                    f"Solids overlap deeper than the contact tolerance "
-                    f"({contact_tolerance:g}):\n  {detail}\n"
+                    f"Solids overlap deeper than {limit}:\n  {detail}\n"
                     "Without imprinting, an overlap belongs to whichever solid a "
-                    "particle was already in. That is harmless for slivers "
-                    "thinner than the contact tolerance, but a solid sitting "
-                    "inside another is never entered by particles arriving from "
-                    "outside it, which gives wrong tallies and no lost "
+                    "particle was already in. That is harmless for the slivers "
+                    "two facetings of one surface leave between them, but a "
+                    "solid sitting inside another is never entered by particles "
+                    "arriving from outside it, which gives wrong tallies and no lost "
                     "particles. Cut one solid from the other in the CAD (for "
                     "instance b = b.cut(a)); or pass overlaps='smaller_wins' to "
                     "give each overlap to the smaller solid of the pair; or, if "
