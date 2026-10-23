@@ -490,15 +490,7 @@ class CadToYamc:
         )
 
         if tet_volumes:
-            solids_to_tet = set()
-            for i, tag in enumerate(self._material_tags):
-                if tag in tet_volumes:
-                    solids_to_tet.add(i + 1)  # solid IDs are 1-indexed
-
-            self._mesh_volumes(
-                solids_to_tet,
-                tet_target_edge_length=target_edge_length,
-            )
+            self.mesh_volumes(tet_volumes, target_edge_length)
 
         return self._surface_mesh
 

@@ -49,6 +49,22 @@ def test_tet_mesh_selective(tmp_path):
     assert os.path.getsize(path) > 0
 
 
+def test_tet_volumes_picks_solids_by_their_material_tags():
+    """A part holding two solids gives the parts after it later solid ids,
+    so tet_volumes picks solids by the tags the mesh gives them, not by
+    their place in the list of material tags."""
+    pair = cq.Workplane().sphere(2).union(cq.Workplane().sphere(2).translate((10, 0, 0)))
+    assy = cq.Assembly()
+    assy.add(pair, name="pair")
+    assy.add(cq.Workplane().sphere(2).translate((0, 20, 0)), name="single")
+
+    c2y = CadToYamc()
+    c2y.add_cadquery_object(assy, material_tags=["pair_tag", "single_tag"])
+    mesh = c2y.mesh(tet_volumes=["single_tag"], target_edge_length=2.0)
+    assert mesh.material_tags == ["pair_tag", "pair_tag", "single_tag"]
+    assert list(c2y._tet_data) == [3]
+
+
 def test_meshing_again_drops_the_tets_of_the_earlier_mesh(tmp_path):
     """Tets index the vertices of the mesh they were made for: a second mesh
     without tet_volumes has none (the export used to panic on them)."""
