@@ -682,6 +682,8 @@ class CadToYamc:
         self._overlaps = []
         self._volume_measures = None
         self._separated = []
+        self._tet_data = {}
+        self._tet_index_maps = {}
 
         brep_fids, scene_fids = _route_faces(pa)
 
