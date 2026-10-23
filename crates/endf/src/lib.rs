@@ -2,8 +2,9 @@
 //!
 //! The layout follows the format itself: [`records`] holds the fixed-width
 //! record primitives, [`function`] the tabulated function types, [`mf`] one
-//! module per ENDF file (MF), and [`material`] the splitting of a file into
-//! materials and sections.
+//! module per ENDF file (MF), [`material`] the splitting of a file into
+//! materials and sections, and [`header`] what each material is, from the
+//! records that open its MF=1 MT=451 without parsing the rest.
 //!
 //! ```no_run
 //! let material = endf::Material::from_file("n-095_Am_244.endf")?;
@@ -31,6 +32,7 @@ pub mod doppler;
 pub mod error;
 pub mod fission_energy;
 pub mod function;
+pub mod header;
 pub mod incident_neutron;
 pub mod incident_photon;
 pub mod material;
@@ -67,6 +69,7 @@ pub use decay::{
 pub use error::{Error, Result};
 pub use fission_energy::FissionEnergyRelease;
 pub use function::{Polynomial, Tabulated1D, Tabulated2D};
+pub use header::{get_headers, headers_from_str, Header};
 pub use incident_neutron::IncidentNeutron;
 pub use incident_photon::{AtomicRelaxation, IncidentPhoton, PhotonReaction};
 pub use material::{get_materials, materials_from_str, Interpretation, Material, Section};

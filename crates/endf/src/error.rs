@@ -48,6 +48,11 @@ pub enum Error {
     InvalidArgument {
         what: String,
     },
+    /// A file that is not ENDF-6 or is cut short, with the line or material
+    /// where that shows.
+    NotEndf {
+        what: String,
+    },
     Io(std::io::Error),
 }
 
@@ -84,6 +89,7 @@ impl fmt::Display for Error {
                 write!(f, "this reader does not implement {what}")
             }
             Error::InvalidArgument { what } => write!(f, "{what}"),
+            Error::NotEndf { what } => write!(f, "not an ENDF-6 file: {what}"),
             Error::Io(e) => write!(f, "{e}"),
         }
     }
