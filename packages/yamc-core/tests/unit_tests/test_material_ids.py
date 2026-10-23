@@ -156,6 +156,9 @@ def test_a_shared_id_is_refused_by_the_tally_and_geometry(capfd):
     tally = yamc.Tally(materials=steel)
     with pytest.raises(ValueError, match=f"both have id {steel.id}"):
         tally.materials = [clash, steel]
+    with pytest.raises(ValueError, match="at least one material"):
+        tally.materials = []
+    assert tally.materials == [steel.id], "a refused value leaves the filter as it was"
     cells = [
         yamc.Cell(region=yamc.Sphere(radius=1.0).below, material=steel),
         yamc.Cell(region=yamc.Sphere(x0=3.0, radius=1.0).below, material=clash),

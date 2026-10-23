@@ -5095,7 +5095,8 @@ class Tally:
     @materials.setter
     def materials(self, value: typing.Optional[typing.Any]) -> None:
         r"""
-        Set the material filter. Accepts a single Material or a list of Materials.
+        Set the material filter. Accepts a single Material or a list of
+        Materials. A value that is refused leaves the filter as it was.
         """
     @property
     def n_energy_bins(self) -> builtins.int:

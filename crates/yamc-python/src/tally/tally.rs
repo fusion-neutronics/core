@@ -892,7 +892,8 @@ impl PyTally {
         })
     }
 
-    /// Set the material filter. Accepts a single Material or a list of Materials.
+    /// Set the material filter. Accepts a single Material or a list of
+    /// Materials. A value that is refused leaves the filter as it was.
     #[setter]
     pub fn set_materials(&mut self, materials: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
         let tally = Arc::get_mut(&mut self.inner).ok_or_else(|| {
@@ -900,9 +901,10 @@ impl PyTally {
                 "Cannot modify tally: multiple references exist",
             )
         })?;
+        let filter = materials.map(material_filter).transpose()?;
         tally.filters.retain(|f| !matches!(f, Filter::Material(_)));
-        if let Some(ms) = materials {
-            tally.filters.push(Filter::Material(material_filter(ms)?));
+        if let Some(filter) = filter {
+            tally.filters.push(Filter::Material(filter));
         }
         Ok(())
     }
