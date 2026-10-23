@@ -65,7 +65,7 @@ def test_tally_materials_kwarg_no_id_fails():
         density=1.0, density_units="g/cc",
         name="test_material")
 
-    with pytest.raises(ValueError, match="no ID"):
+    with pytest.raises(ValueError, match="no id"):
         mmc.Tally(materials=material)
 
 

@@ -106,7 +106,7 @@ fn rect_mesh_tally(lower: f64, upper: f64, shape: usize) -> Arc<Tally> {
 fn iron_tally(material: &Arc<Material>) -> Arc<Tally> {
     let mut t = Tally::new();
     t.filters
-        .push(Filter::Material(MaterialFilter::new(material)));
+        .push(Filter::Material(MaterialFilter::new(material).unwrap()));
     t.scores = vec!["flux".parse().unwrap()];
     t.reset_accumulation();
     Arc::new(t)
