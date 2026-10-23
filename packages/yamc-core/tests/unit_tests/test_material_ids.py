@@ -204,28 +204,65 @@ def test_a_material_tallied_before_its_geometry_is_scored():
     assert 0.05 < split < 0.95, split
 
 
-def test_runs_of_a_model_built_twice_still_combine():
+def _two_shell_run(seed, ids, *, mix_inner=False):
+    """Two Fe56 shells, thin then dense, with a flux tally per cell and one
+    over the materials in id order. ``ids`` are the materials' explicit ids,
+    or None each for automatic ones. With ``mix_inner`` the inner shell is an
+    unnamed mix of the two, whose default name is part of the fingerprint."""
+    thin = yamc.Material(composition={"Fe56": 1.0}, density=2.0, temperature=294, id=ids[0])
+    dense = yamc.Material(composition={"Fe56": 1.0}, density=7.0, temperature=294, id=ids[1])
+    if mix_inner:
+        thin = yamc.Material.mix_materials([thin, dense], [0.5, 0.5], "volume", id=ids[0])
+    for m in (thin, dense):
+        m.read_nuclear_data({"Fe56": FE56})
+    s1, s2 = yamc.Sphere(radius=3.0), yamc.Sphere(radius=6.0, boundary="vacuum")
+    cells = [
+        yamc.Cell(region=s1.below, material=thin),
+        yamc.Cell(region=s1.above & s2.below, material=dense),
+    ]
+    model = yamc.Model(
+        geometry=yamc.Geometry(cells),
+        source=yamc.NeutronSource(
+            energy=yamc.sources.Discrete([14.06e6], [1.0]), position=(0, 0, 0),
+        ),
+        tallies=[
+            yamc.Tally(scores=["flux"], name="by_cell", cells=cells),
+            yamc.Tally(scores=["flux"], name="by_material",
+                       materials=sorted([thin, dense], key=lambda m: m.id)),
+        ],
+    )
+    return (thin.id, dense.id), model.simulate_transport(total_particles=200, seed=seed)
+
+
+def test_runs_of_a_model_built_twice_still_combine(tmp_path):
     """Building the same model twice in one process gives its materials new
     ids and the same physics, so ``combine_results`` must still pool the runs:
-    the model fingerprint it compares leaves material ids out."""
+    the fingerprint labels materials by slot, a mix's default name leaves the
+    ids out, and a material filter is matched by the material it names. One
+    run goes through a file, as runs from separate jobs do."""
+    first_ids, first = _two_shell_run(1, (None, None), mix_inner=True)
+    second_ids, second = _two_shell_run(2, (None, None), mix_inner=True)
+    assert set(first_ids).isdisjoint(second_ids)
+    path = str(tmp_path / "second.arrow")
+    second.to_arrow(path)
+    combined = yamc.combine_results(first, yamc.SimulationResults.from_arrow(path))
+    assert combined["by_cell"].n_histories == 400
+    assert combined["by_material"].n_histories == 400
+    assert combined["by_material"].tally.materials == sorted(first_ids)
 
-    def run(seed):
-        material = yamc.Material(composition={"Fe56": 1.0}, density=7.9, temperature=294)
-        material.read_nuclear_data({"Fe56": FE56})
-        cell = yamc.Cell(region=yamc.Sphere(radius=5.0, boundary="vacuum").below,
-                         material=material)
-        geometry = yamc.Geometry([cell])
-        tally = yamc.Tally(scores=["flux"], name="flux", cells=cell)
-        model = yamc.Model(
-            geometry=geometry,
-            source=yamc.NeutronSource(energy=yamc.sources.Discrete([14.06e6], [1.0])),
-            tallies=[tally],
-        )
-        return material.id, model.simulate_transport(total_particles=200, seed=seed)
 
-    (first_id, first), (second_id, second) = run(1), run(2)
-    assert first_id != second_id
-    assert yamc.combine_results(first, second)["flux"].n_histories == 400
+def test_runs_whose_material_filters_name_different_materials_do_not_combine():
+    """Two runs give the same two ids to the two materials the other way
+    round, as two jobs building their materials in different orders do, and
+    filter on the ids in order. The bins name different materials, so pooling
+    them would average unrelated fluxes."""
+    low = _material().id + 1
+    _, first = _two_shell_run(1, (low, low + 1))
+    _, second = _two_shell_run(2, (low + 1, low))
+    with pytest.raises(ValueError, match="filter on different materials"):
+        yamc.combine_results(first, second)
+    _, third = _two_shell_run(3, (low, low + 1))
+    assert yamc.combine_results(first, third)["by_material"].n_histories == 400
 
 
 def test_a_failed_construction_takes_no_id():

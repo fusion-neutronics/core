@@ -24,7 +24,10 @@
 //!   statistics, so merging a non-root result counts the run twice.
 //! - **Same-name tallies with different configuration**: a structural
 //!   mismatch (scores, filters, bins, estimator, ...) means the merge
-//!   would pool different physical quantities.
+//!   would pool different physical quantities. A material filter's bins
+//!   are matched by the geometry material each id names (its slot, from
+//!   [`RunProvenance::material_slots`]), not by the id: ids are labels,
+//!   which two builds of one model can give out differently.
 //!
 //! Tallies present in only some of the inputs are carried through with
 //! the statistics of the runs that scored them, and reported as
@@ -39,9 +42,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::filter::Filter;
 use crate::result::TallyResult;
 use crate::simulation_results::{RunProvenance, SimulationResults};
-use crate::tally::Tally;
+use crate::tally::{Tally, TallySerde};
 use crate::welford::WelfordTallyStats;
 
 /// Spacing between consecutive per-particle RNG seeds in the transport
@@ -172,7 +176,7 @@ pub fn combine_results(
             match entry.key.clone() {
                 Some(key) => {
                     if let Some(&idx) = key_index.get(&key) {
-                        merge_into(&mut entries[idx], entry, &key)?;
+                        merge_into(&mut entries[idx], entry, &key, &runs)?;
                         matched_existing[idx] = true;
                     } else {
                         if warned_keys.insert(key.clone()) {
@@ -362,17 +366,68 @@ fn entry_from_result(r: &Arc<TallyResult>, run_offset: usize) -> Result<Entry, S
     })
 }
 
-/// Merge `incoming` into the accumulator entry for the same key.
-fn merge_into(acc: &mut Entry, incoming: Entry, key: &TallyKey) -> Result<(), String> {
-    // Configuration equality (`Tally::eq` goes through the TallySerde
-    // projection: scores incl. order, filters and their bin edges,
-    // estimator, multiply_density, nuclides, ...) plus the result shape
-    // must agree, otherwise the merge would pool different physical
-    // quantities.
-    if *acc.tally != *incoming.tally {
+/// A material filter bin as two runs are matched on it.
+#[derive(Debug, PartialEq, Eq)]
+enum MaterialBin {
+    /// The first slot of the run's geometry holding the material with the
+    /// bin's id. The fingerprint pins what each slot holds.
+    Slot(u32),
+    /// An id no material of the run's geometry has: a bin that never scores.
+    Absent(u32),
+}
+
+/// Take the ids out of every material filter of `config`, returning each
+/// filter's bins as the materials they name in `run`, the run the ids were
+/// given in.
+fn material_bins(config: &mut TallySerde, run: Option<&RunProvenance>) -> Vec<Vec<MaterialBin>> {
+    config
+        .filters
+        .iter_mut()
+        .filter_map(|filter| match filter {
+            Filter::Material(f) => Some(
+                std::mem::take(&mut f.material_ids)
+                    .into_iter()
+                    .map(|id| match run.and_then(|r| r.material_slots.get(&id)) {
+                        Some(&slot) => MaterialBin::Slot(slot),
+                        None => MaterialBin::Absent(id),
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Merge `incoming` into the accumulator entry for the same key. `runs` is
+/// every run so far; an entry's ids are those of its first run, whose tally
+/// it carries.
+fn merge_into(
+    acc: &mut Entry,
+    incoming: Entry,
+    key: &TallyKey,
+    runs: &[RunProvenance],
+) -> Result<(), String> {
+    // Configuration equality (`Tally::eq`'s TallySerde projection: scores
+    // incl. order, filters and their bin edges, estimator, multiply_density,
+    // nuclides, ...) plus the result shape must agree, otherwise the merge
+    // would pool different physical quantities. Material filters are
+    // compared by the materials they name, not by id.
+    let first_run = |run_indices: &[usize]| run_indices.first().and_then(|&i| runs.get(i));
+    let (mut acc_config, mut incoming_config) = (acc.tally.to_serde(), incoming.tally.to_serde());
+    let acc_bins = material_bins(&mut acc_config, first_run(&acc.run_indices));
+    let incoming_bins = material_bins(&mut incoming_config, first_run(&incoming.run_indices));
+    if acc_config != incoming_config {
         return Err(format!(
             "cannot combine: tallies named {} have different configurations (scores, \
              filters, estimator or bin structure differ)",
+            key_display(key)
+        ));
+    }
+    if acc_bins != incoming_bins {
+        return Err(format!(
+            "cannot combine: tallies named {} filter on different materials. A material \
+             filter's bins are matched by the geometry material each id names, not by the \
+             id, and here they name different ones",
             key_display(key)
         ));
     }
@@ -459,6 +514,7 @@ mod tests {
             fingerprint: fingerprint.into(),
             data_libraries: BTreeMap::new(),
             data_releases: BTreeMap::new(),
+            material_slots: BTreeMap::new(),
             compute: "cpu".into(),
             yamc_version: "test".into(),
             mpi_size: 1,
@@ -786,6 +842,83 @@ mod tests {
         let b = sim(vec![Arc::new(r2)], vec![run(2, "fp")]);
         let err = combine_results(&[&a, &b]).unwrap_err();
         assert!(err.contains("different configurations"), "got: {err}");
+    }
+
+    fn material_tally(ids: &[u32]) -> Arc<Tally> {
+        let mut t = Tally::new();
+        t.scores = vec![Score::Flux(FluxScore)];
+        t.name = Some("by_material".into());
+        t.filters.push(Filter::Material(crate::MaterialFilter {
+            material_ids: ids.to_vec(),
+        }));
+        t.reset_accumulation();
+        Arc::new(t)
+    }
+
+    /// A run whose geometry holds the material with id `slots[i].0` first in
+    /// slot `slots[i].1`.
+    fn run_with_slots(seed: u64, slots: &[(u32, u32)]) -> RunProvenance {
+        RunProvenance {
+            material_slots: slots.iter().copied().collect(),
+            ..run(seed, "fp")
+        }
+    }
+
+    #[test]
+    fn material_filters_match_by_the_material_not_the_id() {
+        // Two builds of one model: the material in slot 0 has id 1 in the
+        // first and id 7 in the second.
+        let a = sim(
+            vec![result_from_samples(material_tally(&[1]), &[1.0, 2.0], 1.0)],
+            vec![run_with_slots(1, &[(1, 0), (2, 1)])],
+        );
+        let b = sim(
+            vec![result_from_samples(material_tally(&[7]), &[3.0], 1.0)],
+            vec![run_with_slots(2, &[(7, 0), (8, 1)])],
+        );
+        let (c, _) = combine_results(&[&a, &b]).unwrap();
+        let r = c.get_by_name("by_material").unwrap();
+        assert_eq!(r.n_histories, 3);
+        // Labelled with the first run's ids.
+        assert_eq!(r.tally, material_tally(&[1]));
+
+        // A combined result carries its first run's ids, so it still
+        // matches, wherever it comes in the list.
+        let d = sim(
+            vec![result_from_samples(material_tally(&[4]), &[5.0], 1.0)],
+            vec![run_with_slots(3, &[(4, 0), (5, 1)])],
+        );
+        let (e, _) = combine_results(&[&d, &c]).unwrap();
+        assert_eq!(e.get_by_name("by_material").unwrap().n_histories, 4);
+    }
+
+    #[test]
+    fn material_filters_naming_different_materials_are_refused() {
+        // The same id names slot 0 in the first run and slot 1 in the second,
+        // as when two runs build the same materials in opposite orders.
+        let a = sim(
+            vec![result_from_samples(material_tally(&[1]), &[1.0, 2.0], 1.0)],
+            vec![run_with_slots(1, &[(1, 0), (2, 1)])],
+        );
+        let b = sim(
+            vec![result_from_samples(material_tally(&[1]), &[3.0], 1.0)],
+            vec![run_with_slots(2, &[(2, 0), (1, 1)])],
+        );
+        let err = combine_results(&[&a, &b]).unwrap_err();
+        assert!(err.contains("filter on different materials"), "got: {err}");
+
+        // An id no geometry material has is matched by its value.
+        let c = sim(
+            vec![result_from_samples(material_tally(&[9]), &[3.0], 1.0)],
+            vec![run_with_slots(3, &[(1, 0), (2, 1)])],
+        );
+        let d = sim(
+            vec![result_from_samples(material_tally(&[9]), &[4.0], 1.0)],
+            vec![run_with_slots(4, &[(1, 0), (2, 1)])],
+        );
+        assert!(combine_results(&[&c, &d]).is_ok());
+        let err = combine_results(&[&a, &c]).unwrap_err();
+        assert!(err.contains("filter on different materials"), "got: {err}");
     }
 
     #[test]

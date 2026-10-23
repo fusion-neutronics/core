@@ -1554,7 +1554,9 @@ impl PyMaterial {
     ///     materials (List[Material]): Materials to mix.
     ///     fractions (List[float]): Mixing fractions (one per material).
     ///     fraction_type (str): "atom", "mass", or "volume".
-    ///     name (Optional[str]): Name for the new material.
+    ///     name (Optional[str]): Name for the new material. If omitted, one
+    ///         is built from the components' names and fractions, such as
+    ///         ``"steel(0.9000)_unnamed(0.1000)"``.
     ///     id (Optional[int]): ID for the new material. If omitted, a fresh
     ///         one unique in the process is assigned.
     ///

@@ -875,9 +875,14 @@ impl PySimulationResults {
 
     /// Provenance of the run(s) behind these results: a list of dicts
     /// with ``seed``, ``n_histories``, ``elapsed_secs``, ``fingerprint``,
-    /// ``data_libraries``, ``data_releases``, ``compute``, ``yamc_version``,
-    /// ``mpi_size`` and ``mpi_rank``. One entry per ``simulate_transport``
-    /// run; concatenated by ``combine_results``.
+    /// ``data_libraries``, ``data_releases``, ``material_slots``,
+    /// ``compute``, ``yamc_version``, ``mpi_size`` and ``mpi_rank``. One
+    /// entry per ``simulate_transport`` run; concatenated by
+    /// ``combine_results``.
+    ///
+    /// ``material_slots`` maps each geometry material's id to the first slot
+    /// of the geometry's material store holding it, which is how
+    /// ``combine_results`` tells which material a material filter's id names.
     ///
     /// ``data_releases`` maps each library keyword the run downloaded data
     /// from to a dict with ``release`` (the published release identifier),
@@ -903,6 +908,7 @@ impl PySimulationResults {
                 d.set_item("fingerprint", run.fingerprint.clone())?;
                 d.set_item("data_libraries", run.data_libraries.clone())?;
                 d.set_item("data_releases", data_releases_dict(py, &run.data_releases)?)?;
+                d.set_item("material_slots", run.material_slots.clone())?;
                 d.set_item("compute", run.compute.clone())?;
                 d.set_item("yamc_version", run.yamc_version.clone())?;
                 d.set_item("mpi_size", run.mpi_size)?;
@@ -1177,6 +1183,7 @@ pub(crate) fn build_results(
         fingerprint,
         data_libraries: model.data_libraries(),
         data_releases: model.data_releases(),
+        material_slots: model.material_slots(),
         compute: compute.to_string(),
         yamc_version: provenance_version(),
         mpi_size: yamc::mpi_context::mpi_size(),
@@ -1236,7 +1243,11 @@ pub(crate) fn combine_inner(
 /// - all runs must come from the **same model** (geometry, materials,
 ///   source, physics settings and nuclear-data libraries -- library
 ///   mismatches are reported per nuclide);
-/// - tallies with the same name must have identical configurations;
+/// - tallies with the same name must have identical configurations. A
+///   material filter's bins are matched by the geometry material each id
+///   names, not by the id, so runs of a model built anew (whose materials
+///   get new ids) still combine, and filters naming different materials
+///   under the same ids do not;
 /// - GPU-produced results are refused (no Welford merge state), as are
 ///   non-root MPI results (every rank holds the same statistics, so a
 ///   non-root result would count the run twice).

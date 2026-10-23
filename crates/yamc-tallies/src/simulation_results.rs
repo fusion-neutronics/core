@@ -35,8 +35,9 @@ pub struct RunProvenance {
     pub elapsed_secs: f64,
     /// Stable hash of the model's physics identity: geometry, materials,
     /// sources and physics settings plus the nuclear-data-library map;
-    /// excludes seed, total_particles, verbose, diagnostics and the
-    /// tallies subtree (tallies are observation-only).
+    /// excludes seed, total_particles, verbose, diagnostics, the
+    /// tallies subtree (tallies are observation-only) and the values of
+    /// the material ids (see `material_slots`).
     pub fingerprint: String,
     /// Per-isotope / per-element nuclear-data provenance, e.g.
     /// `"n:Co58" -> "endf-b8.1"`, `"p:Fe" -> "endf-b8.1"`. Also folded
@@ -50,6 +51,13 @@ pub struct RunProvenance {
     /// when reading results written before releases were recorded.
     #[serde(default)]
     pub data_releases: BTreeMap<String, yamc_nuclide::storage::release::DataRelease>,
+    /// Each geometry material's id, mapped to the first slot of the
+    /// geometry's material store holding it. `combine_results` matches
+    /// material filters through it: an id is a label, which two builds of one
+    /// model can give out differently, while the fingerprint pins what each
+    /// slot holds. Empty when reading results written before it was recorded.
+    #[serde(default)]
+    pub material_slots: BTreeMap<u32, u32>,
     /// Compute path that produced the run: `"cpu"` or `"gpu"`. GPU runs
     /// carry no Welford merge state and are refused by `combine_results`.
     pub compute: String,

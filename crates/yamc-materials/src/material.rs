@@ -2324,6 +2324,27 @@ mod tests {
     }
 
     #[test]
+    fn test_mix_materials_default_name_leaves_ids_out() {
+        // The default name is part of the model fingerprint, so it must not
+        // carry an id, which differs between two builds of one model.
+        let component = |name: Option<&str>, id: u32| {
+            let mut m = Material::new(
+                HashMap::from([("Fe56".into(), 1.0)]),
+                "atom",
+                "g/cm3",
+                Some(7.874),
+            )
+            .unwrap();
+            m.name = name.map(String::from);
+            m.set_material_id(id);
+            m
+        };
+        let (a, b) = (component(None, 41), component(Some("steel"), 42));
+        let mixed = Material::mix_materials(&[&a, &b], &[0.25, 0.75], "atom", None).unwrap();
+        assert_eq!(mixed.get_name(), Some("unnamed(0.2500)_steel(0.7500)"));
+    }
+
+    #[test]
     fn test_mix_materials_fracs_validation() {
         let mat = Material::new(
             HashMap::from([("H1".into(), 1.0)]),

@@ -2331,7 +2331,9 @@ class Material:
             materials (List[Material]): Materials to mix.
             fractions (List[float]): Mixing fractions (one per material).
             fraction_type (str): "atom", "mass", or "volume".
-            name (Optional[str]): Name for the new material.
+            name (Optional[str]): Name for the new material. If omitted, one
+                is built from the components' names and fractions, such as
+                ``"steel(0.9000)_unnamed(0.1000)"``.
             id (Optional[int]): ID for the new material. If omitted, a fresh
                 one unique in the process is assigned.
         
@@ -4612,9 +4614,14 @@ class SimulationResults:
         r"""
         Provenance of the run(s) behind these results: a list of dicts
         with ``seed``, ``n_histories``, ``elapsed_secs``, ``fingerprint``,
-        ``data_libraries``, ``data_releases``, ``compute``, ``yamc_version``,
-        ``mpi_size`` and ``mpi_rank``. One entry per ``simulate_transport``
-        run; concatenated by ``combine_results``.
+        ``data_libraries``, ``data_releases``, ``material_slots``,
+        ``compute``, ``yamc_version``, ``mpi_size`` and ``mpi_rank``. One
+        entry per ``simulate_transport`` run; concatenated by
+        ``combine_results``.
+        
+        ``material_slots`` maps each geometry material's id to the first slot
+        of the geometry's material store holding it, which is how
+        ``combine_results`` tells which material a material filter's id names.
         
         ``data_releases`` maps each library keyword the run downloaded data
         from to a dict with ``release`` (the published release identifier),
@@ -7499,7 +7506,11 @@ def combine_results(*results: typing.Any) -> SimulationResults:
     - all runs must come from the **same model** (geometry, materials,
       source, physics settings and nuclear-data libraries -- library
       mismatches are reported per nuclide);
-    - tallies with the same name must have identical configurations;
+    - tallies with the same name must have identical configurations. A
+      material filter's bins are matched by the geometry material each id
+      names, not by the id, so runs of a model built anew (whose materials
+      get new ids) still combine, and filters naming different materials
+      under the same ids do not;
     - GPU-produced results are refused (no Welford merge state), as are
       non-root MPI results (every rank holds the same statistics, so a
       non-root result would count the run twice).
