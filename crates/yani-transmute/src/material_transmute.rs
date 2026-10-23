@@ -276,7 +276,7 @@ pub fn transmute_materials(
 
     let ids: Vec<u32> = cases
         .iter()
-        .map(|case| case.material.material_id.unwrap_or(0))
+        .map(|case| case.material.get_material_id().unwrap_or(0))
         .collect();
     if plural {
         let mut seen: HashMap<u32, usize> = HashMap::new();
@@ -1505,8 +1505,8 @@ fn replica_steps(
 pub(crate) struct TransportStatistics<'a> {
     rates: crate::statistical::StatisticalRates,
     /// Keys the statistical draw, so different materials' tallies are drawn
-    /// independently.
-    material_id: u32,
+    /// independently: [`TransportTallied::draw_key`].
+    key: u32,
     base_chain: Arc<HashMap<String, ChainNuclide>>,
     branch: Arc<BranchTable>,
     /// Each replica's tally under the transport's replica weights, when the
@@ -1551,6 +1551,13 @@ pub struct TransportTallied {
     /// (`TransmutationTallies::with_isomer_intervals`). Without it the
     /// `isomer_branching` source holds every split.
     pub isomer: Option<IsomerIntervalProductions>,
+    /// Keys the statistical draw of this tally's error, so the materials of
+    /// one run draw theirs independently: any number distinct among them
+    /// that a new build of the same model reproduces. `Model::transmute`
+    /// gives the material's slot in the geometry. Not its id: an id the user
+    /// did not choose depends on what else the process built, and the same
+    /// seed must give the same answer.
+    pub draw_key: u32,
 }
 
 /// A transport run's inputs to the MF=40 draw: what the nominal tally scored
@@ -1586,9 +1593,9 @@ struct TransportIsomer<'a> {
 /// [`TransportTallied::replicas`] where the transport carried them), and holds
 /// every split without them.
 ///
-/// The statistical draw is keyed on `initial.material_id`, so materials with
-/// distinct ids draw their tallies' errors independently, while the
-/// nuclear-data draws are shared across them.
+/// The statistical draw is keyed on [`TransportTallied::draw_key`], so
+/// materials with distinct keys draw their tallies' errors independently,
+/// while the nuclear-data draws are shared across them.
 ///
 /// `cross` is the run's cross-material covariance, from
 /// [`transport_cross_material`] over every material the run resamples, so
@@ -1660,13 +1667,9 @@ pub fn transport_replicas(
             irradiation: (rate > 0.0).then_some((0, rate)),
         })
         .collect();
-    // The material's id, the key its tally and its results are stored under,
-    // and so the same whatever order the materials are visited in. A material
-    // with no id answers to 0, as in `transmute_materials`.
-    let material_id = initial.material_id.unwrap_or(0);
     let statistics = tallied.statistics.as_ref().map(|c| TransportStatistics {
         rates: crate::statistical::StatisticalRates::new(c),
-        material_id,
+        key: tallied.draw_key,
         base_chain: Arc::clone(chain),
         branch: Arc::clone(&tallied.branch),
         replicas: tallied.replicas.as_ref(),
@@ -1675,7 +1678,7 @@ pub fn transport_replicas(
         rates: crate::statistical::StatisticalRates::new(
             &crate::history_statistics::RateCovariance::empty(),
         ),
-        material_id,
+        key: tallied.draw_key,
         base_chain: Arc::clone(chain),
         branch: Arc::clone(&tallied.branch),
         replicas: tallied.replicas.as_ref(),
@@ -2678,13 +2681,9 @@ fn run_replicas(
                 let mut totals = t.rates[k].clone();
                 let mut partials = t.partials[k].clone();
                 if let Some(st) = st {
-                    statistical_floored = st.rates.add_to(
-                        request.seed,
-                        st.material_id,
-                        replica,
-                        &mut totals,
-                        &mut partials,
-                    );
+                    statistical_floored =
+                        st.rates
+                            .add_to(request.seed, st.key, replica, &mut totals, &mut partials);
                 }
                 rates_sampled += totals.values().map(HashMap::len).sum::<usize>();
                 // The MF=40 draw re-splits this replica's own partials with
@@ -2718,7 +2717,7 @@ fn run_replicas(
             }
             (None, Some(st)) => {
                 let (mut totals, partials, floored) =
-                    st.rates.sample(request.seed, st.material_id, replica);
+                    st.rates.sample(request.seed, st.key, replica);
                 statistical_floored = floored;
                 // The MF=40 draw re-splits this replica's own partials, so
                 // its lists are folded from them, before the fold below
@@ -6153,6 +6152,7 @@ mod tests {
             diagnostics: CoupledDiagnostics::default(),
             isomer: None,
             replicas: None,
+            draw_key: 0,
         };
         let request = DataUncertainty {
             seed: 5,

@@ -36,7 +36,7 @@ def _irradiated(volume):
         ]
     )
     results = material.transmute(schedule=schedule)
-    return results.get_final_material(material.id or 0)
+    return results.get_final_material(material.id)
 
 
 @pytest.fixture

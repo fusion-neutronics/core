@@ -6,10 +6,15 @@
 //! and the per-isotope/per-element nuclear-data provenance. It excludes
 //! the run-varying `verbose` knob and the skipped diagnostics (the other
 //! run parameters -- seed, particle count, threads, time budget -- are
-//! per-call `TransportSettings` and never on the Model at all), plus the
+//! per-call `TransportSettings` and never on the Model at all), the
 //! `tallies` subtree (tallies are
 //! observation-only and may legitimately differ between combinable
-//! runs).
+//! runs), and the values of the material ids. An id labels a material
+//! rather than changing what is sampled, and an automatic one depends on
+//! what else the process built, so each is replaced by the first slot of
+//! the material store holding it: which slots share a material stays part
+//! of the identity. `combine_results` matches material filters the same
+//! way, through [`Model::material_slots`].
 //!
 //! `combine_results` refuses to pool results whose fingerprints differ:
 //! two runs only estimate the same quantities if they sampled the same
@@ -23,7 +28,7 @@
 //! in sorted order regardless of `HashMap` iteration order in the
 //! source structs -- the canonicalization is inherent, not incidental.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use sha2::{Digest, Sha256};
 
@@ -109,6 +114,19 @@ impl Model {
             .collect()
     }
 
+    /// Each geometry material's id, mapped to the first slot of the material
+    /// store holding it: the run provenance `combine_results` matches
+    /// material filters through, by the material each id names.
+    pub fn material_slots(&self) -> BTreeMap<u32, u32> {
+        let mut slots = BTreeMap::new();
+        for (slot, material) in self.geometry.materials().iter().enumerate() {
+            if let Some(id) = material.get_material_id() {
+                slots.entry(id).or_insert(slot as u32);
+            }
+        }
+        slots
+    }
+
     /// Stable hash (SHA-256 hex) of the model's physics identity. See
     /// the module docs for what is included and excluded.
     ///
@@ -124,6 +142,9 @@ impl Model {
             for field in EXCLUDED_FIELDS {
                 map.remove(field);
             }
+            if let Some(geometry) = map.get_mut("geometry") {
+                label_materials_by_slot(geometry);
+            }
         }
         let combined = serde_json::json!({
             "data": self.data_libraries(),
@@ -133,6 +154,37 @@ impl Model {
             .map_err(|e| format!("model fingerprint serialization failed: {e}"))?;
         let digest = Sha256::digest(canonical.as_bytes());
         Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
+    }
+}
+
+/// Replace each id in the serialized geometry's material store by the first
+/// slot holding a material with that id.
+///
+/// A cell reaches its material by slot, so two builds of one model that number
+/// their materials differently sample the same game and must still combine;
+/// the slots that share an id (a mesh fill's per-volume copies) stay part of
+/// the identity.
+fn label_materials_by_slot(geometry: &mut serde_json::Value) {
+    // `{"Csg": {"materials": [...], ...}}`, keyed by the geometry's kind. A
+    // mesh geometry serializes no materials.
+    let Some(kinds) = geometry.as_object_mut() else {
+        return;
+    };
+    for kind in kinds.values_mut() {
+        let Some(materials) = kind
+            .get_mut("materials")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        let mut first_slot: HashMap<u64, usize> = HashMap::new();
+        for (slot, material) in materials.iter_mut().enumerate() {
+            if let Some(entry) = material.get_mut("material_id")
+                && let Some(id) = entry.as_u64()
+            {
+                *entry = (*first_slot.entry(id).or_insert(slot)).into();
+            }
+        }
     }
 }
 
@@ -158,6 +210,79 @@ fn short_data_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::short_data_path;
+    use crate::geo::{BoundaryType, HalfspaceType, Region, Surface, SurfaceKind};
+    use crate::geometry::cell::Cell;
+    use crate::geometry::csg::Geometry;
+    use crate::model::Model;
+    use std::collections::{BTreeMap, HashMap};
+    use std::sync::Arc;
+    use yamc_materials::material::Material;
+
+    /// Two nested spheres, one material each: `ids[i]` is the id of the
+    /// material in slot `i` (`None` leaves it to the geometry), `densities[i]`
+    /// its density.
+    fn shells_model(ids: [Option<u32>; 2], densities: [f64; 2]) -> Model {
+        let sphere = |surface_id, radius, boundary| {
+            Arc::new(Surface {
+                surface_id: Some(surface_id),
+                kind: SurfaceKind::Sphere {
+                    x0: 0.0,
+                    y0: 0.0,
+                    z0: 0.0,
+                    radius,
+                },
+                boundary,
+                name: None,
+            })
+        };
+        let inner = sphere(1, 5.0, BoundaryType::Transmission);
+        let outer = sphere(2, 10.0, BoundaryType::Vacuum);
+        let materials = ids
+            .iter()
+            .zip(densities)
+            .map(|(id, density)| {
+                let mut material = Material::new(
+                    HashMap::from([("Li6".to_string(), 1.0)]),
+                    "atom",
+                    "g/cm3",
+                    Some(density),
+                )
+                .unwrap();
+                if let Some(id) = id {
+                    material.set_material_id(*id);
+                }
+                Arc::new(material)
+            })
+            .collect();
+        let core = Region::new_from_halfspace(HalfspaceType::Below(Arc::clone(&inner)));
+        let shell = Region::new_from_halfspace(HalfspaceType::Above(inner))
+            .intersection(&Region::new_from_halfspace(HalfspaceType::Below(outer)));
+        let cells = vec![
+            Cell::new(Some(1), core, None, Some(0)),
+            Cell::new(Some(2), shell, None, Some(1)),
+        ];
+        Model::new(Geometry::new(cells, materials).unwrap(), vec![], vec![])
+    }
+
+    #[test]
+    fn material_ids_are_not_part_of_the_fingerprint() {
+        let reference = shells_model([Some(1), Some(2)], [2.0, 3.0])
+            .fingerprint()
+            .unwrap();
+        for ids in [[Some(7), Some(3)], [None, None], [Some(2), Some(1)]] {
+            let relabelled = shells_model(ids, [2.0, 3.0]).fingerprint().unwrap();
+            assert_eq!(relabelled, reference, "{ids:?}");
+        }
+        // The materials, and which slot holds which, still are.
+        let swapped = shells_model([Some(1), Some(2)], [3.0, 2.0]);
+        assert_ne!(swapped.fingerprint().unwrap(), reference);
+    }
+
+    #[test]
+    fn material_slots_map_each_id_to_its_slot() {
+        let model = shells_model([Some(7), Some(3)], [2.0, 3.0]);
+        assert_eq!(model.material_slots(), BTreeMap::from([(7, 0), (3, 1)]));
+    }
 
     #[test]
     fn short_data_path_keeps_last_two_components() {

@@ -98,7 +98,7 @@ yamc.transmutation_decay_data = _CHAIN
 yamc.transmutation_reactions = _CHAIN
 yamc.transmutation_fission_yields = _CHAIN
 results = iron.transmute(schedule=schedule)
-step_materials = results.step_materials(iron.id or 0)
+step_materials = results.step_materials(iron.id)
 
 t_transmute = time.time() - t0
 print(f"Transmutation complete in {t_transmute:.2f}s\n")

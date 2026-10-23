@@ -183,7 +183,7 @@ def inventory_of(results, material, uncertainty: bool) -> dict:
 
     ``float.hex`` is exact, so this dump changes if and only if a bit does.
     """
-    material_id = material.id or 0
+    material_id = material.id
     step = results.num_steps
     densities = results.get_material_nuclides(material_id, step) or {}
     out = {"densities": {n: float(v).hex() for n, v in sorted(densities.items())}}

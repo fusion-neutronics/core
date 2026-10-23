@@ -141,5 +141,5 @@ def test_shared_transmutable_material_errors():
     cell2 = yamc.Cell(region=s2.below, material=mat)
     geometry = yamc.Geometry([cell1, cell2])
 
-    with pytest.raises(ValueError, match="Transmutable material 1 is used in 2 cells"):
+    with pytest.raises(ValueError, match=f"Transmutable material {mat.id} is used in 2 cells"):
         geometry.calculate_volume(samples=100_000, seed=42)

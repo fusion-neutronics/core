@@ -471,11 +471,11 @@ pub(crate) fn expand_fills(
         // Fill materials join the flat store after the user's entries.
         // Per-volume clones of one material legitimately share an id, and
         // a fill material may share an id with a user material or another
-        // fill's material only when it is the same material (matching
-        // names); genuine collisions between different materials are
-        // rejected. This matters across fills: each MeshGeometry
-        // auto-assigns ids independently, so two separately built fills
-        // hand out overlapping ids by default.
+        // fill's material only when it is the same material. The Python
+        // Geometry has already refused two different Material objects with
+        // one id across its cells and fills; for a geometry built in Rust,
+        // matching names are taken to mean the same material, and a
+        // different name under the same id is rejected.
         let material_base = materials.len() as u32;
         for mat in &mesh_materials {
             let (id, name) = (mat.get_material_id(), mat.get_name());

@@ -79,7 +79,7 @@ def _nb93_report(sources):
     spectrum = yani.NeutronSource(energy=yani.sources.Histogram([1.35e7, 1.45e7], [1.0]))
     schedule = yani.PulseSchedule([yani.Pulse(rate=1.0e10, duration=(1, "h"), source=spectrum)])
     results = foil.transmute(schedule=schedule)
-    return results.get_branching_report(foil.id or 0, 0)
+    return results.get_branching_report(foil.id, 0)
 
 
 def test_the_report_names_the_source_of_each_split():

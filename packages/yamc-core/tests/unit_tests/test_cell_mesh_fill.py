@@ -13,10 +13,10 @@ import yamc
 TWO_REGION_ARROW = "crates/yamt/tests/data/two_region.arrow"
 
 
-def _dummy_material(name):
+def _dummy_material(name, **kwargs):
     """Minimal Material (no nuclear data): geometry-only tests."""
     return yamc.Material(
-        composition={"H": 1.0}, density=1.0, density_units="g/cc", name=name,
+        composition={"H": 1.0}, density=1.0, density_units="g/cc", name=name, **kwargs,
     )
 
 
@@ -182,26 +182,65 @@ def test_rebuilding_geometry_from_filled_cells_is_rejected():
         yamc.Geometry(geometry.cells)
 
 
-def test_two_fills_with_default_ids_are_rejected():
-    """Each MeshGeometry auto-assigns material ids independently, so two
-    fills built from unrelated materials collide; the constructor must
-    fail fast instead of silently conflating them."""
+def _two_fills(collide):
+    """Two filled chambers 10 cm apart, the second filled with unrelated
+    materials. With ``collide`` its "water" is given the first fill's fuel id."""
+    fuel = _dummy_material("fuel")
+    water = _dummy_material("water", id=fuel.id if collide else None)
     sphere_a = yamc.Sphere(x0=0.5, y0=0.5, z0=0.5, radius=3.0, boundary="vacuum")
     sphere_b = yamc.Sphere(x0=10.5, y0=0.5, z0=0.5, radius=3.0, boundary="vacuum")
     cell_a = yamc.Cell(
-        region=sphere_a.below, material=_dummy_material("gap_a"), fill=_mesh()
+        region=sphere_a.below, material=_dummy_material("gap_a"), fill=_mesh(fuel=fuel)
     )
     cell_b = yamc.Cell(
         region=sphere_b.below,
         material=_dummy_material("gap_b"),
         fill=yamc.MeshGeometry(
-            TWO_REGION_ARROW,
-            {"fuel": _dummy_material("water"), "moderator": _dummy_material("oil")},
+            TWO_REGION_ARROW, {"fuel": water, "moderator": _dummy_material("oil")},
         ),
         translation=(10.0, 0.0, 0.0),
     )
-    with pytest.raises(ValueError, match="distinct ids"):
-        yamc.Geometry([cell_a, cell_b])
+    return [cell_a, cell_b]
+
+
+def test_two_fills_with_default_ids_are_allowed():
+    """Every material gets its own id when it is built, so two fills of
+    unrelated materials do not collide (they did when each MeshGeometry
+    numbered its materials from 1)."""
+    geometry = yamc.Geometry(_two_fills(collide=False))
+    assert geometry.find_cell(0.25, 0.5, 0.5).material.name == "fuel"
+    assert geometry.find_cell(10.25, 0.5, 0.5).material.name == "water"
+
+
+def test_two_fills_with_colliding_ids_are_rejected():
+    """A different material given the id of another fill's material must fail
+    fast instead of silently conflating the two."""
+    with pytest.raises(ValueError, match='materials "fuel" and "water" are different'):
+        yamc.Geometry(_two_fills(collide=True))
+
+
+@pytest.mark.parametrize("name", [None, "iron"], ids=["unnamed", "same_name"])
+def test_a_fill_material_given_the_host_material_id_is_rejected(name):
+    """The host material keeps its automatic id and a different fill material
+    is given the same id explicitly. Accepted, the two would share one tally
+    bin and one transmutation result."""
+    host = _dummy_material(name)
+    fuel = yamc.Material(composition={"H": 1.0}, density=7.0, name=name, id=host.id)
+    sphere = yamc.Sphere(x0=0.5, y0=0.5, z0=0.5, radius=3.0, boundary="vacuum")
+    cell = yamc.Cell(region=sphere.below, material=host, fill=_mesh(fuel=fuel))
+    with pytest.raises(ValueError, match=f"Duplicate Material id {host.id} found"):
+        yamc.Geometry([cell])
+
+
+def test_the_host_material_can_also_fill_the_mesh():
+    """One Material object as the host cell's material and a fill material is
+    one material, under its one id."""
+    shared = _dummy_material("shared")
+    sphere = yamc.Sphere(x0=0.5, y0=0.5, z0=0.5, radius=3.0, boundary="vacuum")
+    cell = yamc.Cell(region=sphere.below, material=shared, fill=_mesh(fuel=shared))
+    geometry = yamc.Geometry([cell])
+    assert geometry.find_cell(0.5, 0.5, 2.0).material.id == shared.id
+    assert geometry.find_cell(0.25, 0.5, 0.5).material.id == shared.id
 
 
 def test_two_fills_sharing_materials_are_allowed():

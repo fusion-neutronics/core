@@ -18,7 +18,7 @@ fn main() {
         Some(1.0),
     )
     .expect("Failed to create material");
-    material.material_id = Some(1);
+    material.set_material_id(1);
     material.set_temperature("294");
 
     // Load the nuclear data

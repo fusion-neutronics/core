@@ -245,12 +245,11 @@ impl PyCell {
     /// Material assigned to this cell.
     ///
     /// Returns:
-    ///     Material object or None for void cells
+    ///     The Material object the cell was given (not a copy), or None for
+    ///     void cells
     #[getter]
-    pub fn material(&self, py: Python<'_>) -> Option<PyMaterial> {
-        self.py_material
-            .as_ref()
-            .map(|py_mat| py_mat.bind(py).borrow().clone())
+    pub fn material(&self, py: Python<'_>) -> Option<Py<PyMaterial>> {
+        self.py_material.as_ref().map(|m| m.clone_ref(py))
     }
 
     /// Mesh body filling this cell.

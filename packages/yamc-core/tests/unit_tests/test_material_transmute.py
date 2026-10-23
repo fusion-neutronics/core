@@ -61,7 +61,7 @@ def transmute_results():
             yamc.Cooldown(duration=DAY),
         ]),
     )
-    return iron, results.step_materials(iron.id or 0)
+    return iron, results.step_materials(iron.id)
 
 
 def _get_density(material, nuclide):
@@ -183,7 +183,7 @@ def test_transmute_multi_spectrum_runs():
             yamc.Pulse(rate=RATE, duration=DAY, source=fast),
             yamc.Cooldown(duration=DAY),
         ]),
-    ).step_materials(iron.id or 0)
+    ).step_materials(iron.id)
     assert len(results) == 3
     # Irradiation still burns Fe56 and breeds daughters.
     assert _get_density(results[1], "Fe56") < _get_density(_make_iron(), "Fe56")
@@ -209,8 +209,8 @@ def test_transmute_does_not_require_the_transmutable_flag():
         yamc.Pulse(rate=RATE, duration=DAY, source=_spectrum()),
         yamc.Cooldown(duration=DAY),
     ])
-    without = inert.transmute(schedule=schedule).step_materials(inert.id or 0)
-    with_flag = flagged.transmute(schedule=schedule).step_materials(flagged.id or 0)
+    without = inert.transmute(schedule=schedule).step_materials(inert.id)
+    with_flag = flagged.transmute(schedule=schedule).step_materials(flagged.id)
 
     # Not merely "both ran": the flag must not perturb the answer either.
     assert len(without) == len(with_flag) == 2
@@ -236,7 +236,7 @@ def test_transmute_returns_results_carrying_per_edge_rates():
         ]),
     )
 
-    mat_id = iron.id or 0
+    mat_id = iron.id
     rates = results.get_reaction_rates(mat_id, 0)
     assert rates, "an irradiation step drove reactions"
     assert "Fe56" in rates, f"expected the seed nuclide as a parent, got {list(rates)}"
@@ -259,7 +259,7 @@ def test_a_decay_only_step_drives_no_reactions():
         ]),
     )
 
-    mat_id = iron.id or 0
+    mat_id = iron.id
     assert results.get_reaction_rates(mat_id, 1) == {}
     # Step 2 does not exist: two schedule steps means indices 0 and 1.
     assert results.get_reaction_rates(mat_id, 2) is None
@@ -274,7 +274,7 @@ def test_step_materials_pairs_with_the_rate_index():
     ])
     results = iron.transmute(schedule=schedule)
 
-    mat_id = iron.id or 0
+    mat_id = iron.id
     steps = results.step_materials(mat_id)
     assert len(steps) == len(results.timesteps) == 2
     # get_material counts the initial composition as 0, so it runs one ahead.
@@ -301,7 +301,7 @@ def test_the_rate_spectrum_sums_to_the_collapsed_rate():
         ]),
     )
 
-    mat_id = iron.id or 0
+    mat_id = iron.id
     spectrum = results.get_reaction_rate_spectrum(mat_id, "Fe56", "(n,gamma)", 0)
     assert spectrum is not None, "the seed nuclide's capture channel was driven"
     assert spectrum["boundaries"] == ENERGY_GROUPS
@@ -328,7 +328,7 @@ def test_the_rate_spectrum_says_where_in_energy_the_rate_came_from():
     )
 
     rates = results.get_reaction_rate_spectrum(
-        iron.id or 0, "Fe56", "(n,gamma)", 0
+        iron.id, "Fe56", "(n,gamma)", 0
     )["rates"]
     thermal, epithermal, fast = rates
     assert thermal > fast, (
@@ -348,7 +348,7 @@ def test_no_rate_spectrum_where_there_is_no_rate():
         ]),
     )
 
-    mat_id = iron.id or 0
+    mat_id = iron.id
 
     def ask(*args):
         return results.get_reaction_rate_spectrum(*args)
@@ -374,7 +374,7 @@ def _year_schedule():
 def test_the_screening_reports_what_it_loaded_and_left_out():
     iron = _make_iron()
     results = iron.transmute(schedule=_year_schedule())
-    info = results.get_product_screening_info(iron.id or 0)
+    info = results.get_product_screening_info(iron.id)
     assert info["threshold"] == 1e-12
     assert "Fe56" in info["loaded"]
     assert info["rounds"] >= 1
@@ -390,13 +390,14 @@ def test_a_zero_threshold_loads_everything_populated_and_agrees():
     exact_iron, screened_iron = _make_iron(), _make_iron()
     exact = exact_iron.transmute(schedule=_year_schedule(), product_threshold=0.0)
     screened = screened_iron.transmute(schedule=_year_schedule())
-    exact_info = exact.get_product_screening_info(0)
+    exact_info = exact.get_product_screening_info(exact_iron.id)
     assert exact_info["below_threshold"] == {}
-    assert set(screened.get_product_screening_info(0)["loaded"]) <= set(
+    assert set(screened.get_product_screening_info(screened_iron.id)["loaded"]) <= set(
         exact_info["loaded"]
     )
     for step in (1, 2):
-        a, b = exact.get_material(0, step), screened.get_material(0, step)
+        a = exact.get_material(exact_iron.id, step)
+        b = screened.get_material(screened_iron.id, step)
         assert b.activity() == pytest.approx(a.activity(), rel=1e-8)
         assert b.decay_heat() == pytest.approx(a.decay_heat(), rel=1e-8)
         atoms_a, atoms_b = a.get_atoms_per_barn_cm(), b.get_atoms_per_barn_cm()

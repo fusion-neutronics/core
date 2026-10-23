@@ -45,6 +45,7 @@ def build_csg():
         composition={"Fe56": 1.0},
         density=7.87,
         name="iron",
+        id=1,  # the results below are read by this id
         transmutable=True,
         temperature=294)
 
@@ -84,6 +85,7 @@ def build_mesh():
         composition={"Fe56": 1.0},
         density=7.87,
         name="iron",
+        id=1,  # the results below are read by this id
         transmutable=True,
         temperature=294)
 

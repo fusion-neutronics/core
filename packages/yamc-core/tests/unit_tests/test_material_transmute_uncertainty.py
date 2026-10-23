@@ -111,7 +111,7 @@ def test_zero_samples_is_rejected_rather_than_meaning_adaptive():
 def test_without_the_option_there_is_no_uncertainty_to_read():
     iron = _iron()
     results = iron.transmute(schedule=_schedule())
-    mid = iron.id or 0
+    mid = iron.id
 
     assert results.get_nuclide_uncertainty(mid, "Mn56", 1) is None
     assert results.get_nuclide_uncertainty_evolution(mid, "Mn56") is None
@@ -121,7 +121,7 @@ def test_without_the_option_there_is_no_uncertainty_to_read():
     assert results.get_decay_heat_uncertainty(mid, 1, by_nuclide=True) is None
     assert results.get_contact_dose_uncertainty(mid, 1) is None
     assert results.get_decay_photon_spectrum_uncertainty(mid, 1) is None
-    assert results.get_data_uncertainty_info(iron.id or 0) is None
+    assert results.get_data_uncertainty_info(iron.id) is None
 
 
 def test_the_default_signature_is_unchanged():
@@ -139,9 +139,9 @@ def test_asking_on_data_without_covariance_reports_it_rather_than_a_zero():
         schedule=_schedule(),
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["cross_sections"]),
     )
-    mid = iron.id or 0
+    mid = iron.id
 
-    info = results.get_data_uncertainty_info(iron.id or 0)
+    info = results.get_data_uncertainty_info(iron.id)
     assert info is not None, "asking for uncertainty must produce a report"
 
     # The fixtures carry no covariance.arrow here (see the module fixture),
@@ -174,7 +174,7 @@ def test_skipped_block_counters_are_per_nuclide_dicts():
         schedule=_schedule(),
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["cross_sections"]),
     )
-    info = results.get_data_uncertainty_info(iron.id or 0)
+    info = results.get_data_uncertainty_info(iron.id)
     counters = (
         "skipped_cross_material",
         "applied_cross_material",
@@ -223,7 +223,7 @@ def test_the_report_names_what_is_never_perturbed():
         schedule=_schedule(),
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8),
     )
-    not_perturbed = results.get_data_uncertainty_info(iron.id or 0)["not_perturbed"]
+    not_perturbed = results.get_data_uncertainty_info(iron.id)["not_perturbed"]
     joined = " ".join(not_perturbed)
     for source in (
         "isomeric branching (MF=9/MF=10)",
@@ -258,7 +258,7 @@ def test_a_shielded_run_reports_its_shielding_held_at_nominal():
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8),
         self_shielding_chord=2.0,
     )
-    info = results.get_data_uncertainty_info(iron.id or 0)
+    info = results.get_data_uncertainty_info(iron.id)
     assert "self-shielding correction" in info["not_perturbed"]
 
 
@@ -274,7 +274,7 @@ def test_a_draw_on_relative_cells_alone_floors_nothing():
         schedule=_schedule(),
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8),
     )
-    info = results.get_data_uncertainty_info(iron.id or 0)
+    info = results.get_data_uncertainty_info(iron.id)
     assert info["rates_floored"] == 0
     assert "rates_sampled" in info
 
@@ -292,7 +292,7 @@ def test_coverage_is_a_share_and_a_dilute_run_has_no_partials_off_the_rate():
         schedule=_schedule(),
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["cross_sections"]),
     )
-    info = results.get_data_uncertainty_info(iron.id or 0)
+    info = results.get_data_uncertainty_info(iron.id)
     # The key and its conversion are checked on every run: without covariance
     # it is an empty dict, which is valid.
     assert isinstance(info["partials_above_rate"], dict)
@@ -314,16 +314,15 @@ def test_coverage_is_a_share_and_a_dilute_run_has_no_partials_off_the_rate():
 
 def test_the_means_are_unchanged_by_asking_for_uncertainty():
     """Bit-identical, not merely close: the nominal pass is untouched."""
-    iron = _iron()
+    iron, other = _iron(), _iron()
     plain = iron.transmute(schedule=_schedule())
-    with_unc = _iron().transmute(
+    with_unc = other.transmute(
         schedule=_schedule(),
         data_uncertainty=yamc.DataUncertainty(seed=3, samples=8),
     )
-    mid = iron.id or 0
 
-    a = plain.get_material_nuclides(mid, 1)
-    b = with_unc.get_material_nuclides(mid, 1)
+    a = plain.get_material_nuclides(iron.id, 1)
+    b = with_unc.get_material_nuclides(other.id, 1)
     assert a.keys() == b.keys()
     for name in a:
         assert a[name] == b[name], f"{name} moved when uncertainty was switched on"
@@ -336,7 +335,7 @@ def test_the_starting_inventory_carries_no_uncertainty():
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8),
     )
     # Step 0 is the initial composition: an input, not a result.
-    assert results.get_nuclide_uncertainty(iron.id or 0, "Fe56", 0) == 0.0
+    assert results.get_nuclide_uncertainty(iron.id, "Fe56", 0) == 0.0
 
 
 def test_the_uncertainty_evolution_lines_up_with_the_density_evolution():
@@ -345,7 +344,7 @@ def test_the_uncertainty_evolution_lines_up_with_the_density_evolution():
         schedule=_schedule(),
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8),
     )
-    mid = iron.id or 0
+    mid = iron.id
     means = results.get_nuclide_evolution(mid, "Fe56")
     sigmas = results.get_nuclide_uncertainty_evolution(mid, "Fe56")
     assert len(means) == len(sigmas), "the two must zip without an index shift"
@@ -407,7 +406,7 @@ def test_the_report_says_which_sources_were_on():
             seed=1, samples=8, sources=["cross_sections"]
         ),
     )
-    assert results.get_data_uncertainty_info(iron.id or 0)["sources"] == ["cross_sections"]
+    assert results.get_data_uncertainty_info(iron.id)["sources"] == ["cross_sections"]
 
 
 # --- flux spectrum uncertainty ------------------------------------------------
@@ -471,7 +470,7 @@ def test_a_flux_error_moves_the_inventory_without_any_covariance():
     contribution cleanly: any spread at all must have come from the flux.
     """
     iron = _iron()
-    mid = iron.id or 0
+    mid = iron.id
     # 10% on every bin.
     sigma = [0.10 * f for f in MULTIGROUP_FLUX]
     results = iron.transmute(
@@ -486,7 +485,7 @@ def test_a_flux_error_moves_the_inventory_without_any_covariance():
     assert mean > 0.0
     assert spread > 0.0, "a 10% flux error must move Mn56"
 
-    info = results.get_data_uncertainty_info(iron.id or 0)
+    info = results.get_data_uncertainty_info(iron.id)
     assert info["spectra_with_flux_sigma"] == 1
     assert info["spectra_without_flux_sigma"] == 0
 
@@ -504,11 +503,11 @@ def test_a_spectrum_without_an_error_is_reported_not_assumed_exact():
             seed=1, samples=8, sources=["flux_spectrum"]
         ),
     )
-    info = results.get_data_uncertainty_info(iron.id or 0)
+    info = results.get_data_uncertainty_info(iron.id)
     assert info["spectra_without_flux_sigma"] == 1
     assert info["spectra_with_flux_sigma"] == 0
     assert info["has_gaps"] is True
-    assert results.get_nuclide_uncertainty(iron.id or 0, "Mn56", 1) == 0.0
+    assert results.get_nuclide_uncertainty(iron.id, "Mn56", 1) == 0.0
 
 
 # --- derived quantities -------------------------------------------------------
@@ -532,7 +531,7 @@ def _uncertain_results():
         schedule=_schedule(),
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["cross_sections"]),
     )
-    return results, iron.id or 0
+    return results, iron.id
 
 
 @pytest.mark.parametrize("quantity", ["activity", "decay_heat"])
@@ -628,7 +627,7 @@ def _no_volume_results():
         schedule=_schedule(),
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8),
     )
-    return results, iron.id or 0
+    return results, iron.id
 
 
 def test_the_contact_dose_is_the_one_derived_quantity_needing_no_volume():
@@ -710,7 +709,7 @@ def test_leaving_half_lives_out_is_reported():
             seed=1, samples=8, sources=["cross_sections"]
         ),
     )
-    info = results.get_data_uncertainty_info(iron.id or 0)
+    info = results.get_data_uncertainty_info(iron.id)
     assert "half-life" in info["not_perturbed"]
     assert info["half_lives_perturbed"] == []
     assert info["half_lives_sampled"] == 0
@@ -722,7 +721,7 @@ def test_asking_for_half_lives_reports_which_were_sampled():
         schedule=_schedule(),
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["half_life"]),
     )
-    info = results.get_data_uncertainty_info(iron.id or 0)
+    info = results.get_data_uncertainty_info(iron.id)
     assert "half-life" not in info["not_perturbed"]
     # Every reachable unstable nuclide is in exactly one of the three lists.
     perturbed = set(info["half_lives_perturbed"])
@@ -811,7 +810,7 @@ def test_correlated_bins_move_the_inventory_more_than_independent_ones():
                 seed=3, samples=256, sources=["flux_spectrum"]
             ),
         )
-        mid = iron.id or 0
+        mid = iron.id
         return results.get_nuclide_uncertainty(mid, "Fe57", 1) / results.get_nuclide_density(
             mid, "Fe57", 1
         )
@@ -835,7 +834,7 @@ def test_attribution_is_off_unless_asked():
         schedule=yamc.PulseSchedule([_pulse(sigma)]),
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=16, sources=["flux_spectrum"]),
     )
-    assert results.get_uncertainty_breakdown(iron.id or 0, "Mn56", 1) is None
+    assert results.get_uncertainty_breakdown(iron.id, "Mn56", 1) is None
 
 
 def test_the_breakdown_says_which_source_carries_the_variance():
@@ -847,7 +846,7 @@ def test_the_breakdown_says_which_source_carries_the_variance():
             seed=1, samples=64, sources=["flux_spectrum"], attribution=True
         ),
     )
-    mid = iron.id or 0
+    mid = iron.id
     b = results.get_uncertainty_breakdown(mid, "Mn56", 1)
     assert b["variance"] == pytest.approx(results.get_nuclide_uncertainty(mid, "Mn56", 1) ** 2)
     # One source: it carries everything, and nothing is left over.
@@ -894,7 +893,7 @@ def test_drawn_photon_lines_keep_the_nominal_spectrum_and_report_an_energy_sprea
         schedule=_schedule(),
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["decay_photon_lines"]),
     )
-    mid = iron.id or 0
+    mid = iron.id
     info = results.get_data_uncertainty_info(mid)
     for key in (
         "decay_photon_lines_perturbed",
@@ -948,7 +947,7 @@ def test_the_report_names_the_fission_yields_drawn_and_held():
         schedule=_schedule(),
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["fission_yield"]),
     )
-    info = results.get_data_uncertainty_info(iron.id or 0)
+    info = results.get_data_uncertainty_info(iron.id)
     for key in (
         "fission_yields_perturbed",
         "no_fission_yield_uncertainty",
@@ -972,7 +971,7 @@ def test_with_no_rate_drawn_the_repair_report_is_empty():
         schedule=_schedule(),
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["half_life"]),
     )
-    info = results.get_data_uncertainty_info(iron.id or 0)
+    info = results.get_data_uncertainty_info(iron.id)
     assert info["rates_sampled"] == 0
     assert info["covariance_repaired"] == []
     assert info["covariance_repairs"] == []

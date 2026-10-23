@@ -76,7 +76,7 @@ def main(fixtures):
         ]
     )
     results = iron.transmute(schedule=schedule)
-    steps = results.step_materials(iron.id or 0)
+    steps = results.step_materials(iron.id)
 
     print("step   activity (Bq)   decay heat (W)   largest")
     for i, material in enumerate(steps):

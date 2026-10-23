@@ -430,9 +430,9 @@ fn two_fill_geometry(
 
 #[test]
 fn two_fills_with_colliding_material_ids_are_rejected() {
-    // Different materials sharing an id across two fills (the default
-    // outcome of independent auto-assignment) must fail fast: material
-    // filters, plots and transmutation are keyed by material id.
+    // Different materials sharing an explicit id across two fills must fail
+    // fast: material filters, plots and transmutation are keyed by material
+    // id.
     let err = two_fill_geometry(
         (dummy_material("fuel", 2), dummy_material("moderator", 3)),
         (dummy_material("water", 2), dummy_material("oil", 3)),

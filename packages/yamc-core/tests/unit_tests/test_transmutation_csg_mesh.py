@@ -45,10 +45,12 @@ def method(request):
 
 
 def _make_iron():
+    # The results are looked up by this id.
     iron = yamc.Material(
         composition={"Fe56": 1.0},
         density=7.87,
         name="iron",
+        id=1,
         transmutable=True,
         temperature=294)
     return iron

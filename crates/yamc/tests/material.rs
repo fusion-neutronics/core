@@ -21,11 +21,7 @@ mod tests {
         assert_eq!(
             mat.get_material_id(),
             None,
-            "Default material_id should be None"
-        );
-        assert_eq!(
-            mat.material_id, None,
-            "Default material_id field should be None"
+            "Material::new is internal and does not allocate an id"
         );
     }
 
@@ -53,19 +49,18 @@ mod tests {
     fn test_material_with_id_constructor() {
         // Test creating material with specific ID
         let mut mat1 = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
-        mat1.material_id = Some(100);
+        mat1.set_material_id(100);
         assert_eq!(mat1.get_material_id(), Some(100));
-        assert_eq!(mat1.material_id, Some(100));
         assert_eq!(mat1.get_name(), None, "Constructor should not set name");
 
         // Test creating material with ID 0
         let mut mat2 = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
-        mat2.material_id = Some(0);
+        mat2.set_material_id(0);
         assert_eq!(mat2.get_material_id(), Some(0));
 
         // Test creating material with max ID
         let mut mat3 = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
-        mat3.material_id = Some(u32::MAX);
+        mat3.set_material_id(u32::MAX);
         assert_eq!(mat3.get_material_id(), Some(u32::MAX));
     }
 
@@ -74,7 +69,7 @@ mod tests {
         // Test that different materials have independent IDs
         let mut mat1 = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
         let mut mat2 = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
-        mat2.material_id = Some(50);
+        mat2.set_material_id(50);
 
         mat1.set_material_id(10);
         mat2.set_material_id(20);
@@ -1773,7 +1768,7 @@ mod tests {
 
         // Also check that new material defaults to false
         let mut material2 = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
-        material2.material_id = Some(42);
+        material2.set_material_id(42);
         assert!(!material2.get_transmutable());
     }
 

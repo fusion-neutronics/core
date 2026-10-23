@@ -96,7 +96,7 @@ def run_yamc_transmute(nuclide, with_anything=True):
     try:
         results = material.transmute(schedule=schedule)
         steps = []
-        for mat in results.step_materials(material.id or 0):
+        for mat in results.step_materials(material.id):
             steps.append(dict(mat.nuclides))
         rates = None
         if with_anything:
@@ -111,7 +111,7 @@ def run_yamc_transmute(nuclide, with_anything=True):
             "steps": steps,
             "mt5_rates": rates,
             "chain": reduced,
-            "branching_report": results.get_branching_report(material.id or 0, 0),
+            "branching_report": results.get_branching_report(material.id, 0),
         }
     finally:
         shutil.rmtree(tmp_chain, ignore_errors=True)

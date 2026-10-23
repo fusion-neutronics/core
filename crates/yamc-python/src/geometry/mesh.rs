@@ -248,11 +248,7 @@ fn extract_bbox(
     #[cfg(feature = "mesh")]
     if let Ok(mg) = domain.extract::<PyMeshGeometry>() {
         if let Some(mat) = material {
-            let mat_id = mat.internal.get_material_id().ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(
-                    "Material must have an ID set to filter MeshGeometry volumes",
-                )
-            })?;
+            let mat_id = mat.material_id()?;
             let bbox = mg.inner.bounding_box_for_material(mat_id).ok_or_else(|| {
                 pyo3::exceptions::PyValueError::new_err(format!(
                     "No MeshGeometry volumes match material ID {mat_id}"

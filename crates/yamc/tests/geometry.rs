@@ -142,10 +142,10 @@ mod tests {
 
         // Test duplicate material IDs
         let mut m1 = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
-        m1.material_id = Some(10);
+        m1.set_material_id(10);
         let mat1 = Arc::new(m1);
         let mut m2 = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
-        m2.material_id = Some(10); // Same ID - should fail
+        m2.set_material_id(10); // Same ID - should fail
         let mat2 = Arc::new(m2);
 
         let cell1 = Cell::new(Some(1), region.clone(), Some("cell1".to_string()), Some(0));
@@ -177,7 +177,9 @@ mod tests {
         };
         let region = Region::new_from_halfspace(HalfspaceType::Below(Arc::new(s1)));
 
-        // Materials without IDs should get auto-assigned IDs
+        // Materials without IDs get one from the process-wide allocator, so
+        // the values depend on what else this process allocated: assert order
+        // and uniqueness, not absolute ids.
         let mat1 = Arc::new(Material::new(HashMap::new(), "atom", "sum", None).unwrap());
         let mat2 = Arc::new(Material::new(HashMap::new(), "atom", "sum", None).unwrap());
 
@@ -188,12 +190,20 @@ mod tests {
             .expect("Auto-assign should succeed");
         let id1 = geometry.materials[0].get_material_id().unwrap();
         let id2 = geometry.materials[1].get_material_id().unwrap();
-        assert_eq!(id1, 1);
-        assert_eq!(id2, 2);
+        assert!(id1 < id2, "slot order: {id1} then {id2}");
 
-        // Mix of explicit and auto-assigned material IDs
+        // Mix of explicit and auto-assigned material IDs. The explicit id is
+        // the one the allocator would hand out next, so assigning the second
+        // material its own id must skip it.
+        let fresh = || {
+            Material::new(HashMap::new(), "atom", "sum", None)
+                .unwrap()
+                .assign_material_id(None)
+                .unwrap()
+        };
+        let next = fresh() + 1;
         let mut m3 = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
-        m3.material_id = Some(10);
+        m3.set_material_id(next);
         let mat3 = Arc::new(m3);
         let mat4 = Arc::new(Material::new(HashMap::new(), "atom", "sum", None).unwrap());
 
@@ -204,8 +214,15 @@ mod tests {
             Geometry::new(vec![cell3, cell4], vec![mat3, mat4]).expect("Mixed IDs should succeed");
         let id3 = geometry.materials[0].get_material_id().unwrap();
         let id4 = geometry.materials[1].get_material_id().unwrap();
-        assert_eq!(id3, 10);
-        assert_eq!(id4, 11);
+        assert_eq!(id3, next);
+        assert!(
+            ![id1, id2, next].contains(&id4),
+            "{id4} repeats an earlier id"
+        );
+
+        // A fallback id cannot collide with one handed out after it either.
+        let later = fresh();
+        assert!(![id1, id2, id3, id4].contains(&later));
     }
 
     #[test]
@@ -231,13 +248,13 @@ mod tests {
 
         // All materials have IDs assigned
         let mut m1 = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
-        m1.material_id = Some(1);
+        m1.set_material_id(1);
         let mat1 = Arc::new(m1);
         let mut m2 = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
-        m2.material_id = Some(2);
+        m2.set_material_id(2);
         let mat2 = Arc::new(m2);
         let mut m3 = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
-        m3.material_id = Some(3);
+        m3.set_material_id(3);
         let mat3 = Arc::new(m3);
 
         let cell1 = Cell::new(Some(1), region.clone(), Some("cell1".to_string()), Some(0));
@@ -423,7 +440,7 @@ mod tests {
         };
         let region = Region::new_from_halfspace(HalfspaceType::Below(Arc::new(sphere)));
         let mut mat_inner = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
-        mat_inner.material_id = Some(10);
+        mat_inner.set_material_id(10);
         let mat = Arc::new(mat_inner);
         let cell = Cell::new(Some(5), region, Some("sphere".to_string()), Some(0));
 

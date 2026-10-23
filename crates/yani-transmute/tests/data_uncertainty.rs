@@ -104,7 +104,7 @@ fn mn56_gets_a_nuclear_data_uncertainty() {
         return skip("mn56_gets_a_nuclear_data_uncertainty");
     };
     let mut material = iron(&dir);
-    let id = material.material_id.unwrap_or(0);
+    let id = material.get_material_id().unwrap_or(0);
 
     let results = run(
         &mut material,
@@ -168,7 +168,7 @@ fn the_means_are_bit_identical_with_and_without_uncertainty() {
         return skip("the_means_are_bit_identical_with_and_without_uncertainty");
     };
     let mut material = iron(&dir);
-    let id = material.material_id.unwrap_or(0);
+    let id = material.get_material_id().unwrap_or(0);
 
     let plain = run(&mut material, None);
     let with = run(
@@ -204,7 +204,7 @@ fn nothing_is_allocated_when_uncertainty_is_not_requested() {
         return skip("nothing_is_allocated_when_uncertainty_is_not_requested");
     };
     let mut material = iron(&dir);
-    let id = material.material_id.unwrap_or(0);
+    let id = material.get_material_id().unwrap_or(0);
 
     let results = run(&mut material, None);
     assert!(results.uncertainty.is_empty(), "no ensemble is built");
@@ -220,7 +220,7 @@ fn the_same_seed_reproduces_the_same_uncertainty() {
         return skip("the_same_seed_reproduces_the_same_uncertainty");
     };
     let mut material = iron(&dir);
-    let id = material.material_id.unwrap_or(0);
+    let id = material.get_material_id().unwrap_or(0);
     let mut at = |seed| {
         run(
             &mut material,
@@ -246,7 +246,7 @@ fn the_starting_inventory_has_no_uncertainty() {
         return skip("the_starting_inventory_has_no_uncertainty");
     };
     let mut material = iron(&dir);
-    let id = material.material_id.unwrap_or(0);
+    let id = material.get_material_id().unwrap_or(0);
     let results = run(
         &mut material,
         Some(&DataUncertainty {
@@ -313,7 +313,7 @@ fn the_per_replica_inventories_are_available() {
         return skip("the_per_replica_inventories_are_available");
     };
     let mut material = iron(&dir);
-    let id = material.material_id.unwrap_or(0);
+    let id = material.get_material_id().unwrap_or(0);
     let results = run(
         &mut material,
         Some(&DataUncertainty {
@@ -399,7 +399,7 @@ fn a_source_switched_off_contributes_nothing() {
         return skip("a_source_switched_off_contributes_nothing");
     };
     let mut material = iron(&dir);
-    let id = material.material_id.unwrap_or(0);
+    let id = material.get_material_id().unwrap_or(0);
 
     let with = run(
         &mut material,
@@ -455,7 +455,7 @@ fn adding_a_source_never_decreases_the_uncertainty() {
         return skip("adding_a_source_never_decreases_the_uncertainty");
     };
     let mut material = iron(&dir);
-    let id = material.material_id.unwrap_or(0);
+    let id = material.get_material_id().unwrap_or(0);
 
     let mut sigma = |sources: Vec<Source>| {
         run(
@@ -494,7 +494,7 @@ fn a_flux_error_moves_the_inventory_on_its_own() {
         return skip("a_flux_error_moves_the_inventory_on_its_own");
     };
     let mut material = iron(std::path::Path::new(&dir));
-    let id = material.material_id.unwrap_or(0);
+    let id = material.get_material_id().unwrap_or(0);
 
     // 10% on every bin.
     let total: f64 = FLUX.iter().sum();
@@ -558,7 +558,7 @@ fn a_spectrum_without_an_error_is_reported_not_assumed_exact() {
         return skip("a_spectrum_without_an_error_is_reported_not_assumed_exact");
     };
     let mut material = iron(std::path::Path::new(&dir));
-    let id = material.material_id.unwrap_or(0);
+    let id = material.get_material_id().unwrap_or(0);
 
     let results = transmute_material(
         &mut material,
@@ -686,7 +686,7 @@ fn the_inventory_spread_scales_with_the_flux_error() {
         return skip("the_inventory_spread_scales_with_the_flux_error");
     };
     let mut material = iron(std::path::Path::new(&dir));
-    let id = material.material_id.unwrap_or(0);
+    let id = material.get_material_id().unwrap_or(0);
     let total: f64 = FLUX.iter().sum();
 
     let mut sigma_at = |rel: f64| {
@@ -737,7 +737,7 @@ fn the_cross_section_attribution_names_the_evaluation() {
         return skip("the_cross_section_attribution_names_the_evaluation");
     };
     let mut material = iron(&dir);
-    let id = material.material_id.unwrap_or(0);
+    let id = material.get_material_id().unwrap_or(0);
     let results = run(
         &mut material,
         Some(&DataUncertainty {

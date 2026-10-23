@@ -68,7 +68,7 @@ fn iron_gas_matches_the_hand_calculation() {
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .set_cross_sections(library);
-    let id = iron.material_id.unwrap_or(0);
+    let id = iron.get_material_id().unwrap_or(0);
 
     let spectra = [MultigroupSpectrum {
         boundaries: vec![13.0e6, 15.0e6],

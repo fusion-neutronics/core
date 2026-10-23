@@ -618,6 +618,7 @@ fn a_transport_run_reads_the_reactions_a_channel_is_derived_from() {
         diagnostics: yani_transmute::CoupledDiagnostics::default(),
         isomer: None,
         replicas: Some(replicas),
+        draw_key: 0,
     };
     let request = yani_transmute::uncertainty::DataUncertainty {
         sources: vec![yani_transmute::uncertainty::Source::CrossSections],

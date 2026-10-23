@@ -456,9 +456,9 @@ class DataUncertainty:
         ...     schedule=sched,
         ...     data_uncertainty=yani.DataUncertainty(seed=42),
         ... )
-        >>> results.get_nuclide_density(iron.id or 0, "Mn56", 1)
+        >>> results.get_nuclide_density(iron.id, "Mn56", 1)
         1.234e-08
-        >>> results.get_nuclide_uncertainty(iron.id or 0, "Mn56", 1)
+        >>> results.get_nuclide_uncertainty(iron.id, "Mn56", 1)
         8.7e-10
     """
     @property
@@ -926,7 +926,10 @@ class Material:
     ``atom/barn-cm`` for a total atom density). For absolute per-nuclide atom
     densities use :meth:`Material.from_atom_densities`.
     
-    Materials may also carry a name, ID, volume (cm³), temperature (K), and a
+    Every Material has an ``id`` from construction: the one passed to the
+    constructor, or else a fresh one that no earlier material in the process
+    was given, so a ``yamc.Tally`` can filter on it before any geometry exists.
+    Materials may also carry a name, volume (cm³), temperature (K), and a
     ``transmutable`` flag that marks them for depletion by
     ``Model.simulate_transmutation`` (not needed for ``Material.transmute()``).
     
@@ -949,9 +952,18 @@ class Material:
         Set the name of the material
         """
     @property
-    def id(self) -> typing.Optional[builtins.int]:
+    def id(self) -> builtins.int:
         r"""
-        Get the material ID
+        The material's ID.
+        
+        Assigned when the material is built: the ``id`` given to the
+        constructor, or else a fresh one that no earlier material in the
+        process was given. Copies keep it, as do the materials a transmutation
+        result returns, which keep their original's. Setting it replaces it,
+        but a tally keeps the IDs it was built with. Two different Material
+        objects with one ID are refused where they meet, in a ``yamc.Geometry``
+        (its cells and their mesh fills) or a ``yamc.MeshGeometry``, and a
+        ``yamc.Tally`` refuses one ID listed twice.
         """
     @id.setter
     def id(self, value: builtins.int) -> None:
@@ -1063,7 +1075,8 @@ class Material:
             density_units (str): Density units: "g/cm3", "g/cc", "kg/m3", or
                 "atom/barn-cm" (total atom density; requires fraction_type="atom").
             name (Optional[str]): Name for the material.
-            id (Optional[int]): ID for the material.
+            id (Optional[int]): ID for the material. Defaults to a fresh one,
+                which no earlier material was given.
             fraction_type (str): "atom" for atom fractions or "mass" for mass fractions.
             transmutable (bool): Mark this material for depletion by
                 ``Model.simulate_transmutation``. Not needed for
@@ -1089,7 +1102,8 @@ class Material:
         Args:
             atom_densities (dict[str, float]): nuclide name -> atoms/barn-cm.
             name (Optional[str]): Name for the material.
-            id (Optional[int]): ID for the material.
+            id (Optional[int]): ID for the material. Defaults to a fresh one,
+                which no earlier material was given.
             transmutable (bool): Mark this material for depletion by
                 ``Model.simulate_transmutation``. Not needed for
                 ``Material.transmute()``, which depletes whatever it is called on.
@@ -1491,7 +1505,7 @@ class Material:
         
         Returns:
             TransmutationResults: The same object ``Model.simulate_transmutation``
-                returns, keyed by this material's ``id`` (0 if it has none).
+                returns, keyed by this material's ``id``.
                 ``get_material(id, step)`` takes step 0 as the initial
                 composition and step ``i`` as the state after schedule step
                 ``i - 1``; ``get_reaction_rates(id, step)`` indexes the schedule
@@ -1589,10 +1603,10 @@ class Material:
             ...     yani.Cooldown(duration=(7, "d")),
             ... ])
             >>> results = iron.transmute(schedule=sched)
-            >>> final = results.get_final_material(iron.id or 0)
+            >>> final = results.get_final_material(iron.id)
             >>> # the isomeric split of the dominant channel, as two edges of one
             >>> # reaction: the sum is sigma * phi * N and the ratio is f_m
-            >>> results.get_reaction_rates(iron.id or 0, 0)["W186"]["(n,2n)"]
+            >>> results.get_reaction_rates(iron.id, 0)["W186"]["(n,2n)"]
             [('W185', 1.1e-08), ('W185_m1', 4.6e-07)]
         """
     def release_nuclear_data(self) -> None:
@@ -1633,8 +1647,11 @@ class Material:
             materials (List[Material]): Materials to mix.
             fractions (List[float]): Mixing fractions (one per material).
             fraction_type (str): "atom", "mass", or "volume".
-            name (Optional[str]): Name for the new material.
-            id (Optional[int]): ID for the new material.
+            name (Optional[str]): Name for the new material. If omitted, one
+                is built from the components' names and fractions, such as
+                ``"steel(0.9000)_unnamed(0.1000)"``.
+            id (Optional[int]): ID for the new material. Defaults to a fresh
+                one, which no earlier material was given.
         
         Returns:
             Material: A new material with the mixed composition and density.
@@ -3660,6 +3677,10 @@ class TransmutationResults:
         r"""
         Get material composition at a specific timestep.
         
+        The material keeps ``material_id``, so it can stand in for the
+        original in a model. Placed beside the original it needs an id of its
+        own, since a geometry refuses two different materials with one id.
+        
         Args:
             material_id: Material ID number.
             step: Timestep index (0 = initial).
@@ -3673,7 +3694,8 @@ class TransmutationResults:
         
         Indexed as ``timesteps``, so entry ``i`` is the state at the end of step
         ``i`` and pairs with ``get_reaction_rates(material_id, i)``. This is the
-        list ``Material.transmute`` used to return on its own.
+        list ``Material.transmute`` used to return on its own. Each keeps
+        ``material_id``, as ``get_material`` says.
         
         Args:
             material_id: Material ID number.
@@ -3684,7 +3706,8 @@ class TransmutationResults:
         """
     def get_final_material(self, material_id: builtins.int) -> typing.Optional[Material]:
         r"""
-        Final composition for a material, after the last step.
+        Final composition for a material, after the last step. It keeps
+        ``material_id``, as ``get_material`` says.
         
         Args:
             material_id: Material ID number.
@@ -4788,10 +4811,13 @@ def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | t
     were shared. The materials' solves then run in parallel.
     
     Args:
-        materials (list[Material]): The materials, each with a distinct ``id``,
-            since the results are keyed by it. As with ``Material.transmute``,
-            the cross sections each needs are loaded into it and kept, and the
-            composition is not modified.
+        materials (list[Material]): The materials, each with a distinct
+            ``id``, since the results are keyed by it. Every material has one
+            from construction; two share one only when one was given the
+            other's explicitly or is a copy of it, as a material a
+            transmutation result returns is of its original. As with
+            ``Material.transmute``, the cross sections each needs are loaded
+            into it and kept, and the composition is not modified.
         schedules (PulseSchedule | list[PulseSchedule]): One schedule for every
             material, or one per material in the same order. Each material's
             schedule carries its own spectra (the pulse sources) and flux

@@ -27,7 +27,10 @@ def _chain():
     yamc.transmutation_fission_yields = CHAIN
 
 
-def _run(*, seed=42, particles=4000, method="independent", data_uncertainty=None, threads=None):
+def _run(
+    *, seed=42, particles=4000, method="independent", data_uncertainty=None, threads=None,
+    material_id=MAT_ID,
+):
     """A thermal-driven iron sphere, whose dominant product is Fe57."""
     material = yamc.Material(
         composition={"Fe56": 1.0},
@@ -36,7 +39,7 @@ def _run(*, seed=42, particles=4000, method="independent", data_uncertainty=None
         transmutable=True,
         volume=4188.79,  # 4/3 pi 10^3
         temperature=294,
-        id=MAT_ID,
+        id=material_id,
     )
     material.read_nuclear_data({"Fe56": os.path.join(TESTS_DIR, "Fe56.arrow")})
     sphere = yamc.Sphere(radius=10.0, boundary="vacuum")
@@ -76,6 +79,20 @@ def test_the_statistical_sigma_predicts_the_seed_to_seed_spread():
         predicted.append(results.get_nuclide_uncertainty(MAT_ID, "Fe57", 1) ** 2)
     ratio = np.var(means, ddof=1) / np.mean(predicted)
     assert 0.35 <= ratio <= 2.2, f"measured over predicted variance {ratio:.3f}"
+
+
+def test_the_statistical_draw_does_not_depend_on_the_material_id():
+    """An id the user did not choose depends on what else the process built,
+    so building the model again gives its material a new one. The same seeds
+    must still give the same sigma, bit for bit, as under an explicit id."""
+    request_ = yamc.DataUncertainty(seed=5, samples=32, sources=["statistical"])
+    sigmas = []
+    for material_id in (None, None, MAT_ID):
+        results = _run(threads=1, data_uncertainty=request_, material_id=material_id)
+        [used] = results.material_ids
+        sigmas.append(results.get_nuclide_uncertainty(used, "Fe57", 1))
+    assert sigmas[0] > 0.0
+    assert sigmas[0] == sigmas[1] == sigmas[2], sigmas
 
 
 @pytest.mark.parametrize(

@@ -72,6 +72,25 @@ fn cell_filter_ids(cells: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
         .collect()
 }
 
+/// Resolve a `Material` or sequence of `Material`s into the `MaterialFilter`
+/// that bins over them, with the core's reason as a `ValueError` when it
+/// cannot (an empty list, or two materials sharing an id).
+fn material_filter(materials: &Bound<'_, PyAny>) -> PyResult<MaterialFilter> {
+    let py_mats: Vec<pyo3::PyRef<'_, PyMaterial>> =
+        if let Ok(list) = materials.extract::<Vec<pyo3::PyRef<'_, PyMaterial>>>() {
+            list
+        } else if let Ok(single) = materials.extract::<pyo3::PyRef<'_, PyMaterial>>() {
+            vec![single]
+        } else {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "materials must be a Material or a list of Material instances",
+            ));
+        };
+    let mat_refs: Vec<&yamc_materials::material::Material> =
+        py_mats.iter().map(|m| &m.internal).collect();
+    MaterialFilter::from_materials(&mat_refs).map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyTally {
@@ -277,33 +296,7 @@ impl PyTally {
         }
 
         if let Some(ms) = materials {
-            let py_mats: Vec<pyo3::PyRef<'_, PyMaterial>> =
-                if let Ok(list) = ms.extract::<Vec<pyo3::PyRef<'_, PyMaterial>>>() {
-                    list
-                } else if let Ok(single) = ms.extract::<pyo3::PyRef<'_, PyMaterial>>() {
-                    vec![single]
-                } else {
-                    return Err(pyo3::exceptions::PyTypeError::new_err(
-                        "materials must be a Material or a list of Material instances",
-                    ));
-                };
-            if py_mats.is_empty() {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "materials must contain at least one Material",
-                ));
-            }
-            let mat_refs: Vec<&yamc_materials::material::Material> =
-                py_mats.iter().map(|m| &m.internal).collect();
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                MaterialFilter::from_materials(&mat_refs)
-            })) {
-                Ok(filter) => filters.push(Filter::Material(filter)),
-                Err(_) => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "Cannot filter on material with no ID - assign an id first",
-                    ));
-                }
-            }
+            filters.push(Filter::Material(material_filter(ms)?));
         }
 
         if let Some(m) = mesh {
@@ -899,7 +892,8 @@ impl PyTally {
         })
     }
 
-    /// Set the material filter. Accepts a single Material or a list of Materials.
+    /// Set the material filter. Accepts a single Material or a list of
+    /// Materials. A value that is refused leaves the filter as it was.
     #[setter]
     pub fn set_materials(&mut self, materials: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
         let tally = Arc::get_mut(&mut self.inner).ok_or_else(|| {
@@ -907,35 +901,10 @@ impl PyTally {
                 "Cannot modify tally: multiple references exist",
             )
         })?;
+        let filter = materials.map(material_filter).transpose()?;
         tally.filters.retain(|f| !matches!(f, Filter::Material(_)));
-        if let Some(ms) = materials {
-            let py_mats: Vec<pyo3::PyRef<'_, PyMaterial>> =
-                if let Ok(list) = ms.extract::<Vec<pyo3::PyRef<'_, PyMaterial>>>() {
-                    list
-                } else if let Ok(single) = ms.extract::<pyo3::PyRef<'_, PyMaterial>>() {
-                    vec![single]
-                } else {
-                    return Err(pyo3::exceptions::PyTypeError::new_err(
-                        "materials must be a Material or a list of Material instances",
-                    ));
-                };
-            if py_mats.is_empty() {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "materials must contain at least one Material",
-                ));
-            }
-            let mat_refs: Vec<&yamc_materials::material::Material> =
-                py_mats.iter().map(|m| &m.internal).collect();
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                MaterialFilter::from_materials(&mat_refs)
-            })) {
-                Ok(filter) => tally.filters.push(Filter::Material(filter)),
-                Err(_) => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "Cannot filter on material with no ID - assign an id first",
-                    ));
-                }
-            }
+        if let Some(filter) = filter {
+            tally.filters.push(Filter::Material(filter));
         }
         Ok(())
     }

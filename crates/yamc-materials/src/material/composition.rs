@@ -236,14 +236,17 @@ impl Material {
     /// * `materials` -- slice of references to materials to mix
     /// * `fractions` -- mixing fractions (one per material)
     /// * `fraction_type` -- `"atom"` (atom), `"mass"` (mass), or `"volume"` (volume)
-    /// * `name` -- optional name for the result (auto-generated if `None`)
-    /// * `material_id` -- optional ID for the result
+    /// * `name` -- optional name for the result. If `None`, it is built from the
+    ///   components' names and fractions, an unnamed component reading
+    ///   `unnamed`: never its id, which for an id the user did not choose
+    ///   depends on what else the process built.
+    ///
+    /// The result has no id, like any other material built in Rust.
     pub fn mix_materials(
         materials: &[&Material],
         fractions: &[f64],
         fraction_type: &str,
         name: Option<String>,
-        material_id: Option<u32>,
     ) -> Result<Material, String> {
         // Validate fraction_type
         let fraction_type = match fraction_type {
@@ -397,19 +400,11 @@ impl Material {
             let parts: Vec<String> = materials
                 .iter()
                 .zip(fractions.iter())
-                .map(|(m, f)| {
-                    let default_name = format!("mat_{}", m.material_id.unwrap_or(0));
-                    let mname = m.name.as_deref().unwrap_or(&default_name);
-                    format!("{}({:.4})", mname, f)
-                })
+                .map(|(m, f)| format!("{}({f:.4})", m.name.as_deref().unwrap_or("unnamed")))
                 .collect();
             parts.join("_")
         });
         result.name = Some(final_name);
-
-        if let Some(id) = material_id {
-            result.material_id = Some(id);
-        }
 
         Ok(result)
     }

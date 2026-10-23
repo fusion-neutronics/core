@@ -3,7 +3,7 @@ use crate::material::PyMaterial;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use yamc::geometry::mesh::MeshGeometry;
 
@@ -108,6 +108,10 @@ pub struct PyMeshGeometry {
     mat_map: HashMap<String, Arc<yamc_materials::material::Material>>,
     /// Implicit complement material stored for rebuild.
     ic_mat: Option<Arc<yamc_materials::material::Material>>,
+    /// The Material objects given (the dict's values, then the implicit
+    /// complement), so a Geometry this fills can refuse two different
+    /// objects with one id across its cells and fills.
+    pub(crate) py_materials: Arc<Vec<Py<PyMaterial>>>,
     /// Current graveyard offset.
     graveyard_offset: Option<f64>,
     /// Contact tolerance passed by the caller, re-applied on rebuild.
@@ -133,67 +137,21 @@ impl PyMeshGeometry {
                 "contact_tolerance must be a non-negative number of cm, got {tol}"
             )));
         }
-        // Mirror PyGeometry::new: auto-assign material IDs to any Material
-        // that doesn't have one yet, mutating the user's Python objects in
-        // place. This means subsequent calls like
-        // `mesh_geom.bounding_box_for_material(li_mat)` see the assigned ID
-        // without the user having to call `set_material_id` manually.
-        //
-        // Two passes over the dict: first collect already-assigned IDs (and
-        // dedup the Materials that need IDs by Python object identity, in
-        // case the user maps two names to the same Material), then assign
-        // the next free integer ID to each one.
-        let mut used_material_ids: HashSet<u32> = HashSet::new();
-        let mut seen_ptrs: HashSet<usize> = HashSet::new();
-        let mut materials_needing_ids: Vec<Bound<'py, PyMaterial>> = Vec::new();
-
-        // Helper closure: process one PyMaterial reference (from the dict
-        // or the implicit-complement option). Records its ID if set, or
-        // schedules it for assignment if not -- deduped by pointer.
-        let mut visit = |py_mat: &Bound<'py, PyMaterial>| -> PyResult<()> {
-            let ptr = py_mat.as_ptr() as usize;
-            if !seen_ptrs.insert(ptr) {
-                return Ok(());
-            }
-            let mat_borrow = py_mat.try_borrow()?;
-            match mat_borrow.internal.get_material_id() {
-                Some(id) => {
-                    if !used_material_ids.insert(id) {
-                        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                            "Duplicate Material id {id} found. All material IDs must be unique."
-                        )));
-                    }
-                }
-                None => {
-                    drop(mat_borrow);
-                    materials_needing_ids.push(py_mat.clone());
-                }
-            }
-            Ok(())
-        };
-
+        // Two different Material objects with one id are refused. One object
+        // under several names (or also as the implicit complement) is one
+        // material, so materials are told apart by Python object identity.
+        let mut material_ids = crate::geometry::DistinctMaterialIds::default();
+        let mut py_materials: Vec<Py<PyMaterial>> = Vec::with_capacity(materials.len() + 1);
         for (_key, value) in materials.iter() {
             let py_mat: Bound<'py, PyMaterial> = value.cast_into()?;
-            visit(&py_mat)?;
+            material_ids.check(&py_mat)?;
+            py_materials.push(py_mat.unbind());
         }
         if let Some(ic) = implicit_complement_material {
-            visit(ic)?;
+            material_ids.check(ic)?;
+            py_materials.push(ic.clone().unbind());
         }
 
-        let mut next_material_id = 1u32;
-        for py_mat in &materials_needing_ids {
-            while used_material_ids.contains(&next_material_id) {
-                next_material_id += 1;
-            }
-            py_mat
-                .try_borrow_mut()?
-                .internal
-                .set_material_id(next_material_id);
-            used_material_ids.insert(next_material_id);
-            next_material_id += 1;
-        }
-
-        // Build the Arc<Material> map now that every Material has an ID.
         let mut mat_map: HashMap<String, Arc<yamc_materials::material::Material>> = HashMap::new();
         for (key, value) in materials.iter() {
             let name: String = key.extract()?;
@@ -264,6 +222,7 @@ impl PyMeshGeometry {
             arrow_data,
             mat_map,
             ic_mat,
+            py_materials: Arc::new(py_materials),
             graveyard_offset,
             contact_tolerance,
         })
@@ -411,18 +370,16 @@ impl PyMeshGeometry {
     /// Bounding box of volumes matching a specific material.
     ///
     /// Args:
-    ///     material: A :class:`Material` with an ``id`` set.
+    ///     material: A :class:`Material`, matched to volumes by its ``id``.
     ///
     /// Returns:
     ///     BoundingBox: Axis-aligned bounding box enclosing only the volumes
     ///         that use the given material.
     ///
     /// Raises:
-    ///     ValueError: If the material has no ID or no volumes match.
+    ///     ValueError: If no volumes match.
     pub fn bounding_box_for_material(&self, material: &PyMaterial) -> PyResult<PyBoundingBox> {
-        let mat_id = material.internal.get_material_id().ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err("Material has no id -- assign one first")
-        })?;
+        let mat_id = material.material_id()?;
         let bbox = self
             .inner
             .bounding_box_for_material(mat_id)

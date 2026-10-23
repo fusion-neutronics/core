@@ -124,7 +124,7 @@ fn run(threads: usize, uncertainty: bool) -> Answer {
         )
         .expect("transmute");
 
-        let id = material.material_id.unwrap_or(0);
+        let id = material.get_material_id().unwrap_or(0);
         let n_steps = results.num_steps();
 
         let mut densities = Vec::new();

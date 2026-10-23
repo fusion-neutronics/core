@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use yamc_materials::Material;
 
 /// Material filter for tallies -- filters/bins events by which material they occur in.
@@ -15,35 +16,41 @@ pub struct MaterialFilter {
 impl MaterialFilter {
     /// Create a `MaterialFilter` from a single material.
     ///
-    /// # Panics
-    /// Panics if the material has no material_id assigned.
-    pub fn new(material: &Material) -> Self {
-        let material_id = material.get_material_id().expect(
-            "Cannot create MaterialFilter for material with no ID - assign a material_id first",
-        );
-        Self {
-            material_ids: vec![material_id],
-        }
+    /// # Errors
+    /// If the material has no id.
+    pub fn new(material: &Material) -> Result<Self, String> {
+        Self::from_materials(&[material])
     }
 
-    /// Create a `MaterialFilter` from a list of materials (one bin per material).
+    /// Create a `MaterialFilter` from a list of materials, one bin per material
+    /// in the order given.
     ///
-    /// # Panics
-    /// Panics if any material has no material_id assigned, or if the list is empty.
-    pub fn from_materials(materials: &[&Material]) -> Self {
-        assert!(
-            !materials.is_empty(),
-            "MaterialFilter requires at least one material",
-        );
-        let material_ids = materials
-            .iter()
-            .map(|m| {
-                m.get_material_id().expect(
-                    "Cannot create MaterialFilter for material with no ID - assign a material_id first",
-                )
-            })
-            .collect();
-        Self { material_ids }
+    /// # Errors
+    /// If the list is empty, a material has no id, or two materials share an
+    /// id: the bins are told apart by id, so the second would never score.
+    pub fn from_materials(materials: &[&Material]) -> Result<Self, String> {
+        if materials.is_empty() {
+            return Err("a material filter needs at least one material".into());
+        }
+        let mut positions: HashMap<u32, usize> = HashMap::with_capacity(materials.len());
+        let mut material_ids = Vec::with_capacity(materials.len());
+        for (position, material) in materials.iter().enumerate() {
+            let id = material.get_material_id().ok_or_else(|| {
+                let label = match material.get_name() {
+                    Some(name) => format!("material {name:?}"),
+                    None => format!("the material at position {position}"),
+                };
+                format!("cannot filter on {label}: it has no id; set one with `set_material_id`")
+            })?;
+            if let Some(first) = positions.insert(id, position) {
+                return Err(format!(
+                    "materials at positions {first} and {position} both have id {id}; a \
+                     material filter has one bin per id, so give each material its own"
+                ));
+            }
+            material_ids.push(id);
+        }
+        Ok(Self { material_ids })
     }
 
     /// Number of material bins this filter produces.

@@ -66,7 +66,7 @@ fn fluxes(
         .into_iter()
         .map(|m| {
             let mut t = Tally::new();
-            t.filters = vec![Filter::Material(MaterialFilter::new(m))];
+            t.filters = vec![Filter::Material(MaterialFilter::new(m).unwrap())];
             t.scores = vec![Score::Flux(FluxScore)];
             t.reset_accumulation();
             Arc::new(t)
@@ -129,7 +129,7 @@ fn delta_tracking_reaches_a_mesh_from_a_source_outside_it() {
         )
         .expect("load box.arrow");
         let mut t = Tally::new();
-        t.filters = vec![Filter::Material(MaterialFilter::new(&iron))];
+        t.filters = vec![Filter::Material(MaterialFilter::new(&iron).unwrap())];
         t.scores = vec![Score::Flux(FluxScore)];
         t.reset_accumulation();
         let tally = Arc::new(t);

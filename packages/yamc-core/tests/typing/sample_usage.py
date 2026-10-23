@@ -23,6 +23,9 @@ assert_type(mat, yamc.Material)
 mat_sum = yamc.Material.from_atom_densities({"Fe": 1.0})
 assert_type(mat_sum, yamc.Material)
 
+# every material is given an id when it is built, so the id is never None
+assert_type(mat.id, int)
+
 tally = yamc.Tally(scores=["flux"])
 assert_type(tally, yamc.Tally)
 

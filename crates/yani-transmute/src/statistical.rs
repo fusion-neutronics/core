@@ -96,17 +96,18 @@ impl StatisticalRates {
     /// error of a few percent it is vanishingly rare, and counting it says when
     /// it is not.
     ///
-    /// `material_id` keys the draw to the material whose tally this is, so
-    /// two materials' draws are independent. It is the material's id rather
-    /// than its position in a call, so the draw does not depend on the order
-    /// materials are visited in.
+    /// `key` tells the draw of this tally's error apart from those of the
+    /// other materials in the run, so their draws are independent
+    /// ([`crate::TransportTallied::draw_key`]). It belongs to the material
+    /// rather than to its position in a call, so the draw does not depend on
+    /// the order materials are visited in.
     pub fn sample(
         &self,
         base_seed: u64,
-        material_id: u32,
+        key: u32,
         replica: u64,
     ) -> (ReactionRates, PartialRates, usize) {
-        let deltas = self.deviations(base_seed, material_id, replica);
+        let deltas = self.deviations(base_seed, key, replica);
         let mut totals: ReactionRates = HashMap::new();
         let mut partials: PartialRates = HashMap::new();
         let mut floored = 0;
@@ -137,14 +138,14 @@ impl StatisticalRates {
 
     /// One replica's draw as deviations from the tallied means, in the order
     /// of the covariance's labels.
-    fn deviations(&self, base_seed: u64, material_id: u32, replica: u64) -> Vec<f64> {
+    fn deviations(&self, base_seed: u64, key: u32, replica: u64) -> Vec<f64> {
         let m = self.len();
         let replica_seed = yamc_rng::history_seed(base_seed, replica);
-        // A second level under the statistical stream, rather than the id
+        // A second level under the statistical stream, rather than the key
         // folded into the stream tag, so the tag stays clear of every other
-        // replica stream whatever the id.
+        // replica stream whatever the key.
         let stream = yamc_rng::secondary_seed(replica_seed, STATISTICAL_STREAM);
-        let mut state = yamc_rng::expand_seed(yamc_rng::secondary_seed(stream, material_id));
+        let mut state = yamc_rng::expand_seed(yamc_rng::secondary_seed(stream, key));
         let z = crate::covariance_sample::standard_normals(&mut state, m);
         (0..m)
             .map(|i| {
@@ -170,12 +171,12 @@ impl StatisticalRates {
     pub fn add_to(
         &self,
         base_seed: u64,
-        material_id: u32,
+        key: u32,
         replica: u64,
         totals: &mut ReactionRates,
         partials: &mut PartialRates,
     ) -> usize {
-        let deltas = self.deviations(base_seed, material_id, replica);
+        let deltas = self.deviations(base_seed, key, replica);
         let mut floored = 0;
         let mut add = |value: &mut f64, delta: f64| {
             *value += delta;
@@ -320,9 +321,9 @@ mod tests {
             vec![0.81],
         ));
         let n = 20000;
-        let draw = |s: &StatisticalRates, id: u32| -> Vec<f64> {
+        let draw = |s: &StatisticalRates, key: u32| -> Vec<f64> {
             (0..n as u64)
-                .map(|r| s.sample(11, id, r).0["Fe56"]["(n,p)"])
+                .map(|r| s.sample(11, key, r).0["Fe56"]["(n,p)"])
                 .collect()
         };
         let (xa, xb) = (draw(&a, 1), draw(&b, 2));
@@ -345,7 +346,7 @@ mod tests {
             xb.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
             draw(&b, 2).iter().map(|x| x.to_bits()).collect::<Vec<_>>()
         );
-        // The id is what separates them: the same tally under the same id
+        // The key is what separates them: the same tally under the same key
         // draws the same deviates.
         let first = a.sample(11, 1, 0).0["Fe56"]["(n,p)"];
         assert_eq!(

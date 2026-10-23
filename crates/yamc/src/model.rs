@@ -482,7 +482,7 @@ pub struct Model {
 
 /// How an error names a material: by name, else by id, else by its slot.
 fn material_label(material: &yamc_materials::material::Material, slot: usize) -> String {
-    match (&material.name, material.material_id) {
+    match (&material.name, material.get_material_id()) {
         (Some(name), _) => format!("material '{name}'"),
         (None, Some(id)) => format!("material {id}"),
         (None, None) => format!("material in slot {slot}"),
@@ -3349,10 +3349,12 @@ impl Model {
                     material.validate_for_transmutation().map_err(|e| {
                         format!(
                             "Material {:?} in cell {:?} failed validation: {}",
-                            material.material_id, cell.cell_id, e
+                            material.get_material_id(),
+                            cell.cell_id,
+                            e
                         )
                     })?;
-                    let mat_id = material.material_id.ok_or_else(|| {
+                    let mat_id = material.get_material_id().ok_or_else(|| {
                         format!(
                             "Transmutable material in cell {:?} has no material_id set",
                             cell.cell_id

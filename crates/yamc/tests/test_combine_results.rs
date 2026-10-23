@@ -121,6 +121,7 @@ fn run_to_results(built: (Model, TransportSettings)) -> SimulationResults {
         fingerprint: model.fingerprint().unwrap(),
         data_libraries: model.data_libraries(),
         data_releases: model.data_releases(),
+        material_slots: model.material_slots(),
         compute: "cpu".into(),
         yamc_version: "test".into(),
         mpi_size: 1,

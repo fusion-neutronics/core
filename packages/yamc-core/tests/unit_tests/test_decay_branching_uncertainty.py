@@ -61,7 +61,7 @@ def _info(sources):
         schedule=_schedule(),
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=sources),
     )
-    return results.get_data_uncertainty_info(iron.id or 0)
+    return results.get_data_uncertainty_info(iron.id)
 
 
 def test_decay_branching_is_an_available_source_and_on_by_default():

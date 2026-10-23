@@ -32,6 +32,7 @@ def _run(method, *, rate=1.0e18, schedule=None, seed=42):
         composition={"Fe56": 1.0},
         density=7.87,
         name="iron",
+        id=MAT_ID,
         transmutable=True,
         volume=4188.79,  # 4/3 pi 10^3
         temperature=294,

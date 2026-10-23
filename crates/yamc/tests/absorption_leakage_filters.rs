@@ -125,7 +125,7 @@ fn test_absorption_leakage_filters() {
     )))];
     tally2.name = Some("absorption in cell 2".to_string());
 
-    let material_filter1 = Filter::Material(MaterialFilter::new(&mat1_arc));
+    let material_filter1 = Filter::Material(MaterialFilter::new(&mat1_arc).unwrap());
     let mut tally1_mat = Tally::new();
     tally1_mat.filters = vec![material_filter1.clone()];
     tally1_mat.scores = vec![Score::ReactionRate(ReactionRateScore::from_mt(Mt::new(
@@ -133,7 +133,7 @@ fn test_absorption_leakage_filters() {
     )))];
     tally1_mat.name = Some("absorption in material 1 (MaterialFilter)".to_string());
 
-    let material_filter2 = Filter::Material(MaterialFilter::new(&mat2_arc));
+    let material_filter2 = Filter::Material(MaterialFilter::new(&mat2_arc).unwrap());
     let mut tally2_mat = Tally::new();
     tally2_mat.filters = vec![material_filter2.clone()];
     tally2_mat.scores = vec![Score::ReactionRate(ReactionRateScore::from_mt(Mt::new(

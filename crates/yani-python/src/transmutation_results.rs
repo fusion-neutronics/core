@@ -1519,6 +1519,10 @@ impl PyTransmutationResults {
 
     /// Get material composition at a specific timestep.
     ///
+    /// The material keeps ``material_id``, so it can stand in for the
+    /// original in a model. Placed beside the original it needs an id of its
+    /// own, since a geometry refuses two different materials with one id.
+    ///
     /// Args:
     ///     material_id: Material ID number.
     ///     step: Timestep index (0 = initial).
@@ -1536,7 +1540,8 @@ impl PyTransmutationResults {
     ///
     /// Indexed as ``timesteps``, so entry ``i`` is the state at the end of step
     /// ``i`` and pairs with ``get_reaction_rates(material_id, i)``. This is the
-    /// list ``Material.transmute`` used to return on its own.
+    /// list ``Material.transmute`` used to return on its own. Each keeps
+    /// ``material_id``, as ``get_material`` says.
     ///
     /// Args:
     ///     material_id: Material ID number.
@@ -1554,7 +1559,8 @@ impl PyTransmutationResults {
             .collect()
     }
 
-    /// Final composition for a material, after the last step.
+    /// Final composition for a material, after the last step. It keeps
+    /// ``material_id``, as ``get_material`` says.
     ///
     /// Args:
     ///     material_id: Material ID number.

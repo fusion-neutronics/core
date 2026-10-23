@@ -592,6 +592,7 @@ impl Model {
                                 t.resonance_parameters = resonance_methods(material);
                                 t
                             }),
+                            draw_key: slot,
                         },
                     );
                 }
@@ -1037,12 +1038,14 @@ impl Model {
         // above, which is untouched and so bit-identical either way.
         if let Some(request) = uncertainty {
             // The cross-material covariance links nuclides across the
-            // materials, so it is read from all of them at once, in id order.
-            let mut resampled: Vec<(&u32, &Material)> = initial_for_replicas
+            // materials, so it is read from all of them at once, in slot
+            // order (each one's draw key): ids would make the order depend on
+            // what else the process built.
+            let mut resampled: Vec<(u32, &Material)> = initial_for_replicas
                 .iter()
-                .filter(|(id, _)| tallied.contains_key(*id))
+                .filter_map(|(id, m)| tallied.get(id).map(|t| (t.draw_key, m)))
                 .collect();
-            resampled.sort_by_key(|(id, _)| **id);
+            resampled.sort_by_key(|(key, _)| *key);
             let materials: Vec<&Material> = resampled.iter().map(|(_, m)| *m).collect();
             let cross = yani_transmute::transport_cross_material(&materials, &chain, request)?;
             for (mat_id, material) in &initial_for_replicas {
@@ -1513,6 +1516,7 @@ mod tests {
                 .with_material(&material),
             isomer: tallies.get_isomer_productions(1, volume, 1.0),
             replicas: tallies.replica_tallied(1, volume),
+            draw_key: 0,
         };
         let mut initial = material.clone();
         initial.nuclides = material.get_atoms_per_barn_cm().unwrap();
