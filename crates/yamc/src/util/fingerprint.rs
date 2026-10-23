@@ -6,10 +6,11 @@
 //! and the per-isotope/per-element nuclear-data provenance. It excludes
 //! the run-varying `verbose` knob and the skipped diagnostics (the other
 //! run parameters -- seed, particle count, threads, time budget -- are
-//! per-call `TransportSettings` and never on the Model at all), plus the
+//! per-call `TransportSettings` and never on the Model at all), the
 //! `tallies` subtree (tallies are
 //! observation-only and may legitimately differ between combinable
-//! runs).
+//! runs), and the material ids, which label materials rather than change
+//! what is sampled.
 //!
 //! `combine_results` refuses to pool results whose fingerprints differ:
 //! two runs only estimate the same quantities if they sampled the same
@@ -124,6 +125,9 @@ impl Model {
             for field in EXCLUDED_FIELDS {
                 map.remove(field);
             }
+            if let Some(geometry) = map.get_mut("geometry") {
+                drop_material_ids(geometry);
+            }
         }
         let combined = serde_json::json!({
             "data": self.data_libraries(),
@@ -133,6 +137,23 @@ impl Model {
             .map_err(|e| format!("model fingerprint serialization failed: {e}"))?;
         let digest = Sha256::digest(canonical.as_bytes());
         Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
+    }
+}
+
+/// Remove every material id from the serialized geometry.
+///
+/// Ids label materials; they are not physics. A cell reaches its material by
+/// slot, and the tallies, which do filter by id, are compared on their own when
+/// results are combined. Two builds of one model that number their materials
+/// differently sample the same game, so their runs must still combine.
+fn drop_material_ids(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.remove("material_id");
+            map.values_mut().for_each(drop_material_ids);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(drop_material_ids),
+        _ => {}
     }
 }
 
@@ -158,6 +179,50 @@ fn short_data_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::short_data_path;
+    use crate::geo::{BoundaryType, HalfspaceType, Region, Surface, SurfaceKind};
+    use crate::geometry::cell::Cell;
+    use crate::geometry::csg::Geometry;
+    use crate::model::Model;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use yamc_materials::material::Material;
+
+    fn sphere_model(material_id: Option<u32>, density: f64) -> Model {
+        let mut material = Material::new(
+            HashMap::from([("Li6".to_string(), 1.0)]),
+            "atom",
+            "g/cm3",
+            Some(density),
+        )
+        .unwrap();
+        if let Some(id) = material_id {
+            material.set_material_id(id);
+        }
+        let sphere = Arc::new(Surface {
+            surface_id: Some(1),
+            kind: SurfaceKind::Sphere {
+                x0: 0.0,
+                y0: 0.0,
+                z0: 0.0,
+                radius: 10.0,
+            },
+            boundary: BoundaryType::Vacuum,
+            name: None,
+        });
+        let region = Region::new_from_halfspace(HalfspaceType::Below(sphere));
+        let cell = Cell::new(Some(1), region, None, Some(0));
+        let geometry = Geometry::new(vec![cell], vec![Arc::new(material)]).unwrap();
+        Model::new(geometry, vec![], vec![])
+    }
+
+    #[test]
+    fn material_ids_are_not_part_of_the_fingerprint() {
+        let reference = sphere_model(Some(1), 2.0).fingerprint().unwrap();
+        assert_eq!(sphere_model(Some(7), 2.0).fingerprint().unwrap(), reference);
+        assert_eq!(sphere_model(None, 2.0).fingerprint().unwrap(), reference);
+        // The material itself still is.
+        assert_ne!(sphere_model(Some(1), 2.5).fingerprint().unwrap(), reference);
+    }
 
     #[test]
     fn short_data_path_keeps_last_two_components() {
