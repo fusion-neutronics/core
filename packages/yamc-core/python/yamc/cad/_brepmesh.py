@@ -12,6 +12,7 @@ scene CDT (see :mod:`yamc.cad._scene_extract`), where BRepMesh is poor.
 
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
 from OCP.BRep import BRep_Tool
+from OCP.BRepTools import BRepTools
 from OCP.TopLoc import TopLoc_Location
 
 
@@ -51,14 +52,18 @@ def brepmesh_face_meshes(pa, face_ids, tolerance, angular_tolerance, parallel=Fa
 
     Runs ``BRepMesh_IncrementalMesh`` once on the imprinted compound (so the
     discretization is harmonized across faces) and extracts each requested
-    face's triangulation in 3D. Returns ``{face_id: (vertices, triangles)}``
-    with face-local 0-based triangle indices, degenerate triangles included
-    (:func:`~yamc.cad._scene_extract.assemble_surface_mesh` drops them).
+    face's triangulation in 3D. Triangulations already on the shapes (a
+    previous mesh of the same assembly, which shares them) are dropped first:
+    BRepMesh would keep any finer than asked. Returns ``{face_id: (vertices,
+    triangles)}`` with face-local 0-based triangle indices, degenerate
+    triangles included (:func:`~yamc.cad._scene_extract.assemble_surface_mesh`
+    drops them).
     """
     face_ids = list(face_ids)
     if not face_ids:
         return {}
 
+    BRepTools.Clean_s(pa.imprinted_compound)
     run_brepmesh(pa.imprinted_compound, tolerance, angular_tolerance, parallel)
 
     result = {}
