@@ -104,6 +104,8 @@ def _occ_signed_volume(shape):
     # of ordinary CAD.
     box = Bnd_Box()
     BRepBndLib.Add_s(occ, box, False)
+    if box.IsVoid():  # no faces, so no volume
+        return 0.0
     x0, y0, z0, x1, y1, z1 = box.Get()
     size = ((x1 - x0) ** 2 + (y1 - y0) ** 2 + (z1 - z0) ** 2) ** 0.5
     apex = gp_Pnt(
