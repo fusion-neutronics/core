@@ -324,7 +324,7 @@ fn the_covered_share_is_of_the_shielded_rate() {
     // shares over every channel the chain drives, only capture covered.
     let total_rate: f64 = shielded["Fe56"].values().sum();
     let expected_total = shielded["Fe56"]["(n,gamma)"] * expected / total_rate;
-    let id = m.material_id.unwrap_or(0);
+    let id = m.get_material_id().unwrap_or(0);
     let total: f64 = FLUX.iter().sum();
     let results = transmute_material_shielded(
         &mut m,
@@ -495,7 +495,7 @@ fn a_zero_covariance_gives_zero_spread_under_shielding() {
             .map(|&(mt, _)| block(mt, correlated(&grid, 0.0)))
             .collect(),
     );
-    let id = m.material_id.unwrap_or(0);
+    let id = m.get_material_id().unwrap_or(0);
     let shielding = Shielding::new(CHORD_CM).expect("a positive chord");
     let total: f64 = FLUX.iter().sum();
     let results = transmute_material_shielded(

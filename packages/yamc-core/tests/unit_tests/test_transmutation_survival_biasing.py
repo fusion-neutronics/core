@@ -21,6 +21,7 @@ def _transmute(survival_biasing):
         composition={"Fe56": 1.0},
         density=7.87,
         name="iron",
+        id=1,
         transmutable=True,
         volume=4188.79,  # 4/3 pi 10^3
         temperature=294)

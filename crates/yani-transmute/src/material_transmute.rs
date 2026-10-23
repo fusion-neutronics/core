@@ -276,7 +276,7 @@ pub fn transmute_materials(
 
     let ids: Vec<u32> = cases
         .iter()
-        .map(|case| case.material.material_id.unwrap_or(0))
+        .map(|case| case.material.get_material_id().unwrap_or(0))
         .collect();
     if plural {
         let mut seen: HashMap<u32, usize> = HashMap::new();
@@ -1663,7 +1663,7 @@ pub fn transport_replicas(
     // The material's id, the key its tally and its results are stored under,
     // and so the same whatever order the materials are visited in. A material
     // with no id answers to 0, as in `transmute_materials`.
-    let material_id = initial.material_id.unwrap_or(0);
+    let material_id = initial.get_material_id().unwrap_or(0);
     let statistics = tallied.statistics.as_ref().map(|c| TransportStatistics {
         rates: crate::statistical::StatisticalRates::new(c),
         material_id,

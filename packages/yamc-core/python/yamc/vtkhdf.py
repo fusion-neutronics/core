@@ -468,7 +468,7 @@ def cell_to_vtkhdf(
     if want_mat:
         mat = cell.material
         if mat is not None:
-            mid = mat.id if mat.id is not None else -1
+            mid = mat.id
 
     # The per-voxel inside/outside test runs in the Rust core; Python paints
     # the resolved cell/material id onto the returned mask.

@@ -83,6 +83,42 @@ pub struct MeshGeometry {
 /// sources and tally meshes that sit a little outside the meshed parts.
 pub const DEFAULT_GRAVEYARD_OFFSET: f64 = 10.0;
 
+/// Give every material in `materials`, and the implicit complement material,
+/// an id: the ones without draw a fresh id from the process-wide allocator.
+///
+/// In name order, with the implicit complement last, so the ids do not depend
+/// on `HashMap` iteration order, which differs from run to run. A material
+/// reached through several names (or also used as the implicit complement)
+/// is one material and gets one id.
+fn assign_ids(
+    materials: &mut HashMap<String, Arc<Material>>,
+    implicit_complement_material: &mut Option<Arc<Material>>,
+) -> Result<(), String> {
+    let mut identified: HashMap<*const Material, Arc<Material>> = HashMap::new();
+    let mut identify = |material: &mut Arc<Material>| -> Result<(), String> {
+        if material.get_material_id().is_some() {
+            return Ok(());
+        }
+        let original = Arc::as_ptr(material);
+        if let Some(done) = identified.get(&original) {
+            *material = Arc::clone(done);
+            return Ok(());
+        }
+        Arc::make_mut(material).assign_material_id(None)?;
+        identified.insert(original, Arc::clone(material));
+        Ok(())
+    };
+    let mut by_name: Vec<(&String, &mut Arc<Material>)> = materials.iter_mut().collect();
+    by_name.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    for (_, material) in by_name {
+        identify(material)?;
+    }
+    if let Some(material) = implicit_complement_material {
+        identify(material)?;
+    }
+    Ok(())
+}
+
 impl MeshGeometry {
     /// Build a `MeshGeometry` from a loaded mesh and a material map.
     ///
@@ -96,44 +132,25 @@ impl MeshGeometry {
     ///   `dist_collision = INFINITY`). `Some(mat)` assigns a real material
     ///   for air/coolant interactions in the gaps between mesh volumes.
     ///
+    /// A material without an id gets a fresh one from the process-wide
+    /// allocator, in name order, so the ids do not depend on the map's
+    /// iteration order.
+    ///
     /// # Errors
     /// Returns an error if any mesh volume references a material name that
     /// is not present in `materials`.
     pub fn new(
         mesh: yamt::MeshGeometry,
         materials: &HashMap<String, Arc<Material>>,
-        implicit_complement_material: Option<Arc<Material>>,
+        mut implicit_complement_material: Option<Arc<Material>>,
     ) -> Result<Self, String> {
         let num_volumes = mesh.topology.num_volumes;
 
         let mut cells = Vec::with_capacity(num_volumes as usize + 1);
         let mut volume_ids = Vec::with_capacity(num_volumes as usize + 1);
 
-        // Auto-assign material IDs to materials that don't have one.
-        // Build a mutable copy of the map so we can set IDs via Arc::make_mut.
-        let mut materials: HashMap<String, Arc<Material>> = materials.clone();
-        let mut used_mat_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        for mat in materials.values() {
-            if let Some(id) = mat.get_material_id() {
-                used_mat_ids.insert(id);
-            }
-        }
-        if let Some(ref ic) = implicit_complement_material
-            && let Some(id) = ic.get_material_id()
-        {
-            used_mat_ids.insert(id);
-        }
-        let mut next_mat_id: u32 = used_mat_ids.iter().copied().max().map_or(1, |m| m + 1);
-        for mat in materials.values_mut() {
-            if mat.get_material_id().is_none() {
-                while used_mat_ids.contains(&next_mat_id) {
-                    next_mat_id += 1;
-                }
-                Arc::make_mut(mat).set_material_id(next_mat_id);
-                used_mat_ids.insert(next_mat_id);
-                next_mat_id += 1;
-            }
-        }
+        let mut materials = materials.clone();
+        assign_ids(&mut materials, &mut implicit_complement_material)?;
 
         // Dummy region for mesh cells -- CSG operations are never evaluated.
         let dummy_region = make_dummy_region();
@@ -611,7 +628,7 @@ mod tests {
         )
         .unwrap();
         water.set_name("water");
-        water.material_id = Some(1);
+        water.set_material_id(1);
 
         let mut materials = HashMap::new();
         materials.insert("water".to_string(), Arc::new(water));
@@ -652,7 +669,7 @@ mod tests {
         )
         .unwrap();
         water.set_name("water");
-        water.material_id = Some(1);
+        water.set_material_id(1);
 
         let mut materials = HashMap::new();
         materials.insert("water".to_string(), Arc::new(water));
@@ -699,7 +716,7 @@ mod tests {
         )
         .unwrap();
         water.set_name("water");
-        water.material_id = Some(1);
+        water.set_material_id(1);
         let mut materials = HashMap::new();
         materials.insert("water".to_string(), Arc::new(water));
 
@@ -727,7 +744,7 @@ mod tests {
         )
         .unwrap();
         water.set_name("water");
-        water.material_id = Some(1);
+        water.set_material_id(1);
         let mut materials = HashMap::new();
         materials.insert("water".to_string(), Arc::new(water));
 
@@ -762,7 +779,7 @@ mod tests {
         )
         .unwrap();
         water.set_name("water");
-        water.material_id = Some(1);
+        water.set_material_id(1);
         let mut materials = HashMap::new();
         materials.insert("water".to_string(), Arc::new(water));
 
@@ -795,7 +812,7 @@ mod tests {
         )
         .unwrap();
         water.set_name("water");
-        water.material_id = Some(1);
+        water.set_material_id(1);
         let mut materials = HashMap::new();
         materials.insert("water".to_string(), Arc::new(water));
 
@@ -825,7 +842,7 @@ mod tests {
         )
         .unwrap();
         water.set_name("water");
-        water.material_id = Some(1);
+        water.set_material_id(1);
         let mut materials = HashMap::new();
         materials.insert("water".to_string(), Arc::new(water));
 
@@ -837,5 +854,41 @@ mod tests {
         assert_eq!(v1["kind"], "mesh");
         assert_eq!(v1["num_volumes"], 1);
         assert!(v1["volume_materials"].is_array());
+    }
+
+    #[test]
+    fn materials_without_ids_get_them_in_name_order() {
+        // The map's iteration order differs from process to process; the ids
+        // must not. The allocator only counts up, so name order shows as
+        // increasing ids whatever else this process allocates meanwhile.
+        let bare = || Arc::new(Material::new(HashMap::new(), "atom", "sum", None).unwrap());
+        let shared = bare();
+        let mut explicit = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
+        explicit.set_material_id(7);
+        let explicit = Arc::new(explicit);
+        let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
+        let mut materials: HashMap<String, Arc<Material>> =
+            names.iter().map(|n| (n.to_string(), bare())).collect();
+        materials.insert("shared_1".into(), Arc::clone(&shared));
+        materials.insert("shared_2".into(), Arc::clone(&shared));
+        materials.insert("explicit".into(), explicit);
+
+        let mut with_ids = materials.clone();
+        let mut complement = Some(shared);
+        assign_ids(&mut with_ids, &mut complement).unwrap();
+        let id = |name: &str| with_ids[name].get_material_id().unwrap();
+
+        let in_name_order: Vec<u32> = names.iter().map(|n| id(n)).collect();
+        assert!(
+            in_name_order.windows(2).all(|w| w[0] < w[1]),
+            "{in_name_order:?}"
+        );
+        assert!(id("h") < id("shared_1"));
+        // One material under two names, and as the complement: one id.
+        assert_eq!(id("shared_1"), id("shared_2"));
+        assert_eq!(complement.unwrap().get_material_id(), Some(id("shared_1")));
+        assert_eq!(id("explicit"), 7);
+        // The caller's materials are left as they were.
+        assert!(materials["a"].get_material_id().is_none());
     }
 }

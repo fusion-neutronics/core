@@ -52,7 +52,7 @@ class MaterialCollection:
         
         Returns:
             Material: A new material carrying the collection's composition,
-            density and name.
+            density and name, and a fresh id.
         
         Raises:
             KeyError: If no entry has that name. The message suggests near
@@ -109,7 +109,8 @@ class MaterialCollection:
             volume (Optional[float]): Volume in cm³.
             transmutable (bool): Mark for depletion by
                 ``Model.simulate_transmutation``.
-            id (Optional[int]): Material ID.
+            id (Optional[int]): Material ID. If omitted, a fresh one unique in
+                the process is assigned.
         
         Returns:
             Material: The material with the overrides applied.

@@ -855,7 +855,7 @@ impl ReplicaContext {
         let mut transmutation_slots = HashMap::new();
         for (slot, material) in materials.iter().enumerate() {
             let layout = transmutation
-                .zip(material.material_id)
+                .zip(material.get_material_id())
                 .and_then(|(t, id)| t.layout(id));
             let tables = Self::material(
                 material,
@@ -867,7 +867,7 @@ impl ReplicaContext {
                 &cross,
                 &partners,
             )?;
-            if let (Some(id), Some(_)) = (material.material_id, tables.as_ref().and(layout)) {
+            if let (Some(id), Some(_)) = (material.get_material_id(), tables.as_ref().and(layout)) {
                 transmutation_slots.entry(id).or_insert(slot);
             }
             out.push(tables);

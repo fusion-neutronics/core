@@ -236,9 +236,9 @@ use yani_transmute::uncertainty::{
 ///     ...     schedule=sched,
 ///     ...     data_uncertainty=yamc.DataUncertainty(seed=42),
 ///     ... )
-///     >>> results.get_nuclide_density(iron.id or 0, "Mn56", 1)
+///     >>> results.get_nuclide_density(iron.id, "Mn56", 1)
 ///     1.234e-08
-///     >>> results.get_nuclide_uncertainty(iron.id or 0, "Mn56", 1)
+///     >>> results.get_nuclide_uncertainty(iron.id, "Mn56", 1)
 ///     8.7e-10
 #[gen_stub_pyclass]
 // `from_py_object` because this is taken as an ARGUMENT to

@@ -473,9 +473,8 @@ pub(crate) fn expand_fills(
         // a fill material may share an id with a user material or another
         // fill's material only when it is the same material (matching
         // names); genuine collisions between different materials are
-        // rejected. This matters across fills: each MeshGeometry
-        // auto-assigns ids independently, so two separately built fills
-        // hand out overlapping ids by default.
+        // rejected. Automatic ids never collide, so this catches explicit
+        // ids that repeat across fills.
         let material_base = materials.len() as u32;
         for mat in &mesh_materials {
             let (id, name) = (mat.get_material_id(), mat.get_name());

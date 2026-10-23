@@ -25,10 +25,11 @@ use crate::transmutation_results::PyTransmutationResults;
 /// were shared. The materials' solves then run in parallel.
 ///
 /// Args:
-///     materials (list[Material]): The materials, each with a distinct ``id``,
-///         since the results are keyed by it. As with ``Material.transmute``,
-///         the cross sections each needs are loaded into it and kept, and the
-///         composition is not modified.
+///     materials (list[Material]): The materials. The results are keyed by
+///         their ``id``, which every material is given when it is built, so
+///         two clash only if one was given the other's explicitly. As with
+///         ``Material.transmute``, the cross sections each needs are loaded
+///         into it and kept, and the composition is not modified.
 ///     schedules (PulseSchedule | list[PulseSchedule]): One schedule for every
 ///         material, or one per material in the same order. Each material's
 ///         schedule carries its own spectra (the pulse sources) and flux

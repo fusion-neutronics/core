@@ -68,16 +68,18 @@ impl PyMaterialCollection {
     ///
     /// Returns:
     ///     Material: A new material carrying the collection's composition,
-    ///     density and name.
+    ///     density and name, and a fresh id.
     ///
     /// Raises:
     ///     KeyError: If no entry has that name. The message suggests near
     ///         matches.
     fn __getitem__(&self, name: &str) -> PyResult<PyMaterial> {
         let entry = self.lookup(name)?;
-        Ok(PyMaterial {
-            internal: entry.to_material().map_err(PyValueError::new_err)?,
-        })
+        let mut internal = entry.to_material().map_err(PyValueError::new_err)?;
+        internal
+            .assign_material_id(None)
+            .map_err(PyValueError::new_err)?;
+        Ok(PyMaterial { internal })
     }
 
     /// Number of materials in the collection.
@@ -145,7 +147,8 @@ impl PyMaterialCollection {
     ///     volume (Optional[float]): Volume in cm³.
     ///     transmutable (bool): Mark for depletion by
     ///         ``Model.simulate_transmutation``.
-    ///     id (Optional[int]): Material ID.
+    ///     id (Optional[int]): Material ID. If omitted, a fresh one unique in
+    ///         the process is assigned.
     ///
     /// Returns:
     ///     Material: The material with the overrides applied.
@@ -183,7 +186,6 @@ impl PyMaterialCollection {
         if let Some(n) = name {
             internal.name = Some(n);
         }
-        internal.material_id = id;
         internal.transmutable = transmutable;
         if let Some(v) = volume {
             internal.volume(Some(v)).map_err(PyValueError::new_err)?;
@@ -194,6 +196,9 @@ impl PyMaterialCollection {
             }
             internal.set_temperature(format!("{t}"));
         }
+        internal
+            .assign_material_id(id)
+            .map_err(PyValueError::new_err)?;
         Ok(PyMaterial { internal })
     }
 

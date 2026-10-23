@@ -79,7 +79,7 @@ fn fraction_remaining(m: &Material, chain: Arc<HashMap<String, yani::ChainNuclid
     )
     .expect("transmute");
     let final_material = out
-        .get_final_material(m.material_id.unwrap_or(0))
+        .get_final_material(m.get_material_id().unwrap_or(0))
         .expect("one material per step");
     *final_material.nuclides.get("Fe56").unwrap_or(&0.0)
 }

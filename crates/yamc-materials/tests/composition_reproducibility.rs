@@ -151,7 +151,7 @@ fn a_mixed_material_is_bit_identical_across_builds() {
         let build = || {
             let a = iron();
             let b = water();
-            Material::mix_materials(&[&a, &b], &[0.6, 0.4], fraction_type, None, None).expect("mix")
+            Material::mix_materials(&[&a, &b], &[0.6, 0.4], fraction_type, None).expect("mix")
         };
 
         let first = build();

@@ -15,9 +15,12 @@ use yamc_materials::material::Material;
 /// ``atom/barn-cm`` for a total atom density). For absolute per-nuclide atom
 /// densities use :meth:`Material.from_atom_densities`.
 ///
-/// Materials may also carry a name, ID, volume (cm³), temperature (K), and a
-/// ``transmutable`` flag that marks them for depletion by
-/// ``Model.simulate_transmutation`` (not needed for ``Material.transmute()``).
+/// Every Material has an ``id``, unique in the process: the one passed to the
+/// constructor, or else one assigned when it is built, so a :class:`Tally` can
+/// filter on it before any geometry exists. Materials may also carry a name,
+/// volume (cm³), temperature (K), and a ``transmutable`` flag that marks them
+/// for depletion by ``Model.simulate_transmutation`` (not needed for
+/// ``Material.transmute()``).
 ///
 /// Examples:
 ///     >>> import yamc
@@ -116,6 +119,14 @@ fn expand_composition_entry(
 }
 
 impl PyMaterial {
+    /// The material's id. Every constructor assigns one and copies keep it, so
+    /// this fails only for a material that reached Python some other way.
+    pub fn material_id(&self) -> PyResult<u32> {
+        self.internal
+            .get_material_id()
+            .ok_or_else(|| PyValueError::new_err("material has no id"))
+    }
+
     /// Load the neutron cross sections a neutron query needs, or say why
     /// there are none.
     ///
@@ -192,16 +203,22 @@ impl PyMaterial {
         self.internal.name = Some(name);
     }
 
-    /// Get the material ID
+    /// The material's ID, unique in the process.
+    ///
+    /// Assigned when the material is built: the ``id`` given to the
+    /// constructor, or else a fresh one that no material in the process has
+    /// been given. Setting it replaces it; two different materials with one
+    /// ID are refused when they meet in a :class:`Geometry`,
+    /// :class:`MeshGeometry` or :class:`Tally`.
     #[getter]
-    fn id(&self) -> Option<u32> {
-        self.internal.material_id
+    fn id(&self) -> PyResult<u32> {
+        self.material_id()
     }
 
     /// Set the material ID
     #[setter(id)]
     fn set_id(&mut self, id: u32) {
-        self.internal.material_id = Some(id);
+        self.internal.set_material_id(id);
     }
 
     /// Whether this material is marked for depletion by ``Model.simulate_transmutation``.
@@ -262,7 +279,8 @@ impl PyMaterial {
     ///     density_units (str): Density units: "g/cm3", "g/cc", "kg/m3", or
     ///         "atom/barn-cm" (total atom density; requires fraction_type="atom").
     ///     name (Optional[str]): Name for the material.
-    ///     id (Optional[int]): ID for the material.
+    ///     id (Optional[int]): ID for the material. If omitted, a fresh one
+    ///         unique in the process is assigned.
     ///     fraction_type (str): "atom" for atom fractions or "mass" for mass fractions.
     ///     transmutable (bool): Mark this material for depletion by
     ///         ``Model.simulate_transmutation``. Not needed for
@@ -364,9 +382,6 @@ impl PyMaterial {
         if let Some(n) = name {
             internal.name = Some(n);
         }
-        if let Some(id) = id {
-            internal.material_id = Some(id);
-        }
         internal.transmutable = transmutable;
         if let Some(v) = volume {
             internal.volume(Some(v)).map_err(PyValueError::new_err)?;
@@ -377,6 +392,10 @@ impl PyMaterial {
             }
             internal.set_temperature(format!("{}", t));
         }
+        // Last, so a material that fails validation takes no id.
+        internal
+            .assign_material_id(id)
+            .map_err(PyValueError::new_err)?;
 
         Ok(PyMaterial { internal })
     }
@@ -391,7 +410,8 @@ impl PyMaterial {
     /// Args:
     ///     atom_densities (dict[str, float]): nuclide name -> atoms/barn-cm.
     ///     name (Optional[str]): Name for the material.
-    ///     id (Optional[int]): ID for the material.
+    ///     id (Optional[int]): ID for the material. If omitted, a fresh one
+    ///         unique in the process is assigned.
     ///     transmutable (bool): Mark this material for depletion by
     ///         ``Model.simulate_transmutation``. Not needed for
     ///         ``Material.transmute()``, which depletes whatever it is called on.
@@ -441,9 +461,6 @@ impl PyMaterial {
         if let Some(n) = name {
             internal.name = Some(n);
         }
-        if let Some(id) = id {
-            internal.material_id = Some(id);
-        }
         internal.transmutable = transmutable;
         if let Some(v) = volume {
             internal.volume(Some(v)).map_err(PyValueError::new_err)?;
@@ -454,6 +471,9 @@ impl PyMaterial {
             }
             internal.set_temperature(format!("{}", t));
         }
+        internal
+            .assign_material_id(id)
+            .map_err(PyValueError::new_err)?;
         Ok(PyMaterial { internal })
     }
 
@@ -573,7 +593,7 @@ impl PyMaterial {
             .unwrap_or_else(|| "Material".to_string());
 
         let mut meta: Vec<(&str, String)> = Vec::new();
-        if let Some(id) = self.internal.material_id {
+        if let Some(id) = self.internal.get_material_id() {
             meta.push(("id", format!("{id}")));
         }
         match self.internal.density {
@@ -1318,7 +1338,7 @@ impl PyMaterial {
     ///
     /// Returns:
     ///     TransmutationResults: The same object ``Model.simulate_transmutation``
-    ///         returns, keyed by this material's ``id`` (0 if it has none).
+    ///         returns, keyed by this material's ``id``.
     ///         ``get_material(id, step)`` takes step 0 as the initial
     ///         composition and step ``i`` as the state after schedule step
     ///         ``i - 1``; ``get_reaction_rates(id, step)`` indexes the schedule
@@ -1416,10 +1436,10 @@ impl PyMaterial {
     ///     ...     yamc.Cooldown(duration=(7, "d")),
     ///     ... ])
     ///     >>> results = iron.transmute(schedule=sched)
-    ///     >>> final = results.get_final_material(iron.id or 0)
+    ///     >>> final = results.get_final_material(iron.id)
     ///     >>> # the isomeric split of the dominant channel, as two edges of one
     ///     >>> # reaction: the sum is sigma * phi * N and the ratio is f_m
-    ///     >>> results.get_reaction_rates(iron.id or 0, 0)["W186"]["(n,2n)"]
+    ///     >>> results.get_reaction_rates(iron.id, 0)["W186"]["(n,2n)"]
     ///     [('W185', 1.1e-08), ('W185_m1', 4.6e-07)]
     #[pyo3(signature = (schedule, data_uncertainty = None, self_shielding_chord = None, self_shielding_shape = None, displacement_damage = false, displacement_energies = None, product_threshold = 1e-12))]
     #[allow(clippy::too_many_arguments)]
@@ -1535,7 +1555,8 @@ impl PyMaterial {
     ///     fractions (List[float]): Mixing fractions (one per material).
     ///     fraction_type (str): "atom", "mass", or "volume".
     ///     name (Optional[str]): Name for the new material.
-    ///     id (Optional[int]): ID for the new material.
+    ///     id (Optional[int]): ID for the new material. If omitted, a fresh
+    ///         one unique in the process is assigned.
     ///
     /// Returns:
     ///     Material: A new material with the mixed composition and density.
@@ -1553,9 +1574,12 @@ impl PyMaterial {
         id: Option<u32>,
     ) -> PyResult<Self> {
         let mat_refs: Vec<&Material> = materials.iter().map(|m| &m.internal).collect();
-        let result = Material::mix_materials(&mat_refs, &fractions, &fraction_type, name, id)
+        let mut internal = Material::mix_materials(&mat_refs, &fractions, &fraction_type, name)
             .map_err(PyValueError::new_err)?;
-        Ok(PyMaterial { internal: result })
+        internal
+            .assign_material_id(id)
+            .map_err(PyValueError::new_err)?;
+        Ok(PyMaterial { internal })
     }
 }
 

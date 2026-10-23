@@ -1479,7 +1479,7 @@ fn translate_materials(
         let mat_name = material
             .name
             .clone()
-            .unwrap_or_else(|| format!("material_{:?}", material.material_id));
+            .unwrap_or_else(|| format!("material_{:?}", material.get_material_id()));
 
         let mut weighted: Vec<(&yamc_nuclide::Nuclide, f64)> = Vec::new();
         for (name, density) in &atoms_per_bcm {

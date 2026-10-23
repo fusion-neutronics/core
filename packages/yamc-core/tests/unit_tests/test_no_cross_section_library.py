@@ -81,7 +81,7 @@ def test_a_decay_only_schedule_needs_no_cross_sections():
         composition={"Fe55": 1.0}, density=7.87, temperature=294, volume=1.0
     )
     results = iron.transmute(yamc.PulseSchedule([yamc.Cooldown(duration=DAY)]))
-    assert results.get_final_material(0).activity() > 0.0
+    assert results.get_final_material(iron.id).activity() > 0.0
 
 
 def test_simulate_transport_refuses():

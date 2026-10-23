@@ -302,7 +302,7 @@ fn schedule_on(spectra: [usize; 2], flux: f64) -> Vec<TransmuteStep> {
 /// steps use `spectra` out of `n` copies of one spectrum.
 fn fe56_contribution(data: &Path, n: usize, spectra: [usize; 2]) -> f64 {
     let mut m = material("Fe56", data);
-    let id = m.material_id.unwrap_or(0);
+    let id = m.get_material_id().unwrap_or(0);
     let groups = vec![1.0e-5, 0.625, 1.0e5, 2.0e7];
     let spectrum = MultigroupSpectrum {
         masses: fusion(&groups),

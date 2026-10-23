@@ -1533,7 +1533,7 @@ fn build_xs_score_per_mt(
         let mat_name = material
             .name
             .clone()
-            .unwrap_or_else(|| format!("material_{:?}", material.material_id));
+            .unwrap_or_else(|| format!("material_{:?}", material.get_material_id()));
         let mut weighted: Vec<(&yamc_nuclide::Nuclide, f64)> = Vec::new();
         for (name, density) in &atoms_per_bcm {
             let Some(nuclide_arc) = material.nuclide_data.get(name) else {
@@ -4807,7 +4807,7 @@ fn build_coupled_photon_inputs(
         let mat_name = material
             .name
             .clone()
-            .unwrap_or_else(|| format!("material_{:?}", material.material_id));
+            .unwrap_or_else(|| format!("material_{:?}", material.get_material_id()));
         let mut weighted: Vec<(&yamc_nuclide::Nuclide, f64)> = Vec::new();
         for (name, density) in &atoms_per_bcm {
             let Some(nuclide_arc) = material.nuclide_data.get(name) else {
@@ -5062,7 +5062,7 @@ fn coupled_xs_error(
     let mat_name = material
         .name
         .clone()
-        .unwrap_or_else(|| format!("material_{:?}", material.material_id));
+        .unwrap_or_else(|| format!("material_{:?}", material.get_material_id()));
     GpuDispatchError::Translate(super::error::GpuTranslateError::CellRegionUnsupported {
         cell_id: None,
         reason: format!("coupled photon-production XS extraction for `{mat_name}`: {reason}"),

@@ -1,11 +1,9 @@
-"""Verify that yamc.MeshGeometry auto-assigns material IDs.
+"""Material ids in yamc.MeshGeometry.
 
-The constructor takes ``&Bound<PyDict>`` and mutates the user's Python
-``Material`` objects in place. Taking ``HashMap<String, PyMaterial>`` would
-clone them, so any material ID it assigned would live only on the clone: the
-user's ``Material`` would keep a ``None`` ID, and a later call like
-``mesh_geom.bounding_box_for_material(li_mat)`` would raise
-``ValueError: Material has no id``.
+Every Material has an id from construction, so a MeshGeometry neither assigns
+nor changes any: it keeps the ids the materials were built with, and refuses
+two different materials that share one. Absolute automatic ids depend on what
+ran earlier in the process, so these tests compare ids rather than assert them.
 
 Lives in ``unit_tests/`` (not ``cad/``) so it runs in CI, which installs no
 cadquery.
@@ -17,39 +15,37 @@ import yamc
 TWO_REGION_ARROW = "crates/yamt/tests/data/two_region.arrow"
 
 
-def _dummy_material(name):
+def _dummy_material(name, **kwargs):
     """Minimal Material (no nuclear data) used purely to test ID handling."""
     return yamc.Material(
-        composition={"H": 1.0}, density=1.0, density_units="g/cc", name=name,
+        composition={"H": 1.0}, density=1.0, density_units="g/cc", name=name, **kwargs,
     )
 
 
-def test_materials_get_ids_assigned_in_user_objects():
-    """Both materials in the user's dict should have their IDs set after
-    ``MeshGeometry`` construction. The user keeps their original object;
-    the assignment must propagate to it."""
+def test_materials_keep_their_ids():
+    """The materials have distinct ids before the mesh geometry is built, and
+    building it does not change them."""
     fuel = _dummy_material("fuel")
     moderator = _dummy_material("moderator")
-    assert fuel.id is None
-    assert moderator.id is None
+    ids = (fuel.id, moderator.id)
+    assert fuel.id != moderator.id
 
     yamc.MeshGeometry(TWO_REGION_ARROW, {"fuel": fuel, "moderator": moderator})
 
-    assert fuel.id is not None, "fuel.id should be auto-assigned"
-    assert moderator.id is not None, "moderator.id should be auto-assigned"
-    assert fuel.id != moderator.id
+    assert (fuel.id, moderator.id) == ids
 
 
 def test_explicit_id_is_preserved():
-    """If the user pre-assigns an ID, it must survive construction."""
-    fuel = _dummy_material("fuel")
+    """An explicit id survives construction, and a material built after it
+    does not get it."""
+    probe = _dummy_material("probe")
+    fuel = _dummy_material("fuel", id=probe.id + 1)
     moderator = _dummy_material("moderator")
-    fuel.id = 42
 
     yamc.MeshGeometry(TWO_REGION_ARROW, {"fuel": fuel, "moderator": moderator})
 
-    assert fuel.id == 42
-    assert moderator.id is not None and moderator.id != 42
+    assert fuel.id == probe.id + 1
+    assert moderator.id not in (probe.id, fuel.id)
 
 
 def test_duplicate_ids_rejected():
@@ -63,9 +59,18 @@ def test_duplicate_ids_rejected():
         yamc.MeshGeometry(TWO_REGION_ARROW, {"fuel": fuel, "moderator": moderator})
 
 
+def test_explicit_id_repeating_an_automatic_one_is_rejected():
+    """An explicit id set later can repeat an automatic one; the mesh
+    geometry refuses the two different materials that share it."""
+    fuel = _dummy_material("fuel")
+    moderator = _dummy_material("moderator", id=fuel.id)
+
+    with pytest.raises(ValueError, match=f"Duplicate Material id {fuel.id}"):
+        yamc.MeshGeometry(TWO_REGION_ARROW, {"fuel": fuel, "moderator": moderator})
+
+
 def test_bounding_box_for_material_works_after_construction():
-    """The original failure mode: looking up a Material by reference must
-    succeed because the Material now has its auto-assigned ID."""
+    """Looking up a Material by reference finds its volumes by its id."""
     fuel = _dummy_material("fuel")
     moderator = _dummy_material("moderator")
     mesh = yamc.MeshGeometry(TWO_REGION_ARROW, {"fuel": fuel, "moderator": moderator})
@@ -109,13 +114,13 @@ def test_calculate_volume_signature_matches_csg():
     assert all(r.std_dev == 0.0 for r in volumes.values())
 
 
-def test_implicit_complement_material_gets_id():
-    """The optional implicit-complement material follows the same auto-assign
-    rule as the named-dict materials."""
+def test_implicit_complement_material_keeps_its_id():
+    """The optional implicit-complement material follows the same rule as the
+    named-dict materials."""
     fuel = _dummy_material("fuel")
     moderator = _dummy_material("moderator")
     air = _dummy_material("air")
-    assert air.id is None
+    air_id = air.id
 
     yamc.MeshGeometry(
         TWO_REGION_ARROW,
@@ -123,14 +128,12 @@ def test_implicit_complement_material_gets_id():
         implicit_complement_material=air,
     )
 
-    assert air.id is not None
+    assert air.id == air_id
     assert air.id not in (fuel.id, moderator.id)
 
 
-def test_same_material_under_multiple_keys_gets_one_id():
-    """If the user maps two names to the same ``Material`` object, they
-    share a single ID -- auto-assign must dedup by Python object identity."""
+def test_same_material_under_multiple_keys_is_one_material():
+    """If the user maps two names to the same ``Material`` object, it is one
+    material with one id, not a duplicate."""
     shared = _dummy_material("shared")
     yamc.MeshGeometry(TWO_REGION_ARROW, {"fuel": shared, "moderator": shared})
-    # Just one ID was assigned; no duplicate-id error fired.
-    assert shared.id is not None

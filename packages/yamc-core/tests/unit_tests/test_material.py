@@ -579,7 +579,7 @@ def test_volume_set_and_get():
 
 def test_material_id_set_and_get():
     mat = Material(composition={"Fe56": 1.0}, density=7.87)
-    assert mat.id is None
+    assert isinstance(mat.id, int)
     mat.id = 42
     assert mat.id == 42
     mat.id = 999

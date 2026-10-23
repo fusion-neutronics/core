@@ -225,8 +225,14 @@ def test_material_object_retention():
     assert mat_air.id == 33
 
 def test_material_id_auto_assignment():
+    """Materials get unique ids when they are built, which the geometry keeps:
+    it neither renumbers them nor needs to assign any. A material shared by
+    two cells is one material with one id."""
     mat1 = yamc.Material(composition={"H": 1.0}, density=1.0)
     mat2 = yamc.Material(composition={"O": 1.0}, density=1.0)
+    ids_before = (mat1.id, mat2.id)
+    assert isinstance(mat1.id, int) and isinstance(mat2.id, int)
+    assert mat1.id != mat2.id
 
     surf1 = yamc.Sphere(x0=0, y0=0, z0=0, radius=1)
     surf2 = yamc.Sphere(x0=3, y0=0, z0=0, radius=1)
@@ -238,42 +244,57 @@ def test_material_id_auto_assignment():
 
     geometry = yamc.Geometry([cell1, cell2, cell3])
 
-    assert geometry.cells[0].material.id == 1
-    assert geometry.cells[1].material.id == 2
-    assert geometry.cells[2].material.id == 2
+    assert (mat1.id, mat2.id) == ids_before
+    assert [c.material.id for c in geometry.cells] == [mat1.id, mat2.id, mat2.id]
 
-    assert mat2.id == 2
     mat2.id = 15
     assert mat2.id == 15
 
-    assert geometry.cells[2].material.id == geometry.cells[1].material.id
-    assert geometry.cells[0].material.id != geometry.cells[1].material.id
-
+    # Cell ids are still assigned by the geometry.
     assert cell1.id == 1
     assert cell2.id == 2
     assert cell3.id == 3
-    assert mat1.id == 1
+
 
 def test_material_id_auto_and_manual_assignment():
-    mat1 = yamc.Material(composition={"H": 1.0}, density=1.0, id=2)
-
+    """Explicit ids are kept, and an automatic id issued after an explicit one
+    skips it. Absolute automatic ids depend on what ran earlier in the
+    process, so the explicit ids are chosen relative to a fresh one."""
+    probe = yamc.Material(composition={"H": 1.0}, density=1.0)
+    # The id the allocator would hand out next, given to the constructor ...
+    mat1 = yamc.Material(composition={"H": 1.0}, density=1.0, id=probe.id + 1)
     mat2 = yamc.Material(composition={"O": 1.0}, density=1.0)
+    # ... and through the setter.
+    mat3 = yamc.Material(composition={"O": 1.0}, density=1.0)
+    mat3.id = mat3.id + 1
+    mat4 = yamc.Material(composition={"O": 1.0}, density=1.0)
 
-    mat3 = yamc.Material(composition={"O": 1.0}, density=1.0, id=1)
+    assert mat1.id == probe.id + 1
+    ids = [probe.id, mat1.id, mat2.id, mat3.id, mat4.id]
+    assert len(set(ids)) == len(ids), ids
 
-    surf1 = yamc.Sphere(x0=0, y0=0, z0=0, radius=1)
-    surf2 = yamc.Sphere(x0=3, y0=0, z0=0, radius=1)
-    surf3 = yamc.Sphere(x0=3, y0=0, z0=0, radius=1)
+    surfs = [yamc.Sphere(x0=3 * i, y0=0, z0=0, radius=1) for i in range(4)]
+    cells = [
+        yamc.Cell(region=s.below, material=m)
+        for s, m in zip(surfs, (mat1, mat2, mat3, mat4))
+    ]
+    geometry = yamc.Geometry(cells)
+    assert [c.material.id for c in geometry.cells] == [
+        mat1.id, mat2.id, mat3.id, mat4.id,
+    ]
 
-    cell1 = yamc.Cell(region=surf1.below, material=mat1)
-    cell2 = yamc.Cell(region=surf2.below, material=mat2)
-    cell3 = yamc.Cell(region=surf3.below, material=mat3)
 
-    yamc.Geometry([cell1, cell2, cell3])
-
-    assert mat1.id == 2
-    assert mat2.id == 3
-    assert mat3.id == 1
+def test_explicit_id_repeating_an_automatic_one_is_rejected():
+    """An explicit id can repeat an automatic one issued earlier; two
+    different materials with one id are refused where they meet."""
+    steel = yamc.Material(composition={"Fe": 1.0}, density=7.9)
+    water = yamc.Material(composition={"H2O": 1.0}, density=1.0, id=steel.id)
+    cells = [
+        yamc.Cell(region=yamc.Sphere(radius=1).below, material=steel),
+        yamc.Cell(region=yamc.Sphere(x0=3, radius=1).below, material=water),
+    ]
+    with pytest.raises(ValueError, match=f"Duplicate Material id {steel.id} found"):
+        yamc.Geometry(cells)
 
 
 def test_sample_slice_xy_basis():

@@ -127,10 +127,12 @@ fn is_embedded_fill_cell(cell: &Cell) -> bool {
 impl Geometry {
     /// Create a new geometry with validation and auto-assignment of IDs.
     ///
-    /// Cells and materials without an ID are automatically assigned one.
-    /// Explicitly set IDs are preserved; duplicates are still an error.
-    /// Every `cell.material_idx` must be either `None` or a valid index into
-    /// `materials`.
+    /// Cells without an ID are assigned the next free one. A material without
+    /// one (built in Rust, or loaded from a model file that had none) is given
+    /// a fresh id from the process-wide allocator, in slot order, so it cannot
+    /// repeat the id of any other material in the process. Explicitly set IDs
+    /// are preserved; duplicates are still an error. Every `cell.material_idx`
+    /// must be either `None` or a valid index into `materials`.
     pub fn new(cells: Vec<Cell>, materials: Vec<Arc<Material>>) -> Result<Self, String> {
         // Fail fast on cells recycled from a mesh-filled geometry: their
         // fill roles reference fills this geometry does not have, so the
@@ -241,7 +243,7 @@ impl Geometry {
             }
         }
 
-        // --- Auto-assign material IDs -------------------------------------------
+        // --- Material IDs --------------------------------------------------------
         let mut used_material_ids: HashSet<u32> = HashSet::new();
         for (idx, material_arc) in materials.iter().enumerate() {
             if let Some(id) = material_arc.get_material_id()
@@ -253,16 +255,11 @@ impl Geometry {
                 ));
             }
         }
-        let mut next_material_id: u32 =
-            used_material_ids.iter().copied().max().map_or(1, |m| m + 1);
+        // The allocator never hands out an id already set on a material, so
+        // these cannot collide with the ones checked above.
         for material_arc in &mut materials {
             if material_arc.get_material_id().is_none() {
-                while used_material_ids.contains(&next_material_id) {
-                    next_material_id += 1;
-                }
-                Arc::make_mut(material_arc).set_material_id(next_material_id);
-                used_material_ids.insert(next_material_id);
-                next_material_id += 1;
+                Arc::make_mut(material_arc).assign_material_id(None)?;
             }
         }
 

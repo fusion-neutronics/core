@@ -420,7 +420,7 @@ impl YaniSession {
 
         // One entry per schedule step: `results` also carries the initial
         // composition at index 0, which is not a step.
-        let material_id = material.material_id.unwrap_or(0);
+        let material_id = material.get_material_id().unwrap_or(0);
         let step_materials = results.step_materials(material_id);
         // Gas produced, in appm of the initial atoms, with the starting H and
         // He subtracted. Index 0 of each series is the initial composition, so

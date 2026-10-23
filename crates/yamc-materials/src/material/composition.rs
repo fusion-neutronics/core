@@ -237,13 +237,13 @@ impl Material {
     /// * `fractions` -- mixing fractions (one per material)
     /// * `fraction_type` -- `"atom"` (atom), `"mass"` (mass), or `"volume"` (volume)
     /// * `name` -- optional name for the result (auto-generated if `None`)
-    /// * `material_id` -- optional ID for the result
+    ///
+    /// The result has no id, like any other material built in Rust.
     pub fn mix_materials(
         materials: &[&Material],
         fractions: &[f64],
         fraction_type: &str,
         name: Option<String>,
-        material_id: Option<u32>,
     ) -> Result<Material, String> {
         // Validate fraction_type
         let fraction_type = match fraction_type {
@@ -406,10 +406,6 @@ impl Material {
             parts.join("_")
         });
         result.name = Some(final_name);
-
-        if let Some(id) = material_id {
-            result.material_id = Some(id);
-        }
 
         Ok(result)
     }

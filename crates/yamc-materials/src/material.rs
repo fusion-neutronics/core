@@ -46,6 +46,7 @@ pub struct SmoothFlight {
 use std::sync::Arc;
 
 mod composition;
+mod id;
 mod loading;
 mod macro_xs;
 mod photon;
@@ -283,8 +284,11 @@ impl FractionType {
 pub struct Material {
     /// Optional name of the material
     pub name: Option<String>,
-    /// Unique identifier for the material
-    pub material_id: Option<u32>,
+    /// Unique identifier for the material. Private so that every id is set
+    /// through [`Material::set_material_id`] or
+    /// [`Material::assign_material_id`], which keep the process-wide allocator
+    /// from handing it out again.
+    material_id: Option<u32>,
     /// Composition of the material as a map of nuclide names to their fractions.
     /// Interpretation depends on `fraction_type`: atom fractions ("atom") or mass fractions ("mass").
     pub nuclides: HashMap<String, f64>,
@@ -764,17 +768,6 @@ impl Material {
     /// Get the name of the material
     pub fn get_name(&self) -> Option<&str> {
         self.name.as_deref()
-    }
-
-    /// Set the material ID
-    pub fn set_material_id(&mut self, material_id: u32) {
-        self.material_id = Some(material_id);
-    }
-
-    /// Get the material ID
-    #[inline]
-    pub fn get_material_id(&self) -> Option<u32> {
-        self.material_id
     }
 
     /// Set whether this material is transmutable
@@ -2293,8 +2286,7 @@ mod tests {
         )
         .unwrap();
 
-        let mixed =
-            Material::mix_materials(&[&water, &iron], &[0.5, 0.5], "volume", None, None).unwrap();
+        let mixed = Material::mix_materials(&[&water, &iron], &[0.5, 0.5], "volume", None).unwrap();
 
         let rho = mixed.get_mass_density().unwrap();
         // Expected: 0.5 * 1.0 + 0.5 * 7.874 = 4.437
@@ -2327,8 +2319,7 @@ mod tests {
         )
         .unwrap();
 
-        let mixed =
-            Material::mix_materials(&[&mat1, &mat2], &[0.5, 0.5], "volume", None, None).unwrap();
+        let mixed = Material::mix_materials(&[&mat1, &mat2], &[0.5, 0.5], "volume", None).unwrap();
         assert!(mixed.transmutable, "Transmutable flag should propagate");
     }
 
@@ -2343,15 +2334,15 @@ mod tests {
         .unwrap();
 
         // Wrong number of fractions
-        let result = Material::mix_materials(&[&mat], &[0.5, 0.5], "atom", None, None);
+        let result = Material::mix_materials(&[&mat], &[0.5, 0.5], "atom", None);
         assert!(result.is_err());
 
         // Negative fraction
-        let result = Material::mix_materials(&[&mat, &mat], &[-0.5, 1.5], "atom", None, None);
+        let result = Material::mix_materials(&[&mat, &mat], &[-0.5, 1.5], "atom", None);
         assert!(result.is_err());
 
         // ao fractions not summing to 1.0
-        let result = Material::mix_materials(&[&mat, &mat], &[0.3, 0.3], "atom", None, None);
+        let result = Material::mix_materials(&[&mat, &mat], &[0.3, 0.3], "atom", None);
         assert!(result.is_err());
     }
 

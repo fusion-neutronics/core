@@ -58,15 +58,17 @@ def test_tally_materials_kwarg():
     assert tally.materials == [123]
 
 
-def test_tally_materials_kwarg_no_id_fails():
-    """Test Tally materials kwarg fails with a material that has no ID."""
+def test_tally_materials_kwarg_without_an_explicit_id():
+    """A material built without an id has one from construction, so a tally
+    can filter on it before any geometry exists (issue #422)."""
     material = mmc.Material(
         composition={"Li6": 1.0},
         density=1.0, density_units="g/cc",
         name="test_material")
 
-    with pytest.raises(ValueError, match="no id"):
-        mmc.Tally(materials=material)
+    tally = mmc.Tally(materials=material)
+
+    assert tally.materials == [material.id]
 
 
 def test_tally_materials_kwarg_readback():

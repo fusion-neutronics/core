@@ -177,7 +177,7 @@ fn tritium_production_carries_a_nuclear_data_uncertainty() {
         return;
     };
     let mut material = blanket(&paths);
-    let id = material.material_id.unwrap_or(0);
+    let id = material.get_material_id().unwrap_or(0);
 
     let results = run(
         &mut material,
@@ -284,7 +284,7 @@ fn the_baseline_row_has_no_uncertainty_and_says_why() {
         return;
     };
     let mut material = blanket(&paths);
-    let id = material.material_id.unwrap_or(0);
+    let id = material.get_material_id().unwrap_or(0);
 
     let plain = run(&mut material, None);
     assert_eq!(
@@ -324,7 +324,7 @@ fn flux_and_cross_sections_combine() {
         return;
     };
     let mut material = blanket(&paths);
-    let id = material.material_id.unwrap_or(0);
+    let id = material.get_material_id().unwrap_or(0);
 
     // 5% on every bin, the sort of thing a converged transport tally gives.
     let total: f64 = FLUX.iter().sum();

@@ -78,9 +78,10 @@ pub fn compute_single_volume(
 /// A CSG geometry: a list of cells defining the simulation domain.
 ///
 /// A Geometry collects :class:`Cell` objects into a complete spatial
-/// description for transport. Cell and material IDs are auto-assigned
-/// where the user did not set them. The geometry validates that surface
-/// IDs (and material IDs) are unique on construction.
+/// description for transport. Cell IDs are auto-assigned where the user did
+/// not set them; every :class:`Material` already has one from construction.
+/// The geometry validates that surface IDs are unique, and that no two
+/// different materials share an ID, on construction.
 ///
 /// For mesh-based geometry (an Arrow IPC mesh, e.g. from CAD), use
 /// :class:`MeshGeometry` instead.
@@ -166,72 +167,28 @@ impl PyGeometry {
             next_cell_id += 1;
         }
 
-        // Step 2: Auto-assign material IDs to materials that don't have them
-        // Track unique materials by their Python object identity (pointer address)
+        // Step 2: every Material has an id from construction, but two
+        // different Material objects can still share one, when an explicit id
+        // repeats another material's. The same object in several cells is one
+        // material, so materials are told apart by Python object identity.
         let mut used_material_ids: HashSet<u32> = HashSet::new();
-        // Set of already-seen material pointers (to avoid processing same material twice)
         let mut seen_material_ptrs: HashSet<usize> = HashSet::new();
-        // Materials that need ID assignment
-        let mut materials_needing_ids: Vec<Py<PyMaterial>> = Vec::new();
-
         for py_cell_ref in py_cell_refs.iter() {
             let cell = py_cell_ref.try_borrow()?;
             if let Some(py_mat_ref) = &cell.py_material {
-                let ptr = py_mat_ref.as_ptr() as usize;
-
-                // Skip if we've already processed this Python Material object
-                if !seen_material_ptrs.insert(ptr) {
+                if !seen_material_ptrs.insert(py_mat_ref.as_ptr() as usize) {
                     continue;
                 }
-
                 let mat = py_mat_ref.bind(py).try_borrow()?;
-                match mat.internal.get_material_id() {
-                    Some(id) => {
-                        if used_material_ids.contains(&id) {
-                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                                "Duplicate Material id {} found. All material IDs must be unique across all cells.",
-                                id
-                            )));
-                        }
-                        used_material_ids.insert(id);
-                    }
-                    None => {
-                        materials_needing_ids.push(py_mat_ref.clone_ref(py));
-                    }
+                if let Some(id) = mat.internal.get_material_id()
+                    && !used_material_ids.insert(id)
+                {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "Duplicate Material id {id} found. All material IDs must be unique \
+                         across all cells."
+                    )));
                 }
             }
-        }
-
-        // Mesh-fill materials already carry ids (assigned at MeshGeometry
-        // construction); reserve them so the auto-assignment below cannot
-        // collide. A shared Python Material naturally keeps one id.
-        #[cfg(feature = "mesh")]
-        for py_cell_ref in py_cell_refs.iter() {
-            let cell = py_cell_ref.try_borrow()?;
-            if let Some(py_fill) = &cell.py_fill {
-                let fill = py_fill.bind(py).try_borrow()?;
-                for mat in &fill.inner.materials {
-                    if let Some(id) = mat.get_material_id() {
-                        used_material_ids.insert(id);
-                    }
-                }
-            }
-        }
-
-        // Generate IDs for materials that need them
-        let mut next_material_id = 1u32;
-        for py_mat_ref in materials_needing_ids {
-            while used_material_ids.contains(&next_material_id) {
-                next_material_id += 1;
-            }
-            // Update the Python Material object
-            py_mat_ref
-                .bind(py)
-                .try_borrow_mut()?
-                .internal
-                .set_material_id(next_material_id);
-            used_material_ids.insert(next_material_id);
-            next_material_id += 1;
         }
 
         // Step 3: Collect unique materials into a flat Vec (dedup by Python object
@@ -296,7 +253,7 @@ impl PyGeometry {
             rust_cells.push(rust_cell);
         }
 
-        // Create geometry (validation only, no auto-assignment needed).
+        // Create geometry (validation only: every material has an id).
         // Cells with a mesh fill route through new_with_fills, which
         // expands the embedded mesh volumes into cells and validates the
         // fill (watertightness, protrusion unless allow_clipping).
@@ -453,7 +410,7 @@ impl PyGeometry {
                 .material_idx
                 .and_then(|i| self.inner.materials.get(i as usize))
                 && mat.transmutable
-                && let (Some(mat_id), Some(cell_id)) = (mat.material_id, cell.cell_id)
+                && let (Some(mat_id), Some(cell_id)) = (mat.get_material_id(), cell.cell_id)
             {
                 transmutable_mat_cells
                     .entry(mat_id)

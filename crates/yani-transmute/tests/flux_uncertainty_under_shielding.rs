@@ -180,7 +180,7 @@ fn a_shielded_run_perturbs_its_shielded_rates() {
         return;
     };
     let shielding = Shielding::new(CHORD_CM).expect("a positive chord");
-    let id = iron(&data).material_id.unwrap_or(0);
+    let id = iron(&data).get_material_id().unwrap_or(0);
 
     let dilute = density(&run(&data, None, false), id);
     let shielded = density(&run(&data, Some(&shielding), false), id);
@@ -220,7 +220,7 @@ fn an_unperturbed_shielded_replica_is_the_nominal_run() {
         return;
     };
     let shielding = Shielding::new(CHORD_CM).expect("a positive chord");
-    let id = iron(&data).material_id.unwrap_or(0);
+    let id = iron(&data).get_material_id().unwrap_or(0);
 
     let total: f64 = FLUX.iter().sum();
     let spectra = vec![MultigroupSpectrum {
@@ -280,7 +280,7 @@ fn a_shielded_run_reports_its_shielding_held_at_nominal() {
         return;
     };
     let shielding = Shielding::new(CHORD_CM).expect("a positive chord");
-    let id = iron(&data).material_id.unwrap_or(0);
+    let id = iron(&data).get_material_id().unwrap_or(0);
     let held = |results: &TransmutationResults| {
         results
             .uncertainty_info

@@ -86,7 +86,7 @@ fn final_inventory(material: &mut Material, n: usize) -> HashMap<String, f64> {
     )
     .expect("transmute");
     results
-        .get_final_material(material.material_id.unwrap_or(0))
+        .get_final_material(material.get_material_id().unwrap_or(0))
         .expect("a final material")
         .nuclides
         .clone()
@@ -174,7 +174,7 @@ fn splitting_a_cooling_step_does_not_change_the_answer() {
         )
         .expect("transmute");
         results
-            .get_final_material(material.material_id.unwrap_or(0))
+            .get_final_material(material.get_material_id().unwrap_or(0))
             .expect("a final material")
             .nuclides
             .clone()
