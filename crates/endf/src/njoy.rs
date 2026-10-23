@@ -1,11 +1,15 @@
-//! Driving NJOY: writing its input deck and running it.
+//! Driving NJOY: checking which NJOY it is, writing its input deck and
+//! running it.
 //!
 //! NJOY turns an evaluation into the processed forms a transport code reads:
 //! a pointwise ENDF file, or an ACE table at a given temperature. It takes its
 //! instructions on standard input and refers to files by unit number, so the
-//! work here is composing the deck and staging the tapes.
+//! work here is composing the deck and staging the tapes. Which NJOY runs
+//! matters as much as the deck, so [`require`] refuses one of the wrong
+//! flavour or too old for a library before any work starts.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -442,6 +446,217 @@ fn metastable_zaid(text: &str, isomeric_state: i64) -> String {
     format!("{}{}{}", &text[..3], digit + 4, &text[4..])
 }
 
+/// An NJOY release, as its banner reports it.
+///
+/// NJOY2016 numbers its releases 2016.0, 2016.1 and onwards, so the part after
+/// the point is a whole number and not a decimal fraction: 2016.9 (2017) is
+/// older than 2016.80 (2026).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Version {
+    /// 2016 for NJOY2016.
+    pub year: u32,
+    /// The release within that line: 80 for 2016.80.
+    pub minor: u32,
+    /// Whether this is the IAEA-NDS fork, which ends its version in `+`: its
+    /// `src/vers.f90` holds `vers='2016.77+'` where upstream's holds a bare
+    /// `'2016.78'`. That suffix is the only thing the binary itself exposes,
+    /// so it is what an NJOY is judged on.
+    pub iaea_fork: bool,
+}
+
+impl Version {
+    /// Whether this is `needed`'s flavour, at its minimum or later.
+    fn meets(self, needed: Flavour) -> bool {
+        let minimum = needed.minimum();
+        self.iaea_fork == minimum.iaea_fork
+            && (self.year, self.minor) >= (minimum.year, minimum.minor)
+    }
+}
+
+/// As NJOY prints it: `2016.80`, or `2016.77+` for the fork.
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let fork = if self.iaea_fork { "+" } else { "" };
+        write!(f, "{}.{}{fork}", self.year, self.minor)
+    }
+}
+
+/// Which NJOY a library is processed with.
+///
+/// Getting this wrong is quiet: the conversion succeeds and the numbers are
+/// subtly wrong, which is why [`require`] judges the executable rather than
+/// trusting whatever `njoy` is first on PATH.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Flavour {
+    /// LANL's NJOY2016 (github.com/njoy/NJOY2016), for every library but
+    /// FENDL.
+    Upstream,
+    /// The IAEA Nuclear Data Section's fork (github.com/IAEA-NDS/NJOY2016),
+    /// which FENDL is processed with. Upstream does not reproduce the official
+    /// release: measured on FENDL-3.2d against LANL's 2016.78, the fork changes
+    /// the URR probability tables by up to 100% (La139), and MT 301 heating
+    /// and MT 444 damage by up to 77% below about 1 keV.
+    IaeaFork,
+}
+
+impl Flavour {
+    /// The oldest release of this flavour a library may be processed with.
+    ///
+    /// Upstream needs 2016.80. Older releases sum the harmonic numbers in
+    /// samm.f90's `bigeta` with integer division (njoy/NJOY2016#415, fixed by
+    /// #417), which gives wrong Coulomb penetrabilities in R-matrix limited
+    /// evaluations with charged-particle channels: Ca40 (n,p) at 925 keV came
+    /// out at 3.1e-3 b instead of 5.6e-7 b. The fork needs 2016.77+, which
+    /// carries 2016.77's fix to the URR background.
+    pub const fn minimum(self) -> Version {
+        match self {
+            Flavour::Upstream => Version {
+                year: 2016,
+                minor: 80,
+                iaea_fork: false,
+            },
+            Flavour::IaeaFork => Version {
+                year: 2016,
+                minor: 77,
+                iaea_fork: true,
+            },
+        }
+    }
+
+    /// How to get an NJOY of this flavour, which a refusal ends with.
+    pub(crate) fn how_to_get(self) -> String {
+        match self {
+            Flavour::Upstream => format!(
+                "Install it with\n    {PIP_INSTALL}\nor build tag {} of \
+                 https://github.com/njoy/NJOY2016, and pass its path as njoy_exec \
+                 if it is not the njoy on PATH",
+                self.minimum()
+            ),
+            Flavour::IaeaFork => IAEA_BUILD.to_string(),
+        }
+    }
+}
+
+/// Installs upstream NJOY2016: the njoy2016 wheel puts an `njoy` beside the
+/// Python interpreter. `--upgrade` because an older wheel is the usual reason
+/// to be refused.
+pub(crate) const PIP_INSTALL: &str =
+    "pip install --upgrade njoy2016 --extra-index-url https://shimwell.github.io/wheels";
+
+/// Builds the IAEA-NDS fork, which has no wheel.
+const IAEA_BUILD: &str = concat!(
+    "Build it (this needs git, cmake and gfortran) with\n",
+    "    git clone https://github.com/IAEA-NDS/NJOY2016\n",
+    "    cmake -S NJOY2016 -B NJOY2016/build -DCMAKE_BUILD_TYPE=Release\n",
+    "    cmake --build NJOY2016/build\n",
+    "and pass the full path to NJOY2016/build/njoy as njoy_exec",
+);
+
+/// The version of an NJOY executable, read from the banner it prints.
+///
+/// NJOY2016 has no `--version`: run with it, NJOY prints its banner,
+/// ` njoy 2016.80  08Oct26` and then the date and time, and stops at the end
+/// of its empty input deck with a non-zero exit. So the exit status says
+/// nothing and is not checked, and the version is the first
+/// `njoy <year>.<minor>` printed, with the `+` the IAEA fork appends. Ported
+/// from `njoy_version` in nuclear_data_generation_scripts' ensure_njoy.sh.
+///
+/// `njoy_exec` is a name looked up on PATH or a path, a relative one taken
+/// from the current directory. Fails with [`Error::NjoyMissing`] if it cannot
+/// be started and [`Error::NjoyNoVersion`] if it prints no version.
+pub fn version(njoy_exec: &str) -> Result<Version> {
+    let program = program(njoy_exec)?;
+    // NJOY writes its listing to a file called `output` in the directory it
+    // runs in before it reads anything, so it runs in a scratch directory
+    // rather than over a file of that name in the caller's.
+    let scratch = temp_dir()?;
+    let ran = std::process::Command::new(program)
+        .arg("--version")
+        .current_dir(&scratch)
+        // NJOY reads its deck from standard input. Closed, it stops at once
+        // instead of reading the caller's.
+        .stdin(std::process::Stdio::null())
+        .output();
+    let _ = std::fs::remove_dir_all(&scratch);
+    let ran = ran.map_err(|source| Error::NjoyMissing {
+        njoy_exec: njoy_exec.to_string(),
+        source,
+    })?;
+
+    // The banner goes to standard output. Standard error is read as well, as
+    // ensure_njoy.sh reads both.
+    let stdout = String::from_utf8_lossy(&ran.stdout);
+    let stderr = String::from_utf8_lossy(&ran.stderr);
+    parse_version(&stdout)
+        .or_else(|| parse_version(&stderr))
+        .ok_or_else(|| Error::NjoyNoVersion {
+            njoy_exec: njoy_exec.to_string(),
+            status: ran.status,
+            output: [stdout.trim(), stderr.trim()]
+                .into_iter()
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        })
+}
+
+/// Check that `njoy_exec` is the NJOY a library needs, and return its version
+/// for the record.
+///
+/// Refuses one of the other flavour, or older than [`Flavour::minimum`], with
+/// [`Error::NjoyUnsuitable`], whose message names the executable, the version
+/// found, the version needed and how to get it. Ported from `verify` in
+/// ensure_njoy.sh, and fails as [`version`] does when there is no version to
+/// judge.
+pub fn require(njoy_exec: &str, needed: Flavour) -> Result<Version> {
+    let found = version(njoy_exec)?;
+    if found.meets(needed) {
+        Ok(found)
+    } else {
+        Err(Error::NjoyUnsuitable {
+            njoy_exec: njoy_exec.to_string(),
+            found,
+            needed,
+        })
+    }
+}
+
+/// The first `njoy <year>.<minor>` in `text`, with a `+` if one follows: the
+/// match ensure_njoy.sh makes with `njoy +[0-9]{4}\.[0-9]+\+?`.
+fn parse_version(text: &str) -> Option<Version> {
+    text.match_indices("njoy").find_map(|(at, word)| {
+        let rest = text[at + word.len()..]
+            .strip_prefix(' ')?
+            .trim_start_matches(' ');
+        let (year, rest) = rest.split_at_checked(4)?;
+        let rest = rest.strip_prefix('.')?;
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 || !year.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        Some(Version {
+            year: year.parse().ok()?,
+            minor: rest[..digits].parse().ok()?,
+            iaea_fork: rest[digits..].starts_with('+'),
+        })
+    })
+}
+
+/// `njoy_exec` as a program to start in another working directory.
+///
+/// A path with a directory part is made absolute against the current
+/// directory, since a child given a working directory of its own resolves a
+/// relative one there instead (Linux does). A bare name is left to the PATH
+/// search.
+fn program(njoy_exec: &str) -> Result<PathBuf> {
+    let path = Path::new(njoy_exec);
+    if path.components().count() > 1 {
+        Ok(std::path::absolute(path)?)
+    } else {
+        Ok(path.to_path_buf())
+    }
+}
+
 /// A fresh temporary directory.
 ///
 /// Hand-rolled because the crate has no dependencies: the name comes from the
@@ -580,5 +795,255 @@ mod tests {
         assert_eq!(library_name(2), "JEFF");
         assert_eq!(library_name(17), "TENDL");
         assert_eq!(library_name(99), "Unknown");
+    }
+
+    // What `njoy --version` prints on standard output, captured from real
+    // builds: the banner, then NJOY stops at the end of its empty deck.
+
+    /// LANL's 2016.80, built from its tag (ab27c64) by ensure_njoy.sh.
+    const UPSTREAM_2016_80: &str = concat!(
+        "\n njoy 2016.80  08Oct26                                       10/23/26 19:56:22\n",
+        " *****************************************************************************\n",
+    );
+    /// LANL's 2016.78, from before the bigeta fix.
+    const UPSTREAM_2016_78: &str = concat!(
+        "\n njoy 2016.78  03Feb25                                       10/23/26 19:56:22\n",
+        " *****************************************************************************\n",
+    );
+    /// The IAEA-NDS fork at 3835cff, built by ensure_njoy.sh. The `+` fills
+    /// the version's eight columns, so one space follows it rather than two.
+    const IAEA_FORK: &str = concat!(
+        "\n njoy 2016.77+ 23Oct24                                       10/23/26 19:56:22\n",
+        " *****************************************************************************\n",
+    );
+    /// The njoy2016 2016.80.post8 wheel on the extra index, the NJOY users are
+    /// told to install. Its binary holds the tag's `vers` and `vday`
+    /// (`2016.80 08Oct26 `) and prints them through the same format, so its
+    /// banner is the tag's line.
+    const WHEEL_2016_80: &str = UPSTREAM_2016_80;
+    /// The 2016.79.post8 wheel the extra index served before it.
+    const WHEEL_2016_79: &str = concat!(
+        "\n njoy 2016.79  18Mar25                                       10/23/26 19:56:22\n",
+        " *****************************************************************************\n",
+    );
+
+    fn v(year: u32, minor: u32, iaea_fork: bool) -> Version {
+        Version {
+            year,
+            minor,
+            iaea_fork,
+        }
+    }
+
+    #[test]
+    fn reads_the_banners_real_builds_print() {
+        for (banner, want, upstream, fork) in [
+            (UPSTREAM_2016_80, v(2016, 80, false), true, false),
+            (UPSTREAM_2016_78, v(2016, 78, false), false, false),
+            (IAEA_FORK, v(2016, 77, true), false, true),
+            // Passes for every library but FENDL as it is.
+            (WHEEL_2016_80, v(2016, 80, false), true, false),
+            (WHEEL_2016_79, v(2016, 79, false), false, false),
+        ] {
+            let found = parse_version(banner).unwrap_or_else(|| panic!("no version in {banner:?}"));
+            assert_eq!(found, want, "{banner:?}");
+            assert_eq!(
+                found.meets(Flavour::Upstream),
+                upstream,
+                "{found} for upstream"
+            );
+            assert_eq!(found.meets(Flavour::IaeaFork), fork, "{found} for the fork");
+        }
+    }
+
+    #[test]
+    fn prints_a_version_as_njoy_does() {
+        assert_eq!(v(2016, 80, false).to_string(), "2016.80");
+        assert_eq!(v(2016, 77, true).to_string(), "2016.77+");
+        assert_eq!(v(2016, 8, false).to_string(), "2016.8");
+        assert_eq!(Flavour::Upstream.minimum().to_string(), "2016.80");
+        assert_eq!(Flavour::IaeaFork.minimum().to_string(), "2016.77+");
+    }
+
+    #[test]
+    fn finds_nothing_in_what_is_not_a_banner() {
+        for text in [
+            "",
+            "njoy",
+            "njoy 2016",
+            "njoy 2016.",
+            "njoy2016.80",
+            "NJOY 2016.80",
+            "njoy 16.80",
+            "njoy 20166.80",
+            "njoy: 2016.80",
+            "true (GNU coreutils) 9.4\nWritten by Jim Meyering.\n",
+        ] {
+            assert_eq!(parse_version(text), None, "{text:?}");
+        }
+        // An "njoy" that is not a version does not end the search.
+        assert_eq!(
+            parse_version(&format!("/usr/bin/njoy: started\n{UPSTREAM_2016_80}")),
+            Some(v(2016, 80, false))
+        );
+    }
+
+    #[test]
+    fn upstream_needs_2016_80_and_the_fork_2016_77() {
+        for (found, upstream, fork) in [
+            (v(2016, 80, false), true, false),
+            (v(2016, 81, false), true, false),
+            (v(2017, 0, false), true, false),
+            (v(2016, 79, false), false, false),
+            // 2016.9 (2017) and 2016.8 are older than 2016.80, which a
+            // comparison of decimals would get wrong.
+            (v(2016, 9, false), false, false),
+            (v(2016, 8, false), false, false),
+            (v(2016, 77, true), false, true),
+            (v(2016, 80, true), false, true),
+            (v(2016, 76, true), false, false),
+        ] {
+            assert_eq!(
+                found.meets(Flavour::Upstream),
+                upstream,
+                "{found} for upstream"
+            );
+            assert_eq!(found.meets(Flavour::IaeaFork), fork, "{found} for the fork");
+        }
+    }
+
+    #[test]
+    fn a_refusal_names_the_binary_both_versions_and_how_to_get_njoy() {
+        let refusal = |found, needed| {
+            Error::NjoyUnsuitable {
+                njoy_exec: "/opt/njoy/bin/njoy".to_string(),
+                found,
+                needed,
+            }
+            .to_string()
+        };
+        let upstream = ["pip install --upgrade njoy2016", "github.com/njoy/NJOY2016"];
+        let fork = [
+            "git clone https://github.com/IAEA-NDS/NJOY2016",
+            "cmake --build",
+        ];
+        for (message, reported, minimum, how) in [
+            (
+                refusal(v(2016, 78, false), Flavour::Upstream),
+                "2016.78",
+                "2016.80",
+                upstream,
+            ),
+            (
+                refusal(v(2016, 77, true), Flavour::Upstream),
+                "2016.77+",
+                "2016.80",
+                upstream,
+            ),
+            (
+                refusal(v(2016, 80, false), Flavour::IaeaFork),
+                "2016.80",
+                "2016.77+",
+                fork,
+            ),
+            (
+                refusal(v(2016, 76, true), Flavour::IaeaFork),
+                "2016.76+",
+                "2016.77+",
+                fork,
+            ),
+        ] {
+            for part in ["\"/opt/njoy/bin/njoy\"", reported, minimum, how[0], how[1]] {
+                assert!(message.contains(part), "{part:?} is not in: {message}");
+            }
+        }
+        assert!(refusal(v(2016, 77, true), Flavour::Upstream).contains("the IAEA-NDS fork,"));
+        assert!(refusal(v(2016, 80, false), Flavour::IaeaFork).contains("upstream NJOY2016,"));
+    }
+
+    #[test]
+    fn a_missing_executable_is_named_with_how_to_get_njoy() {
+        let missing = std::env::temp_dir()
+            .join(format!("endf-no-njoy-here-{}", std::process::id()))
+            .join("njoy");
+        let missing = missing.to_str().expect("a UTF-8 temporary directory");
+        let error = version(missing).unwrap_err();
+        assert!(matches!(error, Error::NjoyMissing { .. }), "{error:?}");
+        let message = error.to_string();
+        assert!(message.contains(missing), "{message}");
+        assert!(message.contains(PIP_INSTALL), "{message}");
+        assert!(message.contains("IAEA-NDS"), "{message}");
+        // A refusal fails the same way when there is nothing to judge.
+        assert!(matches!(
+            require(missing, Flavour::Upstream),
+            Err(Error::NjoyMissing { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_executable_that_is_not_njoy_is_refused() {
+        // GNU `true --version` prints coreutils' version and the BSD one
+        // prints nothing; neither is a banner.
+        let error = version("true").unwrap_err();
+        assert!(matches!(error, Error::NjoyNoVersion { .. }), "{error:?}");
+        assert!(error
+            .to_string()
+            .starts_with("\"true\" printed no NJOY version"));
+    }
+
+    #[test]
+    fn a_relative_path_is_kept_relative_to_the_callers_directory() {
+        // NJOY is started in a scratch directory, so a relative path would
+        // otherwise be looked for there.
+        assert_eq!(program("njoy").unwrap(), PathBuf::from("njoy"));
+        let relative = program("bin/njoy").unwrap();
+        assert!(relative.is_absolute(), "{relative:?}");
+        assert_eq!(
+            relative,
+            std::env::current_dir().unwrap().join("bin").join("njoy")
+        );
+    }
+
+    /// The NJOY on PATH, when this machine has one. Announces a loud skip
+    /// otherwise, as the NJOY-gated tests in yamc-convert do. PATH is searched
+    /// rather than NJOY run to find out, since running it here would leave its
+    /// listing in this directory, which is what this checks the probe does
+    /// not do.
+    #[test]
+    fn reads_the_version_of_the_njoy_on_path() {
+        let on_path = std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path)
+                .any(|dir| dir.join("njoy").is_file() || dir.join("njoy.exe").is_file())
+        });
+        if !on_path {
+            eprintln!("SKIP: no njoy on PATH; this test checked nothing");
+            return;
+        }
+
+        // NJOY rewrites its listing wherever it runs, so an `output` here that
+        // appears or changes would be the probe's.
+        let listing = || {
+            Path::new("output")
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+        };
+        let before = listing();
+        let found = version("njoy").expect("the njoy on PATH reports its version");
+        assert_eq!(found.year, 2016, "{found} is not an NJOY2016");
+        // The gate judges what the probe read.
+        for needed in [Flavour::Upstream, Flavour::IaeaFork] {
+            assert_eq!(
+                require("njoy", needed).is_ok(),
+                found.meets(needed),
+                "{found} for {needed:?}"
+            );
+        }
+        assert_eq!(
+            listing(),
+            before,
+            "the probe wrote NJOY's listing into the working directory"
+        );
     }
 }

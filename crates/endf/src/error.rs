@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use crate::njoy::{Flavour, Version};
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
@@ -48,6 +50,26 @@ pub enum Error {
     InvalidArgument {
         what: String,
     },
+    /// An NJOY executable that could not be started: not found on PATH or at
+    /// its path, or not executable.
+    NjoyMissing {
+        njoy_exec: String,
+        source: std::io::Error,
+    },
+    /// An executable that ran but printed no NJOY version.
+    NjoyNoVersion {
+        njoy_exec: String,
+        status: std::process::ExitStatus,
+        /// What it printed, standard output then standard error.
+        output: String,
+    },
+    /// An NJOY of the other flavour from the one a library needs, or older
+    /// than that flavour's minimum.
+    NjoyUnsuitable {
+        njoy_exec: String,
+        found: Version,
+        needed: Flavour,
+    },
     Io(std::io::Error),
 }
 
@@ -84,6 +106,62 @@ impl fmt::Display for Error {
                 write!(f, "this reader does not implement {what}")
             }
             Error::InvalidArgument { what } => write!(f, "{what}"),
+            Error::NjoyMissing { njoy_exec, source } => write!(
+                f,
+                "could not run NJOY \"{njoy_exec}\": {source}. Install NJOY2016 with\n    {}\n\
+                 (FENDL needs the IAEA-NDS fork instead, https://github.com/IAEA-NDS/NJOY2016), \
+                 or pass njoy_exec the path to an njoy executable",
+                crate::njoy::PIP_INSTALL
+            ),
+            Error::NjoyNoVersion {
+                njoy_exec,
+                status,
+                output,
+            } => {
+                write!(
+                    f,
+                    "\"{njoy_exec}\" printed no NJOY version when run with --version \
+                     ({status}), where NJOY2016 prints a banner such as \
+                     \" njoy 2016.80  08Oct26\""
+                )?;
+                if output.is_empty() {
+                    write!(f, "; it printed nothing")
+                } else {
+                    write!(f, "; it printed:\n{output}")
+                }
+            }
+            Error::NjoyUnsuitable {
+                njoy_exec,
+                found,
+                needed,
+            } => {
+                let minimum = needed.minimum();
+                match (needed, found.iaea_fork) {
+                    (Flavour::Upstream, true) => write!(
+                        f,
+                        "\"{njoy_exec}\" is NJOY {found}, the IAEA-NDS fork, but this library \
+                         needs upstream NJOY2016 {minimum} or later"
+                    )?,
+                    (Flavour::Upstream, false) => write!(
+                        f,
+                        "\"{njoy_exec}\" is NJOY {found}, but this library needs {minimum} or \
+                         later: older releases get the Coulomb penetrabilities of R-matrix \
+                         limited evaluations wrong (njoy/NJOY2016#415)"
+                    )?,
+                    (Flavour::IaeaFork, false) => write!(
+                        f,
+                        "\"{njoy_exec}\" is NJOY {found}, upstream NJOY2016, but this library \
+                         needs the IAEA-NDS fork, {minimum} or later, because upstream does not \
+                         reproduce its official processing"
+                    )?,
+                    (Flavour::IaeaFork, true) => write!(
+                        f,
+                        "\"{njoy_exec}\" is NJOY {found}, but this library needs the IAEA-NDS \
+                         fork at {minimum} or later"
+                    )?,
+                }
+                write!(f, ". {}", needed.how_to_get())
+            }
             Error::Io(e) => write!(f, "{e}"),
         }
     }
@@ -92,6 +170,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Error::NjoyMissing { source, .. } => Some(source),
             Error::Io(e) => Some(e),
             _ => None,
         }
