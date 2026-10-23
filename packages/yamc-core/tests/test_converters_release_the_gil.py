@@ -1,8 +1,8 @@
 """The converters must not hold the GIL while they work.
 
 A library build converts thousands of evaluations, and NJOY alone runs for
-minutes over some of them. Held for the length of a call, the GIL stopped every
-other thread in the interpreter, so a thread pool over evaluations converted
+minutes over some of them. Held for the length of a call, the GIL stops every
+other thread in the interpreter, so a thread pool over evaluations converts
 them one at a time.
 
 Timed, because nothing else is observable from Python: a conversion runs in a
@@ -10,9 +10,9 @@ worker thread while this one keeps reading the clock, and the readings must not
 stop for the length of the conversion. The fixtures convert in milliseconds,
 too short to time, so another process holds each call inside Rust for `HOLD`
 seconds whatever the machine: NJOY is a shell script that sleeps, and every
-other input is a pipe that a second process fills only once the converter has
-opened it. Both need POSIX, so Windows skips this file; the bindings it guards
-are the same on every platform.
+other input is a pipe that a second process fills `HOLD` seconds after the
+converter opens it. Both need POSIX, so Windows skips this file; the bindings
+it guards are the same on every platform.
 """
 
 import lzma
@@ -39,23 +39,20 @@ FIXTURES = Path(__file__).resolve().parents[3] / "crates" / "endf" / "fixtures"
 HOLD = 0.3
 
 #: Fills a pipe: once the converter opens it, waits HOLD, writes the file and
-#: closes. A later open is served the same way, so a converter that read its
-#: input twice would be held twice rather than hang. The pause before
-#: reopening lets the reader see the end first: reopened at once, the pipe
-#: would hand it the file again.
-FEED = """
-import sys, time
-data = open(sys.argv[1], "rb").read()
-while True:
-    with open(sys.argv[2], "wb") as pipe:
-        time.sleep(float(sys.argv[3]))
-        pipe.write(data)
-    time.sleep(1)
-"""
+#: closes, then serves the next open the same way. So a converter that read its
+#: input twice would be held twice rather than hang, even one that stopped part
+#: way through the first time: only `cat` sees the broken pipe, and the loop
+#: goes on. The pause before serving again lets the reader see the end first:
+#: reopened at once, the pipe would hand it the file again.
+FEED = 'while :; do { sleep "$3"; cat "$1"; } > "$2"; sleep 1; done'
 
 FE56 = "n-026_Fe_056_trimmed.endf.xz"
 NB93 = "n-041_Nb_093_tendl2017_trimmed.endf.xz"
-NB_DECAY = ["dec-041_Nb_092.endf.xz", "dec-041_Nb_092m1.endf.xz", "dec-041_Nb_093m1.endf.xz"]
+NB_DECAY = [
+    "dec-041_Nb_092.endf.xz",
+    "dec-041_Nb_092m1.endf.xz",
+    "dec-041_Nb_093m1.endf.xz",
+]
 
 
 @pytest.fixture
@@ -71,9 +68,8 @@ def held(tmp_path):
     def late(path):
         pipe = f"{path}.pipe"
         os.mkfifo(pipe)
-        writers.append(
-            subprocess.Popen([sys.executable, "-c", FEED, path, pipe, str(HOLD)])
-        )
+        feed = ["sh", "-c", FEED, "feed", path, pipe, str(HOLD)]
+        writers.append(subprocess.Popen(feed))
         return pipe
 
     def photonuclear():
@@ -114,7 +110,8 @@ def _in_njoy(convert):
 
 
 #: Each binding in crates/yani-python/src/convert.rs, as a call held up by a
-#: stand-in. Built on the main thread, so the worker only converts.
+#: stand-in; a binding added there belongs here too. Built on the main thread,
+#: so the worker only converts.
 CASES = {
     "convert_neutron_xs": lambda h: _in_njoy(
         partial(yamc.convert_neutron_xs, h.plain(FE56), h.out, njoy_exec=h.njoy)
@@ -155,7 +152,9 @@ def _longest_stall(convert):
     took. The clock starts before the worker does: starting a thread waits for
     it to begin, and a worker that takes the GIL straight into a conversion
     would otherwise stop this thread before its first reading, hiding the
-    stall it is here to see.
+    stall it is here to see. For the same reason the clock is read once more
+    after the conversion is seen to be done, so a stall that lasts until the
+    end is counted too.
     """
 
     def timed():
@@ -167,7 +166,9 @@ def _longest_stall(convert):
     last = time.perf_counter()
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(timed)
-        while not future.done():
+        done = False
+        while not done:
+            done = future.done()
             now = time.perf_counter()
             longest = max(longest, now - last)
             last = now
@@ -178,9 +179,9 @@ def _longest_stall(convert):
 def test_the_main_thread_keeps_running_during_a_conversion(binding, held):
     """Holding the GIL stops this thread for the whole conversion.
 
-    Released, it stops only for thread switches: at most 10 ms in 16 runs of
-    all seven on a loaded 32-core machine, one core or all of them, against
-    300 ms and more when held.
+    Released, it stops only for thread switches: under 17 ms in 16 runs of all
+    seven, pinned to one core beside a busy loop, against at least 93% of the
+    call when held.
     """
     stall, duration = _longest_stall(CASES[binding](held))
     assert duration >= HOLD, (

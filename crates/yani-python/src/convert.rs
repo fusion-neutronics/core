@@ -7,10 +7,10 @@
 //!
 //! Every function here does its work with the GIL released. One call can take
 //! minutes (NJOY over an evaluation, or a whole sublibrary through the chain
-//! builder), and holding the GIL for it stopped every other Python thread, so
-//! a thread pool over evaluations ran them one at a time. The arguments are
-//! extracted and checked first, only Rust values go into the work, and its
-//! result becomes Python objects again afterwards.
+//! builder), and holding the GIL for it would stop every other Python thread,
+//! so a thread pool over evaluations would run them one at a time. The
+//! arguments are extracted and checked first, only Rust values go into the
+//! work, and its result becomes Python objects afterwards.
 
 use std::error::Error;
 use std::path::PathBuf;
