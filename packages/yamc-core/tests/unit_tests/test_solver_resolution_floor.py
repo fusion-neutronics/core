@@ -41,7 +41,7 @@ def _graphite_steps():
         ]
     )
     results = material.transmute(schedule=schedule)
-    return results.step_materials(material.id or 0)
+    return results.step_materials(material.id)
 
 
 @pytest.fixture(scope="module")

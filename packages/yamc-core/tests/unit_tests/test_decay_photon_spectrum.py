@@ -36,7 +36,7 @@ def activated_iron():
         ]
     )
     results = material.transmute(schedule=schedule)
-    return results.get_final_material(material.id or 0)
+    return results.get_final_material(material.id)
 
 
 def test_spectrum_is_ascending_positive_lines(activated_iron):

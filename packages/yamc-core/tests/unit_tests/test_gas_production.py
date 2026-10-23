@@ -68,7 +68,7 @@ def _by_hand(results, mid):
 def test_every_time_point_matches_the_inventory():
     iron = _material({"Fe56": 1.0})
     results = iron.transmute(schedule=_schedule())
-    mid = iron.id or 0
+    mid = iron.id
     gas = results.get_gas_production(mid)
 
     assert sorted(gas) == KEYS
@@ -98,8 +98,8 @@ def test_starting_gas_is_subtracted_unless_the_total_is_asked_for():
     water = _material({"O16": 1.0, "H1": 2.0}, density=0.09)
     oxide_results = oxide.transmute(schedule=_schedule())
     water_results = water.transmute(schedule=_schedule())
-    oxide_gas = oxide_results.get_gas_production(oxide.id or 0)
-    water_gas = water_results.get_gas_production(water.id or 0)
+    oxide_gas = oxide_results.get_gas_production(oxide.id)
+    water_gas = water_results.get_gas_production(water.id)
 
     # The same oxygen makes the same helium. appm is per initial atom, and the
     # water has three for every one the oxide has, so per oxygen atom they
@@ -111,7 +111,7 @@ def test_starting_gas_is_subtracted_unless_the_total_is_asked_for():
     # (n,p), less what capture on the water's H1 turned into H2, nowhere near
     # the 2/3 of a million appm the water started with.
     assert 0.0 < water_gas["H1"][-1] * 3.0 <= oxide_gas["H1"][-1]
-    total = water_results.get_gas_production(water.id or 0, produced=False)
+    total = water_results.get_gas_production(water.id, produced=False)
     starting = 2.0 / 3.0 * 1e6
     assert total["H1"][0] == pytest.approx(starting, rel=1e-12)
     assert total["H1"][-1] == pytest.approx(starting + water_gas["H1"][-1], rel=1e-12)
@@ -121,13 +121,13 @@ def test_starting_gas_is_subtracted_unless_the_total_is_asked_for():
 def test_an_unknown_material_is_none():
     iron = _material({"Fe56": 1.0})
     results = iron.transmute(schedule=_schedule())
-    assert results.get_gas_production((iron.id or 0) + 1000) is None
+    assert results.get_gas_production(iron.id + 1000) is None
 
 
 def test_uncertainty_is_none_unless_asked_for():
     iron = _material({"Fe56": 1.0})
     results = iron.transmute(schedule=_schedule())
-    assert results.get_gas_production_uncertainty(iron.id or 0, 1) is None
+    assert results.get_gas_production_uncertainty(iron.id, 1) is None
 
 
 def test_uncertainty_comes_with_the_replicas():
@@ -136,7 +136,7 @@ def test_uncertainty_comes_with_the_replicas():
         schedule=_schedule(),
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8),
     )
-    mid = iron.id or 0
+    mid = iron.id
     gas = results.get_gas_production(mid)
     for step in range(len(results.times)):
         band = results.get_gas_production_uncertainty(mid, step)

@@ -49,7 +49,7 @@ def _inventory(pkg, chain_dir, cross_sections):
         energy=pkg.sources.Histogram([1e-5, 1e5, 1e6, 1.5e7], [1e12, 1e13, 1e14])
     )
     results = material.transmute(schedule=_schedule(pkg, spectrum))
-    last = results.get_final_material(material.id or 0)
+    last = results.get_final_material(material.id)
     return dict(last.nuclides), last.activity(), last.decay_heat()
 
 

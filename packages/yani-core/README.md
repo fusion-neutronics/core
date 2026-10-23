@@ -24,12 +24,12 @@ schedule = yani.PulseSchedule([
 ])
 
 results = steel.transmute(schedule=schedule)
-final = results.get_final_material(steel.id or 0)
+final = results.get_final_material(steel.id)
 print(final.activity(), "Bq")
 print(final.decay_heat(), "W")
 print(final.contact_dose(), "Gy/h")
 print(final.clearance_index("UK_EPR16_out_of_scope").index)
-print(results.get_gas_production(steel.id or 0)["He"], "appm He")
+print(results.get_gas_production(steel.id)["He"], "appm He")
 ```
 
 Displacement damage comes from the same call: pass `displacement_damage=True`
@@ -66,7 +66,7 @@ yani.transmutation_branch_ratios = ["irdff-ii", "endf-b8.1"]
 
 foil = yani.Material({"Nb93": 1.0}, density=8.57, volume=1.0)
 results = foil.transmute(schedule=schedule)
-report = results.get_branching_report(foil.id or 0, 0)
+report = results.get_branching_report(foil.id, 0)
 [(c["reaction"], c["source"]) for c in report["channels"] if c["parent"] == "Nb93"]
 # [('(n,2n)', 'irdff-ii'), ('(n,gamma)', 'irdff-ii'), ("(n,n')", 'irdff-ii')]
 report["mixed"]  # True: IRDFF-II splits on ENDF/B-VIII.1 totals
@@ -108,7 +108,7 @@ into residuals would not account for the missing inventory.
 
 These compositions can be solved with that ENDF/B-VIII.1 configuration, with
 the warning and missing residuals recorded by
-`results.get_branching_report(material.id or 0, 0)["unmodelled_mt5"]` for the
+`results.get_branching_report(material.id, 0)["unmodelled_mt5"]` for the
 first irradiation interval. Inspect each interval's report when the spectrum
 changes. The 0.1% value is a warning threshold for missing MT=5 residuals,
 not permission to treat the returned inventory as complete.
@@ -140,7 +140,7 @@ zirconium = yani.Material(
 )
 results = zirconium.transmute(schedule)
 print(results.data_releases)
-print(results.get_branching_report(zirconium.id or 0, 0)["mixed"])
+print(results.get_branching_report(zirconium.id, 0)["mixed"])
 ```
 
 Make a new material after selecting the sources. The same selection applies to
