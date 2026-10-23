@@ -4220,7 +4220,9 @@ def convert_neutron_transport(input_path: builtins.str, output_dir: builtins.str
     input_path : str
         Path to the ENDF evaluation.
     output_dir : str
-        Directory to write ``{Nuclide}.arrow/`` into.
+        Directory to write ``{Nuclide}.arrow/`` into. NJOY also works in a
+        hidden directory here, so this disk needs room for its tapes; the
+        directory is removed when the conversion ends.
     njoy_exec : str
         The NJOY executable. FENDL needs the IAEA-NDS fork; upstream NJOY does
         not reproduce the official release, and both builds succeed, so the
@@ -4262,7 +4264,10 @@ def convert_neutron_xs(input_path: builtins.str, output_dir: builtins.str, sourc
     input_path : str
         An ENDF evaluation, or an ACE table when ``source_format="ace"``.
     output_dir : str
-        Directory to write ``{nuclide}.arrow/`` into.
+        Directory to write ``{nuclide}.arrow/`` into. With
+        ``source_format="endf"``, NJOY also works in a hidden directory here,
+        so this disk needs room for its tapes; the directory is removed when
+        the conversion ends.
     source_format : {"endf", "ace"}
         ``"endf"`` runs NJOY to reconstruct resonances and Doppler broaden,
         which is the documented route and the only one that can reach an

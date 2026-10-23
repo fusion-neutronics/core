@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{Error, Result};
 use crate::material::Material;
@@ -67,6 +68,8 @@ pub struct AceOptions {
     pub ace: Option<PathBuf>,
     /// Where the xsdir goes. Defaults to sitting beside the ACE file.
     pub xsdir: Option<PathBuf>,
+    /// Where the tapes go by default. NJOY also works in a directory of its
+    /// own inside this one while it runs (see [`run`]).
     pub output_dir: PathBuf,
     /// Whether ACER thins and smooths the elastic and capture cross sections
     /// at low energy.
@@ -317,28 +320,44 @@ acer / %%%%%%%%%%%%%%%%%%%%%%%% Write out in ACE format %%%%%%%%%%%%%%%%%%%%%%%%
 
 /// Run NJOY with the given deck.
 ///
-/// The tapes are staged in a temporary directory as `tape20`, `tape21` and so
-/// on, since that is how NJOY names them, and the outputs are moved out
-/// afterwards.
-pub fn run(deck: &Deck, njoy_exec: &str, input_filename: Option<&Path>) -> Result<String> {
+/// NJOY reads and writes its tapes in the directory it runs in, as `tape20`,
+/// `tape21` and so on, so it runs in a [`Scratch`] directory made inside
+/// `scratch`: the inputs are copied in, the outputs are moved out afterwards,
+/// and the directory goes whether NJOY succeeded or not. Its scratch units, 10
+/// to 19, are not named tapes: the Fortran runtime makes them in `TMPDIR`, or
+/// `/tmp` without it, so `TMPDIR` is set to that directory for NJOY too.
+///
+/// `scratch` should be on the disk the output goes to, which is why
+/// [`make_ace`] passes its output directory. One evaluation's tapes can run to
+/// hundreds of MB, and the system temporary directory is often a small
+/// RAM-backed tmpfs or under a per-user quota. Filling it does not fail with a
+/// message that names the cause: NJOY exits with an error or leaves a tape cut
+/// short, and the largest evaluations are the ones that fail.
+pub fn run(
+    deck: &Deck,
+    njoy_exec: &str,
+    input_filename: Option<&Path>,
+    scratch: &Path,
+) -> Result<String> {
     if let Some(path) = input_filename {
         std::fs::write(path, &deck.commands)?;
     }
 
-    let tmpdir = temp_dir()?;
-    let result = run_in(deck, njoy_exec, &tmpdir);
-    // The temporary directory goes whether NJOY succeeded or not.
-    let _ = std::fs::remove_dir_all(&tmpdir);
-    result
+    let work = Scratch::new_in(scratch, "run")?;
+    run_in(deck, njoy_exec, work.path())
 }
 
-fn run_in(deck: &Deck, njoy_exec: &str, tmpdir: &Path) -> Result<String> {
+fn run_in(deck: &Deck, njoy_exec: &str, work: &Path) -> Result<String> {
     for (unit, filename) in &deck.tapein {
-        std::fs::copy(filename, tmpdir.join(format!("tape{unit}")))?;
+        std::fs::copy(filename, work.join(format!("tape{unit}")))?;
     }
 
     let mut child = std::process::Command::new(njoy_exec)
-        .current_dir(tmpdir)
+        .current_dir(work)
+        // Where gfortran makes the files behind NJOY's scratch units. It
+        // unlinks each as it opens it, so they take space while NJOY runs and
+        // none is ever left behind.
+        .env("TMPDIR", work)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -360,7 +379,7 @@ fn run_in(deck: &Deck, njoy_exec: &str, tmpdir: &Path) -> Result<String> {
     }
 
     for (unit, filename) in &deck.tapeout {
-        let written = tmpdir.join(format!("tape{unit}"));
+        let written = work.join(format!("tape{unit}"));
         if written.is_file() {
             if let Some(parent) = filename.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -386,7 +405,12 @@ pub fn make_ace(filename: &Path, material: &Material, options: &AceOptions) -> R
         });
     }
     let deck = ace_deck(filename, material, options)?;
-    run(&deck, &options.njoy_exec, options.input_filename.as_deref())?;
+    run(
+        &deck,
+        &options.njoy_exec,
+        options.input_filename.as_deref(),
+        &options.output_dir,
+    )?;
 
     if options.acer.is_none() {
         return Ok(());
@@ -442,28 +466,94 @@ fn metastable_zaid(text: &str, isomeric_state: i64) -> String {
     format!("{}{}{}", &text[..3], digit + 4, &text[4..])
 }
 
-/// A fresh temporary directory.
+/// A working directory for NJOY, made inside a directory the caller names and
+/// removed when dropped.
 ///
-/// Hand-rolled because the crate has no dependencies: the name comes from the
-/// process id and a counter, and `create_dir` fails rather than reuses if the
-/// name is somehow taken.
-fn temp_dir() -> Result<PathBuf> {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
+/// The caller names it so it can sit beside the output, not in the system
+/// temporary directory (see [`run`] for why). The name starts with a dot, so
+/// `ls` and shell globs pass it by, and ends in a number, so nothing that
+/// looks for `*.arrow` folders takes it for a nuclide. It carries a label,
+/// the process id and a counter, so conversions running at the same time, in
+/// this process or another, each get their own. A name that is already taken
+/// is skipped, never reused, so a directory that another process made is
+/// never written into or deleted.
+///
+/// Dropping it removes it: on success, on an early return and on a panic.
+/// Only a process that is killed leaves one behind.
+///
+/// Hand-rolled because the crate has no dependencies.
+#[derive(Debug)]
+pub struct Scratch {
+    path: PathBuf,
+}
 
-    let base = std::env::temp_dir();
-    for _ in 0..64 {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = base.join(format!("endf-njoy-{}-{n}", std::process::id()));
-        match std::fs::create_dir(&path) {
-            Ok(()) => return Ok(path),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e.into()),
-        }
+impl Scratch {
+    /// Make a fresh directory inside `parent`, which must exist. `label` goes
+    /// into the name, so a directory left by a killed process says what it
+    /// was for.
+    pub fn new_in(parent: &Path, label: &str) -> Result<Scratch> {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        Scratch::numbered_by(parent, label, &COUNTER)
     }
-    Err(Error::Unsupported {
-        what: "finding an unused temporary directory name",
-    })
+
+    /// [`Scratch::new_in`] with the counter passed in, so a test knows which
+    /// names it will try.
+    fn numbered_by(parent: &Path, label: &str, counter: &AtomicU64) -> Result<Scratch> {
+        // Absolute, since NJOY is handed it as TMPDIR from inside it, where a
+        // relative path would mean somewhere else.
+        let parent = std::path::absolute(parent).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!(
+                    "could not make NJOY's working directory in {}: {e}",
+                    parent.display()
+                ),
+            )
+        })?;
+        let pid = std::process::id();
+        for _ in 0..64 {
+            let n = counter.fetch_add(1, Ordering::Relaxed);
+            let path = parent.join(format!(".njoy-{label}-{pid}-{n}"));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(Scratch { path }),
+                // Left by an earlier process that had the same id.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => {
+                    return Err(std::io::Error::new(
+                        e.kind(),
+                        format!(
+                            "could not make NJOY's working directory {}: {e}",
+                            path.display()
+                        ),
+                    )
+                    .into());
+                }
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "64 names for NJOY's working directory in {} were taken \
+                 (.njoy-{label}-{pid}-*). Killed runs leave these behind; \
+                 remove the ones no running process is using",
+                parent.display()
+            ),
+        )
+        .into())
+    }
+
+    /// The directory, as an absolute path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        // There is no one to tell from a destructor. A directory that cannot
+        // be removed stays, under a name that says what made it.
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }
 
 #[cfg(test)]
@@ -580,5 +670,218 @@ mod tests {
         assert_eq!(library_name(2), "JEFF");
         assert_eq!(library_name(17), "TENDL");
         assert_eq!(library_name(99), "Unknown");
+    }
+
+    /// A fresh directory for one test, under the system temporary directory.
+    fn fresh_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("endf-njoy-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// What a directory holds, sorted.
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A stand-in for NJOY, so where it runs and what it leaves can be checked
+    /// without NJOY installed: a shell script that writes the directory it was
+    /// started in to `ran_in` beside itself and the one its `TMPDIR` names to
+    /// `tmpdir`, saves its deck where it runs, then runs `body` there.
+    ///
+    /// Written by `sh`, not by this process. A process another test starts
+    /// inherits, for a moment, every file this one has open, and running the
+    /// script while a copy of it is open for writing fails with "Text file
+    /// busy".
+    #[cfg(unix)]
+    fn stand_in(dir: &Path, body: &str) -> PathBuf {
+        let script = dir.join("njoy");
+        let text = format!(
+            "#!/bin/sh\npwd -P > '{}'\n(cd \"${{TMPDIR:-/tmp}}\" && pwd -P) > '{}'\n\
+             cat > deck\n{body}\n",
+            dir.join("ran_in").display(),
+            dir.join("tmpdir").display()
+        );
+        let mut sh = std::process::Command::new("sh")
+            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(&script)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        sh.stdin.take().unwrap().write_all(text.as_bytes()).unwrap();
+        assert!(sh.wait().unwrap().success());
+        script
+    }
+
+    /// What the stand-in under `root` wrote down: where it ran (`ran_in`) or
+    /// where its TMPDIR pointed (`tmpdir`), with symlinks resolved.
+    #[cfg(unix)]
+    fn recorded(root: &Path, what: &str) -> PathBuf {
+        let text = std::fs::read_to_string(root.join(what)).expect("NJOY was run");
+        PathBuf::from(text.trim_end())
+    }
+
+    /// `path`, which is absolute, as a path from the current directory.
+    #[cfg(unix)]
+    fn relative_to_here(path: &Path) -> PathBuf {
+        let here = std::env::current_dir().unwrap();
+        let mut relative: PathBuf = here.components().skip(1).map(|_| "..").collect();
+        relative.push(path.strip_prefix("/").unwrap());
+        relative
+    }
+
+    /// The evaluation on disk, an empty output directory, and the options for
+    /// a pointwise run of `njoy` that writes its one tape there.
+    #[cfg(unix)]
+    fn pendf_into(root: &Path, njoy: &Path) -> (PathBuf, PathBuf, AceOptions) {
+        let evaluation = root.join("in.endf");
+        std::fs::write(&evaluation, crate::testdata::text(AM244)).unwrap();
+        let out = root.join("out");
+        std::fs::create_dir(&out).unwrap();
+        let options = AceOptions {
+            output_dir: out.clone(),
+            njoy_exec: njoy.to_str().unwrap().to_string(),
+            ..AceOptions::pendf_only(out.join("pendf"))
+        };
+        (evaluation, out, options)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn njoy_runs_in_a_directory_of_its_own_inside_the_output_directory() {
+        let root = fresh_dir("runs-inside");
+        let njoy = stand_in(&root, "echo pointwise > tape21");
+        let (evaluation, out, options) = pendf_into(&root, &njoy);
+
+        make_ace(&evaluation, &am244(), &options).unwrap();
+
+        let ran_in = recorded(&root, "ran_in");
+        assert_eq!(
+            ran_in.parent(),
+            Some(std::fs::canonicalize(&out).unwrap().as_path()),
+            "NJOY ran in {}, not in a directory of its own inside {}",
+            ran_in.display(),
+            out.display()
+        );
+        let name = ran_in.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with(".njoy-run-"), "{name}");
+        // Its scratch units go there too, not to /tmp.
+        assert_eq!(recorded(&root, "tmpdir"), ran_in);
+        // The tape the deck asked for came out, and the working directory went.
+        assert_eq!(entries(&out), ["pendf"]);
+        assert_eq!(
+            std::fs::read_to_string(out.join("pendf")).unwrap(),
+            "pointwise\n"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_output_directory_reaches_njoy_as_an_absolute_tmpdir() {
+        let root = fresh_dir("relative");
+        // NJOY reads TMPDIR from inside its own directory, where a relative
+        // one names a directory that is not there.
+        let njoy = stand_in(
+            &root,
+            "case \"$TMPDIR\" in /*) ;; *) exit 9 ;; esac\necho pointwise > tape21",
+        );
+        let (evaluation, out, mut options) = pendf_into(&root, &njoy);
+        options.output_dir = relative_to_here(&out);
+
+        make_ace(&evaluation, &am244(), &options).unwrap();
+
+        assert_eq!(recorded(&root, "tmpdir"), recorded(&root, "ran_in"));
+        assert_eq!(entries(&out), ["pendf"]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_njoy_run_leaves_nothing_in_the_output_directory() {
+        let root = fresh_dir("fails");
+        let njoy = stand_in(&root, "echo partial > tape21\nexit 3");
+        let (evaluation, out, options) = pendf_into(&root, &njoy);
+
+        let err = make_ace(&evaluation, &am244(), &options)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("NJOY exited with"), "{err}");
+        // It ran in the output directory, and neither its working directory
+        // nor the tape it cut short is left there.
+        let ran_in = recorded(&root, "ran_in");
+        assert!(
+            ran_in.starts_with(std::fs::canonicalize(&out).unwrap()),
+            "NJOY ran in {}",
+            ran_in.display()
+        );
+        assert_eq!(entries(&out), Vec::<String>::new());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_scratch_directory_is_hidden_its_own_and_gone_once_dropped() {
+        let root = fresh_dir("scratch");
+        let a = Scratch::new_in(&root, "Fe56").unwrap();
+        let b = Scratch::new_in(&root, "Fe56").unwrap();
+        assert_ne!(a.path(), b.path(), "two conversions shared a directory");
+        for scratch in [&a, &b] {
+            assert!(scratch.path().is_dir());
+            assert!(scratch.path().is_absolute());
+            assert_eq!(scratch.path().parent(), Some(root.as_path()));
+            let name = scratch.path().file_name().unwrap().to_string_lossy();
+            assert!(name.starts_with(".njoy-Fe56-"), "{name}");
+        }
+
+        // Dropped with a tape in it, it goes, and takes nothing else with it.
+        std::fs::write(a.path().join("tape20"), "evaluation").unwrap();
+        let b_name = b.path().file_name().unwrap().to_string_lossy().into_owned();
+        drop(a);
+        assert_eq!(entries(&root), [b_name]);
+        drop(b);
+        assert_eq!(entries(&root), Vec::<String>::new());
+
+        // A parent that does not exist is an error that names the path.
+        let err = Scratch::new_in(&root.join("absent"), "x")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("absent"), "{err}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_name_already_taken_is_skipped_and_left_alone() {
+        let root = fresh_dir("taken");
+        let pid = std::process::id();
+        let name = |n: u64| root.join(format!(".njoy-x-{pid}-{n}"));
+        // What a killed run that had this process id would leave.
+        std::fs::create_dir(name(0)).unwrap();
+        std::fs::write(name(0).join("tape20"), "left by a killed run").unwrap();
+
+        let fresh = Scratch::numbered_by(&root, "x", &AtomicU64::new(0)).unwrap();
+        assert_eq!(fresh.path(), name(1));
+        drop(fresh);
+        assert_eq!(
+            std::fs::read_to_string(name(0).join("tape20")).unwrap(),
+            "left by a killed run"
+        );
+
+        // With every name it would try taken, it says so rather than reuse one.
+        for n in 1..64 {
+            std::fs::create_dir(name(n)).unwrap();
+        }
+        let err = Scratch::numbered_by(&root, "x", &AtomicU64::new(0))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("were taken"), "{err}");
+        assert_eq!(entries(&root).len(), 64);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
