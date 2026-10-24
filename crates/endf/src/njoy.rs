@@ -5,8 +5,9 @@
 //! a pointwise ENDF file, or an ACE table at a given temperature. It takes its
 //! instructions on standard input and refers to files by unit number, so the
 //! work here is composing the deck and staging the tapes. Which NJOY runs
-//! matters as much as the deck, so [`require`] refuses one of the wrong
-//! flavour or too old for a library before any work starts.
+//! matters as much as the deck, so [`require`] lets a caller refuse one of
+//! the wrong flavour, or too old for a library, before any work starts.
+//! [`run`] and [`make_ace`] do not check: they run the NJOY they are given.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -329,7 +330,7 @@ pub fn run(deck: &Deck, njoy_exec: &str, input_filename: Option<&Path>) -> Resul
         std::fs::write(path, &deck.commands)?;
     }
 
-    let tmpdir = temp_dir()?;
+    let tmpdir = temp_dir(&std::env::temp_dir())?;
     let result = run_in(deck, njoy_exec, &tmpdir);
     // The temporary directory goes whether NJOY succeeded or not.
     let _ = std::fs::remove_dir_all(&tmpdir);
@@ -537,11 +538,35 @@ impl Flavour {
     }
 }
 
+/// How to get NJOY when there is no version to judge: the flavour a library
+/// needs, if the caller said, and otherwise the upstream wheel with a pointer
+/// to the fork.
+pub(crate) fn install_hint(needed: Option<Flavour>) -> String {
+    let Some(needed) = needed else {
+        return format!(
+            "Install NJOY2016 with\n    {PIP_INSTALL}\n(FENDL needs the IAEA-NDS fork \
+             instead, https://github.com/IAEA-NDS/NJOY2016), or pass njoy_exec the path \
+             to an njoy executable"
+        );
+    };
+    let name = match needed {
+        Flavour::Upstream => "upstream NJOY2016",
+        Flavour::IaeaFork => "the IAEA-NDS fork of NJOY2016",
+    };
+    format!(
+        "This library needs {name}, {} or later. {}",
+        needed.minimum(),
+        needed.how_to_get()
+    )
+}
+
 /// Installs upstream NJOY2016: the njoy2016 wheel puts an `njoy` beside the
 /// Python interpreter. `--upgrade` because an older wheel is the usual reason
-/// to be refused.
-pub(crate) const PIP_INSTALL: &str =
-    "pip install --upgrade njoy2016 --extra-index-url https://shimwell.github.io/wheels";
+/// to be refused. `--index-url` so that pip takes njoy2016 from that index
+/// alone, never a higher-numbered package of the same name on PyPI. It has no
+/// dependencies to fetch from anywhere else.
+const PIP_INSTALL: &str =
+    "pip install --upgrade njoy2016 --index-url https://shimwell.github.io/wheels";
 
 /// Builds the IAEA-NDS fork, which has no wheel.
 const IAEA_BUILD: &str = concat!(
@@ -562,24 +587,67 @@ const IAEA_BUILD: &str = concat!(
 /// from `njoy_version` in nuclear_data_generation_scripts' ensure_njoy.sh.
 ///
 /// `njoy_exec` is a name looked up on PATH or a path, a relative one taken
-/// from the current directory. Fails with [`Error::NjoyMissing`] if it cannot
-/// be started and [`Error::NjoyNoVersion`] if it prints no version.
+/// from the current directory. NJOY runs in a scratch directory made in the
+/// system temporary directory. Fails with [`Error::NjoyMissing`] if it cannot
+/// be started, [`Error::NjoyNoVersion`] if it prints no version, and
+/// [`Error::Io`], naming `njoy_exec` and what failed, if a relative path
+/// cannot be resolved or the scratch directory cannot be made.
 pub fn version(njoy_exec: &str) -> Result<Version> {
+    probe(njoy_exec, None, &std::env::temp_dir())
+}
+
+/// Check that `njoy_exec` is the NJOY a library needs, and return its version
+/// for the record.
+///
+/// Refuses one of the other flavour, or older than [`Flavour::minimum`], with
+/// [`Error::NjoyUnsuitable`], whose message names the executable, the version
+/// found, the version needed and how to get it. Ported from `verify` in
+/// ensure_njoy.sh. Fails as [`version`] does when there is no version to
+/// judge, with messages that say how to get this flavour.
+pub fn require(njoy_exec: &str, needed: Flavour) -> Result<Version> {
+    let found = probe(njoy_exec, Some(needed), &std::env::temp_dir())?;
+    if found.meets(needed) {
+        Ok(found)
+    } else {
+        Err(Error::NjoyUnsuitable {
+            njoy_exec: njoy_exec.to_string(),
+            found,
+            needed,
+        })
+    }
+}
+
+/// [`version`], running NJOY in a fresh directory made inside `scratch`.
+/// `needed` goes into the errors, so that one from [`require`] says which
+/// NJOY to get.
+fn probe(njoy_exec: &str, needed: Option<Flavour>, scratch: &Path) -> Result<Version> {
     let program = program(njoy_exec)?;
     // NJOY writes its listing to a file called `output` in the directory it
     // runs in before it reads anything, so it runs in a scratch directory
-    // rather than over a file of that name in the caller's.
-    let scratch = temp_dir()?;
+    // rather than over a file of that name in the caller's. Nothing has run
+    // yet if that fails, so the error says so rather than reading as a
+    // missing NJOY.
+    let dir = temp_dir(scratch).map_err(|e| match e {
+        Error::Io(e) => Error::Io(std::io::Error::new(
+            e.kind(),
+            format!(
+                "could not make a directory in {} to run NJOY \"{njoy_exec}\" in: {e}",
+                scratch.display()
+            ),
+        )),
+        e => e,
+    })?;
     let ran = std::process::Command::new(program)
         .arg("--version")
-        .current_dir(&scratch)
+        .current_dir(&dir)
         // NJOY reads its deck from standard input. Closed, it stops at once
         // instead of reading the caller's.
         .stdin(std::process::Stdio::null())
         .output();
-    let _ = std::fs::remove_dir_all(&scratch);
+    let _ = std::fs::remove_dir_all(&dir);
     let ran = ran.map_err(|source| Error::NjoyMissing {
         njoy_exec: njoy_exec.to_string(),
+        needed,
         source,
     })?;
 
@@ -591,35 +659,37 @@ pub fn version(njoy_exec: &str) -> Result<Version> {
         .or_else(|| parse_version(&stderr))
         .ok_or_else(|| Error::NjoyNoVersion {
             njoy_exec: njoy_exec.to_string(),
+            needed,
             status: ran.status,
-            output: [stdout.trim(), stderr.trim()]
-                .into_iter()
-                .filter(|text| !text.is_empty())
-                .collect::<Vec<_>>()
-                .join("\n"),
+            output: shorten(
+                &[stdout.trim(), stderr.trim()]
+                    .into_iter()
+                    .filter(|text| !text.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
         })
 }
 
-/// Check that `njoy_exec` is the NJOY a library needs, and return its version
-/// for the record.
-///
-/// Refuses one of the other flavour, or older than [`Flavour::minimum`], with
-/// [`Error::NjoyUnsuitable`], whose message names the executable, the version
-/// found, the version needed and how to get it. Ported from `verify` in
-/// ensure_njoy.sh, and fails as [`version`] does when there is no version to
-/// judge.
-pub fn require(njoy_exec: &str, needed: Flavour) -> Result<Version> {
-    let found = version(njoy_exec)?;
-    if found.meets(needed) {
-        Ok(found)
-    } else {
-        Err(Error::NjoyUnsuitable {
-            njoy_exec: njoy_exec.to_string(),
-            found,
-            needed,
-        })
+/// At most the first [`OUTPUT_LINES`] lines of what a probed executable
+/// printed, so that one which prints a great deal does not end up whole in
+/// an error message. NJOY's own failure text is about 20 lines.
+fn shorten(output: &str) -> String {
+    let mut lines = output.lines();
+    let kept = lines
+        .by_ref()
+        .take(OUTPUT_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let cut = kept.char_indices().nth(OUTPUT_CHARS).map(|(at, _)| at);
+    if cut.is_none() && lines.next().is_none() {
+        return kept;
     }
+    format!("{}\n(truncated)", &kept[..cut.unwrap_or(kept.len())])
 }
+
+const OUTPUT_LINES: usize = 20;
+const OUTPUT_CHARS: usize = 4000;
 
 /// The first `njoy <year>.<minor>` in `text`, with a `+` if one follows: the
 /// match ensure_njoy.sh makes with `njoy +[0-9]{4}\.[0-9]+\+?`.
@@ -650,23 +720,26 @@ fn parse_version(text: &str) -> Option<Version> {
 /// search.
 fn program(njoy_exec: &str) -> Result<PathBuf> {
     let path = Path::new(njoy_exec);
-    if path.components().count() > 1 {
-        Ok(std::path::absolute(path)?)
-    } else {
-        Ok(path.to_path_buf())
+    if path.components().count() <= 1 {
+        return Ok(path.to_path_buf());
     }
+    std::path::absolute(path).map_err(|e| {
+        Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("could not resolve NJOY \"{njoy_exec}\" against the current directory: {e}"),
+        ))
+    })
 }
 
-/// A fresh temporary directory.
+/// A fresh directory inside `base`.
 ///
 /// Hand-rolled because the crate has no dependencies: the name comes from the
 /// process id and a counter, and `create_dir` fails rather than reuses if the
 /// name is somehow taken.
-fn temp_dir() -> Result<PathBuf> {
+fn temp_dir(base: &Path) -> Result<PathBuf> {
     use std::sync::atomic::{AtomicU32, Ordering};
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
-    let base = std::env::temp_dir();
     for _ in 0..64 {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = base.join(format!("endf-njoy-{}-{n}", std::process::id()));
@@ -881,6 +954,27 @@ mod tests {
         ] {
             assert_eq!(parse_version(text), None, "{text:?}");
         }
+    }
+
+    #[test]
+    fn long_output_is_cut_short() {
+        assert_eq!(shorten("one\ntwo"), "one\ntwo");
+        let many: String = (0..100).map(|n| format!("line {n}\n")).collect();
+        let short = shorten(many.trim_end());
+        assert!(short.ends_with("line 19\n(truncated)"), "{short}");
+        let wide = "x".repeat(10_000);
+        assert_eq!(shorten(&wide), format!("{}\n(truncated)", "x".repeat(4000)));
+    }
+
+    #[test]
+    fn reads_a_banner_as_ensure_njoy_does() {
+        // `njoy +[0-9]{4}\.[0-9]+\+?`: one space or more before the version,
+        // and the fork's `+` only straight after it.
+        assert_eq!(parse_version("njoy   2016.80"), Some(v(2016, 80, false)));
+        assert_eq!(
+            parse_version(" njoy 2016.80  08Oct26 x+"),
+            Some(v(2016, 80, false))
+        );
         // An "njoy" that is not a version does not end the search.
         assert_eq!(
             parse_version(&format!("/usr/bin/njoy: started\n{UPSTREAM_2016_80}")),
@@ -967,17 +1061,33 @@ mod tests {
             .join(format!("endf-no-njoy-here-{}", std::process::id()))
             .join("njoy");
         let missing = missing.to_str().expect("a UTF-8 temporary directory");
+        // Asked for no flavour, it points to both.
         let error = version(missing).unwrap_err();
         assert!(matches!(error, Error::NjoyMissing { .. }), "{error:?}");
         let message = error.to_string();
         assert!(message.contains(missing), "{message}");
         assert!(message.contains(PIP_INSTALL), "{message}");
         assert!(message.contains("IAEA-NDS"), "{message}");
-        // A refusal fails the same way when there is nothing to judge.
-        assert!(matches!(
-            require(missing, Flavour::Upstream),
-            Err(Error::NjoyMissing { .. })
-        ));
+        // Asked for one, it says that one and how to get it, and nothing else.
+        let upstream = require(missing, Flavour::Upstream).unwrap_err();
+        assert!(
+            matches!(upstream, Error::NjoyMissing { .. }),
+            "{upstream:?}"
+        );
+        let upstream = upstream.to_string();
+        for part in [missing, "upstream NJOY2016, 2016.80 or later", PIP_INSTALL] {
+            assert!(upstream.contains(part), "{part:?} is not in: {upstream}");
+        }
+        assert!(!upstream.contains("IAEA-NDS"), "{upstream}");
+        let fork = require(missing, Flavour::IaeaFork).unwrap_err().to_string();
+        for part in [
+            missing,
+            "IAEA-NDS fork of NJOY2016, 2016.77+ or later",
+            IAEA_BUILD,
+        ] {
+            assert!(fork.contains(part), "{part:?} is not in: {fork}");
+        }
+        assert!(!fork.contains("pip install"), "{fork}");
     }
 
     #[cfg(unix)]
@@ -987,13 +1097,39 @@ mod tests {
         // prints nothing; neither is a banner.
         let error = version("true").unwrap_err();
         assert!(matches!(error, Error::NjoyNoVersion { .. }), "{error:?}");
-        assert!(error
-            .to_string()
-            .starts_with("\"true\" printed no NJOY version"));
+        assert!(
+            error
+                .to_string()
+                .starts_with("\"true\" printed no NJOY version"),
+            "{error}"
+        );
+        // Asked for a flavour, it says how to get that one.
+        let fork = require("true", Flavour::IaeaFork).unwrap_err();
+        assert!(matches!(fork, Error::NjoyNoVersion { .. }), "{fork:?}");
+        let fork = fork.to_string();
+        assert!(
+            fork.contains("2016.77+") && fork.contains(IAEA_BUILD),
+            "{fork}"
+        );
     }
 
     #[test]
-    fn a_relative_path_is_kept_relative_to_the_callers_directory() {
+    fn a_scratch_directory_that_cannot_be_made_is_named() {
+        // NJOY never starts, so this must not read as an NJOY that is missing.
+        let nowhere = std::env::temp_dir().join(format!("endf-no-dir-here-{}", std::process::id()));
+        let error = probe("njoy", None, &nowhere).unwrap_err();
+        let Error::Io(e) = &error else {
+            panic!("{error:?}")
+        };
+        assert_eq!(e.kind(), std::io::ErrorKind::NotFound, "{e}");
+        let message = error.to_string();
+        for part in [nowhere.to_str().unwrap(), "to run NJOY \"njoy\""] {
+            assert!(message.contains(part), "{part:?} is not in: {message}");
+        }
+    }
+
+    #[test]
+    fn a_relative_path_is_taken_from_the_callers_directory() {
         // NJOY is started in a scratch directory, so a relative path would
         // otherwise be looked for there.
         assert_eq!(program("njoy").unwrap(), PathBuf::from("njoy"));
@@ -1003,6 +1139,58 @@ mod tests {
             relative,
             std::env::current_dir().unwrap().join("bin").join("njoy")
         );
+        // Tests run in the crate directory, where this file is found and then
+        // refused for not being executable. Looked for from the scratch
+        // directory, it would not be found at all.
+        #[cfg(unix)]
+        {
+            let error = version("src/njoy.rs").unwrap_err();
+            let Error::NjoyMissing { source, .. } = &error else {
+                panic!("{error:?}")
+            };
+            assert_eq!(
+                source.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "{error}"
+            );
+        }
+    }
+
+    /// A stand-in for NJOY that writes where it ran to a file beside itself,
+    /// prints its banner on standard error alone and exits 2, so the probe is
+    /// checked where NJOY is not installed.
+    #[cfg(unix)]
+    #[test]
+    fn reads_a_banner_on_standard_error_in_a_directory_it_then_removes() {
+        let dir = std::env::temp_dir().join(format!("endf-njoy-stand-in-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let (njoy, ran_in) = (dir.join("njoy"), dir.join("ran_in"));
+        let script = format!(
+            "#!/bin/sh\npwd -P > '{}'\necho ' njoy 2016.80  08Oct26' >&2\nexit 2\n",
+            ran_in.display()
+        );
+        // Written by `sh`, not by this process. A child another test starts
+        // holds this process's open files until it execs, and a script that
+        // is open for writing fails to run with "Text file busy".
+        let written = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "printf '%s' \"$2\" > \"$1\" && chmod 755 \"$1\"",
+                "sh",
+            ])
+            .arg(&njoy)
+            .arg(&script)
+            .status()
+            .unwrap();
+        assert!(written.success());
+
+        assert_eq!(version(njoy.to_str().unwrap()).unwrap(), v(2016, 80, false));
+        let ran_in = PathBuf::from(std::fs::read_to_string(&ran_in).unwrap().trim_end());
+        let here = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert_ne!(ran_in, here, "the probe ran in the working directory");
+        assert!(!ran_in.exists(), "the probe left {ran_in:?} behind");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// The NJOY on PATH, when this machine has one. Announces a loud skip

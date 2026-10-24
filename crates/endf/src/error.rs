@@ -1,4 +1,4 @@
-//! Errors raised while reading an ENDF-6 file.
+//! Errors raised while reading ENDF-6 files and driving NJOY.
 
 use std::fmt;
 
@@ -54,11 +54,16 @@ pub enum Error {
     /// its path, or not executable.
     NjoyMissing {
         njoy_exec: String,
+        /// The flavour [`crate::njoy::require`] was asked for, so the message
+        /// says how to get that one. `None` from [`crate::njoy::version`].
+        needed: Option<Flavour>,
         source: std::io::Error,
     },
     /// An executable that ran but printed no NJOY version.
     NjoyNoVersion {
         njoy_exec: String,
+        /// As for [`Error::NjoyMissing`].
+        needed: Option<Flavour>,
         status: std::process::ExitStatus,
         /// What it printed, standard output then standard error.
         output: String,
@@ -106,15 +111,18 @@ impl fmt::Display for Error {
                 write!(f, "this reader does not implement {what}")
             }
             Error::InvalidArgument { what } => write!(f, "{what}"),
-            Error::NjoyMissing { njoy_exec, source } => write!(
+            Error::NjoyMissing {
+                njoy_exec,
+                needed,
+                source,
+            } => write!(
                 f,
-                "could not run NJOY \"{njoy_exec}\": {source}. Install NJOY2016 with\n    {}\n\
-                 (FENDL needs the IAEA-NDS fork instead, https://github.com/IAEA-NDS/NJOY2016), \
-                 or pass njoy_exec the path to an njoy executable",
-                crate::njoy::PIP_INSTALL
+                "could not run NJOY \"{njoy_exec}\": {source}. {}",
+                crate::njoy::install_hint(*needed)
             ),
             Error::NjoyNoVersion {
                 njoy_exec,
+                needed,
                 status,
                 output,
             } => {
@@ -125,10 +133,11 @@ impl fmt::Display for Error {
                      \" njoy 2016.80  08Oct26\""
                 )?;
                 if output.is_empty() {
-                    write!(f, "; it printed nothing")
+                    write!(f, ", and it printed nothing. ")?;
                 } else {
-                    write!(f, "; it printed:\n{output}")
+                    write!(f, ". It printed:\n{output}\n")?;
                 }
+                f.write_str(&crate::njoy::install_hint(*needed))
             }
             Error::NjoyUnsuitable {
                 njoy_exec,
