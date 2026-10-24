@@ -178,7 +178,8 @@ impl Config {
                 if !is_keyword_or_directory(nuclide_or_keyword) {
                     panic!(
                         "Invalid cross section source: '{}'. Must be a keyword ({}) or a directory path.",
-                        nuclide_or_keyword, "tendl-2025, fendl-3.2d, endf-b8.1"
+                        nuclide_or_keyword,
+                        crate::url_cache::cross_section_keywords().join(", ")
                     );
                 }
                 self.default_cross_section = Some(nuclide_or_keyword.to_string());
@@ -353,8 +354,9 @@ impl IntoCrossSectionsInput for &str {
         refuse_branching_only(self);
         if !is_keyword_or_directory(self) {
             panic!(
-                "Invalid cross section source: '{}'. Must be a keyword (tendl-2025, fendl-3.2d, endf-b8.1) or a directory path.",
+                "Invalid cross section source: '{}'. Must be a keyword ({}) or a directory path.",
                 self,
+                crate::url_cache::cross_section_keywords().join(", ")
             );
         }
         config.default_cross_section = Some(self.to_string());
@@ -515,5 +517,37 @@ mod missing_cross_section_tests {
         let partial = mapped.missing_cross_sections(&["Fe56"]);
         assert!(partial.contains("maps 1 nuclide(s)"), "{partial}");
         assert!(partial.contains("'Fe56'"), "{partial}");
+    }
+}
+
+#[cfg(test)]
+mod invalid_source_tests {
+    use super::*;
+
+    /// A source that is neither a keyword nor a directory is refused with every
+    /// keyword a cross-section source can be, from the one list of them, and
+    /// none of the branching-only ones.
+    #[test]
+    fn an_invalid_source_lists_every_cross_section_keyword() {
+        let refusal = |set: fn()| -> String {
+            let payload = std::panic::catch_unwind(set).expect_err("an invalid source panics");
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_default()
+        };
+        for message in [
+            refusal(|| Config::new().set_cross_section("not-a-library", None)),
+            refusal(|| Config::new().set_cross_sections("not-a-library")),
+        ] {
+            assert!(
+                message.starts_with("Invalid cross section source: 'not-a-library'"),
+                "{message}"
+            );
+            for keyword in crate::url_cache::cross_section_keywords() {
+                assert!(message.contains(keyword), "{keyword} missing: {message}");
+            }
+            assert!(!message.contains("irdff-ii"), "{message}");
+        }
     }
 }
