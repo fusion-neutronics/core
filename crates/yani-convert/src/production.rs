@@ -130,21 +130,22 @@ pub fn extract_production(material: &Material) -> Vec<ProductionChannel> {
     out
 }
 
-/// Read the radionuclide production of many evaluations, one at a time.
+/// Read the radionuclide production of many evaluations, one file at a time.
 ///
 /// Streamed rather than parsed into a held set, because a whole neutron
 /// sublibrary does not fit in memory, and a survey is the case that wants every
-/// file rather than a scoped few. Channels come back in file order, so the
-/// answer does not depend on how the work was scheduled.
+/// file rather than a scoped few. Every material of a file is read, so a tape
+/// such as IRDFF-II's answers for all of its evaluations. Channels come back in
+/// file order and then tape order, so the answer does not depend on how the
+/// work was scheduled.
 pub fn production_from_files<P: AsRef<Path>>(
     paths: &[P],
 ) -> Result<Vec<ProductionChannel>, Box<dyn Error>> {
     let mut out = Vec::new();
     for path in paths {
-        let display = path.as_ref().display().to_string();
-        let material = Material::from_file(path.as_ref())
-            .map_err(|e| -> Box<dyn Error> { format!("{display}: {e}").into() })?;
-        out.extend(extract_production(&material));
+        for material in crate::read_materials(path.as_ref())? {
+            out.extend(extract_production(&material));
+        }
     }
     Ok(out)
 }
