@@ -116,6 +116,7 @@ __all__ = [
     "solid_overlaps",
     "solid_shared_volume",
     "transmute",
+    "verify_library",
     "weld_mesh",
 ]
 
@@ -8433,6 +8434,51 @@ def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | t
         ... ]
         >>> results = yani.transmute(cells, schedules)
         >>> results.get_final_material(cells[3].id)
+    """
+
+def verify_library(path: builtins.str) -> dict:
+    r"""
+    Check a nuclear-data library folder against its ``manifest.json``.
+    
+    Re-hashes every file the manifest lists and compares its size and sha256
+    with the manifest, then looks for files the manifest does not list.
+    Loading data from a library folder only checks the sizes of the files it
+    reads; this is the full check, for a library kept for offline use or built
+    locally.
+    
+    Parameters
+    ----------
+    path : str
+        A library folder: ``manifest.json`` beside the ``neutron/``,
+        ``photon/``, ``photonuclear/`` and ``transmutation/`` folders it
+        describes, laid out as each release in :func:`cache_dir` is. A release
+        folder in the cache holds only the files runs have downloaded, so the
+        rest are reported missing.
+    
+    Returns
+    -------
+    dict
+        ``keyword``, ``release``, ``format_version`` and ``manifest_sha256``
+        identify the release the manifest describes, and ``file_count`` and
+        ``total_bytes`` count what it lists. ``missing`` (listed but absent),
+        ``changed`` (listed, with another size or sha256) and ``unlisted``
+        (in the release's ``<Name>.arrow/`` folders, or a particle's
+        ``index.json``, but not listed) are sorted paths relative to the
+        folder. ``ok`` is ``True`` when all three are empty.
+    
+        An unlisted file fails the check: results record the manifest's sha256
+        as the identity of the library a run read, and a file the manifest
+        does not list is data that identity does not cover. Files outside the
+        release's folders, such as a local build's ``.build/`` folder, are not
+        looked at.
+    
+    Raises
+    ------
+    RuntimeError
+        If ``path`` is not a folder or holds no ``manifest.json``, if the
+        manifest is not a version 1 release manifest or is in a
+        ``format_version`` this build does not read, or if a listed file
+        cannot be read.
     """
 
 def weld_mesh(vertices: typing.Sequence[typing.Sequence[builtins.float]], triangles: typing.Sequence[typing.Sequence[builtins.int]], rel_tol: builtins.float = 1e-06) -> tuple[builtins.list[builtins.list[builtins.float]], builtins.list[builtins.list[builtins.int]], builtins.list[builtins.int]]:

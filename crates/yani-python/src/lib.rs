@@ -32,6 +32,7 @@ pub mod distribution;
 pub mod element;
 pub mod group_structures;
 pub mod html_repr;
+pub mod library;
 pub mod material;
 pub mod particle;
 pub mod read;
@@ -119,6 +120,7 @@ pub fn register_classes(py: Python<'_>, m: &Bound<'_, PyModule>, package: &str) 
     m.add_function(wrap_pyfunction!(read::read_element_from_arrow, m)?)?;
     m.add_function(wrap_pyfunction!(read::read_photonuclear_from_arrow, m)?)?;
     m.add_function(wrap_pyfunction!(config::cache_dir, m)?)?;
+    m.add_function(wrap_pyfunction!(library::verify_library, m)?)?;
     // The host's downloader on Pyodide, which has no sockets. Registered here
     // so the yamc and yani wheels share the one hook.
     #[cfg(target_os = "emscripten")]
