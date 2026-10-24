@@ -67,11 +67,14 @@ impl From<CellSerde> for Cell {
 impl Cell {
     /// Find the closest surface of this cell to a point along a direction (first intersection with any region surface).
     /// Returns `(BoundaryType, distance, surface_id)` to avoid an Arc clone per call.
+    /// `on_surface` is the surface the particle has just crossed, if any:
+    /// that surface's distance treats the crossing as an exact root.
     #[inline]
     pub fn closest_surface(
         &self,
         point: [f64; 3],
         direction: [f64; 3],
+        on_surface: Option<crate::geometry::backend::OnSurface>,
     ) -> Option<(crate::geo::BoundaryType, f64, Option<usize>)> {
         let mut min_dist = f64::INFINITY;
         let mut closest_boundary = None;
@@ -80,7 +83,10 @@ impl Cell {
         // Use cached surfaces for fast iteration (avoids repeated collection)
         for (surface_arc, _sense) in &self.cached_surfaces {
             let surface: &crate::geo::Surface = surface_arc.as_ref();
-            if let Some(dist) = surface.distance_to_surface(point, direction)
+            let offset = on_surface
+                .filter(|on| surface.surface_id == Some(on.surface_id))
+                .map(|on| on.offset);
+            if let Some(dist) = surface.distance_to_surface_on(point, direction, offset)
                 && dist > 1e-10
                 && dist < min_dist
             {

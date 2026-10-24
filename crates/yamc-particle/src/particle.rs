@@ -120,6 +120,13 @@ pub struct Particle {
     /// Surface ID of the last surface crossed; `NO_SURFACE` when unset
     /// (used for lost-particle diagnostics).
     pub last_surface_id: u32,
+    /// Surface ID of the surface the particle has just crossed and still
+    /// sits next to (moved only the crossing nudge past it); `NO_SURFACE`
+    /// otherwise. Set by the transmission crossing, cleared by every
+    /// other move ([`Particle::move_by`]). Lets the next surface-distance
+    /// query treat that crossing as an exact root instead of solving
+    /// for it in round-off.
+    pub on_surface_id: u32,
     /// Parent nuclide for D1S decay photons.
     /// Set only on photons produced by the D1S method, used by ParentNuclideFilter.
     /// Stored as an interned `NuclideId` (2 bytes with niche-packed Option) so the
@@ -153,6 +160,7 @@ impl Particle {
             urr_random: NO_URR,           // Set per-collision when in URR range
             urr_energy: -1.0,             // Invalid energy to force initial sampling
             last_surface_id: NO_SURFACE,  // Set on surface crossings for lost particle diagnostics
+            on_surface_id: NO_SURFACE,    // Set by a crossing, cleared by the next move
             parent_nuclide: None,         // Set only for D1S decay photons
             replica: None,
             #[cfg(feature = "debug_history")]
@@ -201,10 +209,13 @@ impl Particle {
         );
     }
 
-    /// Move the particle along its current direction by the specified distance
+    /// Move the particle along its current direction by the specified
+    /// distance. The particle is no longer on the surface it last
+    /// crossed: a crossing sets `on_surface_id` again after moving.
     pub fn move_by(&mut self, distance: f64) {
         // Save current position as last position
         self.last_position = self.position;
+        self.on_surface_id = NO_SURFACE;
 
         // Update position
         for i in 0..3 {

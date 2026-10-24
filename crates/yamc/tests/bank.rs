@@ -26,6 +26,7 @@ mod tests {
             urr_energy: 0.0,
             previous_cell_index: yamc_particle::particle::NO_CELL,
             last_surface_id: yamc_particle::particle::NO_SURFACE,
+            on_surface_id: yamc_particle::particle::NO_SURFACE,
             parent_nuclide: None,
             replica: None,
             #[cfg(feature = "debug_history")]
@@ -64,6 +65,7 @@ mod tests {
             urr_energy: 0.0,
             previous_cell_index: yamc_particle::particle::NO_CELL,
             last_surface_id: yamc_particle::particle::NO_SURFACE,
+            on_surface_id: yamc_particle::particle::NO_SURFACE,
             parent_nuclide: None,
             replica: None,
             #[cfg(feature = "debug_history")]
@@ -84,6 +86,7 @@ mod tests {
             urr_energy: 0.0,
             previous_cell_index: yamc_particle::particle::NO_CELL,
             last_surface_id: yamc_particle::particle::NO_SURFACE,
+            on_surface_id: yamc_particle::particle::NO_SURFACE,
             parent_nuclide: None,
             replica: None,
             #[cfg(feature = "debug_history")]
@@ -192,6 +195,7 @@ mod tests {
             urr_energy: 0.0,
             previous_cell_index: yamc_particle::particle::NO_CELL,
             last_surface_id: yamc_particle::particle::NO_SURFACE,
+            on_surface_id: yamc_particle::particle::NO_SURFACE,
             parent_nuclide: None,
             replica: None,
             #[cfg(feature = "debug_history")]

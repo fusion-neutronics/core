@@ -19,4 +19,4 @@ pub use geometry::CsgGeometry;
 pub use mesh::{GeoMesh, GeoMeshVolume};
 pub use plot::{PlotGrid, PlotParams, PlotSample};
 pub use region::{FlatRegion, HalfspaceType, Region, RegionExpr};
-pub use surface::{BoundaryType, Halfspace, Surface, SurfaceKind};
+pub use surface::{quartic_real_roots, BoundaryType, Halfspace, Surface, SurfaceKind};

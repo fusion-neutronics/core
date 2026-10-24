@@ -915,6 +915,8 @@ impl Model {
         let mut pos = start;
         let mut remaining = max_distance;
         let mut tau = 0.0;
+        // The surface just stepped NUDGE past, for the next query.
+        let mut on_surface = None;
         let mut cell_idx = match self
             .geometry
             .find_cell_index_along((pos[0], pos[1], pos[2]), direction)
@@ -938,11 +940,16 @@ impl Model {
                     }
                 })
                 .unwrap_or(0.0);
-            let d = self
+            let hit = self
                 .geometry
-                .closest_boundary(cell_idx, pos, direction)
-                .map(|h| h.distance)
-                .unwrap_or(remaining);
+                .closest_boundary(cell_idx, pos, direction, on_surface);
+            on_surface = hit.as_ref().and_then(|h| h.surface_id).map(|surface_id| {
+                crate::geometry::backend::OnSurface {
+                    surface_id,
+                    offset: NUDGE,
+                }
+            });
+            let d = hit.map(|h| h.distance).unwrap_or(remaining);
             let seg = d.min(remaining);
             tau += sigma_t * seg;
             remaining -= seg;

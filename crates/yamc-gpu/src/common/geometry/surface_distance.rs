@@ -31,7 +31,10 @@
 //! bit-comparable results, following the established pattern in
 //! `poly_solve`.
 
-use crate::common::poly_solve::{quartic_smallest_positive, quartic_smallest_positive_cpu};
+use crate::common::poly_solve::{
+    quadratic_root_max, quadratic_root_max_cpu, quadratic_root_min, quadratic_root_min_cpu,
+    quartic_factors, quartic_factors_cpu, NO_ROOT,
+};
 use cubecl::prelude::*;
 
 /// Distance returned when a surface is not hit forward. Crate-internal;
@@ -92,18 +95,32 @@ pub fn quadratic_smallest_positive(qa: f64, qb: f64, qc: f64) -> f64 {
     result
 }
 
+/// Crossings closer than this fraction of the torus size to the point
+/// where the particle crossed the torus are that crossing. Same value
+/// and reasoning as `yamc-geo`'s torus `ON_SURFACE_TOLERANCE`.
+pub const TORUS_ON_SURFACE_TOLERANCE: f64 = 1e-9;
+
 /// Smallest positive ray-torus intersection in axis-permuted
 /// coordinates: `(t1, t2)` are the transverse displacements from the
 /// torus centre, `ax` the axial one, with matching direction
 /// components `(dt1, dt2, dax)`. `a` is the major radius, `b` the
 /// axial minor, `c` the radial minor (the `yamc-geo` convention).
 ///
-/// Scales the axial coordinate by `c/b` to reduce an elliptical torus
-/// to a circular one of minor radius `c`, builds the quartic in the
-/// ray parameter, and returns its smallest positive root via
-/// [`quartic_smallest_positive`].
+/// Port of `yamc_geo`'s `torus_distance`, which documents the method:
+/// the axial coordinate is scaled by `c/b` (elliptical to circular),
+/// lengths are divided by `a + c`, the quartic is factorised by
+/// [`quartic_factors`] (Algorithm 1010), and roots on the mirror torus
+/// (`|q|^2 + a^2 - c^2 < 0` at the hit point) are rejected.
+///
+/// `on_surface_offset >= 0` says the particle has just crossed this
+/// torus and sits that far past the crossing along the ray (the
+/// transport nudge); the quartic is then built at the crossing point
+/// with its constant term exactly zero, and roots within
+/// [`TORUS_ON_SURFACE_TOLERANCE`] of it are dropped. Pass a negative
+/// value when the particle is not on the torus.
 #[cube]
-#[allow(clippy::too_many_arguments)]
+// `a - a` is a runtime zero (cubecl keeps literal-seeded f64s comptime).
+#[allow(clippy::too_many_arguments, clippy::eq_op)]
 pub fn torus_smallest_positive(
     t1: f64,
     t2: f64,
@@ -114,44 +131,90 @@ pub fn torus_smallest_positive(
     a: f64,
     b: f64,
     c: f64,
+    on_surface_offset: f64,
 ) -> f64 {
-    let mut ax_scale = 1.0_f64;
-    let bc = b - c;
-    let mut abs_bc = bc;
-    if abs_bc < 0.0 {
-        abs_bc = -bc;
+    let on_surface = on_surface_offset >= 0.0;
+    // Runtime zero (cubecl keeps literal-seeded `let mut` f64s comptime).
+    let rt_zero = a - a;
+    let mut offset = rt_zero;
+    if on_surface {
+        offset = on_surface_offset;
     }
-    if abs_bc > 1e-14 {
-        ax_scale = c / b;
-    }
-    let pax_s = ax * ax_scale;
-    let dax_s = dax * ax_scale;
-    let mq = dt1 * dt1 + dt2 * dt2 + dax_s * dax_s;
-    let kq = t1 * dt1 + t2 * dt2 + pax_s * dax_s;
-    let nq = t1 * t1 + t2 * t2 + pax_s * pax_s;
+    let size = a + c;
+    let inv = 1.0 / size;
+    let ax_scale = c / b;
+    let x = (t1 - offset * dt1) * inv;
+    let y = (t2 - offset * dt2) * inv;
+    let z = (ax - offset * dax) * ax_scale * inv;
+    let w = dax * ax_scale;
+    let ar = a * inv;
+    let cr = c * inv;
+    let m = dt1 * dt1 + dt2 * dt2 + w * w;
+    let k = x * dt1 + y * dt2 + z * w;
+    let n = x * x + y * y + z * z;
     let m_t = dt1 * dt1 + dt2 * dt2;
-    let k_t = t1 * dt1 + t2 * dt2;
-    let n_t = t1 * t1 + t2 * t2;
-    let big_s = nq + a * a - c * c;
-    let c4 = mq * mq;
-    let c3 = 4.0 * mq * kq;
-    let c2 = 4.0 * kq * kq + 2.0 * mq * big_s - 4.0 * a * a * m_t;
-    let c1 = 4.0 * kq * big_s - 8.0 * a * a * k_t;
-    let c0 = big_s * big_s - 4.0 * a * a * n_t;
-    let mut result = 1e30_f64;
-    let mut abs_c4 = c4;
-    if abs_c4 < 0.0 {
-        abs_c4 = -c4;
+    let k_t = x * dt1 + y * dt2;
+    let n_t = x * x + y * y;
+    let a2 = ar * ar;
+    let cr2 = cr * cr;
+    let big_s = n + a2 - cr2;
+    let c4 = m * m;
+    let c3 = 4.0 * m * k;
+    let c2 = 4.0 * k * k + 2.0 * m * big_s - 4.0 * a2 * m_t;
+    let c1 = 4.0 * k * big_s - 8.0 * a2 * k_t;
+    let mut c0 = big_s * big_s - 4.0 * a2 * n_t;
+    if on_surface {
+        c0 = 0.0;
     }
-    if abs_c4 > 1e-30 {
-        let bn = c3 / c4;
-        let cn = c2 / c4;
-        let dn = c1 / c4;
-        let en = c0 / c4;
-        let t = quartic_smallest_positive(bn, cn, dn, en);
-        if t < 1e30_f64 {
-            result = t;
+    let mut floor = (1e-12 + offset) * inv;
+    if on_surface && floor < TORUS_ON_SURFACE_TOLERANCE {
+        floor = TORUS_ON_SURFACE_TOLERANCE;
+    }
+    let mut min_t = rt_zero + 1e30;
+    // Bounding ball |q| <= a + c (radius 1 here): a ray starting outside
+    // that moves away or whose line misses it cannot hit.
+    let mut may_hit = c4 != 0.0;
+    if n > 1.0 + 1e-9 && (k >= 0.0 || n - k * k / m > 1.0 + 1e-9) {
+        may_hit = false;
+    }
+    if may_hit {
+        let f = quartic_factors(c3 / c4, c2 / c4, c1 / c4, c0 / c4);
+        if f.real == 1u32 {
+            let mut q = 0u32;
+            while q < 2u32 {
+                let mut alpha = f.alpha1;
+                let mut beta = f.beta1;
+                if q == 1u32 {
+                    alpha = f.alpha2;
+                    beta = f.beta2;
+                }
+                let x_max = quadratic_root_max(alpha, beta);
+                if x_max < NO_ROOT {
+                    let x_min = quadratic_root_min(beta, x_max);
+                    let mut r = 0u32;
+                    while r < 2u32 {
+                        let mut t = x_max * f.scale;
+                        if r == 1u32 {
+                            t = x_min * f.scale;
+                        }
+                        if t > floor && t < min_t {
+                            let sx = x + t * dt1;
+                            let sy = y + t * dt2;
+                            let sz = z + t * w;
+                            if sx * sx + sy * sy + sz * sz + a2 - cr2 >= 0.0 {
+                                min_t = t;
+                            }
+                        }
+                        r += 1u32;
+                    }
+                }
+                q += 1u32;
+            }
         }
+    }
+    let mut result = rt_zero + MISS;
+    if min_t < 1e30_f64 {
+        result = min_t * size - offset;
     }
     result
 }
@@ -277,28 +340,66 @@ pub fn torus_smallest_positive_cpu(
     a: f64,
     b: f64,
     c: f64,
+    on_surface_offset: f64,
 ) -> f64 {
-    let ax_scale = if (b - c).abs() > 1e-14 { c / b } else { 1.0 };
-    let pax_s = ax * ax_scale;
-    let dax_s = dax * ax_scale;
-    let mq = dt1 * dt1 + dt2 * dt2 + dax_s * dax_s;
-    let kq = t1 * dt1 + t2 * dt2 + pax_s * dax_s;
-    let nq = t1 * t1 + t2 * t2 + pax_s * pax_s;
+    let on_surface = on_surface_offset >= 0.0;
+    let offset = if on_surface { on_surface_offset } else { 0.0 };
+    let size = a + c;
+    let inv = 1.0 / size;
+    let ax_scale = c / b;
+    let x = (t1 - offset * dt1) * inv;
+    let y = (t2 - offset * dt2) * inv;
+    let z = (ax - offset * dax) * ax_scale * inv;
+    let w = dax * ax_scale;
+    let ar = a * inv;
+    let cr = c * inv;
+    let m = dt1 * dt1 + dt2 * dt2 + w * w;
+    let k = x * dt1 + y * dt2 + z * w;
+    let n = x * x + y * y + z * z;
     let m_t = dt1 * dt1 + dt2 * dt2;
-    let k_t = t1 * dt1 + t2 * dt2;
-    let n_t = t1 * t1 + t2 * t2;
-    let big_s = nq + a * a - c * c;
-    let c4 = mq * mq;
-    let c3 = 4.0 * mq * kq;
-    let c2 = 4.0 * kq * kq + 2.0 * mq * big_s - 4.0 * a * a * m_t;
-    let c1 = 4.0 * kq * big_s - 8.0 * a * a * k_t;
-    let c0 = big_s * big_s - 4.0 * a * a * n_t;
-    if c4.abs() < 1e-30 {
+    let k_t = x * dt1 + y * dt2;
+    let n_t = x * x + y * y;
+    let a2 = ar * ar;
+    let cr2 = cr * cr;
+    let big_s = n + a2 - cr2;
+    let c4 = m * m;
+    let c3 = 4.0 * m * k;
+    let c2 = 4.0 * k * k + 2.0 * m * big_s - 4.0 * a2 * m_t;
+    let c1 = 4.0 * k * big_s - 8.0 * a2 * k_t;
+    let c0 = if on_surface {
+        0.0
+    } else {
+        big_s * big_s - 4.0 * a2 * n_t
+    };
+    let mut floor = (1e-12 + offset) * inv;
+    if on_surface && floor < TORUS_ON_SURFACE_TOLERANCE {
+        floor = TORUS_ON_SURFACE_TOLERANCE;
+    }
+    if c4 == 0.0 || (n > 1.0 + 1e-9 && (k >= 0.0 || n - k * k / m > 1.0 + 1e-9)) {
         return MISS;
     }
-    let t = quartic_smallest_positive_cpu(c3 / c4, c2 / c4, c1 / c4, c0 / c4);
-    if t < MISS {
-        t
+    let f = quartic_factors_cpu(c3 / c4, c2 / c4, c1 / c4, c0 / c4);
+    if !f.real {
+        return MISS;
+    }
+    let mut min_t = 1e30_f64;
+    for (alpha, beta) in [(f.alpha1, f.beta1), (f.alpha2, f.beta2)] {
+        let x_max = quadratic_root_max_cpu(alpha, beta);
+        if x_max >= NO_ROOT {
+            continue;
+        }
+        let x_min = quadratic_root_min_cpu(beta, x_max);
+        for t in [x_max * f.scale, x_min * f.scale] {
+            if t > floor && t < min_t {
+                let (sx, sy, sz) = (x + t * dt1, y + t * dt2, z + t * w);
+                if sx * sx + sy * sy + sz * sz + a2 - cr2 >= 0.0 {
+                    min_t = t;
+                }
+            }
+        }
+    }
+    if min_t < 1e30_f64 {
+        min_t * size - offset
     } else {
         MISS
     }
@@ -374,6 +475,50 @@ pub fn cone_smallest_positive_cpu(
     let qb = 2.0 * (vd - kappa * va * da);
     let qc = v2 - kappa * va * va;
     quadratic_smallest_positive_cpu(qa, qb, qc)
+}
+
+/// Test kernel: [`torus_smallest_positive`] per thread. `cases` is
+/// stride-10 `[t1, t2, ax, dt1, dt2, dax, a, b, c, on_surface_offset]`.
+#[cube(launch_unchecked)]
+fn torus_distance_kernel(cases: &[f64], out: &mut [f64]) {
+    if ABSOLUTE_POS >= out.len() {
+        terminate!();
+    }
+    let i = ABSOLUTE_POS * 10;
+    out[ABSOLUTE_POS] = torus_smallest_positive(
+        cases[i],
+        cases[i + 1],
+        cases[i + 2],
+        cases[i + 3],
+        cases[i + 4],
+        cases[i + 5],
+        cases[i + 6],
+        cases[i + 7],
+        cases[i + 8],
+        cases[i + 9],
+    );
+}
+
+/// Run [`torus_smallest_positive`] on the GPU for the parity tests;
+/// `cases` as in `torus_distance_kernel`.
+pub fn run_torus_distance(ctx: &crate::GpuContext, cases: &[f64]) -> Vec<f64> {
+    assert!(cases.len().is_multiple_of(10));
+    let n = cases.len() / 10;
+    let client = ctx.client();
+    let cases_h = client.create_from_slice(bytemuck::cast_slice(cases));
+    let out_h = client.empty(n * core::mem::size_of::<f64>());
+    const WG: u32 = 64;
+    let groups = (n as u32).div_ceil(WG);
+    unsafe {
+        torus_distance_kernel::launch_unchecked(
+            &client,
+            CubeCount::Static(groups, 1, 1),
+            CubeDim::new_1d(WG),
+            BufferArg::from_raw_parts(cases_h, cases.len()),
+            BufferArg::from_raw_parts(out_h.clone(), n),
+        );
+    }
+    bytemuck::cast_slice(&client.read_one(out_h).unwrap()).to_vec()
 }
 
 // ----------------------------- Tests -----------------------------
@@ -546,16 +691,46 @@ mod tests {
                 let (px, py, pz) = (p[0], p[1], p[2]);
                 let (dx, dy, dz) = (d[0], d[1], d[2]);
                 // ZTorus: axial = z, transverse = (x, y).
-                let z_helper =
-                    torus_smallest_positive_cpu(px - x0, py - y0, pz - z0, dx, dy, dz, a, b, c);
+                let z_helper = torus_smallest_positive_cpu(
+                    px - x0,
+                    py - y0,
+                    pz - z0,
+                    dx,
+                    dy,
+                    dz,
+                    a,
+                    b,
+                    c,
+                    -1.0,
+                );
                 agree(z_helper, zt.distance_to_surface(p, d), 1e-7, "ztorus");
                 // XTorus: axial = x, transverse = (y, z).
-                let x_helper =
-                    torus_smallest_positive_cpu(py - y0, pz - z0, px - x0, dy, dz, dx, a, b, c);
+                let x_helper = torus_smallest_positive_cpu(
+                    py - y0,
+                    pz - z0,
+                    px - x0,
+                    dy,
+                    dz,
+                    dx,
+                    a,
+                    b,
+                    c,
+                    -1.0,
+                );
                 agree(x_helper, xt.distance_to_surface(p, d), 1e-7, "xtorus");
                 // YTorus: axial = y, transverse = (x, z).
-                let y_helper =
-                    torus_smallest_positive_cpu(px - x0, pz - z0, py - y0, dx, dz, dy, a, b, c);
+                let y_helper = torus_smallest_positive_cpu(
+                    px - x0,
+                    pz - z0,
+                    py - y0,
+                    dx,
+                    dz,
+                    dy,
+                    a,
+                    b,
+                    c,
+                    -1.0,
+                );
                 agree(y_helper, yt.distance_to_surface(p, d), 1e-7, "ytorus");
             }
         }
@@ -571,5 +746,85 @@ mod tests {
         assert!(quadratic_smallest_positive_cpu(0.0, 2.0, 4.0) >= MISS);
         // No solution at all (qa = qb = 0) -> miss.
         assert!(quadratic_smallest_positive_cpu(0.0, 0.0, 1.0) >= MISS);
+    }
+
+    /// Torus test cases in axis-frame coordinates, stride 10 as the
+    /// test kernel takes them, from points on circular and elliptical
+    /// tori (unit-sized and at the 907 cm blanket scale) along a
+    /// direction fan: flagged exactly on the surface, flagged after the
+    /// 1e-8 cm crossing nudge, and unflagged from off-surface points.
+    fn torus_cases() -> Vec<[f64; 10]> {
+        let mut cases = Vec::new();
+        for (a, b, c) in [
+            (3.0, 1.0, 1.0),
+            (3.0, 0.5, 0.8),
+            (907.2, 467.7, 467.7),
+            (907.2, 750.0, 467.7),
+            (1.0, 1.5, 1.5),
+        ] {
+            for i in 0..6 {
+                let theta = std::f64::consts::TAU * (i as f64 + 0.3) / 6.0;
+                let phi = 0.4 + 1.1 * i as f64;
+                let rho = a + c * theta.cos();
+                let p = [rho * phi.cos(), rho * phi.sin(), b * theta.sin()];
+                for d in direction_fan() {
+                    cases.push([p[0], p[1], p[2], d[0], d[1], d[2], a, b, c, 0.0]);
+                    let q = [p[0] + 1e-8 * d[0], p[1] + 1e-8 * d[1], p[2] + 1e-8 * d[2]];
+                    cases.push([q[0], q[1], q[2], d[0], d[1], d[2], a, b, c, 1e-8]);
+                    let o = [0.5 * p[0], 0.7 * p[1], 1.3 * p[2]];
+                    cases.push([o[0], o[1], o[2], d[0], d[1], d[2], a, b, c, -1.0]);
+                }
+            }
+        }
+        cases
+    }
+
+    /// The CPU twin agrees with the `yamc-geo` torus distance, on and
+    /// off the surface, for all three axes (the twin is called with the
+    /// axis permutation each dispatch site applies).
+    #[test]
+    fn torus_on_surface_matches_geo_oracle() {
+        for case in torus_cases() {
+            let [p0, p1, p2, d0, d1, d2, a, b, c, off] = case;
+            let on = (off >= 0.0).then_some(off);
+            let twin = torus_smallest_positive_cpu(p0, p1, p2, d0, d1, d2, a, b, c, off);
+            let ctx = format!("{case:?}");
+            let zt = Surface::new_ztorus(0.0, 0.0, 0.0, a, b, c, None, None);
+            agree(
+                twin,
+                zt.distance_to_surface_on([p0, p1, p2], [d0, d1, d2], on),
+                1e-9,
+                &ctx,
+            );
+            let xt = Surface::new_xtorus(0.0, 0.0, 0.0, a, b, c, None, None);
+            let x = xt.distance_to_surface_on([p2, p0, p1], [d2, d0, d1], on);
+            agree(twin, x, 1e-9, &ctx);
+            let yt = Surface::new_ytorus(0.0, 0.0, 0.0, a, b, c, None, None);
+            let y = yt.distance_to_surface_on([p0, p2, p1], [d0, d2, d1], on);
+            agree(twin, y, 1e-9, &ctx);
+        }
+    }
+
+    /// GPU twin parity for the torus: the kernel matches its CPU twin
+    /// on every case (identical arithmetic up to the sqrt-based cube
+    /// root, so to round-off).
+    #[test]
+    fn gpu_torus_matches_cpu_twin() {
+        let ctx = match crate::GpuContext::new() {
+            Ok(c) => c,
+            Err(crate::GpuInitError::NoF64Adapter) => {
+                println!("no Vulkan f64 adapter -- skipping");
+                return;
+            }
+        };
+        let cases = torus_cases();
+        let flat: Vec<f64> = cases.iter().flatten().copied().collect();
+        let gpu = run_torus_distance(&ctx, &flat);
+        for (case, g) in cases.iter().zip(&gpu) {
+            let [p0, p1, p2, d0, d1, d2, a, b, c, off] = *case;
+            let cpu = torus_smallest_positive_cpu(p0, p1, p2, d0, d1, d2, a, b, c, off);
+            let same = *g == cpu || (g - cpu).abs() <= 1e-12 * cpu.abs().max(1.0);
+            assert!(same, "{case:?}: gpu {g} cpu {cpu}");
+        }
     }
 }
