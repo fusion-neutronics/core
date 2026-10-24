@@ -368,7 +368,7 @@ fn write_version(
     unconverted: &[serde_json::Value],
 ) -> Result<(), Box<dyn Error>> {
     let mut marker = serde_json::json!({
-        "format_version": 2,
+        "format_version": nuclear_data_schema::FORMAT_VERSION,
         "library": provenance.library,
         "data_version": provenance.data_version,
         "converter_version": concat!("yamc-convert ", env!("CARGO_PKG_VERSION")),

@@ -32,10 +32,7 @@ fn write_marker(dir: &Path, format_version: &str) {
 fn the_current_format_version_reads() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path().join("current");
-    write_marker(
-        &dir,
-        &yamc_nuclide::arrow::nuclide_arrow::FORMAT_VERSION.to_string(),
-    );
+    write_marker(&dir, &nuclear_data_schema::FORMAT_VERSION.to_string());
     assert!(
         yamc_test_cache::format_version_is_readable(&dir),
         "a directory stamped with the build's own format_version must be readable"
