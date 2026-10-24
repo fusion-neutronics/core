@@ -88,8 +88,8 @@ use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
 
 use super::release::{
-    parse_latest, parse_manifest, pointer_url, verify, DataRelease, LatestPointer, ManifestFile,
-    Release, StreamHash, LATEST, MANIFEST,
+    parse_latest, parse_manifest, pointer_url, verify, write_atomically, DataRelease,
+    LatestPointer, ManifestFile, Release, StreamHash, LATEST, MANIFEST,
 };
 use super::url_cache::{
     cache_root, drop_superseded, fetch_ranged, get_path_lock, ranged, ranges_section,
@@ -988,23 +988,6 @@ fn tempdir_in(parent: &Path) -> Result<PathBuf, String> {
     }
     fs::create_dir_all(&dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
     Ok(dir)
-}
-
-/// Write `bytes` to `path` through a temporary file and a rename.
-fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let parent = path.parent().ok_or(std::io::ErrorKind::InvalidInput)?;
-    fs::create_dir_all(parent)?;
-    let tmp = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
-        std::process::id()
-    ));
-    {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp, path)
 }
 
 /// Stream `url` into `dest`, counting and hashing as it arrives, and keep it
