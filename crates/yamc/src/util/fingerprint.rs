@@ -69,13 +69,16 @@ impl Model {
 
     /// The published release of each library keyword this model's data came
     /// from: release identifier, manifest sha256, and whether the origin was
-    /// unreachable so a cached release was used. Keyed by keyword.
+    /// unreachable so a cached release was used. Keyed by keyword, or by the
+    /// absolute path of a local release folder the data was read from.
     ///
     /// A library is listed when a nuclide was loaded from that release's cache
     /// folder (`<cache root>/<keyword>/<release>/...`) or a material names the
-    /// keyword as its data source. One release per library per process (see
+    /// keyword as its data source, and a local release folder when data was
+    /// loaded from inside it. One release per library per process (see
     /// `yamc_nuclide::url_cache::data_releases`), so this is exact for a run.
-    /// Empty for data loaded from local directories.
+    /// Empty for data loaded from local directories that are not release
+    /// folders.
     pub fn data_releases(&self) -> BTreeMap<String, yamc_nuclide::storage::release::DataRelease> {
         let in_use = yamc_nuclide::url_cache::data_releases();
         if in_use.is_empty() {
@@ -101,13 +104,14 @@ impl Model {
                         || lib.split('/').next() == Some(keyword.as_str())
                 });
                 let loaded = paths.iter().any(|p| {
-                    p.ancestors().any(|a| {
-                        a.file_name().and_then(|n| n.to_str()) == Some(release.release.as_str())
-                            && a.parent()
-                                .and_then(|q| q.file_name())
-                                .and_then(|n| n.to_str())
-                                == Some(keyword.as_str())
-                    })
+                    yamc_nuclide::url_cache::local_release_holds(keyword, p)
+                        || p.ancestors().any(|a| {
+                            a.file_name().and_then(|n| n.to_str()) == Some(release.release.as_str())
+                                && a.parent()
+                                    .and_then(|q| q.file_name())
+                                    .and_then(|n| n.to_str())
+                                    == Some(keyword.as_str())
+                        })
                 });
                 named || loaded
             })

@@ -486,7 +486,6 @@ pub fn library_keyword(library: &str) -> &str {
 /// `evaluated_yields.arrow` is the tape-literal fission yield evaluation, both
 /// MT=454 and MT=459 with DY. A library published without it loads with no
 /// evaluated yields; the nominal yields are unaffected.
-#[cfg(feature = "download")]
 pub(crate) fn transmutation_sections(subsection: &str) -> &'static [(&'static str, bool)] {
     match subsection {
         "decay" => &[
@@ -519,14 +518,17 @@ pub(crate) fn transmutation_sections(subsection: &str) -> &'static [(&'static st
 ///   verified into the cache (see [`super::release_cache`]). A library whose
 ///   release does not publish the subsection is refused with a message listing
 ///   the subsections it does publish.
-/// - Path to a converter root (contains a `{subsection}/` subdir): return that
-///   subdir.
-/// - Path already pointing at the subsection dir: return it as-is.
+/// - Anything else is a local path: a release folder's
+///   `transmutation/{subsection}.arrow/`, a converter root's `{subsection}/`,
+///   or the subsection directory itself (see `resolve_local_subsection`).
+///
+/// A bare name that is both a keyword and a directory is refused.
 #[cfg(feature = "download")]
 pub fn resolve_subsection(
     source: &str,
     subsection: &str,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    refuse_shadowed_keyword(source)?;
     if is_branching_only(source) && subsection != "branching" {
         return Err(branching_only_error(
             source,
@@ -541,10 +543,50 @@ pub fn resolve_subsection(
             subsection,
         )?)
     } else {
-        let base = PathBuf::from(source);
-        let nested = base.join(subsection);
-        Ok(if nested.is_dir() { nested } else { base })
+        resolve_local_subsection(source, subsection)
     }
+}
+
+/// Resolve a transmutation subsection under a local path.
+///
+/// - A release folder (it holds a release `manifest.json`, see
+///   [`super::local_release`]): its `transmutation/{subsection}.arrow/`. A
+///   subsection the release does not carry is refused, naming the ones it does.
+/// - A converter root (it holds a `{subsection}/` subdir): that subdir.
+/// - Anything else is taken to be the subsection directory itself.
+fn resolve_local_subsection(
+    source: &str,
+    subsection: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let base = PathBuf::from(source);
+    if let Some(release) = super::local_release::open(&base)? {
+        return Ok(release.subsection(subsection)?);
+    }
+    let nested = base.join(subsection);
+    Ok(if nested.is_dir() { nested } else { base })
+}
+
+/// Whether `source` is a library keyword that also names a directory in the
+/// working directory.
+fn is_shadowed_keyword(source: &str) -> bool {
+    is_keyword(source) && std::path::Path::new(source).is_dir()
+}
+
+/// Refuse `source` when it is both a library keyword and a directory in the
+/// working directory: reading either one would be a guess at which was meant.
+/// `./<name>` (or an absolute path) names the directory unambiguously.
+fn refuse_shadowed_keyword(source: &str) -> Result<(), String> {
+    if !is_shadowed_keyword(source) {
+        return Ok(());
+    }
+    let dir = std::path::absolute(source).unwrap_or_else(|_| PathBuf::from(source));
+    Err(format!(
+        "'{source}' is both a library keyword and the directory {}, so which one is meant is \
+         not clear. To read the directory, give it as a path (\"./{source}\" or \"{}\"); to \
+         use the published '{source}' library, rename or move the directory.",
+        dir.display(),
+        dir.display()
+    ))
 }
 
 /// Download the sections of one nuclide or element from a raw base URL (one
@@ -1807,18 +1849,24 @@ pub fn home_dir() -> Option<PathBuf> {
 }
 
 /// The release each library keyword resolved to in this process, keyed by
-/// keyword: the release identifier, its manifest sha256, and whether the
-/// origin was unreachable so a cached release was used. Results record this as
-/// their nuclear-data provenance. Empty in a build without downloads.
+/// keyword, and the release of each local release folder data was read from,
+/// keyed by the folder's absolute path: the release identifier, its manifest
+/// sha256, and whether the origin was unreachable so a cached release was used
+/// (never, for a local folder). Results record this as their nuclear-data
+/// provenance.
 pub fn data_releases() -> std::collections::BTreeMap<String, super::release::DataRelease> {
     #[cfg(feature = "download")]
-    {
-        super::release_cache::data_releases()
-    }
+    let mut releases = super::release_cache::data_releases();
     #[cfg(not(feature = "download"))]
-    {
-        std::collections::BTreeMap::new()
-    }
+    let mut releases = std::collections::BTreeMap::new();
+    releases.extend(super::local_release::used());
+    releases
+}
+
+/// Whether `path`, a path data was loaded from, lies in the local release
+/// folder that [`data_releases`] records under `key`. Never true of a keyword.
+pub fn local_release_holds(key: &str, path: &std::path::Path) -> bool {
+    super::local_release::holds(key, path)
 }
 
 /// Get the cache directory for yamc, creating it if it does not exist.
@@ -1838,27 +1886,21 @@ pub fn get_cache_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
 /// Resolve a nuclide (or element) name within a directory.
 ///
 /// A directory holding a release `manifest.json` is a release folder, laid out
-/// `neutron/<Name>.arrow/` and `photon/<Name>.arrow/` (a library downloaded
-/// whole, or a cached release folder). The files of the entry that the
-/// manifest lists and that are present are checked against their manifest
-/// sizes, which costs a `stat` each and catches a truncated copy; a full hash
-/// check is `verify_library`'s job. Any other directory holds
-/// `<Name>.arrow/` directly.
+/// `neutron/<Name>.arrow/` and `photon/<Name>.arrow/` (a library downloaded or
+/// built whole, or a cached release folder; see [`super::local_release`]). The
+/// files of the entry that the manifest lists and that are present are checked
+/// against their manifest sizes, which costs a `stat` each and catches a
+/// truncated copy; a full hash check is `verify_library`'s job. Any other
+/// directory holds `<Name>.arrow/` directly.
 fn resolve_nuclide_in_dir(
     dir: &std::path::Path,
     nuclide_name: &str,
     kind: DataKind,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let manifest = dir.join(super::release::MANIFEST);
-    if !manifest.is_file() {
-        return Ok(dir.join(format!("{}.arrow", nuclide_name)));
+    match super::local_release::open(dir)? {
+        Some(release) => Ok(release.particle(kind, nuclide_name)?),
+        None => Ok(dir.join(format!("{nuclide_name}.arrow"))),
     }
-    let entry = match kind {
-        DataKind::Neutron => format!("neutron/{nuclide_name}.arrow"),
-        DataKind::Photon => format!("photon/{nuclide_name}.arrow"),
-    };
-    super::release::check_sizes(dir, &std::fs::read(&manifest)?, &entry)?;
-    Ok(dir.join(entry))
 }
 
 /// Check if a string looks like a URL (starts with http:// or https://)
@@ -1871,9 +1913,11 @@ pub fn is_url(path_or_url: &str) -> bool {
 /// If it's a keyword, resolve it to the library's current release and serve
 /// the `kind`-specific folder from the verified cache, downloading what it
 /// lacks.
-/// If it's a directory, resolve to `<dir>/<nuclide_name>.arrow`.
+/// If it's a directory, resolve to `<dir>/<nuclide_name>.arrow`, or in a
+/// release folder to its `neutron/` or `photon/` entry.
 /// If it's a URL, download and cache it.
 /// If it's a local file path, return as-is.
+/// A bare name that is both a keyword and a directory is refused.
 #[cfg(feature = "download")]
 pub fn resolve_path_or_url(
     path_url_or_keyword: &str,
@@ -1881,6 +1925,7 @@ pub fn resolve_path_or_url(
     kind: DataKind,
     scope: &crate::load_scope::LoadScope,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    refuse_shadowed_keyword(path_url_or_keyword)?;
     if is_branching_only(path_url_or_keyword) {
         return Err(branching_only_error(path_url_or_keyword, data_role(kind)).into());
     }
@@ -1974,6 +2019,7 @@ pub fn resolve_subsection(
     source: &str,
     subsection: &str,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    refuse_shadowed_keyword(source)?;
     if is_branching_only(source) && subsection != "branching" {
         return Err(branching_only_error(
             source,
@@ -1988,9 +2034,7 @@ pub fn resolve_subsection(
         )
         .into())
     } else {
-        let base = PathBuf::from(source);
-        let nested = base.join(subsection);
-        Ok(if nested.is_dir() { nested } else { base })
+        resolve_local_subsection(source, subsection)
     }
 }
 
@@ -2003,6 +2047,7 @@ pub fn resolve_path_or_url(
     kind: DataKind,
     _scope: &crate::load_scope::LoadScope,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    refuse_shadowed_keyword(path_url_or_keyword)?;
     if is_branching_only(path_url_or_keyword) {
         return Err(branching_only_error(path_url_or_keyword, data_role(kind)).into());
     }

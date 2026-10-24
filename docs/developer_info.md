@@ -701,6 +701,25 @@ converters that wrote its files, with their versions (`["yamc-convert 0.1.0",
 was recorded read back with an empty list. `combine_results` refuses to pool
 runs that read different releases of one library.
 
-A local directory passed as the data source is read as it is, with no
-download and no manifest check.
+A local directory passed as a data source is read with no download. One that
+holds a release `manifest.json` (a library downloaded or built whole) is a
+release folder, and its one path serves every setting: cross sections from
+`neutron/` and `photon/`, each transmutation subsection from
+`transmutation/<subsection>.arrow/`. Its manifest is parsed once per process
+(again only when the file is rewritten), a `format_version` this build does not
+read is refused as for a published release, and the files each load reads are
+checked against the manifest's sizes (hashes are not checked on load). A
+subsection the manifest does not list is refused, naming the subsections it
+does carry, and so is a listed file the folder does not hold. Results record
+the folder in `data_releases` under its absolute path, with `offline` false.
+Any other directory is read as it is, with no manifest check: a converter's
+output, a folder of `<Name>.arrow/`, or a chain directory, whose own
+`manifest.json` lists `subsections` rather than `files`. Wherever a reactions
+or fission-yields source resolves, the folder must hold `reactions.arrow` or
+`fission_yields.arrow`: one without it is refused rather than read as a chain
+with none, and `False` leaves the part out.
+
+A bare name that is both a keyword and a directory in the working directory
+(`endf-b8.1` with a folder `./endf-b8.1` beside it) is refused rather than
+guessed at. `./endf-b8.1` or an absolute path names the directory.
 
