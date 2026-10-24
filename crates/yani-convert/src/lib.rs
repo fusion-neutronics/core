@@ -45,6 +45,30 @@ use endf::chain::{collect_q_values, Chain, QValues};
 use endf::decay::DecayInconsistency;
 use endf::{Decay, Material};
 
+/// Every material in an ENDF file, in tape order.
+///
+/// A file may hold one evaluation or a whole sublibrary: JEFF-4.0 ships its
+/// decay data and fission yields as one tape each (3852 and 19 materials) and
+/// IRDFF-II its neutron library as one tape of 70. A tape converts to what
+/// its materials split into one file each, in tape order, convert to. A file
+/// with no material is refused rather than read as nothing.
+pub(crate) fn read_materials(path: &Path) -> Result<Vec<Material>, String> {
+    let materials = endf::get_materials(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if materials.is_empty() {
+        return Err(format!("{}: no ENDF material in the file", path.display()));
+    }
+    Ok(materials)
+}
+
+/// Every material of every file, in file order and then tape order.
+fn read_all(paths: &[String]) -> Result<Vec<Material>, String> {
+    let mut materials = Vec::new();
+    for path in paths {
+        materials.extend(read_materials(Path::new(path))?);
+    }
+    Ok(materials)
+}
+
 /// The declared schema for a section, by its path in the format.
 ///
 /// Panics on an unknown path, which can only be a typo: the schema crate is the
@@ -1041,6 +1065,10 @@ fn apply_branch_ratios(chain: &mut Chain, path: &Path) -> Result<(), Box<dyn Err
 ///
 /// `decay_fill_files` and `decay_fill_library` are the second decay library
 /// that replaces placeholder average energies; both empty for no fill.
+///
+/// Every file may be one evaluation or a tape of many. Every material in it is
+/// read, in file order and then tape order, so a tape converts to what its
+/// materials split one per file, in tape order, convert to.
 #[allow(clippy::too_many_arguments)]
 pub fn convert_transmutation_files(
     decay_files: &[String],
@@ -1054,12 +1082,6 @@ pub fn convert_transmutation_files(
     out: &Path,
     provenance: &Provenance,
 ) -> Result<usize, Box<dyn Error>> {
-    let read = |paths: &[String]| -> Result<Vec<Material>, Box<dyn Error>> {
-        paths
-            .iter()
-            .map(|p| Material::from_file(p).map_err(|e| format!("{p}: {e}").into()))
-            .collect()
-    };
     if !decay_fill_files.is_empty() && decay_fill_library.is_empty() {
         return Err(
             "decay_fill_files were given without decay_fill_library; the \
@@ -1068,33 +1090,38 @@ pub fn convert_transmutation_files(
                 .into(),
         );
     }
-    let decay = read(decay_files)?;
-    let fpy = read(fpy_files)?;
-    let decay_fill = read(decay_fill_files)?;
+    let decay = read_all(decay_files)?;
+    let fpy = read_all(fpy_files)?;
+    let decay_fill = read_all(decay_fill_files)?;
 
-    // Read and dropped one at a time, rather than collected like the others. A
-    // chain wants nothing from a neutron evaluation but its channels' Q values,
-    // and holding the parsed set to get them peaked at 39 GB over TENDL's 2848
-    // files, which is more than an ordinary machine has: it was killed three
-    // times on a 45 GB one.
+    // Read and dropped one file at a time, rather than collected like the
+    // others. A chain wants nothing from a neutron evaluation but its
+    // channels' Q values, and holding the parsed set to get them peaked at
+    // 39 GB over TENDL's 2848 files, which is more than an ordinary machine
+    // has: it was killed three times on a 45 GB one.
     //
-    // One map per file, in parallel, merged in file order afterwards. The files
-    // are independent, and merging in order leaves the result identical to a
-    // sequential read, including which of two evaluations of the same nuclide
-    // wins. Only the evaluations in flight are held, so the peak is set by the
-    // core count rather than by the size of the sublibrary, and parsing is what
-    // the pass spends effectively all of its time on: 41 s of the 41.4 s a
-    // TENDL-2017 reactions build took on one core.
+    // One map per material, the files in parallel, merged in file order and
+    // then tape order afterwards. The files are independent, and merging in
+    // order leaves the result identical to a sequential read, including which
+    // of two evaluations of the same nuclide wins. Only the files in flight
+    // are held, so the peak is set by the core count and the largest file
+    // rather than by the size of the sublibrary, and parsing is what the pass
+    // spends effectively all of its time on: 41 s of the 41.4 s a TENDL-2017
+    // reactions build took on one core.
     //
     // MT=5's products are read in the same pass, for the same reason: they
     // are the one part of a neutron evaluation the reactions subsection needs
     // beyond its Q values.
-    type PerFile = (QValues, Option<anything::Evaluation>);
+    type PerFile = Vec<(QValues, Option<anything::Evaluation>)>;
     let read_q = |path: &String| -> Result<PerFile, String> {
-        let material = Material::from_file(path).map_err(|e| format!("{path}: {e}"))?;
-        let mut out = QValues::new();
-        collect_q_values(&material, &mut out);
-        Ok((out, anything::read(&material)))
+        Ok(read_materials(Path::new(path))?
+            .iter()
+            .map(|material| {
+                let mut out = QValues::new();
+                collect_q_values(material, &mut out);
+                (out, anything::read(material))
+            })
+            .collect())
     };
     #[cfg(not(target_arch = "wasm32"))]
     let per_file: Vec<PerFile> = {
@@ -1112,7 +1139,7 @@ pub fn convert_transmutation_files(
 
     let mut q_values = QValues::new();
     let mut anything_by_parent: BTreeMap<String, anything::Evaluation> = BTreeMap::new();
-    for (map, mt5) in per_file {
+    for (map, mt5) in per_file.into_iter().flatten() {
         for (nuclide, channels) in map {
             q_values.entry(nuclide).or_default().extend(channels);
         }
@@ -1182,6 +1209,9 @@ pub fn convert_transmutation_files(
 /// different libraries (TENDL branching beside ENDF/B decay is the usual
 /// combination), so they are written by separate calls with their own
 /// provenance and merged into the same manifest.
+///
+/// Every material in each file is read, as for
+/// [`convert_transmutation_files`].
 pub fn convert_branching_files(
     neutron_files: &[String],
     decay_files: &[String],
@@ -1190,13 +1220,7 @@ pub fn convert_branching_files(
     tol_ev: f64,
     linearize_tol: f64,
 ) -> Result<branching::BranchingStats, Box<dyn Error>> {
-    let read = |paths: &[String]| -> Result<Vec<Material>, Box<dyn Error>> {
-        paths
-            .iter()
-            .map(|p| Material::from_file(p).map_err(|e| format!("{p}: {e}").into()))
-            .collect()
-    };
-    let decay = read(decay_files)?;
+    let decay = read_all(decay_files)?;
 
     // Streamed, like the Q values above and for the same reason.
     // The branching pass gets away with holding its neutron set today only
@@ -1204,18 +1228,21 @@ pub fn convert_branching_files(
     // subsection, a few hundred rather than a few thousand evaluations, which
     // is a convention rather than a promise.
     //
-    // In parallel, one evaluation at a time per worker, absorbed afterwards in
-    // file order. Each evaluation's rows depend on nothing but that evaluation
-    // and the isomer table, and absorbing in order leaves the rows, the flagged
-    // levels and the partial-sum lines exactly as reading the files one at a
-    // time left them.
+    // In parallel, one file at a time per worker, absorbed afterwards in file
+    // order and then tape order. Each evaluation's rows depend on nothing but
+    // that evaluation and the isomer table, and absorbing in order leaves the
+    // rows, the flagged levels and the partial-sum lines exactly as reading
+    // the evaluations one at a time left them.
     let extractor = branching::BranchingExtractor::new(&decay, tol_ev, linearize_tol);
-    let extract = |path: &String| -> Result<branching::BranchingPartial, String> {
-        let material = Material::from_file(path).map_err(|e| format!("{path}: {e}"))?;
-        Ok(extractor.extract_one(&material))
+    type PerFile = Vec<branching::BranchingPartial>;
+    let extract = |path: &String| -> Result<PerFile, String> {
+        Ok(read_materials(Path::new(path))?
+            .iter()
+            .map(|material| extractor.extract_one(material))
+            .collect())
     };
     #[cfg(not(target_arch = "wasm32"))]
-    let partials: Vec<branching::BranchingPartial> = {
+    let partials: Vec<PerFile> = {
         use rayon::prelude::*;
         neutron_files
             .par_iter()
@@ -1223,13 +1250,13 @@ pub fn convert_branching_files(
             .collect::<Result<Vec<_>, _>>()?
     };
     #[cfg(target_arch = "wasm32")]
-    let partials: Vec<branching::BranchingPartial> = neutron_files
+    let partials: Vec<PerFile> = neutron_files
         .iter()
         .map(extract)
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut extractor = extractor;
-    for partial in partials {
+    for partial in partials.into_iter().flatten() {
         extractor.absorb(partial);
     }
     let branching::Extracted {

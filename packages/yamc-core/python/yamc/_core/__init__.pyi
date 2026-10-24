@@ -7556,10 +7556,11 @@ def convert_branching(neutron_files: typing.Sequence[builtins.str], decay_files:
     ----------
     neutron_files : list[str]
         Neutron evaluations of the parent nuclides. MF=8/9/10 radionuclide
-        production is what carries the branching.
+        production is what carries the branching. A file may hold many
+        materials, such as IRDFF-II's tape of 70, and every one is read.
     decay_files : list[str]
         Decay evaluations, read only to build the isomer table, so the
-        metastable ones suffice.
+        metastable ones suffice. A tape is read whole, as for the neutron files.
     output_path : str
         The transmutation directory to write ``branching/`` into.
     library, data_version, created_utc
@@ -7779,7 +7780,9 @@ def convert_transmutation(decay_files: typing.Sequence[builtins.str], fpy_files:
     decay_files, fpy_files, neutron_files : list[str]
         ENDF inputs. All three are needed to build a network: the decay data
         says what decays into what, the neutron data what transmutes into what,
-        and the fission yields what fission produces.
+        and the fission yields what fission produces. A file may hold one
+        evaluation or a whole tape of them, such as JEFF-4.0's decay and
+        fission yield tapes; every material in it is read.
     output_path : str
         Directory to write. Created if absent, merged into if it already holds
         other subsections of the same library.
@@ -7819,7 +7822,7 @@ def convert_transmutation(decay_files: typing.Sequence[builtins.str], fpy_files:
         for the same nuclide with a half-life within 25% of the first's.
         Half-lives and decay modes are never touched. The decay subsection's
         ``provenance.json`` lists every placeholder and every replacement,
-        with or without a fill.
+        with or without a fill. A tape is read whole, as for ``decay_files``.
     decay_fill_library : str, optional
         The library ``decay_fill_files`` came from, e.g. ``"jendl-5.0"``.
         Required with ``decay_fill_files``.
@@ -8032,15 +8035,16 @@ def radionuclide_production(neutron_files: typing.Sequence[builtins.str]) -> lis
     Parameters
     ----------
     neutron_files : list[str]
-        Neutron evaluations. Read one at a time rather than held, so a whole
-        sublibrary is a valid argument.
+        Neutron evaluations, one or many materials per file. Read one file at
+        a time rather than held, so a whole sublibrary is a valid argument.
     
     Returns
     -------
     list[dict]
-        One entry per (parent, reaction) carrying MF=9 or MF=10, in file order,
-        each with ``parent``, ``mt``, ``reaction`` (the transmutation reaction
-        name, or ``None`` for an MT no chain reaction covers) and ``states``.
+        One entry per (parent, reaction) carrying MF=9 or MF=10, in file order
+        and then tape order, each with ``parent``, ``mt``, ``reaction`` (the
+        transmutation reaction name, or ``None`` for an MT no chain reaction
+        covers) and ``states``.
         Each state has ``excitation_energy_eV``, ``level_index``, ``product``
         and ``source``. ``excitation_energy_eV`` is ``None`` for an excited
         state whose evaluation gives neither a positive MF=8 ELFS nor a
