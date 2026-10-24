@@ -127,6 +127,37 @@ fn control(line: &str) -> Result<(i32, i32, i32)> {
     ))
 }
 
+/// The line the first material starts on: 1, after the TPID record that
+/// opens a tape, or 0 when the first line is already MF=1 MT=451.
+///
+/// Told by the material's side, because evaluators write ill-formed TPID
+/// records while every material opens with its MF=1 MT=451. Not every tape
+/// has a TPID: JEFF-4.0's fission yield tape opens with MAT 9040, and taking
+/// that line for a TPID read its MF=1 MT=451 a record late, wrongly and
+/// without an error.
+fn first_material_line(lines: &[&str]) -> usize {
+    match lines.first().map(|line| control(line)) {
+        Some(Ok((_, 1, 451))) | None => 0,
+        Some(_) => 1,
+    }
+}
+
+/// The text of an ENDF file.
+///
+/// ENDF-6 is ASCII, but stray bytes from other encodings turn up in the
+/// descriptions of some tapes: IRDFF-II's has a Windows-1252 dash in Zn68's.
+/// A file that is not UTF-8 is read as Latin-1, one character per byte,
+/// rather than refused over a comment. That is how the generation scripts
+/// read such a tape to split it into one file per material, so the tape
+/// reads as its split files do.
+fn read_text(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path)?;
+    Ok(match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(not_utf8) => not_utf8.into_bytes().into_iter().map(char::from).collect(),
+    })
+}
+
 /// What [`Material::interpret`] built, one variant per sublibrary that has a
 /// high-level interface.
 #[derive(Debug, Clone, PartialEq)]
@@ -136,7 +167,8 @@ pub enum Interpretation {
 }
 
 impl Material {
-    /// Parse the first material in `text`, skipping the leading TPID record.
+    /// Parse the first material in `text`, skipping the TPID record that
+    /// opens it, if it has one.
     ///
     /// Not `std::str::FromStr`: that trait's `Err` would have to be this
     /// crate's error type anyway, and the inherent method keeps the name the
@@ -144,13 +176,13 @@ impl Material {
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(text: &str) -> Result<Material> {
         let lines: Vec<&str> = text.lines().collect();
-        let mut cursor = usize::from(!lines.is_empty());
+        let mut cursor = first_material_line(&lines);
         Material::parse(&lines, &mut cursor)
     }
 
+    /// Parse the first material in a file. [`get_materials`] reads them all.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Material> {
-        let text = std::fs::read_to_string(path)?;
-        Material::from_str(&text)
+        Material::from_str(&read_text(path.as_ref())?)
     }
 
     /// Parse one material starting at `cursor`, leaving `cursor` on the line
@@ -555,18 +587,13 @@ fn parse_section(mf: i32, mt: i32, text: &str) -> Result<Section> {
 
 /// Read every material in an ENDF-6 file.
 pub fn get_materials(path: impl AsRef<Path>) -> Result<Vec<Material>> {
-    let text = std::fs::read_to_string(path)?;
-    materials_from_str(&text)
+    materials_from_str(&read_text(path.as_ref())?)
 }
 
 /// Read every material in the text of an ENDF-6 file.
 pub fn materials_from_str(text: &str) -> Result<Vec<Material>> {
     let lines: Vec<&str> = text.lines().collect();
-    if lines.is_empty() {
-        return Ok(Vec::new());
-    }
-    // Skip the TPID record that opens the file.
-    let mut cursor = 1usize;
+    let mut cursor = first_material_line(&lines);
     let mut materials = Vec::new();
     while cursor < lines.len() {
         // MAT=-1 is the TEND record that closes the file.
@@ -628,6 +655,83 @@ mod tests {
         let materials = materials_from_str(&crate::testdata::text(FIXTURE)).unwrap();
         assert_eq!(materials.len(), 1);
         assert_eq!(materials[0].mat, 9552);
+    }
+
+    const IN116: [&[u8]; 3] = [
+        include_bytes!("../fixtures/dec-049_In_116.endf.xz"),
+        include_bytes!("../fixtures/dec-049_In_116m1.endf.xz"),
+        include_bytes!("../fixtures/dec-049_In_116m2.endf.xz"),
+    ];
+
+    fn assert_same(read: &Material, alone: &Material) {
+        assert_eq!(read.mat, alone.mat);
+        assert_eq!(read.section_text, alone.section_text);
+        assert_eq!(read.section_data, alone.section_data);
+    }
+
+    /// One-material files joined into a tape with no TPID, the shape of
+    /// JEFF-4.0's fission yield tape: every material through its MEND, then
+    /// one TEND.
+    #[test]
+    fn a_tape_with_no_tpid_reads_every_material_as_it_reads_alone() {
+        let files = IN116.map(crate::testdata::text);
+        let mut tape = String::new();
+        for file in &files {
+            for line in file.lines().skip(1) {
+                if control_field(line, 66, 70).unwrap() == -1 {
+                    break;
+                }
+                tape.push_str(line);
+                tape.push('\n');
+            }
+        }
+        tape.push_str(&format!("{:66}{:>4}{:>2}{:>3}{:>5}\n", "", -1, 0, 0, 0));
+
+        let materials = materials_from_str(&tape).unwrap();
+        assert_eq!(materials.len(), files.len());
+        for (read, file) in materials.iter().zip(&files) {
+            assert_same(read, &Material::from_str(file).unwrap());
+        }
+        assert_same(
+            &Material::from_str(&tape).unwrap(),
+            &Material::from_str(&files[0]).unwrap(),
+        );
+    }
+
+    /// A byte outside UTF-8 in a TEXT record, as IRDFF-II's tape has, is read
+    /// as Latin-1 and the rest of the material as it reads without it.
+    #[test]
+    fn a_file_that_is_not_utf8_is_read_as_latin1() {
+        let text = crate::testdata::text(IN116[0]);
+        let mut lines: Vec<Vec<u8>> = text.lines().map(|l| l.as_bytes().to_vec()).collect();
+        // A description line of MF=1/MT=451, blank at the column the stray
+        // byte goes in and at column 66, so its control fields still read.
+        let line = &mut lines[12];
+        assert_eq!(&line[70..75], b" 1451");
+        assert_eq!((line[40], line[65]), (b' ', b' '));
+        line[40] = 0x96;
+        let mut bytes = lines.join(&b'\n');
+        bytes.push(b'\n');
+        assert!(String::from_utf8(bytes.clone()).is_err());
+
+        let path = std::env::temp_dir().join(format!("endf-latin1-{}.endf", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let one = Material::from_file(&path);
+        let all = get_materials(&path);
+        std::fs::remove_file(&path).unwrap();
+
+        let (one, all) = (one.unwrap(), all.unwrap());
+        assert_eq!(all.len(), 1);
+        assert_same(&all[0], &one);
+        let clean = Material::from_str(&text).unwrap();
+        assert_eq!(one.sections(), clean.sections());
+        for (key, section) in &clean.section_data {
+            if *key != (1, 451) {
+                assert_eq!(&one.section_data[key], section, "{key:?}");
+            }
+        }
+        let description = &one.mf1_mt451().unwrap().description;
+        assert!(description.iter().any(|line| line.contains('\u{96}')));
     }
 
     #[test]
