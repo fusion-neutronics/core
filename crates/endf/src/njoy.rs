@@ -373,9 +373,21 @@ fn run_in(deck: &Deck, njoy_exec: &str, work: &Path) -> Result<String> {
     let output = child.wait_with_output()?;
     let log = String::from_utf8_lossy(&output.stdout).into_owned();
     if !output.status.success() {
-        return Err(Error::BadAceTable {
-            what: format!("NJOY exited with {}: {log}", output.status),
-        });
+        // Standard error as well. NJOY prints its own errors on standard
+        // output, but the Fortran runtime prints on standard error, and a
+        // scratch disk that filled up is named only there: standard output
+        // stops at the banner and the module that died.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        let what = if stderr.is_empty() {
+            format!("NJOY exited with {}: {log}", output.status)
+        } else {
+            format!(
+                "NJOY exited with {}: {log}\nstandard error:\n{stderr}",
+                output.status
+            )
+        };
+        return Err(Error::BadAceTable { what });
     }
 
     for (unit, filename) in &deck.tapeout {
@@ -806,7 +818,13 @@ mod tests {
     #[test]
     fn a_failed_njoy_run_leaves_nothing_in_the_output_directory() {
         let root = fresh_dir("fails");
-        let njoy = stand_in(&root, "echo partial > tape21\nexit 3");
+        // As NJOY dies when its scratch disk fills: the module on standard
+        // output, the cause from the Fortran runtime on standard error.
+        let njoy = stand_in(
+            &root,
+            "echo partial > tape21\necho ' reconr...'\n\
+             echo 'Fortran runtime error: No space left on device' >&2\nexit 2",
+        );
         let (evaluation, out, options) = pendf_into(&root, &njoy);
 
         let err = make_ace(&evaluation, &am244(), &options)
@@ -814,6 +832,11 @@ mod tests {
             .to_string();
 
         assert!(err.contains("NJOY exited with"), "{err}");
+        assert!(err.contains("reconr..."), "{err}");
+        assert!(
+            err.contains("Fortran runtime error: No space left on device"),
+            "{err}"
+        );
         // It ran in the output directory, and neither its working directory
         // nor the tape it cut short is left there.
         let ran_in = recorded(&root, "ran_in");
