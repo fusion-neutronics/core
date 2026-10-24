@@ -58,6 +58,9 @@ def test_a_transport_run_records_the_converters_of_its_release():
 
 def test_a_transmutation_records_the_converters_of_its_releases():
     yamc.cross_section_data = "endf-b8.1"
+    yamc.transmutation_decay_data = "endf-b8.1"
+    yamc.transmutation_reactions = "endf-b8.1"
+    yamc.transmutation_fission_yields = "endf-b8.1"
     hydrogen = yamc.Material(
         composition={"H1": 1.0}, density=0.07, volume=1.0, temperature=294
     )
