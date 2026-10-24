@@ -36,6 +36,7 @@ impl PyParticle {
                 urr_random: yamc_particle::particle::NO_URR, // Set per-collision when in URR range
                 urr_energy: -1.0, // Invalid energy to force initial sampling
                 last_surface_id: yamc_particle::particle::NO_SURFACE, // Set on surface crossings for lost particle diagnostics
+                on_surface_id: yamc_particle::particle::NO_SURFACE,
                 parent_nuclide: None, // Only set for D1S decay photons
                 replica: None,
                 #[cfg(feature = "debug_history")]

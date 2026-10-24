@@ -117,7 +117,8 @@ impl PyCell {
     ) -> Option<(String, f64)> {
         let point_arr = [point.0, point.1, point.2];
         let dir_arr = [direction.0, direction.1, direction.2];
-        if let Some((boundary, dist, _surface_id)) = self.inner.closest_surface(point_arr, dir_arr)
+        if let Some((boundary, dist, _surface_id)) =
+            self.inner.closest_surface(point_arr, dir_arr, None)
         {
             return Some((format!("{:?}", boundary), dist));
         }
