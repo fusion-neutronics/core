@@ -17,6 +17,7 @@ it guards are the same on every platform.
 
 import lzma
 import os
+import re
 import subprocess
 import sys
 import time
@@ -194,3 +195,17 @@ def test_the_main_thread_keeps_running_during_a_conversion(binding, held):
         f"{duration * 1e3:.0f} ms {binding}, which is what holding the GIL "
         "through it looks like"
     )
+
+
+def test_every_converter_binding_has_a_case():
+    """A binding added to convert.rs without a case here would go unchecked."""
+    source = (
+        Path(__file__).resolve().parents[3]
+        / "crates"
+        / "yani-python"
+        / "src"
+        / "convert.rs"
+    ).read_text()
+    bindings = set(re.findall(r"#\[pyfunction\][^{]*?pub fn (\w+)\(", source))
+    assert bindings, "no #[pyfunction] found in convert.rs, so this checks nothing"
+    assert bindings == set(CASES)
