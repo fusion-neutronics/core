@@ -41,7 +41,7 @@ that is not ENDF-6 is an error:
 
 ```rust
 for header in endf::get_headers("IRDFF-II.endf")? {
-    println!("MAT {} is {} (NSUB {})", header.mat, header.name(), header.nsub);
+    println!("MAT {} is {:?} (NSUB {})", header.mat, header.name(), header.nsub);
 }
 # Ok::<(), endf::Error>(())
 ```

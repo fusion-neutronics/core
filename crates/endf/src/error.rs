@@ -48,9 +48,14 @@ pub enum Error {
     InvalidArgument {
         what: String,
     },
-    /// A file that is not ENDF-6 or is cut short, with the line or material
-    /// where that shows.
+    /// A file that is not ENDF-6 at all: it has no material, or a line
+    /// before its first material is not an ENDF record.
     NotEndf {
+        what: String,
+    },
+    /// A file that is ENDF-6 but cut short or broken, with the line or
+    /// material where that shows.
+    MalformedEndf {
         what: String,
     },
     Io(std::io::Error),
@@ -90,6 +95,7 @@ impl fmt::Display for Error {
             }
             Error::InvalidArgument { what } => write!(f, "{what}"),
             Error::NotEndf { what } => write!(f, "not an ENDF-6 file: {what}"),
+            Error::MalformedEndf { what } => write!(f, "malformed ENDF-6 file: {what}"),
             Error::Io(e) => write!(f, "{e}"),
         }
     }

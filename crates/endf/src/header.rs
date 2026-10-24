@@ -10,7 +10,7 @@
 //!
 //! ```no_run
 //! for header in endf::get_headers("IRDFF-II.endf")? {
-//!     println!("MAT {} is {} (NSUB {})", header.mat, header.name(), header.nsub);
+//!     println!("MAT {} is {:?} (NSUB {})", header.mat, header.name(), header.nsub);
 //! }
 //! # Ok::<(), endf::Error>(())
 //! ```
@@ -65,18 +65,20 @@ impl Header {
     /// the target, `"Am242_m1"`, or for the sublibraries that are per element
     /// (NSUB 3, 6 and 113) the element's symbol, `"Fe"`.
     ///
-    /// Thermal scattering data (NSUB 12) is named for its compound, which ZA
-    /// does not give, so this is not a name for it.
-    pub fn name(&self) -> String {
+    /// `None` for thermal scattering data (NSUB 12), which is named for its
+    /// compound and ZA does not give that, and for a Z with no element symbol.
+    pub fn name(&self) -> Option<String> {
         let z = self.za / 1000;
-        if matches!(self.nsub, 3 | 6 | 113) {
-            return ATOMIC_SYMBOL
-                .get(z as usize)
-                .copied()
-                .unwrap_or("?")
-                .to_string();
+        let symbol = *ATOMIC_SYMBOL.get(usize::try_from(z).ok()?)?;
+        match self.nsub {
+            12 => None,
+            3 | 6 | 113 => Some(symbol.to_string()),
+            _ => Some(gnds_name(
+                z as u32,
+                (self.za % 1000) as u32,
+                self.liso as u32,
+            )),
         }
-        gnds_name(z as u32, (self.za % 1000) as u32, self.liso as u32)
     }
 }
 
@@ -84,17 +86,23 @@ impl Header {
 ///
 /// The file is read a line at a time, so memory does not grow with its size.
 /// Materials are found where [`get_materials`](crate::get_materials) finds
-/// them, so the two agree on any file both can read. This one also reads a
-/// tape whose first line is already MF=1 MT=451, which has no TPID record to
-/// skip (JEFF-4.0's fission yield tape), and bytes that are not UTF-8 outside
-/// the four records it parses (IRDFF-II's tape has a cp1252 dash in Zn68's
-/// description). It refuses what `get_materials` ignores after the TEND
-/// record, so two files run together are an error rather than half read.
+/// them, with two differences. `get_materials` always skips the first line
+/// as the TPID record, so on a tape that has none and opens straight into
+/// MF=1 MT=451 (JEFF-4.0's fission yield tape) it misreads the first
+/// material; this reader sees that the first line is MF=1 MT=451 and reads
+/// it. And it refuses what `get_materials` ignores after the TEND record, so
+/// two files run together are an error rather than half read. It also reads
+/// bytes that are not UTF-8 outside the four records it parses (IRDFF-II's
+/// tape has a cp1252 dash in Zn68's description).
 ///
-/// Fails with [`Error::NotEndf`] on a file with no material in it, a line
-/// with no MAT, MF and MT numbers, a material with no MF=1 MT=451 or with
-/// two, a file that ends inside a material, and anything but blank lines
-/// after the TEND record.
+/// Fails with [`Error::NotEndf`] on a file with no material in it, or with a
+/// line that has no MAT, MF and MT numbers before its first material: the
+/// file is not ENDF-6 at all. Fails with [`Error::MalformedEndf`] on a file
+/// that is ENDF-6 but cut short or broken: a line with no MAT, MF and MT
+/// numbers once a material has started, a material with no MF=1 MT=451 or
+/// with two, an MF=1 MT=451 shorter than its four opening records or with
+/// one of them not UTF-8, a file that ends inside a material, and anything
+/// but blank lines and further TEND records after the TEND record.
 pub fn get_headers(path: impl AsRef<Path>) -> Result<Vec<Header>> {
     let file = std::fs::File::open(path)?;
     read(std::io::BufReader::with_capacity(1 << 16, file))
@@ -120,6 +128,10 @@ enum Place {
 
 fn not_endf(what: String) -> Error {
     Error::NotEndf { what }
+}
+
+fn malformed(what: String) -> Error {
+    Error::MalformedEndf { what }
 }
 
 /// MAT, MF and MT from columns 67 to 75, a blank field being zero as in
@@ -174,7 +186,7 @@ fn read(mut input: impl BufRead) -> Result<Vec<Header>> {
             {
                 continue;
             }
-            return Err(not_endf(format!(
+            return Err(malformed(format!(
                 "line {number} follows the TEND record at line {at}, which ends the tape"
             )));
         }
@@ -189,9 +201,16 @@ fn read(mut input: impl BufRead) -> Result<Vec<Header>> {
 
         let (m, mf, mt) = fields.ok_or_else(|| {
             let shown: String = String::from_utf8_lossy(&line).chars().take(80).collect();
-            not_endf(format!(
+            let what = format!(
                 "line {number} has no MAT, MF and MT numbers in columns 67 to 75: {shown:?}"
-            ))
+            );
+            // Before any material this is not ENDF at all; inside one it is
+            // an ENDF file that is broken.
+            if headers.is_empty() && place == Place::Between {
+                not_endf(what)
+            } else {
+                malformed(what)
+            }
         })?;
 
         if place == Place::Between {
@@ -211,7 +230,7 @@ fn read(mut input: impl BufRead) -> Result<Vec<Header>> {
             // MAT=0 is the MEND record that closes the material.
             if m == 0 {
                 if !seen {
-                    return Err(not_endf(format!(
+                    return Err(malformed(format!(
                         "MAT {mat} (lines {start} to {number}) has no MF=1 MT=451 section"
                     )));
                 }
@@ -220,7 +239,7 @@ fn read(mut input: impl BufRead) -> Result<Vec<Header>> {
                 place = Place::Section;
                 if (mf, mt) == (1, 451) {
                     if seen {
-                        return Err(not_endf(format!(
+                        return Err(malformed(format!(
                             "line {number} starts a second MF=1 MT=451 section in MAT {mat}, \
                              with no MEND record before it"
                         )));
@@ -233,7 +252,7 @@ fn read(mut input: impl BufRead) -> Result<Vec<Header>> {
         } else if mt == 0 {
             // A SEND record.
             if pending > 0 {
-                return Err(not_endf(format!(
+                return Err(malformed(format!(
                     "MF=1 MT=451 of MAT {mat} ends at line {number}, after {} of the four \
                      records that open it",
                     4 - pending
@@ -245,7 +264,7 @@ fn read(mut input: impl BufRead) -> Result<Vec<Header>> {
 
         if place == Place::Section && pending > 0 {
             let text = std::str::from_utf8(&line).map_err(|_| {
-                not_endf(format!(
+                malformed(format!(
                     "line {number}, a record of MF=1 MT=451 in MAT {mat}, is not text"
                 ))
             })?;
@@ -259,7 +278,7 @@ fn read(mut input: impl BufRead) -> Result<Vec<Header>> {
     }
 
     if place != Place::Between {
-        return Err(not_endf(format!(
+        return Err(malformed(format!(
             "the file ends inside MAT {mat}, which has no MEND record"
         )));
     }
@@ -311,6 +330,7 @@ mod tests {
     const IN116M2: &[u8] = include_bytes!("../fixtures/dec-049_In_116m2.endf.xz");
     const HF177M1: &[u8] = include_bytes!("../fixtures/dec-072_Hf_177m1.endf.xz");
     const PHOTOATOMIC: &[u8] = include_bytes!("../fixtures/photoat-001_H_000.endf.xz");
+    const RELAXATION: &[u8] = include_bytes!("../fixtures/atom-001_H_000.endf.xz");
 
     /// One record: its 66 columns, then MAT, MF and MT.
     fn record(body: &str, mat: i32, mf: i32, mt: i32) -> String {
@@ -400,6 +420,13 @@ mod tests {
         }
     }
 
+    fn broken(file: &str) -> String {
+        match headers_from_str(file) {
+            Err(e @ Error::MalformedEndf { .. }) => e.to_string(),
+            other => panic!("expected MalformedEndf, got {other:?}"),
+        }
+    }
+
     #[test]
     fn every_fixture_reads_as_the_full_reader_reads_it() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
@@ -415,7 +442,7 @@ mod tests {
             assert_eq!(headers, full_reader(&file), "{fixture}");
             let material = Material::from_str(&file).unwrap();
             if let Some(name) = reader_name(&material) {
-                assert_eq!(headers[0].name(), name, "{fixture}");
+                assert_eq!(headers[0].name(), Some(name), "{fixture}");
                 named.insert(headers[0].nsub);
             }
         }
@@ -431,9 +458,9 @@ mod tests {
         assert_eq!(
             seen,
             [
-                (9552, 10, "Am244".to_string()),
-                (1477, 4, "In116_m1".to_string()),
-                (100, 3, "H".to_string()),
+                (9552, 10, Some("Am244".to_string())),
+                (1477, 4, Some("In116_m1".to_string())),
+                (100, 3, Some("H".to_string())),
             ]
         );
     }
@@ -456,9 +483,9 @@ mod tests {
         let first = text(AM244);
         let tend = first.lines().count();
         assert_eq!(
-            refusal(&(first.clone() + &text(IN116M1))),
+            broken(&(first.clone() + &text(IN116M1))),
             format!(
-                "not an ENDF-6 file: line {} follows the TEND record at line {tend}, which \
+                "malformed ENDF-6 file: line {} follows the TEND record at line {tend}, which \
                  ends the tape",
                 tend + 1
             )
@@ -482,7 +509,7 @@ mod tests {
             };
             assert_eq!(
                 (header.lis, header.liso, header.name()),
-                (lis, liso, name.into())
+                (lis, liso, Some(name.into()))
             );
         }
     }
@@ -518,8 +545,17 @@ mod tests {
         let lines: Vec<&str> = file.lines().collect();
         let half = lines[..lines.len() / 2].join("\n");
         assert_eq!(
-            refusal(&half),
-            "not an ENDF-6 file: the file ends inside MAT 9552, which has no MEND record"
+            broken(&half),
+            "malformed ENDF-6 file: the file ends inside MAT 9552, which has no MEND record"
+        );
+
+        // A line that is not a record, once a material has started. (A short
+        // one has blank MAT, MF and MT columns and reads as a MEND record.)
+        let garbled = [lines[..10].join("\n"), "x".repeat(80)].join("\n");
+        assert!(
+            broken(&garbled)
+                .starts_with("malformed ENDF-6 file: line 11 has no MAT, MF and MT numbers"),
+            "{garbled}"
         );
 
         // MF=1 MT=451 closed after its HEAD and first CONT records.
@@ -531,8 +567,8 @@ mod tests {
         ]
         .concat();
         assert_eq!(
-            refusal(&short),
-            "not an ENDF-6 file: MF=1 MT=451 of MAT 9552 ends at line 4, after 2 of the four \
+            broken(&short),
+            "malformed ENDF-6 file: MF=1 MT=451 of MAT 9552 ends at line 4, after 2 of the four \
              records that open it"
         );
     }
@@ -547,7 +583,7 @@ mod tests {
             .position(|line| control(line.as_bytes()).is_some_and(|(mat, ..)| mat == 0))
             .unwrap();
         let joined = [lines[..mend].join("\n"), lines[mend + 1..].join("\n")].join("\n");
-        let message = refusal(&joined);
+        let message = broken(&joined);
         assert!(
             message.contains("starts a second MF=1 MT=451 section in MAT 9552"),
             "{message}"
@@ -568,9 +604,88 @@ mod tests {
         ]
         .concat();
         assert_eq!(
-            refusal(&bare),
-            "not an ENDF-6 file: MAT 9552 (lines 2 to 4) has no MF=1 MT=451 section"
+            broken(&bare),
+            "malformed ENDF-6 file: MAT 9552 (lines 2 to 4) has no MF=1 MT=451 section"
         );
+    }
+
+    #[test]
+    fn every_field_comes_from_its_own_place() {
+        // Every one of the 18 fields holds a different value, so reading one
+        // from another's place fails.
+        let opening = [
+            record(
+                " 2.604600+4 5.534450+1          1          2          3          4",
+                2631,
+                1,
+                451,
+            ),
+            record(
+                " 6.000000+0 7.000000+0          8          9          0         10",
+                2631,
+                1,
+                451,
+            ),
+            record(
+                " 1.100000+1 1.200000+1         13         14         15         16",
+                2631,
+                1,
+                451,
+            ),
+            record(
+                " 1.700000+1 0.000000+0         18          0          0          0",
+                2631,
+                1,
+                451,
+            ),
+        ]
+        .concat();
+        assert_eq!(
+            parse(2631, &opening).unwrap(),
+            Header {
+                mat: 2631,
+                za: 26046,
+                awr: 55.3445,
+                lrp: 1,
+                lfi: 2,
+                nlib: 3,
+                nmod: 4,
+                elis: 6.0,
+                sta: 7.0,
+                lis: 8,
+                liso: 9,
+                nfor: 10,
+                awi: 11.0,
+                emax: 12.0,
+                lrel: 13,
+                nsub: 15,
+                nver: 16,
+                temp: 17.0,
+                ldrv: 18,
+            }
+        );
+    }
+
+    #[test]
+    fn some_materials_have_no_name() {
+        let header = |za, nsub| Header {
+            za,
+            nsub,
+            ..headers_from_str(&text(AM244)).unwrap()[0]
+        };
+        // Atomic relaxation, which has no reader that names it, is per element.
+        let [relaxation] = headers_from_str(&text(RELAXATION)).unwrap()[..] else {
+            panic!("one material");
+        };
+        assert_eq!(
+            (relaxation.nsub, relaxation.name()),
+            (6, Some("H".to_string()))
+        );
+        assert_eq!(header(26056, 6).name(), Some("Fe".to_string()));
+        // Thermal scattering is named for its compound (ZA 134 is CH4).
+        assert_eq!(header(134, 12).name(), None);
+        assert_eq!(header(200_400, 10).name(), None);
+        assert_eq!(header(-1000, 10).name(), None);
     }
 
     #[test]
@@ -596,7 +711,7 @@ mod tests {
         std::fs::write(&endf, &bytes).unwrap();
         assert_eq!(
             get_headers(&endf).unwrap_err().to_string(),
-            "not an ENDF-6 file: line 3, a record of MF=1 MT=451 in MAT 9552, is not text"
+            "malformed ENDF-6 file: line 3, a record of MF=1 MT=451 in MAT 9552, is not text"
         );
 
         // An archive, which is bytes rather than lines of text.
