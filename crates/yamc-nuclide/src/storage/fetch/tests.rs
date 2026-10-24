@@ -186,9 +186,17 @@ impl Scratch {
         Scratch(dir)
     }
 
-    /// Where the library builder keeps its archives: `.build/downloads/`.
+    /// Where the library builder keeps its archives, `.build/downloads/`.
+    /// Joined one part at a time, so it has this platform's separators: on
+    /// Windows `std::path::absolute` turns `/` into `\`, so the folder an
+    /// error names would not match `.build/downloads` written as one.
+    fn folder(&self) -> PathBuf {
+        self.0.join(".build").join("downloads")
+    }
+
+    /// `name` in [`Scratch::folder`].
     fn downloads(&self, name: &str) -> PathBuf {
-        self.0.join(".build/downloads").join(name)
+        self.folder().join(name)
     }
 }
 
@@ -265,7 +273,7 @@ fn a_file_is_downloaded_checked_and_renamed_into_place() {
         assert_eq!(fs::read(&dest).unwrap(), file());
         assert_eq!(origin.hits(path), 1);
     }
-    let mut left: Vec<_> = fs::read_dir(scratch.0.join(".build/downloads"))
+    let mut left: Vec<_> = fs::read_dir(scratch.folder())
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
         .collect();
@@ -467,6 +475,40 @@ fn a_pinned_file_in_place_is_used_without_a_request() {
     assert_eq!(fs::read(&dest).unwrap(), file());
 }
 
+/// A `.part` the host refused before sending any of the file is left as it
+/// was: it may be a web browser's download still in progress, which Firefox
+/// keeps as `<name>.part`, whether or not an empty file holds the name.
+#[test]
+fn a_refusal_leaves_a_browser_download_in_progress_alone() {
+    let origin = Origin::start();
+    let (bytes, sha256) = pins();
+    let scratch = Scratch::new("browser");
+    fs::create_dir_all(scratch.folder()).unwrap();
+    let begun = &file()[..3000];
+    for (path, reply, placeholder) in [
+        (
+            "fendl-3.2d-T1-atom-endf.zip",
+            Reply::Status("403 Forbidden", "text/html", CHALLENGE.to_vec()),
+            false,
+        ),
+        (
+            "jendl5-n_upd17.tar.gz",
+            Reply::Status("200 OK", "text/html", JAEA_PAGE.to_vec()),
+            true,
+        ),
+    ] {
+        let url = origin.serve(path, vec![reply]);
+        let dest = scratch.downloads(path);
+        if placeholder {
+            fs::write(&dest, b"").unwrap();
+        }
+        fs::write(part_path(&dest), begun).unwrap();
+        let err = download_file(&url, &dest, bytes, &sha256).unwrap_err();
+        assert_names_the_way_out(&err, &url, &dest);
+        assert_eq!(fs::read(part_path(&dest)).unwrap(), begun, "{path}");
+    }
+}
+
 /// A dropped connection, a transfer cut short and a 5xx are retried, each
 /// from the start. As many failures in a row as there are attempts give up,
 /// naming the last.
@@ -522,6 +564,25 @@ fn a_pin_that_is_not_a_sha256_is_refused_before_any_request() {
         assert!(err.contains("is not 64 hex digits"), "{err}");
     }
     assert_eq!(origin.hits("x.zip"), 0);
+}
+
+/// An address no request can be sent to, a `file://` URL or one with no
+/// scheme, fails the same way every time, so it is refused at once rather
+/// than retried, with the same way out.
+#[test]
+fn an_address_that_cannot_be_requested_is_refused_at_once() {
+    let (bytes, sha256) = pins();
+    let scratch = Scratch::new("address");
+    let dest = scratch.downloads("TENDL-g.tgz");
+    for url in [
+        "file:///data/TENDL-g.tgz",
+        "tendl.imperial.ac.uk/tendl_2025/tar_files/TENDL-g.tgz",
+    ] {
+        let err = download_file(url, &dest, bytes, &sha256).unwrap_err();
+        assert!(!err.contains("attempts failed"), "{err}");
+        assert_names_the_way_out(&err, url, &dest);
+        assert_nothing_kept(&dest);
+    }
 }
 
 /// Calls for one file at once take turns: one downloads it, and the others

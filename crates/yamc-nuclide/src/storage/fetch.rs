@@ -53,7 +53,9 @@ const HTML_PAGE: &str =
 /// first kilobyte of its body, and no body is read past `bytes + 1`. A
 /// different file found at `dest` is replaced only by a checked download. A
 /// `.part` an interrupted run left is overwritten by the next download, or
-/// removed once `dest` holds the file.
+/// removed once `dest` holds the file. One is never removed by an attempt
+/// the host refused before sending any of the file, since it may be a web
+/// browser's download still in progress.
 ///
 /// A transport failure, a body cut short and a 5xx are retried from the
 /// start, with the release downloads' delays. Anything else the host answers
@@ -102,7 +104,7 @@ pub fn download_file(url: &str, dest: &Path, bytes: u64, sha256: &str) -> Result
         if delay_ms > 0 {
             std::thread::sleep(Duration::from_millis(delay_ms));
         }
-        let failure = match attempt(&client, url, &part, bytes, &sha256) {
+        match attempt(&client, url, &part, bytes, &sha256) {
             Ok(()) => {
                 return fs::rename(&part, &dest)
                     .map(|()| Outcome::Downloaded)
@@ -115,15 +117,11 @@ pub fn download_file(url: &str, dest: &Path, bytes: u64, sha256: &str) -> Result
                         )
                     });
             }
-            Err(failure) => failure,
-        };
-        fs::remove_file(&part).ok();
-        match failure {
-            Failure::Transient(why) => last = why,
-            Failure::Refused(why) => {
+            Err(Failure::Transient(why)) => last = why,
+            Err(Failure::Refused(why)) => {
                 return Err(failed(url, &dest, bytes, &sha256, &why, found.as_deref()));
             }
-            Failure::Local(why) => return Err(why),
+            Err(Failure::Local(why)) => return Err(why),
         }
     }
     let why = format!(
@@ -229,25 +227,32 @@ fn attempt(
     let mut body = (&head[..])
         .chain(&mut response)
         .take(bytes.saturating_add(1));
-    let (n, got) = stream_to_file(&mut body, part).map_err(|e| {
-        if written_here(&e) {
-            Failure::Local(format!("could not write {}: {e}", part.display()))
-        } else {
-            reading(e)
-        }
-    })?;
-    if n == bytes && got == sha256 {
+    let streamed = stream_to_file(&mut body, part);
+    if let Ok((n, got)) = &streamed
+        && *n == bytes
+        && got == sha256
+    {
         return Ok(());
     }
-    Err(Failure::Refused(if page {
-        HTML_PAGE.to_string()
-    } else if n > bytes {
-        format!("the host sent more than the expected {bytes} bytes")
-    } else if n < bytes {
-        format!("the host sent {n} bytes, not the expected {bytes}")
-    } else {
-        format!("the host sent a different file, with sha256 {got}")
-    }))
+    // Only here, once this attempt has written it: a `.part` that a refusal
+    // came before may be a web browser's download in progress, which
+    // Firefox keeps as `<name>.part` beside where the file will go.
+    fs::remove_file(part).ok();
+    Err(match streamed {
+        Err(e) if written_here(&e) => {
+            Failure::Local(format!("could not write {}: {e}", part.display()))
+        }
+        Err(e) => reading(e),
+        Ok((n, got)) => Failure::Refused(if page {
+            HTML_PAGE.to_string()
+        } else if n > bytes {
+            format!("the host sent more than the expected {bytes} bytes")
+        } else if n < bytes {
+            format!("the host sent {n} bytes, not the expected {bytes}")
+        } else {
+            format!("the host sent a different file, with sha256 {got}")
+        }),
+    })
 }
 
 /// Whether a body starts as a web page does: with `<`, after any byte-order
