@@ -122,7 +122,9 @@ pub enum GpuDispatchError {
         cell_id: u32,
     },
     /// `Model::ensure_photon_data_for_gpu` failed -- a photon model's
-    /// materials are missing photon data (`photon_data_paths` empty).
+    /// materials are missing photon data (`photon_data_paths` empty). Also a
+    /// D1S run whose decay-photon data cannot be prepared, an unset
+    /// transmutation source among the reasons.
     PhotonDataPrep(String),
     /// `Model::ensure_nuclear_data_loaded` or
     /// `Model::ensure_neutron_temperatures_for_gpu` failed -- a nuclide has no
@@ -688,6 +690,10 @@ fn run_on_gpu_dispatch(
     model
         .validate_convergence_targets()
         .map_err(GpuDispatchError::ConvergenceTargetUnmatched)?;
+    // An unset transmutation source a D1S run reads, before any data loads.
+    model
+        .check_decay_photon_sources()
+        .map_err(GpuDispatchError::PhotonDataPrep)?;
     // The neutron kernel supports survival biasing (implicit capture); any
     // other variance-reduction technique is rejected rather than silently
     // ignored. Iterate so an added variant (e.g. weight windows) fails fast

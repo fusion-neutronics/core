@@ -158,19 +158,20 @@ pub fn set_cross_section_data_entry(nuclide_or_keyword: &str, path: Option<&str>
 
 // Transmutation network subsections. Each part (decay, reactions,
 // fission_yields, branch_ratios) is sourced independently by a library keyword
-// or a path; unset parts fall back to a built-in default at load time
-// (endf-b8.1 for decay/reactions/fission_yields; no branching overlay when
-// branch_ratios is unset). branch_ratios also takes several sources in order.
-// Getters return the raw setting (``None`` = default).
+// or a path. There is no default library, as there is none for cross
+// sections: a calculation that reads an unset part is refused before any work,
+// naming the setting (no branching overlay is applied when branch_ratios is
+// unset). branch_ratios also takes several sources in order. Getters return
+// the setting as it was assigned (``None`` = unset).
 
-/// What a subsection setter accepts from Python: a keyword or path, `None`,
-/// or `False`.
+/// What a subsection setter accepts from Python, and its getter returns: a
+/// keyword or path, `None`, or `False`.
 ///
 /// `reactions` and `fission_yields` have three states where the other two
 /// sources have two, so `None` alone cannot spell them. `None` keeps the
-/// meaning it has everywhere else in this module -- put it back to the
-/// default -- and `False` is the one that turns the subsection off.
-#[derive(FromPyObject)]
+/// meaning it has everywhere else in this module, unset, and `False` is the
+/// one that turns the subsection off.
+#[derive(FromPyObject, IntoPyObject)]
 pub enum SubsectionArg {
     // Checked before the string arm: `False` is not a source name.
     Toggle(bool),
@@ -199,12 +200,11 @@ impl pyo3_stub_gen::PyStubType for SubsectionArg {
 /// refusal of a branching-only library.
 fn subsection_source(value: Option<SubsectionArg>, role: &str) -> PyResult<SubsectionSource> {
     match value {
-        None => Ok(SubsectionSource::Default),
+        None => Ok(SubsectionSource::Unset),
         Some(SubsectionArg::Toggle(false)) => Ok(SubsectionSource::Off),
         Some(SubsectionArg::Toggle(true)) => Err(PyValueError::new_err(
             "True is not a source: pass a library keyword or a path to choose \
-             one, None to use the default library, or False to turn the \
-             subsection off",
+             one, False to turn the subsection off, or None to unset it",
         )),
         Some(SubsectionArg::Source(source)) => {
             refuse_branching_only(&source, role)?;
@@ -213,10 +213,21 @@ fn subsection_source(value: Option<SubsectionArg>, role: &str) -> PyResult<Subse
     }
 }
 
+/// A subsection setting as it was assigned: its source, `False` when it is
+/// turned off, `None` when it is unset.
+fn subsection_arg(source: &SubsectionSource) -> Option<SubsectionArg> {
+    match source {
+        SubsectionSource::Unset => None,
+        SubsectionSource::Off => Some(SubsectionArg::Toggle(false)),
+        SubsectionSource::Set(source) => Some(SubsectionArg::Source(source.clone())),
+    }
+}
+
 /// What a cross-section source is, as a refusal names it.
 const CROSS_SECTION_ROLE: &str = "the neutron cross-section library";
 
-/// Get the decay-data source for the transmutation network, or ``None``.
+/// Get the decay-data source for the transmutation network, or ``None`` when
+/// it is unset.
 #[gen_stub_pyfunction]
 #[pyfunction]
 pub fn get_transmutation_decay_data() -> Option<String> {
@@ -227,7 +238,11 @@ pub fn get_transmutation_decay_data() -> Option<String> {
         .clone()
 }
 
-/// Set the decay-data source. Pass ``None`` to reset to the default library.
+/// Set the decay-data source: a library keyword or a path.
+///
+/// Every transmutation and decay quantity (activity, decay heat, dose) reads
+/// it, and there is no default library, so one with it unset is refused
+/// before any work, naming the setting. Pass ``None`` to unset it.
 #[gen_stub_pyfunction]
 #[pyfunction]
 pub fn set_transmutation_decay_data(value: Option<&str>) -> PyResult<()> {
@@ -241,24 +256,27 @@ pub fn set_transmutation_decay_data(value: Option<&str>) -> PyResult<()> {
     Ok(())
 }
 
-/// Get the reaction-topology source for the transmutation network.
-///
-/// Returns the source that will actually be used -- the default library when
-/// the setting is untouched or was reset with ``None`` -- or ``None`` when it
-/// has been turned off with ``False``.
+/// Get the reaction-topology source for the transmutation network, as it was
+/// assigned: the source, ``False`` when it is turned off, or ``None`` when it
+/// is unset.
 #[gen_stub_pyfunction]
 #[pyfunction]
-pub fn get_transmutation_reactions() -> Option<String> {
-    CONFIG
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .get_transmutation_reactions()
+pub fn get_transmutation_reactions() -> Option<SubsectionArg> {
+    subsection_arg(
+        &CONFIG
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .transmutation_reactions,
+    )
 }
 
 /// Set the reaction-topology source.
 ///
-/// Pass a library keyword or a path to choose one, or ``None`` to go back to
-/// the default library.
+/// Pass a library keyword or a path to choose one. An irradiation, a D1S
+/// decay-photon run, ``Model.radionuclides`` and
+/// ``PulseSchedule.time_correct_tally`` read it, and there is no default
+/// library, so one with it unset is refused before any work, naming the
+/// setting. Pass ``None`` to unset it.
 ///
 /// Pass ``False`` to turn the subsection off, for a decay-only calculation on
 /// a material with no reaction rates. A rate that then needs it is refused
@@ -275,24 +293,25 @@ pub fn set_transmutation_reactions(value: Option<SubsectionArg>) -> PyResult<()>
     Ok(())
 }
 
-/// Get the fission-yields source for the transmutation network.
-///
-/// Returns the source that will actually be used -- the default library when
-/// the setting is untouched or was reset with ``None`` -- or ``None`` when it
-/// has been turned off with ``False``.
+/// Get the fission-yields source for the transmutation network, as it was
+/// assigned: the source, ``False`` when it is turned off, or ``None`` when it
+/// is unset.
 #[gen_stub_pyfunction]
 #[pyfunction]
-pub fn get_transmutation_fission_yields() -> Option<String> {
-    CONFIG
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .get_transmutation_fission_yields()
+pub fn get_transmutation_fission_yields() -> Option<SubsectionArg> {
+    subsection_arg(
+        &CONFIG
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .transmutation_fission_yields,
+    )
 }
 
 /// Set the fission-yields source.
 ///
-/// Pass a library keyword or a path to choose one, or ``None`` to go back to
-/// the default library.
+/// Pass a library keyword or a path to choose one. An irradiation reads it,
+/// and there is no default library, so one with it unset is refused before
+/// any work, naming the setting. Pass ``None`` to unset it.
 ///
 /// Pass ``False`` to turn the subsection off, which is the honest setting for
 /// a material nothing in which fissions and for a library that publishes no

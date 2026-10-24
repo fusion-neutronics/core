@@ -22,6 +22,7 @@ use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pyme
 
 use super::decay_photons::resolve_chain;
 use super::source::PyNeutronSource;
+use yamc_nuclide::config::ChainUse;
 use yani_transmute::uncertainty::SpreadAccumulator;
 
 /// Extract a duration -- either a plain number of seconds or a `(value, unit)`
@@ -547,7 +548,10 @@ impl PyPulseSchedule {
     ///         never included, so there is no row-0 footgun.
     ///
     /// The transmutation network is assembled from the configured per-subsection
-    /// sources (``yamc.transmutation_decay_data`` etc.).
+    /// sources: the decay data (``yamc.transmutation_decay_data``) and the
+    /// reactions (``yamc.transmutation_reactions``), which say which emitters
+    /// a collision makes. There is no default library, so either one unset
+    /// raises ``ValueError``, naming it.
     ///
     ///     data_uncertainty (DataUncertainty, optional): Also propagate the
     ///         nuclear-data uncertainty of the dose. Two sources act on it.
@@ -605,7 +609,7 @@ impl PyPulseSchedule {
         let n = self.schedule.len();
         let (tcf_indices, single) = resolve_steps(steps, n)?;
 
-        let chain = resolve_chain()?.chain;
+        let chain = resolve_chain(ChainUse::Activation)?.chain;
 
         // Elapsed time at the end of each schedule step (cumulative dt).
         // tcf index t corresponds to the end of schedule step t-1.
