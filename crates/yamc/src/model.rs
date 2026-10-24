@@ -12,6 +12,7 @@ use std::io::{IsTerminal, Write};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::sync::Mutex;
+use yamc_nuclide::config::ChainUse;
 use yamc_physics::gpu::flat::inelastic_flat::InelasticFlatCache;
 use yamc_physics::util::bank::ParticleBank;
 use yamc_source::source::{ParticleSource, SourceSelector};
@@ -1575,6 +1576,20 @@ impl Model {
         Ok(data_load_secs)
     }
 
+    /// Refuse a decay-photon (D1S) run whose transmutation sources leave out
+    /// what it reads, before any data is loaded: the decay data, and the
+    /// reactions that say which emitter a collision makes. There is no
+    /// default library for either.
+    pub(crate) fn check_decay_photon_sources(&self) -> Result<(), String> {
+        if !self.use_decay_photons {
+            return Ok(());
+        }
+        yamc_nuclide::config::Config::global()
+            .transmutation_sources(ChainUse::Activation)
+            .map(|_| ())
+            .map_err(|why| format!("use_decay_photons: {why}"))
+    }
+
     /// Validate the convergence targets before any expensive work: every target
     /// must apply to at least one tally. A target that matches no tally is never
     /// evaluated, so `convergence_targets_met` would count it as met and the run
@@ -1698,10 +1713,11 @@ impl Model {
             return Ok(Vec::new());
         }
         // Assemble the transmutation chain from the configured per-subsection
-        // sources (decay / reactions / fission_yields), each resolved and
-        // downloaded independently. Decay data (needed for decay-photon
-        // sources) defaults to the endf-b8.1 library when unset.
-        let chain = yani_transmute::load_configured_chain()
+        // sources, each resolved and downloaded independently: the decay data
+        // for the photon sources and the reactions for which emitters a
+        // collision makes. There is no default library for either
+        // (`check_decay_photon_sources` refuses an unset one before any work).
+        let chain = yani_transmute::load_configured_chain(ChainUse::Activation)
             .map_err(|e| {
                 format!(
                     "Failed to load transmutation chain for decay photons: {}",
@@ -1797,6 +1813,7 @@ impl Model {
         // Validate the variance-reduction configuration before any expensive work.
         self.validate_variance_reduction()?;
         self.validate_convergence_targets()?;
+        self.check_decay_photon_sources()?;
 
         // Mesh-filled cells require surface tracking: Woodcock/hybrid
         // flights cross cells against a global majorant and never see the

@@ -33,7 +33,8 @@ __version__: str
 #
 # `transmutation_reactions` and `transmutation_fission_yields` accept `False` as
 # well as a library keyword or path: False turns the subsection off, `None`
-# resets to the default library. The other three take no bool.
+# unsets it (there is no default library), and each reads back as assigned.
+# The other three take no bool.
 #
 # `Literal[False]` and not `bool`, matching the setters: `True` is rejected at
 # runtime, so a plain bool here would advertise a spelling that raises.

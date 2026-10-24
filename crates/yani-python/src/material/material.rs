@@ -4,6 +4,7 @@ use pyo3::types::{PyDict, PyType};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use std::collections::HashMap;
 use yamc_materials::material::Material;
+use yamc_nuclide::config::ChainUse;
 
 /// A homogeneous mixture of nuclides at a fixed density and temperature.
 ///
@@ -798,9 +799,10 @@ impl PyMaterial {
     /// Calculate the radioactive activity of the current material inventory.
     ///
     /// The material must have a ``volume`` in cm³. Atom densities are converted
-    /// to total atoms using ``atoms/barn-cm * 1e24 * volume``. The supplied
-    /// transmutation chain provides half-lives; each nuclide's activity is
-    /// ``N * ln(2) / half_life``. Stable nuclides are omitted.
+    /// to total atoms using ``atoms/barn-cm * 1e24 * volume``. The decay data
+    /// (``transmutation_decay_data``, which has no default) provides
+    /// half-lives; each nuclide's activity is ``N * ln(2) / half_life``.
+    /// Stable nuclides are omitted.
     ///
     /// Args:
     ///     by_nuclide (bool): Return a ``dict[str, float]`` by nuclide instead
@@ -820,7 +822,7 @@ impl PyMaterial {
             .internal
             .get_atoms_per_barn_cm()
             .map_err(PyValueError::new_err)?;
-        let chain = crate::distribution::resolve_chain()?.chain;
+        let chain = crate::distribution::resolve_chain(ChainUse::Decay)?.chain;
 
         let activities = yani_decay::activity_by_nuclide(&atom_densities, volume, &chain);
 
@@ -839,8 +841,9 @@ impl PyMaterial {
     /// Calculate decay heat from the current material inventory.
     ///
     /// The material must have a ``volume`` in cm³. Atom densities are converted
-    /// to total atoms using ``atoms/barn-cm * 1e24 * volume``. The supplied
-    /// transmutation chain provides half-lives and mean decay energies.
+    /// to total atoms using ``atoms/barn-cm * 1e24 * volume``. The decay data
+    /// (``transmutation_decay_data``, which has no default) provides
+    /// half-lives and mean decay energies.
     ///
     /// Args:
     ///     by_nuclide (bool): Return a ``dict[str, float]`` by nuclide instead
@@ -874,7 +877,7 @@ impl PyMaterial {
             .internal
             .get_atoms_per_barn_cm()
             .map_err(PyValueError::new_err)?;
-        let chain = crate::distribution::resolve_chain()?.chain;
+        let chain = crate::distribution::resolve_chain(ChainUse::Decay)?.chain;
 
         let heats = match component {
             None => yani_decay::decay_heat_by_nuclide(&atom_densities, volume, &chain),
@@ -957,7 +960,7 @@ impl PyMaterial {
             .internal
             .get_atoms_per_barn_cm()
             .map_err(PyValueError::new_err)?;
-        let chain = crate::distribution::resolve_chain()?.chain;
+        let chain = crate::distribution::resolve_chain(ChainUse::Decay)?.chain;
         let lines = yani_decay::decay_photon_lines(&atom_densities, volume, &chain);
         Ok(lines.into_iter().unzip())
     }
@@ -994,7 +997,7 @@ impl PyMaterial {
             .internal
             .get_atoms_per_barn_cm()
             .map_err(PyValueError::new_err)?;
-        let chain = crate::distribution::resolve_chain()?.chain;
+        let chain = crate::distribution::resolve_chain(ChainUse::Decay)?.chain;
         Ok(
             yani_decay::decay_photon_continua(&atom_densities, volume, &chain)
                 .into_iter()
@@ -1086,7 +1089,7 @@ impl PyMaterial {
             .internal
             .get_atoms_per_barn_cm()
             .map_err(PyValueError::new_err)?;
-        let chain = crate::distribution::resolve_chain()?.chain;
+        let chain = crate::distribution::resolve_chain(ChainUse::Decay)?.chain;
 
         if by_nuclide {
             let doses =
@@ -1159,7 +1162,7 @@ impl PyMaterial {
         exclude_daughters: bool,
     ) -> PyResult<super::clearance::PyClearanceResult> {
         use radiological_material_clearance_finder as clearance;
-        let chain = crate::distribution::resolve_chain()?.chain;
+        let chain = crate::distribution::resolve_chain(ChainUse::Decay)?.chain;
         let inventory = super::clearance::inventory(&self.internal, &chain)?;
         let set = clearance::get_limit_set(limit_set).map_err(super::clearance::to_py_err)?;
         let options = super::clearance::options(metal, apply_default_limit, exclude_daughters);
@@ -1202,7 +1205,7 @@ impl PyMaterial {
         exclude_daughters: bool,
     ) -> PyResult<HashMap<String, super::clearance::PyClearanceResult>> {
         use radiological_material_clearance_finder as clearance;
-        let chain = crate::distribution::resolve_chain()?.chain;
+        let chain = crate::distribution::resolve_chain(ChainUse::Decay)?.chain;
         let inventory = super::clearance::inventory(&self.internal, &chain)?;
         let names: Option<Vec<&str>> = limit_sets
             .as_ref()
@@ -1325,6 +1328,10 @@ impl PyMaterial {
     /// The transmutation network is assembled from the configured per-subsection
     /// sources (``yamc.transmutation_decay_data`` / ``_reactions`` /
     /// ``_fission_yields``); decay-only schedules need only the decay source.
+    /// There is no default library: a source the schedule reads that is unset
+    /// raises ``ValueError`` before any work, naming each such setting.
+    /// ``_reactions`` and ``_fission_yields`` can be set to ``False`` instead,
+    /// for a material with no reaction rates or one in which nothing fissions.
     ///
     /// The material does **not** need ``transmutable=True``. That flag exists so
     /// ``Model.simulate_transmutation`` can pick which materials in a geometry to
@@ -1430,7 +1437,8 @@ impl PyMaterial {
     ///
     /// Raises:
     ///     ValueError: If an irradiation pulse lacks a NeutronSource, its energy
-    ///         is not a Histogram, or on other invalid inputs.
+    ///         is not a Histogram, a transmutation source the schedule reads is
+    ///         unset, or on other invalid inputs.
     ///
     /// Examples:
     ///     >>> spectrum = yamc.NeutronSource(energy=yamc.sources.Histogram("CCFE-709", flux_709))
@@ -1470,7 +1478,9 @@ impl PyMaterial {
         // NeutronSource) and a magnitude (rate); cooldowns are decay-only.
         let (spectra, steps) = sched.transmute_plan(py)?;
 
-        let loaded = crate::distribution::resolve_chain()?;
+        let loaded = crate::distribution::resolve_chain(ChainUse::transmutation(
+            steps.iter().any(|step| step.irradiation.is_some()),
+        ))?;
         let shielding = shielding_request(
             &self.internal,
             self_shielding_chord,
