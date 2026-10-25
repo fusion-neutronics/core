@@ -534,6 +534,10 @@ fn multi_cell_photon_transport_kernel(
 
     let mut step = 0u32;
     let mut keep_going = 1u32;
+    // Surface the photon has just crossed (and sits 1e-9 cm past),
+    // u32::MAX for none: its torus distance treats that crossing as an
+    // exact root.
+    let mut on_surface = 4_294_967_295u32;
     while step < max_steps && keep_going == 1u32 {
         // Photon cutoff: CPU kills photons whose energy drops below
         // `photon_cutoff_energy` (default 1 keV) during transport.
@@ -562,6 +566,7 @@ fn multi_cell_photon_transport_kernel(
                 // Transport-born secondary: drop the D1S parent attribution so
                 // its flux is not binned into the source radionuclide.
                 current_parent = 0u32;
+                on_surface = 4_294_967_295u32;
             } else {
                 keep_going = 0u32;
             }
@@ -772,6 +777,10 @@ fn multi_cell_photon_transport_kernel(
                     let p7 = surface_params[sb + 7];
                     let p8 = surface_params[sb + 8];
                     let p9 = surface_params[sb + 9];
+                    let mut torus_offset = p3 * 0.0 - 1.0; // runtime-typed -1 (see rt_zero)
+                    if on_surface == s {
+                        torus_offset = 1e-9_f64;
+                    }
                     let mut hit = 1e30_f64;
                     if stype == 0u32 {
                         // sphere
@@ -847,6 +856,7 @@ fn multi_cell_photon_transport_kernel(
                             p3,
                             p4,
                             p5,
+                            torus_offset,
                         );
                     } else if stype == 4u32 {
                         // XTorus: axial coord is x; transverse pair (y, z).
@@ -860,6 +870,7 @@ fn multi_cell_photon_transport_kernel(
                             p3,
                             p4,
                             p5,
+                            torus_offset,
                         );
                     } else if stype == 5u32 {
                         // YTorus: axial coord is y; transverse pair (x, z).
@@ -873,6 +884,7 @@ fn multi_cell_photon_transport_kernel(
                             p3,
                             p4,
                             p5,
+                            torus_offset,
                         );
                     } else if stype == 6u32 {
                         // Quadric: p0..p9 = a, b, c, d, e, f, g, h, j, k.
@@ -1131,6 +1143,7 @@ fn multi_cell_photon_transport_kernel(
                 px += dx * d;
                 py += dy * d;
                 pz += dz * d;
+                on_surface = 4_294_967_295u32;
 
                 if collide_first {
                     // 8a. Collision-estimator tallies. The collision-density
@@ -3476,6 +3489,7 @@ fn multi_cell_photon_transport_kernel(
                     px += dx * 1e-9_f64;
                     py += dy * 1e-9_f64;
                     pz += dz * 1e-9_f64;
+                    on_surface = winner_surface;
                 }
             }
         } // closes `if keep_going == 1u32 {`

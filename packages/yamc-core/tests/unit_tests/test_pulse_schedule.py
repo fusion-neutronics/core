@@ -31,6 +31,11 @@ def _broomstick_cell():
 
 
 def _run_decay_photons(source):
+    # Called from a module-scoped fixture, which runs before the conftest's
+    # function-scoped one that points the chain at the fixture.
+    yamc.transmutation_decay_data = CHAIN
+    yamc.transmutation_reactions = CHAIN
+    yamc.transmutation_fission_yields = CHAIN
     cell = _broomstick_cell()
     geom = yamc.Geometry([cell])
     radionuclides = yamc.Model(geometry=geom, source=source).radionuclides()

@@ -13,6 +13,9 @@ matching version of this wheel and is where the documentation lives.
 import yani
 
 yani.cross_section_data = "endf-b8.1"
+yani.transmutation_decay_data = "endf-b8.1"
+yani.transmutation_reactions = "endf-b8.1"
+yani.transmutation_fission_yields = "endf-b8.1"
 
 steel = yani.materials.pnnl.material("Steel, Stainless 316", volume=1000.0)
 spectrum = yani.NeutronSource(
@@ -31,6 +34,12 @@ print(final.contact_dose(), "Gy/h")
 print(final.clearance_index("UK_EPR16_out_of_scope").index)
 print(results.get_gas_production(steel.id)["He"], "appm He")
 ```
+
+Each setting takes a library keyword or a local folder, and none has a default:
+a calculation that reads one that is unset is refused before any work, naming
+it. `transmutation_reactions` and `transmutation_fission_yields` also take
+`False`, which leaves that subsection out of a material with no reaction rates,
+or one in which nothing fissions.
 
 Displacement damage comes from the same call: pass `displacement_damage=True`
 for the damage energy per atom and NRT dpa over the schedule, per element and
@@ -62,6 +71,9 @@ split, from the first source that evaluates it.
 
 ```python
 yani.cross_section_data = "endf-b8.1"
+yani.transmutation_decay_data = "endf-b8.1"
+yani.transmutation_reactions = "endf-b8.1"
+yani.transmutation_fission_yields = "endf-b8.1"
 yani.transmutation_branch_ratios = ["irdff-ii", "endf-b8.1"]
 
 foil = yani.Material({"Nb93": 1.0}, density=8.57, volume=1.0)

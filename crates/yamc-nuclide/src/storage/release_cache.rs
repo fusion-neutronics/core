@@ -727,7 +727,7 @@ fn held(release: &CachedRelease, file: &ManifestFile, ranging: Ranged<'_>) -> bo
 }
 
 /// Delays before each retry of a transport failure or a 5xx.
-const RETRY_DELAYS_MS: &[u64] = &[200, 500, 1000];
+pub(super) const RETRY_DELAYS_MS: &[u64] = &[200, 500, 1000];
 
 /// The origin could not be reached, and why.
 struct Unreachable(String);
@@ -835,7 +835,7 @@ fn body_to_file(
 /// A reqwest error with its causes, which is where "dns error" or "timed out"
 /// actually is.
 #[cfg(not(target_os = "emscripten"))]
-fn describe(e: &reqwest::Error) -> String {
+pub(super) fn describe(e: &reqwest::Error) -> String {
     let mut text = e.to_string();
     let mut source = std::error::Error::source(e);
     while let Some(s) = source {
@@ -1038,8 +1038,19 @@ fn fetch_verified(
 }
 
 /// Copy a body to `dest` in chunks, hashing as it goes, and fsync it.
-fn stream_to_file(body: &mut impl Read, dest: &Path) -> std::io::Result<(u64, String)> {
+pub(super) fn stream_to_file(body: &mut impl Read, dest: &Path) -> std::io::Result<(u64, String)> {
     let mut file = fs::File::create(dest)?;
+    let written = copy_hashed(body, &mut file)?;
+    file.sync_all()?;
+    Ok(written)
+}
+
+/// Copy `body` into `out` in chunks, counting and hashing as it goes: the byte
+/// count and hex sha256 of what was copied.
+pub(super) fn copy_hashed(
+    body: &mut impl Read,
+    out: &mut impl Write,
+) -> std::io::Result<(u64, String)> {
     let mut hash = StreamHash::default();
     let mut buffer = vec![0u8; 256 * 1024];
     loop {
@@ -1048,9 +1059,8 @@ fn stream_to_file(body: &mut impl Read, dest: &Path) -> std::io::Result<(u64, St
             break;
         }
         hash.update(&buffer[..n]);
-        file.write_all(&buffer[..n])?;
+        out.write_all(&buffer[..n])?;
     }
-    file.sync_all()?;
     Ok(hash.finish())
 }
 

@@ -15,7 +15,7 @@
 //! - **X/Y/ZTorus** (axis-symmetric, possibly elliptical): the
 //!   ray-torus intersection is a quartic in `t`, built from
 //!   `(major a, axial minor b, radial minor c)` and solved via
-//!   `quartic_smallest_positive` (Ferrari + Newton). All three route
+//!   `poly_solve::quartic_factors` (Algorithm 1010). All three route
 //!   through `surface_distance::torus_smallest_positive` with their
 //!   transverse/axial coordinates permuted.
 //! - **Quadric** (general): `Σ` of the ten quadric terms reduces to a
@@ -162,15 +162,15 @@ fn boundary_distance_kernel(
             // p0..p2 = centre, p3 = a (major), p4 = b (axial
             // minor), p5 = c (radial minor). Axial coordinate is z;
             // transverse pair is (x, y).
-            hit = torus_smallest_positive(px - p0, py - p1, pz - p2, dx, dy, dz, p3, p4, p5);
+            hit = torus_smallest_positive(px - p0, py - p1, pz - p2, dx, dy, dz, p3, p4, p5, -1.0);
         }
         if stype == SURFACE_XTORUS {
             // Axial coordinate is x; transverse pair is (y, z).
-            hit = torus_smallest_positive(py - p1, pz - p2, px - p0, dy, dz, dx, p3, p4, p5);
+            hit = torus_smallest_positive(py - p1, pz - p2, px - p0, dy, dz, dx, p3, p4, p5, -1.0);
         }
         if stype == SURFACE_YTORUS {
             // Axial coordinate is y; transverse pair is (x, z).
-            hit = torus_smallest_positive(px - p0, pz - p2, py - p1, dx, dz, dy, p3, p4, p5);
+            hit = torus_smallest_positive(px - p0, pz - p2, py - p1, dx, dz, dy, p3, p4, p5, -1.0);
         }
         if stype == SURFACE_QUADRIC {
             // p0..p9 = a, b, c, d, e, f, g, h, j, k.
@@ -363,14 +363,44 @@ pub fn run_boundary_distance_cpu(
                     }
                 }
             } else if stype == SURFACE_ZTORUS {
-                hit =
-                    torus_smallest_positive_cpu(px - p0, py - p1, pz - p2, dx, dy, dz, p3, p4, p5);
+                hit = torus_smallest_positive_cpu(
+                    px - p0,
+                    py - p1,
+                    pz - p2,
+                    dx,
+                    dy,
+                    dz,
+                    p3,
+                    p4,
+                    p5,
+                    -1.0,
+                );
             } else if stype == SURFACE_XTORUS {
-                hit =
-                    torus_smallest_positive_cpu(py - p1, pz - p2, px - p0, dy, dz, dx, p3, p4, p5);
+                hit = torus_smallest_positive_cpu(
+                    py - p1,
+                    pz - p2,
+                    px - p0,
+                    dy,
+                    dz,
+                    dx,
+                    p3,
+                    p4,
+                    p5,
+                    -1.0,
+                );
             } else if stype == SURFACE_YTORUS {
-                hit =
-                    torus_smallest_positive_cpu(px - p0, pz - p2, py - p1, dx, dz, dy, p3, p4, p5);
+                hit = torus_smallest_positive_cpu(
+                    px - p0,
+                    pz - p2,
+                    py - p1,
+                    dx,
+                    dz,
+                    dy,
+                    p3,
+                    p4,
+                    p5,
+                    -1.0,
+                );
             } else if stype == SURFACE_QUADRIC {
                 hit = quadric_smallest_positive_cpu(
                     px, py, pz, dx, dy, dz, p0, p1, p2, p3, p4, p5, p6, p7, p8, p9,

@@ -42,6 +42,8 @@ pub enum Source<'a> {
     /// An ENDF evaluation, reconstructed and broadened by NJOY first. This is
     /// the documented route: it is the only one that can reach an arbitrary
     /// temperature, and the only one a transport conversion could ever use.
+    /// NJOY works in a hidden directory inside the output directory, which is
+    /// removed when the conversion returns.
     Endf {
         path: &'a Path,
         njoy_exec: &'a str,
@@ -82,8 +84,9 @@ struct Read {
     material: Option<Material>,
 }
 
-/// Read a nuclide from either source.
-fn read(source: &Source) -> Result<Read, Box<dyn Error>> {
+/// Read a nuclide from either source. An ENDF source runs NJOY in a working
+/// directory inside `output_dir`.
+fn read(source: &Source, output_dir: &Path) -> Result<Read, Box<dyn Error>> {
     match source {
         Source::Ace { path } => {
             let text =
@@ -112,38 +115,42 @@ fn read(source: &Source) -> Result<Read, Box<dyn Error>> {
                 Material::from_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
 
             // NJOY writes into a directory of its own so a failed run leaves
-            // nothing behind to be mistaken for output.
+            // nothing behind to be mistaken for output. It is removed when
+            // `work` drops, on an error or a panic too.
             //
-            // The counter is what makes two conversions of the SAME evaluation
-            // in one process safe. Keying on the process id and the file name
-            // alone gave them one directory between them, and the first to
-            // finish deleted it under the second: a library converted across
-            // threads would fail, or worse, read half of someone else's ACE
-            // file.
-            static RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let work = std::env::temp_dir().join(format!(
-                "yamc-convert-njoy-{}-{}-{}",
-                std::process::id(),
-                RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("nuclide")
-            ));
-            let _ = std::fs::remove_dir_all(&work);
-            std::fs::create_dir_all(&work)?;
+            // It sits inside the output directory, not the system temporary
+            // directory, and NJOY's scratch units follow it there (see
+            // `endf::njoy::run`). One evaluation's tapes can run to hundreds
+            // of MB, and /tmp is often a small tmpfs or under a per-user quota
+            // on the machines that build libraries. Filling it showed up as
+            // NJOY failing on the largest evaluations, not as a full disk.
+            //
+            // Every conversion gets its own directory, even two of the SAME
+            // evaluation in one process. Keying on the process id and the file
+            // name alone once gave them one directory between them, and the
+            // first to finish deleted it under the second: a library converted
+            // across threads would fail, or worse, read half of someone else's
+            // ACE file.
+            std::fs::create_dir_all(output_dir)
+                .map_err(|e| format!("could not create {}: {e}", output_dir.display()))?;
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("nuclide");
+            let work = endf::njoy::Scratch::new_in(output_dir, stem)?;
 
             // Keep the HEATR tapes rather than letting them be cleaned up:
             // MT 901 is built from them afterwards and is not in the ACE file.
             // NJOY writes the second one at this path with "_local" appended.
-            let heatr = work.join("heatr");
+            let heatr = work.path().join("heatr");
             // The 0 K grid comes off the RECONR output, which is the only
             // place it exists: every ACE table has been broadened to a
             // temperature. The published files carry it, and the reader keeps
             // it deliberately, so it is kept here too.
-            let pendf = work.join("pendf");
+            let pendf = work.path().join("pendf");
             let options = endf::njoy::AceOptions {
                 temperatures: temperatures.clone(),
-                output_dir: work.clone(),
+                output_dir: work.path().to_path_buf(),
                 njoy_exec: (*njoy_exec).to_string(),
                 heatr: Some(Some(heatr.clone())),
                 pendf: Some(Some(pendf.clone())),
@@ -158,7 +165,7 @@ fn read(source: &Source) -> Result<Read, Box<dyn Error>> {
                 )
             })?;
 
-            let ace = work.join("ace");
+            let ace = work.path().join("ace");
             let text = std::fs::read_to_string(&ace)
                 .map_err(|e| format!("{}: NJOY produced no ACE file ({e})", ace.display()))?;
             let tables = endf::ace::tables_from_str(&text, None)?;
@@ -198,7 +205,7 @@ fn read(source: &Source) -> Result<Read, Box<dyn Error>> {
             // MT 901 and the MT 301 correction. Not fatal if the tapes are
             // missing: a caller who turned HEATR off gets a conversion without
             // heating rather than no conversion, and the message says which.
-            let local = work.join("heatr_local");
+            let local = work.path().join("heatr_local");
             if heatr.is_file() && local.is_file() {
                 crate::heating::add_heating_local(&mut data, &material, &heatr, &local)?;
             } else {
@@ -249,7 +256,8 @@ fn read(source: &Source) -> Result<Read, Box<dyn Error>> {
                 }
             }
 
-            let _ = std::fs::remove_dir_all(&work);
+            // Every tape has been read, so the directory can go now.
+            drop(work);
 
             // Read from the evaluation, for the same reason the heating
             // correction is: MT 458 is evaluated data and is not on any tape
@@ -283,7 +291,7 @@ pub fn convert_neutron_xs(
     provenance: &Provenance,
     covariance: bool,
 ) -> Result<PathBuf, Box<dyn Error>> {
-    let Read { data, material, .. } = read(source)?;
+    let Read { data, material, .. } = read(source, output_dir)?;
     let dir = output_dir.join(format!("{}.arrow", data.name()));
     std::fs::create_dir_all(&dir)?;
 
@@ -360,7 +368,7 @@ fn write_version(
     unconverted: &[serde_json::Value],
 ) -> Result<(), Box<dyn Error>> {
     let mut marker = serde_json::json!({
-        "format_version": 2,
+        "format_version": nuclear_data_schema::FORMAT_VERSION,
         "library": provenance.library,
         "data_version": provenance.data_version,
         "converter_version": concat!("yamc-convert ", env!("CARGO_PKG_VERSION")),
@@ -436,7 +444,7 @@ pub fn convert_neutron_transport(
         data,
         release,
         material,
-    } = read(source)?;
+    } = read(source, output_dir)?;
     let dir = output_dir.join(format!("{}.arrow", data.name()));
     std::fs::create_dir_all(&dir)?;
 

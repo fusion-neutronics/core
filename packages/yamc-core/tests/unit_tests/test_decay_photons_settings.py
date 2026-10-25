@@ -54,13 +54,14 @@ def test_decay_photons_settings_getters():
 def test_transmutation_data():
     """Test the per-subsection yamc.transmutation_* module attributes.
 
-    Only the two-state sources round-trip ``None`` this way. ``reactions`` and
-    ``fission_yields`` can also be turned off, so ``None`` puts them back to
-    the default library rather than clearing them; they are covered in
-    test_transmutation_subsection_settings.py.
+    Each one unsets with ``None``, as there is no default library.
+    ``reactions`` and ``fission_yields`` can also be turned off with
+    ``False``; that is covered in test_transmutation_subsection_settings.py.
     """
     for attr in (
         "transmutation_decay_data",
+        "transmutation_reactions",
+        "transmutation_fission_yields",
         "transmutation_branch_ratios",
     ):
         setattr(mmc, attr, None)

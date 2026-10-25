@@ -171,7 +171,10 @@ fn extract_sources(source: &Bound<'_, PyAny>) -> PyResult<Vec<ParticleSource>> {
 ///     transport_secondary_photons: Transport secondary photons produced by
 ///         neutron interactions, i.e. coupled neutron->photon (default: False).
 ///         A PhotonSource transports photons regardless of this flag.
-///     use_decay_photons: Enable D1S decay photon mode (default: False).
+///     use_decay_photons: Enable D1S decay photon mode (default: False). It
+///         reads ``yamc.transmutation_decay_data`` and
+///         ``yamc.transmutation_reactions``, which have no default: a run with
+///         either unset raises ``ValueError`` before any data is loaded.
 ///     photon_cutoff_energy: Photon energy cutoff in eV (default: 1000.0).
 ///     electron_treatment: Electron energy treatment, "ttb" (thick-target
 ///         bremsstrahlung) or "local" (local deposition). Default: "ttb".
@@ -636,10 +639,15 @@ impl PyModel {
     /// decay-photon tally.
     ///
     /// The transmutation network is assembled from the configured per-subsection
-    /// sources (``yamc.transmutation_decay_data`` and friends).
+    /// sources: the decay data (``yamc.transmutation_decay_data``) and the
+    /// reactions (``yamc.transmutation_reactions``). There is no default
+    /// library.
     ///
     /// Returns:
     ///     list[str]: Sorted, de-duplicated radionuclide names.
+    ///
+    /// Raises:
+    ///     ValueError: If either source is unset, naming it.
     pub fn radionuclides(&self) -> pyo3::PyResult<Vec<String>> {
         yani_python::distribution::get_radionuclides_from_chain(self.inner.required_nuclides())
     }
@@ -1586,6 +1594,12 @@ impl PyModel {
 
     /// Run transport-transmutation calculation.
     ///
+    /// The transmutation network is assembled from the configured
+    /// ``yamc.transmutation_*`` sources, and there is no default library: the
+    /// decay data, and when a step irradiates the reactions and fission yields
+    /// too, must each be set (the latter two to a source or ``False``), or
+    /// this raises ``ValueError`` before any transport, naming each unset one.
+    ///
     /// Args:
     ///     method: Transmutation method -- ``"coupled"`` or ``"independent"``.
     ///
@@ -1812,7 +1826,12 @@ impl PyModel {
         if log_loads {
             yamc_nuclide::set_load_logging(true);
         }
-        let outcome = crate::distribution::resolve_chain().and_then(|loaded| {
+        // A step with a source rate runs transport and irradiates, so it reads
+        // every subsection; a schedule that only cools reads the decay data.
+        let chain_use = yamc_nuclide::config::ChainUse::transmutation(
+            core_schedule.steps().iter().any(|step| step.rate > 0.0),
+        );
+        let outcome = crate::distribution::resolve_chain(chain_use).and_then(|loaded| {
             let chain = loaded.chain;
             let branch = loaded.branch;
             let parts = loaded.parts;

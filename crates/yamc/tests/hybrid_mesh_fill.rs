@@ -153,7 +153,7 @@ fn closest_boundary_takes_min_of_csg_and_mesh() {
     // From the gap towards the cube: the mesh face at z=1 is nearer than
     // the sphere, so the crossing enters the fuel volume.
     let hit = g
-        .closest_boundary(0, [0.25, 0.5, 2.0], [0.0, 0.0, -1.0])
+        .closest_boundary(0, [0.25, 0.5, 2.0], [0.0, 0.0, -1.0], None)
         .unwrap();
     assert!((hit.distance - 1.0).abs() < 1e-9, "got {}", hit.distance);
     assert_eq!(hit.boundary, BoundaryType::Transmission);
@@ -164,7 +164,7 @@ fn closest_boundary_takes_min_of_csg_and_mesh() {
     // the centre the ray starts at (-0.25, 0, 1.5), so the exit solves
     // (1.5 + t)^2 + 0.0625 = 9.
     let hit = g
-        .closest_boundary(0, [0.25, 0.5, 2.0], [0.0, 0.0, 1.0])
+        .closest_boundary(0, [0.25, 0.5, 2.0], [0.0, 0.0, 1.0], None)
         .unwrap();
     let expected = (9.0_f64 - 0.0625).sqrt() - 1.5;
     assert!(
@@ -178,7 +178,7 @@ fn closest_boundary_takes_min_of_csg_and_mesh() {
     // From inside the fuel volume upwards: exit through the skin back to
     // the host complement.
     let hit = g
-        .closest_boundary(fuel_idx, [0.25, 0.5, 0.5], [0.0, 0.0, 1.0])
+        .closest_boundary(fuel_idx, [0.25, 0.5, 0.5], [0.0, 0.0, 1.0], None)
         .unwrap();
     assert!((hit.distance - 0.5).abs() < 1e-9);
     assert_eq!(hit.next_cell_index, Some(0));
@@ -186,7 +186,7 @@ fn closest_boundary_takes_min_of_csg_and_mesh() {
     // From fuel towards moderator: internal face at x=0.5, same CSG cell,
     // material switches.
     let hit = g
-        .closest_boundary(fuel_idx, [0.25, 0.5, 0.5], [1.0, 0.0, 0.0])
+        .closest_boundary(fuel_idx, [0.25, 0.5, 0.5], [1.0, 0.0, 0.0], None)
         .unwrap();
     assert!((hit.distance - 0.25).abs() < 1e-9);
     assert_eq!(hit.next_cell_index, Some(mod_idx));
@@ -201,7 +201,7 @@ fn translation_and_rotation_place_the_body() {
     assert_eq!(g.find_cell_index((0.25, 0.5, 0.5)), Some(0), "gap now");
     // Boundary from below the translated cube: skin at z=1.2.
     let hit = g
-        .closest_boundary(0, [0.25, 0.5, 0.0], [0.0, 0.0, 1.0])
+        .closest_boundary(0, [0.25, 0.5, 0.0], [0.0, 0.0, 1.0], None)
         .unwrap();
     assert!((hit.distance - 1.2).abs() < 1e-9, "got {}", hit.distance);
     assert_eq!(hit.next_cell_index, Some(idx));
@@ -258,7 +258,7 @@ fn protrusion_errors_unless_clipping_allowed() {
     let mat = &g.materials[g.cells[idx].material_idx.unwrap() as usize];
     assert_eq!(mat.volume, None, "clipped material volume dropped");
     let hit = g
-        .closest_boundary(idx, [0.45, 0.5, 0.5], [-1.0, 0.0, 0.0])
+        .closest_boundary(idx, [0.45, 0.5, 0.5], [-1.0, 0.0, 0.0], None)
         .unwrap();
     assert_eq!(hit.boundary, BoundaryType::Vacuum, "CSG surface clips");
     assert!(hit.distance < 0.45, "got {}", hit.distance);
@@ -322,7 +322,7 @@ fn coincident_skin_crossings_go_to_the_csg_surface() {
             let r = (1.0 - z * z).sqrt();
             let phi = 2.399963229728653 * k as f64;
             let dir = [r * phi.cos(), r * phi.sin(), z];
-            let hit = g.closest_boundary(mod_idx, start, dir).unwrap();
+            let hit = g.closest_boundary(mod_idx, start, dir, None).unwrap();
             assert_ne!(
                 hit.next_cell_index,
                 Some(0),

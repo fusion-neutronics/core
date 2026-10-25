@@ -1,8 +1,9 @@
 """Every calculation that needs neutron cross sections refuses to run without
 a library, and says how to configure one.
 
-There is no default neutron library (the photon data and the transmutation
-chain have one; the neutron library is the calculation's central choice), so
+There is no default neutron library (the neutron library is the
+calculation's central choice; nor is there a default transmutation library,
+see test_no_transmutation_data.py), so
 with ``yamc.cross_section_data`` unset these used to either panic with a
 message about file paths, which Python sees as a ``PanicException`` that
 ``except Exception`` does not catch, or, for ``Material.transmute``, run and

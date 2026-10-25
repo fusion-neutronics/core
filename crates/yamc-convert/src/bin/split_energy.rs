@@ -38,9 +38,18 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use nuclear_data_schema::FORMAT_VERSION;
 use yamc_convert::energy_ranges::write_energy_ranges;
 use yamc_convert::marker;
 use yamc_convert::nuclide::migrate_energy_out_of_nuclide;
+
+// The migration produces format 2, which is what it stamps. A newer format
+// changes something this binary does not do, so it has to learn that change,
+// or be retired, before it may stamp the newer number.
+const _: () = assert!(
+    FORMAT_VERSION == 2,
+    "split_energy migrates format 1 folders to format 2: extend it to the new format or retire it"
+);
 
 /// The `*.arrow` folders under `root`, or `root` itself when it is one.
 fn folders(root: &Path) -> std::io::Result<Vec<PathBuf>> {
@@ -90,7 +99,10 @@ fn migrate(dir: &Path) -> Result<bool, Box<dyn std::error::Error>> {
         return Ok(false);
     }
     write_energy_ranges(dir)?;
-    marker::update(dir, &[("format_version", serde_json::json!(2))])?;
+    marker::update(
+        dir,
+        &[("format_version", serde_json::json!(FORMAT_VERSION))],
+    )?;
     Ok(true)
 }
 

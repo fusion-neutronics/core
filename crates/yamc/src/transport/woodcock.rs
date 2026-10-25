@@ -108,18 +108,19 @@ pub(super) fn distance_to_geometry_exit(
     direction: [f64; 3],
     max_distance: f64,
 ) -> f64 {
-    const SURFACE_TOLERANCE: f64 = 1e-8;
     // Guard against pathological geometries; a real leak path crosses
     // far fewer cells than this.
     const MAX_STEPS: usize = 10_000;
     let mut traveled = 0.0;
+    // The surface the walk has just crossed, moved SURFACE_TOLERANCE past.
+    let mut on_surface: Option<OnSurface> = None;
     for _ in 0..MAX_STEPS {
         let pos = [
             start[0] + direction[0] * traveled,
             start[1] + direction[1] * traveled,
             start[2] + direction[2] * traveled,
         ];
-        let Some(hit) = geometry.closest_boundary(cell_index, pos, direction) else {
+        let Some(hit) = geometry.closest_boundary(cell_index, pos, direction, on_surface) else {
             // No boundary ahead along the ray, yet the landing point was
             // outside: a geometry gap. Keep only the distance confidently
             // walked inside (also avoids propagating an infinite
@@ -127,6 +128,10 @@ pub(super) fn distance_to_geometry_exit(
             return traveled;
         };
         traveled += hit.distance + SURFACE_TOLERANCE;
+        on_surface = hit.surface_id.map(|surface_id| OnSurface {
+            surface_id,
+            offset: SURFACE_TOLERANCE,
+        });
         if traveled >= max_distance {
             return max_distance;
         }
@@ -182,12 +187,14 @@ pub(super) fn woodcock_flight_exit(
     if vacuum_surfaces.is_empty() {
         return None;
     }
-    const SURFACE_TOLERANCE: f64 = 1e-8;
     // Parity with `distance_to_geometry_exit`; a real flight crosses
     // far fewer vacuum-surface roots than this.
     const MAX_STEPS: usize = 10_000;
     let mut traveled = 0.0;
     let mut cell_hint = pre_flight_cell_idx;
+    // Index of the vacuum surface the walk has just stepped
+    // SURFACE_TOLERANCE past, whose crossing is then an exact root.
+    let mut crossed: Option<usize> = None;
     for _ in 0..MAX_STEPS {
         let pos = [
             start[0] + direction[0] * traveled,
@@ -198,16 +205,17 @@ pub(super) fn woodcock_flight_exit(
         // `distance_to_surface` already discards roots <= 1e-12 and
         // parallel planes; the tolerance filter below also handles
         // particles born within epsilon of a boundary.
-        let mut nearest: Option<f64> = None;
-        for surface in vacuum_surfaces {
-            if let Some(t) = surface.distance_to_surface(pos, direction)
+        let mut nearest: Option<(f64, usize)> = None;
+        for (i, surface) in vacuum_surfaces.iter().enumerate() {
+            let offset = (crossed == Some(i)).then_some(SURFACE_TOLERANCE);
+            if let Some(t) = surface.distance_to_surface_on(pos, direction, offset)
                 && t > SURFACE_TOLERANCE
-                && nearest.is_none_or(|n| t < n)
+                && nearest.is_none_or(|(n, _)| t < n)
             {
-                nearest = Some(t);
+                nearest = Some((t, i));
             }
         }
-        let t = nearest?;
+        let (t, surface_index) = nearest?;
         let hit = traveled + t;
         if hit >= d_flight {
             // First candidate crossing is beyond the sampled flight.
@@ -228,6 +236,7 @@ pub(super) fn woodcock_flight_exit(
             Some(idx) => {
                 cell_hint = idx;
                 traveled = probe_dist;
+                crossed = Some(surface_index);
             }
         }
     }

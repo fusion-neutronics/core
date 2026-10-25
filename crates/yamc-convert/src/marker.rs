@@ -46,6 +46,7 @@ pub fn stamp_data_version(dir: &Path, version: &str) -> Result<bool, Box<dyn Err
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nuclear_data_schema::FORMAT_VERSION;
 
     fn folder(marker: serde_json::Value) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
@@ -66,7 +67,7 @@ mod tests {
         // Including the two indexes, which are the expensive thing in the file
         // and have nothing to do with the stamp.
         let dir = folder(serde_json::json!({
-            "format_version": 2,
+            "format_version": FORMAT_VERSION,
             "data_version": "2026-09-08",
             "library": "endf-b8.1",
             "reaction_ranges": {"schema": [0, 10], "mts": {"102": {"294K": [10, 20]}}},
@@ -75,7 +76,7 @@ mod tests {
         assert!(stamp_data_version(dir.path(), "2026-09-17").unwrap());
         let after = read(dir.path());
         assert_eq!(after["data_version"], "2026-09-17");
-        assert_eq!(after["format_version"], 2);
+        assert_eq!(after["format_version"], FORMAT_VERSION);
         assert_eq!(after["library"], "endf-b8.1");
         assert_eq!(after["reaction_ranges"]["mts"]["102"]["294K"][1], 20);
         assert_eq!(after["energy_ranges"]["temperatures"]["294K"][0], 10);
@@ -87,13 +88,13 @@ mod tests {
         assert!(update(
             dir.path(),
             &[
-                ("format_version", serde_json::json!(2)),
+                ("format_version", serde_json::json!(FORMAT_VERSION)),
                 ("data_version", serde_json::json!("new")),
             ],
         )
         .unwrap());
         let after = read(dir.path());
-        assert_eq!(after["format_version"], 2);
+        assert_eq!(after["format_version"], FORMAT_VERSION);
         assert_eq!(after["data_version"], "new");
     }
 

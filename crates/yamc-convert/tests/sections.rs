@@ -498,10 +498,11 @@ fn an_ace_conversion_loads_through_yamcs_own_reader() {
         serde_json::from_str(&std::fs::read_to_string(out.join("version.json")).expect("marker"))
             .expect("json");
     assert_eq!(marker["data_version"], "rust-check");
-    // 2 since the union energy grids moved into their own section. The
-    // loader below refuses anything else, so this pins the writer and the
-    // reader to the same number from opposite sides.
-    assert_eq!(marker["format_version"], 2);
+    // The one format the loader below reads; it refuses anything else.
+    assert_eq!(
+        marker["format_version"],
+        nuclear_data_schema::FORMAT_VERSION
+    );
     assert!(
         marker["energy_ranges"]["temperatures"].is_object(),
         "a conversion indexes its energy.arrow so a client can range-fetch one grid"

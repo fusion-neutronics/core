@@ -8,9 +8,9 @@ running the very tests that show it is not one.
 
 The settings are process-global (one `CONFIG` behind the module properties in
 packages/yani-core/python/yani/__init__.py), so a test that sets one and does not
-put it back changes what every later test in the same process resolves. No test
-here sets them today: the fixture is in place so that whoever writes the first
-one that does gets the guarantee without having to know it was missing.
+put it back changes what every later test in the same process resolves. Tests
+here set them (test_branching_sources.py, test_no_transmutation_data.py), and
+this puts them back after each one.
 
 yani is imported inside the fixture rather than at module scope. A missing wheel
 raised from a conftest aborts the whole session at collection, where the same
