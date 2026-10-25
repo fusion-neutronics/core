@@ -2195,7 +2195,8 @@ pub fn export_chain_parts<P: AsRef<Path>>(
     std::fs::write(
         dir.join("manifest.json"),
         format!(
-            r#"{{"format_version": 2, "library": "{}", "converter_version": "yani {}", "subsections": {{"decay": {{"path": "decay"}}, "reactions": {{"path": "reactions"}}, "fission_yields": {{"path": "fission_yields"}}}}}}"#,
+            r#"{{"format_version": {}, "library": "{}", "converter_version": "yani {}", "subsections": {{"decay": {{"path": "decay"}}, "reactions": {{"path": "reactions"}}, "fission_yields": {{"path": "fission_yields"}}}}}}"#,
+            nuclear_data_schema::FORMAT_VERSION,
             library.unwrap_or("unknown"),
             env!("CARGO_PKG_VERSION"),
         ),
@@ -2644,6 +2645,39 @@ mod tests {
             back["Xx999"].decay_energy_uncertainty, None,
             "an unstated decay-energy uncertainty must not come back as zero"
         );
+    }
+
+    /// An exported chain is stamped with the format the converters write, as
+    /// a converted chain is.
+    #[test]
+    fn an_exported_chain_carries_the_published_format_version() {
+        let dir = std::env::temp_dir().join(format!("yani-format-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let chain = std::collections::HashMap::from([(
+            "Co60".to_string(),
+            crate::ChainNuclide {
+                name: "Co60".to_string(),
+                half_life: Some(1.66344e8),
+                half_life_uncertainty: None,
+                decay_energy: 2.5e6,
+                decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
+                reactions: Vec::new(),
+                decays: Vec::new(),
+                fission_yields: None,
+                sources: Vec::new(),
+            },
+        )]);
+
+        super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+        let text = std::fs::read_to_string(dir.join("manifest.json")).expect("manifest");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manifest: serde_json::Value = serde_json::from_str(&text).expect("manifest is JSON");
+        assert_eq!(
+            manifest["format_version"],
+            nuclear_data_schema::FORMAT_VERSION
+        );
+        assert_eq!(manifest["library"], "test");
     }
 
     /// A chain of decay modes: a sigma, a stored 0.0 and none at all, and an

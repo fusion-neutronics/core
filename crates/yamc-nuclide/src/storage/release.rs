@@ -39,7 +39,19 @@ use sha2::{Digest, Sha256};
 ///
 /// Format 2 is the current one: the union energy grids live in `energy.arrow`
 /// and `reactions.arrow` holds one record batch per (MT, temperature).
+///
+/// The range ends at [`nuclear_data_schema::FORMAT_VERSION`], the format the
+/// converters write, and the assertion below holds it there: a build reads
+/// what it writes and nothing newer. How far back it reaches is a separate
+/// decision. The bounds stay literals because the data-format check
+/// (`scripts/check_format_version_bumps.py`) reads them from this source.
 pub const SUPPORTED_FORMAT_VERSIONS: RangeInclusive<u32> = 2..=2;
+
+const _: () = assert!(
+    *SUPPORTED_FORMAT_VERSIONS.start() <= nuclear_data_schema::FORMAT_VERSION
+        && *SUPPORTED_FORMAT_VERSIONS.end() == nuclear_data_schema::FORMAT_VERSION,
+    "SUPPORTED_FORMAT_VERSIONS must end at nuclear_data_schema::FORMAT_VERSION"
+);
 
 /// The pointer object under `<origin>/<keyword>/`.
 pub const LATEST: &str = "latest.json";
@@ -619,6 +631,16 @@ mod tests {
         });
         let err = parse_latest("endf-b8.1", pointer.to_string().as_bytes()).unwrap_err();
         assert!(err.contains("no longer reads"), "{err}");
+    }
+
+    /// A release in the format the converters write is read, and the next
+    /// format is refused with the advice to upgrade.
+    #[test]
+    fn the_format_the_converters_write_is_the_newest_this_build_reads() {
+        let written = nuclear_data_schema::FORMAT_VERSION;
+        assert!(check_format_version("endf-b8.1", "2026-10-01", written).is_ok());
+        let err = check_format_version("endf-b8.1", "2027-01-01", written + 1).unwrap_err();
+        assert!(err.contains("Upgrade"), "{err}");
     }
 
     #[test]

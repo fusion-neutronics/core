@@ -547,7 +547,10 @@ fn convert_transmutation_writes_a_complete_directory() {
         &std::fs::read_to_string(dir.join("manifest.json")).expect("manifest"),
     )
     .expect("manifest is JSON");
-    assert_eq!(manifest["format_version"], 2);
+    assert_eq!(
+        manifest["format_version"],
+        nuclear_data_schema::FORMAT_VERSION
+    );
     assert_eq!(manifest["data_version"], "2026-08-09.1");
     for subsection in ["decay", "reactions", "fission_yields"] {
         assert_eq!(

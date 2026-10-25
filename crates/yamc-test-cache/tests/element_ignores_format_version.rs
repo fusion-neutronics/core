@@ -19,7 +19,7 @@
 
 use std::path::Path;
 
-fn stamp(dir: &Path, format_version: i64) {
+fn stamp(dir: &Path, format_version: u32) {
     std::fs::create_dir_all(dir).expect("mkdir");
     std::fs::write(
         dir.join("version.json"),
@@ -52,11 +52,11 @@ fn a_superseded_element_stamp_is_still_present_and_a_nuclide_one_is_not() {
     // about the element path resolving somewhere else.
     stamp(
         &tmp.path().join(format!("{lib}-Fe.arrow")),
-        yamc_nuclide::arrow::nuclide_arrow::FORMAT_VERSION,
+        nuclear_data_schema::FORMAT_VERSION,
     );
     stamp(
         &tmp.path().join(format!("{lib}-Fe56.arrow")),
-        yamc_nuclide::arrow::nuclide_arrow::FORMAT_VERSION,
+        nuclear_data_schema::FORMAT_VERSION,
     );
     assert!(yamc_test_cache::element("Fe").is_some());
     assert!(yamc_test_cache::nuclide("Fe56").is_some());

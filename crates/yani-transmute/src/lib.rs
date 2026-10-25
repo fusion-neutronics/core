@@ -84,23 +84,37 @@ pub use material_transmute::{
     TransportTallied,
 };
 
-/// Load the transmutation chain assembled from the configured per-subsection
-/// sources (`yamc.transmutation_decay_data` / `_reactions` /
-/// `_fission_yields`). Each source (a library keyword or a local path) is
-/// resolved independently (keyword -> downloaded subsection tar), then the
-/// parts are merged.
+/// Load the transmutation chain a calculation of `chain_use` reads, from the
+/// configured per-subsection sources (`yamc.transmutation_decay_data` /
+/// `_reactions` / `_fission_yields`).
 ///
-/// `_reactions` and `_fission_yields` can each be set to `None`, which leaves
-/// that subsection out: nothing is downloaded and the chain is built without
-/// it. That is the honest setting for a decay-only calculation and for a
-/// material nothing in which fissions, and it is also the only way to run a
-/// library that publishes no yields of its own without quietly folding another
+/// There is no default library: a source `chain_use` reads that is unset is
+/// refused before anything is resolved or downloaded, naming each such
+/// setting (see [`yamc_nuclide::config::Config::transmutation_sources`]).
+/// What loads is [`load_chain_sources`].
+pub fn load_configured_chain(
+    chain_use: yamc_nuclide::config::ChainUse,
+) -> Result<yani::LoadedChain, Box<dyn std::error::Error>> {
+    let sources = yamc_nuclide::config::Config::global().transmutation_sources(chain_use)?;
+    load_chain_sources(&sources)
+}
+
+/// Load the transmutation chain assembled from `sources`. Each source (a
+/// library keyword or a local path) is resolved independently (keyword ->
+/// downloaded subsection), then the parts are merged.
+///
+/// A reactions or fission-yields source of `None` leaves that subsection out:
+/// nothing is downloaded and the chain is built without it. That is the
+/// honest setting (`False`) for a decay-only calculation and for a material
+/// nothing in which fissions, and it is also the only way to run a library
+/// that publishes no yields of its own without quietly folding another
 /// library's in. `LoadedChain::parts` records what was left out, so a solve
-/// that turns out to need it is refused rather than answered without it.
-/// `_decay_data` has no such state: half-lives come from it and a chain
-/// without them is empty.
+/// that turns out to need it is refused rather than answered without it. The
+/// decay data has no such state: half-lives come from it and a chain without
+/// them is empty.
 ///
-/// When `yamc.transmutation_branch_ratios` names branching sources, each
+/// When `sources.branching` names branching sources
+/// (`yamc.transmutation_branch_ratios`), each
 /// one's `branching/` subsection is also resolved, and they are laid over the
 /// chain in the order given and returned in `LoadedChain::branch`: each
 /// `(parent, reaction)` channel takes its curves, and its MF=40 covariance,
@@ -116,37 +130,33 @@ pub use material_transmute::{
 /// multiplicities, which are folded the same way whatever branching source is
 /// set, and every other reaction's product lands where the plain three-part
 /// chain puts it.
-pub fn load_configured_chain() -> Result<yani::LoadedChain, Box<dyn std::error::Error>> {
-    let (decay_src, reactions_src, fpy_src, branch_srcs) = {
-        let cfg = yamc_nuclide::config::Config::global();
-        (
-            cfg.get_transmutation_decay_data(),
-            cfg.get_transmutation_reactions(),
-            cfg.get_transmutation_fission_yields(),
-            cfg.get_transmutation_branch_ratios(),
-        )
-    };
-    let decay_dir = yamc_nuclide::url_cache::resolve_subsection(&decay_src, "decay")?;
-    // `None` here is the user having turned the subsection off, not an absent
-    // default: nothing is downloaded and the chain is built without it. What
-    // that costs is checked where the rates are known, not here, because a
-    // material that never fissions is entitled to no fission yields.
-    let resolve = |src: Option<String>, subsection: &str| {
-        src.map(|src| yamc_nuclide::url_cache::resolve_subsection(&src, subsection))
+pub fn load_chain_sources(
+    sources: &yamc_nuclide::config::TransmutationSources,
+) -> Result<yani::LoadedChain, Box<dyn std::error::Error>> {
+    let decay_dir = yamc_nuclide::url_cache::resolve_subsection(&sources.decay, "decay")?;
+    // `None` here is a subsection the calculation does without: turned off,
+    // or unset where it is not read. Nothing is downloaded and the chain is
+    // built without it. What that costs is checked where the rates are known,
+    // not here, because a material that never fissions is entitled to no
+    // fission yields.
+    let resolve = |src: &Option<String>, subsection: &str| {
+        src.as_deref()
+            .map(|src| yamc_nuclide::url_cache::resolve_subsection(src, subsection))
             .transpose()
     };
-    let reactions_dir = resolve(reactions_src, "reactions")?;
-    let fpy_dir = resolve(fpy_src, "fission_yields")?;
-    let branch_dirs: Vec<(String, String)> = branch_srcs
-        .into_iter()
+    let reactions_dir = resolve(&sources.reactions, "reactions")?;
+    let fpy_dir = resolve(&sources.fission_yields, "fission_yields")?;
+    let branch_dirs: Vec<(&str, String)> = sources
+        .branching
+        .iter()
         .map(|src| {
-            let dir = yamc_nuclide::url_cache::resolve_subsection(&src, "branching")?;
-            Ok((src, dir.to_string_lossy().into_owned()))
+            let dir = yamc_nuclide::url_cache::resolve_subsection(src, "branching")?;
+            Ok((src.as_str(), dir.to_string_lossy().into_owned()))
         })
         .collect::<Result<_, Box<dyn std::error::Error>>>()?;
     let branching: Vec<(&str, &str)> = branch_dirs
         .iter()
-        .map(|(src, dir)| (src.as_str(), dir.as_str()))
+        .map(|(src, dir)| (*src, dir.as_str()))
         .collect();
     yani::load_chain_parts(
         &decay_dir.to_string_lossy(),

@@ -355,23 +355,25 @@ impl Geometry {
     /// always exits to the neighbour cell, clipping any protruding mesh.
     /// Mesh boundary-condition tags (e.g. vacuum) apply only when the
     /// mesh IS the geometry; inside a fill every mesh face transmits.
+    /// `on_surface` is the surface the particle has just crossed, if any.
     pub fn closest_boundary(
         &self,
         cell_index: usize,
         position: [f64; 3],
         direction: [f64; 3],
+        on_surface: Option<crate::geometry::backend::OnSurface>,
     ) -> Option<crate::geometry::backend::BoundaryHit> {
         use crate::geometry::backend::BoundaryHit;
         let cell = &self.cells[cell_index];
-        let csg_hit = cell
-            .closest_surface(position, direction)
-            .map(|(boundary, dist, surf_id)| BoundaryHit {
+        let csg_hit = cell.closest_surface(position, direction, on_surface).map(
+            |(boundary, dist, surf_id)| BoundaryHit {
                 distance: dist,
                 boundary,
                 next_cell_index: None,
                 surface_id: surf_id,
                 relocate_triangle: None,
-            });
+            },
+        );
         #[cfg(feature = "mesh")]
         if let Some(role) = cell.fill_role {
             use crate::geometry::fill::FillRole;

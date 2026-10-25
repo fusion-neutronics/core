@@ -7,6 +7,7 @@ mod sphere;
 mod torus;
 
 use crate::region::{HalfspaceType, RegionExpr};
+pub use roots::quartic_real_roots;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use torus::{torus_distance, torus_evaluate};
@@ -125,6 +126,24 @@ impl Surface {
     /// Compute the distance from a point along a direction to the surface.
     /// Returns Some(distance) if intersection exists and distance > 0, else None.
     pub fn distance_to_surface(&self, point: [f64; 3], direction: [f64; 3]) -> Option<f64> {
+        self.distance_to_surface_on(point, direction, None)
+    }
+
+    /// [`Surface::distance_to_surface`] for a particle that may have
+    /// just crossed this surface: `on_surface` is `Some(offset)` when it
+    /// did and has since moved `offset` past the crossing along
+    /// `direction` (transport moves a crossing particle 1e-8 cm past the
+    /// surface; 0 for a particle exactly on it), `None` otherwise. The
+    /// tori then treat the crossing as an exact root and drop it, rather
+    /// than solve for it in round-off (which can return it as a tiny
+    /// positive distance). The other surfaces ignore it: a quadratic's
+    /// root at the crossing comes back accurately, behind the particle.
+    pub fn distance_to_surface_on(
+        &self,
+        point: [f64; 3],
+        direction: [f64; 3],
+        on_surface: Option<f64>,
+    ) -> Option<f64> {
         match &self.kind {
             SurfaceKind::Plane { a, b, c, d } => plane::distance(point, direction, *a, *b, *c, *d),
             SurfaceKind::Sphere { x0, y0, z0, radius } => {
@@ -152,6 +171,7 @@ impl Surface {
                 *a,
                 *b,
                 *c,
+                on_surface,
             ),
             SurfaceKind::XTorus {
                 x0,
@@ -170,6 +190,7 @@ impl Surface {
                 *a,
                 *b,
                 *c,
+                on_surface,
             ),
             SurfaceKind::YTorus {
                 x0,
@@ -188,6 +209,7 @@ impl Surface {
                 *a,
                 *b,
                 *c,
+                on_surface,
             ),
             SurfaceKind::Quadric {
                 a,

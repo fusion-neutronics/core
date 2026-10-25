@@ -9,6 +9,7 @@ use arrow_array::types::{Float64Type, Int32Type};
 use arrow_array::{Array, RecordBatch};
 use arrow_ipc::reader::FileReader;
 use endf::Material;
+use nuclear_data_schema::FORMAT_VERSION;
 
 use crate::entry::Provenance;
 use crate::sections::*;
@@ -109,7 +110,7 @@ pub fn convert_photonuclear(
         sections,
     )?;
     let version = serde_json::json!({
-        "format_version": 2,
+        "format_version": FORMAT_VERSION,
         "particle": "photonuclear",
         "scope": "evaluated",
         "converter_version": concat!("yamc-convert ", env!("CARGO_PKG_VERSION")),
@@ -161,7 +162,7 @@ pub fn inspect_photonuclear(dir: &Path) -> Result<PhotonuclearSummary, Box<dyn E
         serde_json::from_str(&std::fs::read_to_string(dir.join("version.json"))?)?;
     if marker["particle"] != "photonuclear"
         || marker["scope"] != "evaluated"
-        || marker["format_version"] != 2
+        || marker["format_version"] != FORMAT_VERSION
     {
         return Err("not a supported evaluated photonuclear folder".into());
     }
@@ -324,6 +325,19 @@ mod tests {
         assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
     }
 
+    /// Read back only in the format the converter writes.
+    #[test]
+    fn rejects_a_folder_in_another_format() {
+        let input = evaluation(0);
+        let output = tempfile::tempdir().unwrap();
+        let dir =
+            convert_photonuclear(input.path(), output.path(), &Provenance::default()).unwrap();
+        let next = FORMAT_VERSION + 1;
+        crate::marker::update(&dir, &[("format_version", serde_json::json!(next))]).unwrap();
+        let error = inspect_photonuclear(&dir).unwrap_err();
+        assert!(error.to_string().contains("not a supported"), "{error}");
+    }
+
     #[test]
     fn preserves_cross_sections_and_source_sections() {
         use arrow_array::cast::AsArray;
@@ -416,6 +430,7 @@ mod tests {
                 .unwrap();
         assert_eq!(marker["particle"], "photonuclear");
         assert_eq!(marker["scope"], "evaluated");
+        assert_eq!(marker["format_version"], FORMAT_VERSION);
         let summary = inspect_photonuclear(&dir).unwrap();
         assert_eq!(summary.name, "Li6");
         assert_eq!(

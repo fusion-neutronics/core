@@ -22,8 +22,13 @@ def get_radionuclides_from_chain(nuclide_names: typing.Sequence[builtins.str]) -
         nuclide_names (list[str]): Nuclide names present in the model materials.
     
     The transmutation network is assembled from the configured per-subsection
-    sources (``yani.transmutation_decay_data`` etc.).
+    sources: the decay data (``yani.transmutation_decay_data``) and the
+    reactions (``yani.transmutation_reactions``), each a library keyword or a
+    path. There is no default library.
     
     Returns:
         list[str]: Sorted list of unique radionuclide names.
+    
+    Raises:
+        ValueError: If either source is unset, naming it.
     """

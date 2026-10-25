@@ -33,6 +33,19 @@ pub struct BoundaryHit {
     pub relocate_triangle: Option<u32>,
 }
 
+/// The surface a particle has just crossed, for a boundary query made
+/// straight after the crossing. Transport moves a crossing particle a
+/// small fixed distance past the surface; `offset` is that distance, so
+/// the surface solvers can find the crossing point again and treat the
+/// crossing as an exact root (see `Surface::distance_to_surface_on`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OnSurface {
+    /// ID of the crossed surface.
+    pub surface_id: usize,
+    /// Distance moved past the crossing along the direction of flight.
+    pub offset: f64,
+}
+
 /// Backend-agnostic geometry. The transport loop only sees this type.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub enum GeometryKind {
@@ -237,14 +250,18 @@ impl GeometryKind {
     /// exit; cells involved in a mesh fill additionally test the next
     /// mesh-surface crossing and return the nearer of the two.
     /// For Mesh: fires a ray in the volume using the surface BVH.
+    ///
+    /// `on_surface` names the surface the particle has just crossed, if
+    /// any (CSG only; mesh crossings are resolved by triangle).
     pub fn closest_boundary(
         &self,
         cell_index: usize,
         position: [f64; 3],
         direction: [f64; 3],
+        on_surface: Option<OnSurface>,
     ) -> Option<BoundaryHit> {
         match self {
-            GeometryKind::Csg(g) => g.closest_boundary(cell_index, position, direction),
+            GeometryKind::Csg(g) => g.closest_boundary(cell_index, position, direction, on_surface),
             #[cfg(feature = "mesh")]
             GeometryKind::Mesh(g) => g.closest_boundary(cell_index, position, direction),
         }

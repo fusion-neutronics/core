@@ -5,8 +5,8 @@ The four ``yamc.transmutation_*`` settings each take a library keyword or a
 path. A keyword resolves the library's current release through
 ``{keyword}/latest.json`` and downloads
 ``{keyword}/{release}/transmutation/{subsection}.arrow/`` on first use, verified
-against the release manifest, into ``yamc.cache_dir()``. Unset
-decay/reactions/fission_yields fall back to the default ``endf-b8.1`` library.
+against the release manifest, into ``yamc.cache_dir()``. There is no default
+library: a calculation that reads an unset one is refused, naming it.
 
 These are end-to-end network tests against the R2 data; they skip when the
 data is unavailable (offline with an empty cache, or the library not yet
@@ -84,17 +84,15 @@ def test_endf_b81_subsection_keywords_resolve():
         assert os.path.isdir(_cache(sub)), f"expected cached subsection at {_cache(sub)}"
 
 
-def test_defaults_match_explicit_endf_b81():
-    """Unset decay/reactions/fission_yields default to endf-b8.1, giving the
-    same result as setting the keyword explicitly."""
-    ok, err = _try_endf_b81()
-    if not ok:
-        pytest.skip(f"endf-b8.1 subsections unavailable (offline?): {err}")
-
-    explicit = _radionuclides(["Fe54", "Fe56"])
-    _reset()  # all unset -> defaults (endf-b8.1)
-    default = _radionuclides(["Fe54", "Fe56"])
-    assert sorted(explicit) == sorted(default)
+def test_unset_subsections_are_refused_not_defaulted():
+    """Unset decay/reactions are refused, naming each, rather than read from
+    endf-b8.1: there is no default library. Nothing is downloaded first."""
+    _reset()
+    with pytest.raises(ValueError) as error:
+        _radionuclides(["Fe54", "Fe56"])
+    message = str(error.value)
+    assert message.startswith("no transmutation data is configured"), message
+    assert "transmutation_decay_data and transmutation_reactions are not set" in message
 
 
 def test_missing_subsection_errors_clearly():
@@ -102,6 +100,9 @@ def test_missing_subsection_errors_clearly():
     no decay subsection) surfaces a download error, not a silent empty chain."""
     _reset()
     yamc.transmutation_decay_data = "tendl-2025"
-    with pytest.raises(Exception):
+    yamc.transmutation_reactions = "tendl-2025"
+    with pytest.raises(Exception) as error:
         _radionuclides(["Fe54"])
+    # The decay subsection's absence, not an unset setting.
+    assert "no transmutation data is configured" not in str(error.value)
     _reset()

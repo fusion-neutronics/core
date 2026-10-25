@@ -1044,6 +1044,9 @@ pub(super) fn transport_one_particle(
     // that hits the cap while alive marks the whole history as unfinished,
     // even when a later popped secondary ends normally.
     let mut truncated = false;
+    // Surface the particle has just crossed (and sits REGION_CROSS_EPS
+    // past), `u32::MAX` for none: the kernel's `on_surface` register.
+    let mut on_surface = u32::MAX;
     while (alive == 1 && step < inputs.max_steps) || !pend.is_empty() {
         if alive == 1 && step >= inputs.max_steps {
             truncated = true;
@@ -1080,6 +1083,7 @@ pub(super) fn transport_one_particle(
             // matching `Particle::new`'s `NO_URR`.
             urr_held = None;
             step = 0;
+            on_surface = u32::MAX;
         }
 
         // 1. Cell-finding via stackless BVH traversal.
@@ -1298,6 +1302,12 @@ pub(super) fn transport_one_particle(
                 let p4 = inputs.surface_params[sb + 4];
                 let p5 = inputs.surface_params[sb + 5];
                 let p6 = inputs.surface_params[sb + 6];
+                // The torus just crossed treats that crossing as exact.
+                let torus_offset = if on_surface == s as u32 {
+                    REGION_CROSS_EPS
+                } else {
+                    -1.0
+                };
                 let p7 = inputs.surface_params[sb + 7];
                 let p8 = inputs.surface_params[sb + 8];
                 let p9 = inputs.surface_params[sb + 9];
@@ -1376,6 +1386,7 @@ pub(super) fn transport_one_particle(
                         p3,
                         p4,
                         p5,
+                        torus_offset,
                     );
                 }
                 if stype == 4 {
@@ -1390,6 +1401,7 @@ pub(super) fn transport_one_particle(
                         p3,
                         p4,
                         p5,
+                        torus_offset,
                     );
                 }
                 if stype == 5 {
@@ -1404,6 +1416,7 @@ pub(super) fn transport_one_particle(
                         p3,
                         p4,
                         p5,
+                        torus_offset,
                     );
                 }
                 if stype == 6 {
@@ -1465,6 +1478,7 @@ pub(super) fn transport_one_particle(
             px += dx * d;
             py += dy * d;
             pz += dz * d;
+            on_surface = u32::MAX;
 
             // 8. Collide or cross.
             if collide_first {
@@ -2236,6 +2250,7 @@ pub(super) fn transport_one_particle(
                 px += dx * REGION_CROSS_EPS;
                 py += dy * REGION_CROSS_EPS;
                 pz += dz * REGION_CROSS_EPS;
+                on_surface = winner_surface as u32;
             }
         }
 

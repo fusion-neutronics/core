@@ -22,38 +22,23 @@ fn refuse_branching_only(value: &str) {
     }
 }
 
-/// Global configuration container for the nuclear data library.
-///
-/// The configuration is primarily a mapping from nuclide names (e.g. "Li6")
-/// to the file system path of the Arrow IPC directory that stores the reaction /
-/// energy data for that nuclide. Helper methods are provided to set a single path,
-/// bulk insert many paths, or query the mapping.
-///
-/// A single global instance is exposed via the `CONFIG` static (a
-/// `Lazy<Mutex<Config>>`). Most code should obtain a guard with
-/// [`Config::global`] rather than accessing the mutex directly to keep usage
-/// consistent and centralized.
-/// Default library for the decay / reactions / fission-yield transmutation
-/// subsections when the user has not set them explicitly.
-pub const DEFAULT_TRANSMUTATION_LIBRARY: &str = "endf-b8.1";
-
 /// Where one optional transmutation subsection comes from.
 ///
 /// Three states, because "the user has not chosen" and "the user chose not to
-/// have it" are different answers and only one of them is an error when the
-/// subsection turns out to be needed. `Option<String>` cannot hold both: it
-/// spelled them the same way, so `transmutation_fission_yields = None` read as
-/// off and behaved as endf-b8.1.
+/// have it" are different answers, and only the first is an error when a
+/// calculation reads the subsection. `Option<String>` cannot hold both.
 ///
 /// Only the parts a calculation can do without are modelled this way. The
 /// decay subsection is not one of them: half-lives and decay energies come
 /// from it and a chain without it is empty, so it keeps a plain
-/// `Option<String>` that falls back to the default library.
+/// `Option<String>`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum SubsectionSource {
-    /// Not set. The default library supplies it, as it always has.
+    /// Not set. There is no default library, so a calculation that reads the
+    /// subsection is refused before any work, naming the setting (see
+    /// [`Config::transmutation_sources`]).
     #[default]
-    Default,
+    Unset,
     /// Deliberately not loaded. Nothing is downloaded, and a calculation that
     /// turns out to need it fails with an error naming what it needed.
     Off,
@@ -62,12 +47,11 @@ pub enum SubsectionSource {
 }
 
 impl SubsectionSource {
-    /// The source to resolve, or `None` when the subsection is not to be loaded.
-    pub fn resolve(&self) -> Option<String> {
+    /// The source to resolve, or `None` when there is none: unset or off.
+    pub fn source(&self) -> Option<&str> {
         match self {
-            Self::Default => Some(DEFAULT_TRANSMUTATION_LIBRARY.to_string()),
-            Self::Off => None,
-            Self::Set(source) => Some(source.clone()),
+            Self::Set(source) => Some(source),
+            Self::Unset | Self::Off => None,
         }
     }
 
@@ -78,15 +62,66 @@ impl SubsectionSource {
 }
 
 impl From<Option<&str>> for SubsectionSource {
-    /// `None` is "back to the default", matching every other optional source
-    /// on [`Config`]. [`Self::Off`] has no spelling here on purpose: turning a
-    /// subsection off is a deliberate act and the caller has to name it.
+    /// `None` is unset, matching every other optional source on [`Config`].
+    /// [`Self::Off`] has no spelling here on purpose: turning a subsection off
+    /// is a deliberate act and the caller has to name it.
     fn from(value: Option<&str>) -> Self {
         match value {
-            None => Self::Default,
+            None => Self::Unset,
             Some(source) => Self::Set(source.to_string()),
         }
     }
+}
+
+/// What a calculation reads from the transmutation chain. Every one reads the
+/// decay data; the variants differ in what they read beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChainUse {
+    /// The decay data alone: activity, decay heat, decay photons, dose,
+    /// clearance, and a schedule that only cools.
+    Decay,
+    /// The decay data and which nuclide each neutron reaction makes: the
+    /// activation products a D1S decay-photon run, `Model.radionuclides` and
+    /// `PulseSchedule.time_correct_tally` follow.
+    Activation,
+    /// A schedule that irradiates: the decay data, the reactions and the
+    /// fission yields.
+    Irradiation,
+}
+
+impl ChainUse {
+    /// What a transmutation reads: [`Self::Irradiation`] when its schedule
+    /// irradiates, the decay data alone when it only cools.
+    pub fn transmutation(irradiates: bool) -> Self {
+        if irradiates {
+            Self::Irradiation
+        } else {
+            Self::Decay
+        }
+    }
+
+    fn reads_reactions(self) -> bool {
+        matches!(self, Self::Activation | Self::Irradiation)
+    }
+
+    fn reads_fission_yields(self) -> bool {
+        matches!(self, Self::Irradiation)
+    }
+}
+
+/// The transmutation sources one calculation loads, from
+/// [`Config::transmutation_sources`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransmutationSources {
+    /// The decay subsection's source: a library keyword or a path.
+    pub decay: String,
+    /// The reactions subsection's source, or `None` when it is not loaded:
+    /// turned off, or unset where the calculation does not read it.
+    pub reactions: Option<String>,
+    /// The fission-yields subsection's source, or `None` as for `reactions`.
+    pub fission_yields: Option<String>,
+    /// The isomeric-branching sources, in order; empty for no overlay.
+    pub branching: Vec<String>,
 }
 
 /// The isomeric-branching sources, in the shape they were given.
@@ -117,6 +152,17 @@ impl BranchSources {
     }
 }
 
+/// Global configuration container for the nuclear data library.
+///
+/// The configuration is primarily a mapping from nuclide names (e.g. "Li6")
+/// to the file system path of the Arrow IPC directory that stores the reaction /
+/// energy data for that nuclide. Helper methods are provided to set a single path,
+/// bulk insert many paths, or query the mapping.
+///
+/// A single global instance is exposed via the `CONFIG` static (a
+/// `Lazy<Mutex<Config>>`). Most code should obtain a guard with
+/// [`Config::global`] rather than accessing the mutex directly to keep usage
+/// consistent and centralized.
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Map of nuclide name -> absolute or relative path to its Arrow data directory.
@@ -124,7 +170,8 @@ pub struct Config {
     /// Optional global default cross section source keyword
     pub default_cross_section: Option<String>,
     /// Source (library keyword or path to a `decay/` subsection) for the decay
-    /// part of the transmutation network. `None` means the default library.
+    /// part of the transmutation network. `None` is unset: there is no
+    /// default library.
     pub transmutation_decay_data: Option<String>,
     /// Source for the reaction-topology part (`reactions/` subsection), or
     /// [`SubsectionSource::Off`] for a decay-only calculation.
@@ -153,8 +200,8 @@ impl Config {
             cross_sections: HashMap::new(),
             default_cross_section: None,
             transmutation_decay_data: None,
-            transmutation_reactions: SubsectionSource::Default,
-            transmutation_fission_yields: SubsectionSource::Default,
+            transmutation_reactions: SubsectionSource::Unset,
+            transmutation_fission_yields: SubsectionSource::Unset,
             transmutation_branch_ratios: BranchSources::Unset,
         }
     }
@@ -199,9 +246,9 @@ impl Config {
     /// them one.
     ///
     /// There is no default cross-section library: neutron and photon data
-    /// follow the caller's selection. The transmutation chain has a default
-    /// ([`DEFAULT_TRANSMUTATION_LIBRARY`]), but a transport calculation that
-    /// needs cross sections and finds no source stops here.
+    /// follow the caller's selection, and a transport calculation that needs
+    /// cross sections and finds no source stops here. Nor is there a default
+    /// transmutation library (see [`Config::transmutation_sources`]).
     pub fn missing_cross_sections(&self, nuclides: &[&str]) -> String {
         let named = nuclides
             .iter()
@@ -235,21 +282,54 @@ impl Config {
         input.apply(self);
     }
 
-    /// Effective source for the decay subsection (setting or default library).
-    pub fn get_transmutation_decay_data(&self) -> String {
-        self.transmutation_decay_data
-            .clone()
-            .unwrap_or_else(|| DEFAULT_TRANSMUTATION_LIBRARY.to_string())
-    }
-
-    /// Effective source for the reactions subsection, or `None` when it is off.
-    pub fn get_transmutation_reactions(&self) -> Option<String> {
-        self.transmutation_reactions.resolve()
-    }
-
-    /// Effective source for the fission-yields subsection, or `None` when off.
-    pub fn get_transmutation_fission_yields(&self) -> Option<String> {
-        self.transmutation_fission_yields.resolve()
+    /// The transmutation sources a calculation of `chain_use` loads, or why it
+    /// cannot run.
+    ///
+    /// There is no default transmutation library, as there is no default
+    /// cross-section library: which evaluation the decay data, reactions and
+    /// fission yields come from is the caller's choice. So a setting the
+    /// calculation reads that is unset refuses it, before anything is
+    /// resolved or downloaded, with a message naming each such setting and
+    /// how to set it. A reactions or fission-yields setting turned off is a
+    /// choice, and is not loaded; one left unset where the calculation does
+    /// not read it is not loaded either.
+    pub fn transmutation_sources(
+        &self,
+        chain_use: ChainUse,
+    ) -> Result<TransmutationSources, String> {
+        let mut unset = Vec::new();
+        if self.transmutation_decay_data.is_none() {
+            unset.push("transmutation_decay_data");
+        }
+        let reads = [
+            (
+                chain_use.reads_reactions(),
+                &self.transmutation_reactions,
+                "transmutation_reactions",
+            ),
+            (
+                chain_use.reads_fission_yields(),
+                &self.transmutation_fission_yields,
+                "transmutation_fission_yields",
+            ),
+        ];
+        for (read, setting, name) in reads {
+            if read && *setting == SubsectionSource::Unset {
+                unset.push(name);
+            }
+        }
+        match &self.transmutation_decay_data {
+            Some(decay) if unset.is_empty() => Ok(TransmutationSources {
+                decay: decay.clone(),
+                reactions: self.transmutation_reactions.source().map(str::to_string),
+                fission_yields: self
+                    .transmutation_fission_yields
+                    .source()
+                    .map(str::to_string),
+                branching: self.get_transmutation_branch_ratios(),
+            }),
+            _ => Err(unset_transmutation_message(&unset, chain_use)),
+        }
     }
 
     /// The branching overlay's sources, in order; empty when none is set (no
@@ -295,10 +375,48 @@ impl Config {
         self.cross_sections.clear();
         self.default_cross_section = None;
         self.transmutation_decay_data = None;
-        self.transmutation_reactions = SubsectionSource::Default;
-        self.transmutation_fission_yields = SubsectionSource::Default;
+        self.transmutation_reactions = SubsectionSource::Unset;
+        self.transmutation_fission_yields = SubsectionSource::Unset;
         self.transmutation_branch_ratios = BranchSources::Unset;
     }
+}
+
+/// Why a calculation of `chain_use` cannot run with the transmutation settings
+/// `unset` (each one it reads and finds unset), saying how to set them.
+fn unset_transmutation_message(unset: &[&str], chain_use: ChainUse) -> String {
+    let named = match unset {
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        [] => String::new(),
+    };
+    let (verb, it, each) = if unset.len() == 1 {
+        ("is", "it", "it")
+    } else {
+        ("are", "them", "each")
+    };
+    let examples = unset
+        .iter()
+        .map(|setting| format!("`yamc.{setting} = \"endf-b8.1\"`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let keywords = crate::url_cache::cross_section_keywords().join(", ");
+    let off = if chain_use == ChainUse::Irradiation
+        && unset
+            .iter()
+            .any(|s| *s == "transmutation_reactions" || *s == "transmutation_fission_yields")
+    {
+        " transmutation_reactions and transmutation_fission_yields also take False, which \
+         leaves that subsection out: no reactions for a material with no reaction rates, no \
+         fission yields for one in which nothing fissions."
+    } else {
+        ""
+    };
+    format!(
+        "no transmutation data is configured: {named} {verb} not set, and this calculation \
+         reads {it}. There is no default library, as there is none for cross sections. Set \
+         {each} to a library keyword ({keywords}) whose release publishes that subsection, or \
+         to a local folder holding it, e.g. {examples} (or `yani.`).{off}"
+    )
 }
 
 /// [`Config::missing_cross_sections`] for one nuclide, against the global
@@ -386,55 +504,47 @@ mod subsection_source_tests {
     use super::*;
 
     #[test]
-    fn untouched_resolves_to_the_default_library() {
-        assert_eq!(
-            SubsectionSource::Default.resolve().as_deref(),
-            Some(DEFAULT_TRANSMUTATION_LIBRARY)
-        );
+    fn untouched_has_no_source() {
+        assert_eq!(SubsectionSource::default(), SubsectionSource::Unset);
+        assert_eq!(SubsectionSource::Unset.source(), None);
+        assert!(!SubsectionSource::Unset.is_off());
     }
 
     #[test]
-    fn off_resolves_to_nothing_at_all() {
-        assert_eq!(SubsectionSource::Off.resolve(), None);
+    fn off_has_no_source_either() {
+        assert_eq!(SubsectionSource::Off.source(), None);
         assert!(SubsectionSource::Off.is_off());
     }
 
     #[test]
     fn a_set_source_is_returned_as_given() {
         let source = SubsectionSource::Set("tendl-2025".to_string());
-        assert_eq!(source.resolve().as_deref(), Some("tendl-2025"));
+        assert_eq!(source.source(), Some("tendl-2025"));
         assert!(!source.is_off());
     }
 
-    /// `None` resets to the default; it is not a way to spell "off". The two
-    /// were the same value once, and a chain silently lost its reactions
-    /// whenever a caller cleared the setting.
+    /// `None` unsets; it is not a way to spell "off". The two were the same
+    /// value once, and a chain silently lost its reactions whenever a caller
+    /// cleared the setting.
     #[test]
-    fn none_resets_to_the_default() {
-        assert_eq!(SubsectionSource::from(None), SubsectionSource::Default);
-        assert_eq!(
-            SubsectionSource::from(None).resolve().as_deref(),
-            Some(DEFAULT_TRANSMUTATION_LIBRARY)
-        );
+    fn none_unsets() {
+        assert_eq!(SubsectionSource::from(None), SubsectionSource::Unset);
         assert_eq!(
             SubsectionSource::from(Some("jeff-4.0")),
             SubsectionSource::Set("jeff-4.0".to_string())
         );
     }
 
-    /// A fresh config still supplies both, so nothing that never touched these
-    /// settings sees a change.
+    /// There is no default library: a fresh config supplies no subsection.
     #[test]
-    fn a_new_config_supplies_both_subsections() {
+    fn a_new_config_supplies_no_transmutation_data() {
         let config = Config::new();
-        assert_eq!(
-            config.get_transmutation_reactions().as_deref(),
-            Some(DEFAULT_TRANSMUTATION_LIBRARY)
-        );
-        assert_eq!(
-            config.get_transmutation_fission_yields().as_deref(),
-            Some(DEFAULT_TRANSMUTATION_LIBRARY)
-        );
+        assert_eq!(config.transmutation_decay_data, None);
+        assert_eq!(config.transmutation_reactions, SubsectionSource::Unset);
+        assert_eq!(config.transmutation_fission_yields, SubsectionSource::Unset);
+        for chain_use in [ChainUse::Decay, ChainUse::Activation, ChainUse::Irradiation] {
+            assert!(config.transmutation_sources(chain_use).is_err());
+        }
     }
 
     /// The branching sources are an ordered list: kept in order and in the
@@ -485,13 +595,160 @@ mod subsection_source_tests {
     }
 
     #[test]
-    fn clear_puts_both_back_to_the_default() {
+    fn clear_unsets_every_transmutation_source() {
         let mut config = Config::new();
+        config.transmutation_decay_data = Some("endf-b8.1".to_string());
+        config.transmutation_reactions = SubsectionSource::Off;
+        config.transmutation_fission_yields = SubsectionSource::Set("jeff-4.0".to_string());
+        config.clear();
+        assert_eq!(config.transmutation_decay_data, None);
+        assert_eq!(config.transmutation_reactions, SubsectionSource::Unset);
+        assert_eq!(config.transmutation_fission_yields, SubsectionSource::Unset);
+    }
+}
+
+#[cfg(test)]
+mod transmutation_sources_tests {
+    //! A calculation reads the subsections its use names, and an unset one
+    //! refuses it, naming the setting, where it used to read endf-b8.1.
+
+    use super::*;
+
+    fn unset_named(config: &Config, chain_use: ChainUse) -> Vec<&'static str> {
+        let message = config
+            .transmutation_sources(chain_use)
+            .expect_err("a source it reads is unset");
+        [
+            "transmutation_decay_data",
+            "transmutation_reactions",
+            "transmutation_fission_yields",
+            "transmutation_branch_ratios",
+        ]
+        .into_iter()
+        .filter(|setting| message.contains(&format!("yamc.{setting} = ")))
+        .collect()
+    }
+
+    #[test]
+    fn each_use_names_the_unset_settings_it_reads() {
+        let config = Config::new();
+        assert_eq!(
+            unset_named(&config, ChainUse::Decay),
+            ["transmutation_decay_data"]
+        );
+        assert_eq!(
+            unset_named(&config, ChainUse::Activation),
+            ["transmutation_decay_data", "transmutation_reactions"]
+        );
+        assert_eq!(
+            unset_named(&config, ChainUse::Irradiation),
+            [
+                "transmutation_decay_data",
+                "transmutation_reactions",
+                "transmutation_fission_yields"
+            ]
+        );
+    }
+
+    /// Only what is unset is named, so a caller who set two of three is told
+    /// about the third alone.
+    #[test]
+    fn a_set_source_is_not_named() {
+        let mut config = Config::new();
+        config.transmutation_decay_data = Some("endf-b8.1".to_string());
+        config.transmutation_reactions = SubsectionSource::Set("tendl-2025".to_string());
+        assert_eq!(
+            unset_named(&config, ChainUse::Irradiation),
+            ["transmutation_fission_yields"]
+        );
+        let message = config
+            .transmutation_sources(ChainUse::Irradiation)
+            .expect_err("fission yields unset");
+        assert!(
+            message.contains("transmutation_fission_yields is not set"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn the_message_says_how_to_set_each_one() {
+        let message = Config::new()
+            .transmutation_sources(ChainUse::Irradiation)
+            .expect_err("nothing is set");
+        assert!(
+            message.starts_with("no transmutation data is configured"),
+            "{message}"
+        );
+        assert!(
+            message.contains(
+                "transmutation_decay_data, transmutation_reactions and \
+                 transmutation_fission_yields are not set"
+            ),
+            "{message}"
+        );
+        assert!(message.contains("There is no default library"), "{message}");
+        assert!(message.contains("a local folder"), "{message}");
+        for keyword in crate::url_cache::cross_section_keywords() {
+            assert!(message.contains(keyword), "{keyword}: {message}");
+        }
+        assert!(!message.contains("irdff-ii"), "{message}");
+        assert!(message.contains("also take False"), "{message}");
+        // A decay calculation has no use for the False of the other two.
+        let decay = Config::new()
+            .transmutation_sources(ChainUse::Decay)
+            .expect_err("decay unset");
+        assert!(!decay.contains("False"), "{decay}");
+    }
+
+    /// Turning a subsection off is a choice: it is not loaded, and the
+    /// calculation runs without it.
+    #[test]
+    fn off_is_a_choice() {
+        let mut config = Config::new();
+        config.transmutation_decay_data = Some("endf-b8.1".to_string());
         config.transmutation_reactions = SubsectionSource::Off;
         config.transmutation_fission_yields = SubsectionSource::Off;
-        config.clear();
-        assert!(!config.transmutation_reactions.is_off());
-        assert!(!config.transmutation_fission_yields.is_off());
+        let sources = config
+            .transmutation_sources(ChainUse::Irradiation)
+            .expect("each source is set or off");
+        assert_eq!(
+            sources,
+            TransmutationSources {
+                decay: "endf-b8.1".to_string(),
+                reactions: None,
+                fission_yields: None,
+                branching: Vec::new(),
+            }
+        );
+    }
+
+    /// A use that does not read a subsection runs with it unset and does not
+    /// load it, and loads what is set as before.
+    #[test]
+    fn a_use_runs_without_what_it_does_not_read() {
+        let mut config = Config::new();
+        config.transmutation_decay_data = Some("decay-dir".to_string());
+        let decay = config
+            .transmutation_sources(ChainUse::Decay)
+            .expect("only decay is read");
+        assert_eq!(decay.reactions, None);
+        assert_eq!(decay.fission_yields, None);
+
+        config.transmutation_reactions = SubsectionSource::Set("jeff-4.0".to_string());
+        config
+            .set_transmutation_branch_ratios(BranchSources::One("irdff-ii".to_string()))
+            .expect("one branching source");
+        let activation = config
+            .transmutation_sources(ChainUse::Activation)
+            .expect("decay and reactions are set");
+        assert_eq!(activation.decay, "decay-dir");
+        assert_eq!(activation.reactions.as_deref(), Some("jeff-4.0"));
+        assert_eq!(activation.fission_yields, None);
+        assert_eq!(activation.branching, ["irdff-ii"]);
+        assert_eq!(
+            config.transmutation_sources(ChainUse::Decay),
+            Ok(activation)
+        );
     }
 }
 
