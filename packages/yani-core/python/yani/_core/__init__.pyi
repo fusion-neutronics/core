@@ -2789,7 +2789,7 @@ class TransmutationResults:
         with ``release`` (the release identifier), ``manifest_sha256`` (the
         hash of that release's manifest, which pins every file in it),
         ``format_version``, ``offline`` (True when the data origin was
-        unreachable and the newest complete cached release was used; always
+        unreachable and the newest complete cached release was used, always
         False for a local folder) and ``converter_versions`` (every converter
         that wrote the release's files, with its version, as its manifest lists
         them; empty in results recorded before releases listed them). Empty
