@@ -10,7 +10,7 @@
 pub mod debug;
 
 use crate::geo::BoundaryType;
-use crate::geometry::backend::{BoundaryHit, GeometryKind};
+use crate::geometry::backend::{BoundaryHit, GeometryKind, OnSurface};
 use crate::geometry::neighbor_lists::NeighborLists;
 use crate::track::{TrackEventType, Tracker};
 use crate::util::fast_rng::FastRng;
@@ -427,6 +427,22 @@ fn verify_crossing(
     false
 }
 
+/// How far a transmission crossing moves the particle past the surface,
+/// so that it lands strictly inside the cell it enters.
+pub(crate) const SURFACE_TOLERANCE: f64 = 1e-8;
+
+/// The surface `particle` has just crossed (and sits
+/// [`SURFACE_TOLERANCE`] past), for its next boundary query.
+#[inline(always)]
+pub(crate) fn on_surface(particle: &yamc_particle::particle::Particle) -> Option<OnSurface> {
+    yamc_particle::particle::surface_id_to_option(particle.on_surface_id).map(|surface_id| {
+        OnSurface {
+            surface_id,
+            offset: SURFACE_TOLERANCE,
+        }
+    })
+}
+
 /// Handle a surface-crossing event: the particle has reached a cell
 /// boundary before its sampled collision distance. If the crossed
 /// surface has a Vacuum boundary the particle leaves the geometry --
@@ -485,11 +501,11 @@ pub(crate) fn handle_surface_crossing<T: Tracker>(
             particle.weight,
             cell_id,
         );
-        const SURFACE_TOLERANCE: f64 = 1e-8;
         particle.previous_cell_index = cell_index as u32;
         particle.last_surface_id =
             yamc_particle::particle::surface_id_to_u32(boundary_hit.surface_id);
         particle.move_by(boundary_hit.distance + SURFACE_TOLERANCE);
+        particle.on_surface_id = particle.last_surface_id;
         // Use topology-based next cell if available (mesh geometry),
         // otherwise invalidate cache to trigger find_cell_index (CSG).
         particle.current_cell_index =
@@ -662,9 +678,12 @@ pub(crate) fn transport_particle<T: Tracker>(
             );
         }
 
-        if let Some(mut boundary_hit) =
-            geometry.closest_boundary(cell_index, particle.position, particle.direction)
-        {
+        if let Some(mut boundary_hit) = geometry.closest_boundary(
+            cell_index,
+            particle.position,
+            particle.direction,
+            on_surface(particle),
+        ) {
             let dist_surface = boundary_hit.distance;
             if dist_surface < dist_collision {
                 if verify_crossing(ctx, particle, cell_index, dist_surface) {
@@ -1214,7 +1233,12 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
                 }
             };
 
-            match geometry.closest_boundary(cell_index, particle.position, particle.direction) {
+            match geometry.closest_boundary(
+                cell_index,
+                particle.position,
+                particle.direction,
+                on_surface(particle),
+            ) {
                 Some(mut boundary_hit) if boundary_hit.distance < dist_collision => {
                     // Cross the boundary -- no collision this step.
                     if verify_crossing(ctx, particle, cell_index, boundary_hit.distance) {

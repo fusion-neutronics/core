@@ -398,51 +398,24 @@ mod gpu_guards {
 
     /// D1S decay-photon transport IS supported on GPU now (it routes through the
     /// same coupled two-pass path; end-to-end coverage lives in
-    /// `gpu_d1s_decay_photon.rs`). Like the coupled case it requires data: a D1S
-    /// run whose transmutation chain cannot be assembled (here the default
-    /// `endf-b8.1` decay library is unresolvable because the test build has no
-    /// `download` feature and no local chain path) fails fast at decay-data
-    /// preparation, BEFORE any GPU context -- so this guard runs on any host. It
-    /// is not a "decay photons are rejected" check; they are accepted, the decay
-    /// data is what is missing here.
-    /// IGNORED: this test asks for a state the public API forbids, and then
-    /// two further things go wrong.
-    ///
-    /// It sets `use_decay_photons` ALONE. The Python constructor rejects that
-    /// outright ("use_decay_photons=True requires transport_secondary_photons
-    /// =True", `yamc-python/src/simulation/model.rs:277`), so no supported
-    /// caller can produce this model.
-    ///
-    /// The third problem is fixed: `has_photons()` now counts
-    /// `use_decay_photons`, so this model no longer reports "no photons" and
-    /// `ensure_photon_data_for_gpu` no longer skips its missing-photon-data
-    /// check. `a_decay_photon_model_reports_photons` in `yamc/src/model.rs`
-    /// pins that.
-    ///
-    /// With the guard now firing the error is about photon data, which is what
-    /// the sibling `gpu_coupled_requires_photon_data` already asserts. So to
-    /// test what THIS test wants, reaching decay-data preparation, the model
-    /// needs photon data PRESENT and decay data absent, which means the
-    /// two-fixture material `gpu_coupled_photon.rs` builds.
-    ///
-    /// And it still could not get there: `neutron_csg_model()` uses
-    /// `build_csg()`, whose "inside the sphere" is `Complement(Above(..))`, and
-    /// the GPU AABB pass rejects a Complement as unbounded extent. That is what
-    /// `build_csg_gpu()` in this module exists for; its comment names the
-    /// error.
-    ///
-    /// Ignored rather than deleted or weakened to accept whichever error
-    /// surfaces first. The assertion is the right one; it needs a model with
-    /// photon data present, decay data absent and a GPU-bounded CSG.
+    /// `gpu_d1s_decay_photon.rs`). It reads the decay data and the reactions,
+    /// and there is no default library for either, so a D1S run with neither
+    /// set is refused naming both, before any data is loaded and BEFORE any
+    /// GPU context, so this guard runs on any host. That is also before the
+    /// photon-data check `gpu_coupled_requires_photon_data` trips and the
+    /// AABB pass that refuses `build_csg()`'s `Complement` region. It is not a
+    /// "decay photons are rejected" check; they are accepted, the sources are
+    /// what is missing here. Nothing in this binary sets them.
     #[test]
-    #[ignore = "sets use_decay_photons alone, which the API forbids; see above"]
     fn gpu_decay_photons_require_decay_data() {
         let mut m = neutron_csg_model();
+        m.transport_secondary_photons = true;
         m.use_decay_photons = true;
         let s = err_string(&mut m);
         assert!(
-            s.contains("decay photon") || s.contains("transmutation chain"),
-            "D1S run without decay data should fail at decay-data prep, got: {s}"
+            s.contains("use_decay_photons: no transmutation data is configured")
+                && s.contains("transmutation_decay_data and transmutation_reactions are not set"),
+            "D1S run without decay data should be refused naming its sources, got: {s}"
         );
     }
 

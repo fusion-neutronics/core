@@ -4,12 +4,31 @@
 //! `pip install yani` and calls this: no `endf` package from a git branch, no
 //! separate converter distribution, no NJOY. The parser is an implementation
 //! detail this module never names in its signature.
+//!
+//! Every function here does its work with the GIL released. One call can take
+//! minutes (NJOY over an evaluation, or a whole sublibrary through the chain
+//! builder), and holding the GIL for it would stop every other Python thread,
+//! so a thread pool over evaluations would run them one at a time. The
+//! arguments are extracted and checked first, only Rust values go into the
+//! work, and its result becomes Python objects afterwards.
 
+use std::error::Error;
 use std::path::PathBuf;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3_stub_gen::derive::gen_stub_pyfunction;
+
+/// Run `convert` with the GIL released, raising its error as `RuntimeError`.
+fn detached<T: Send>(
+    py: Python<'_>,
+    convert: impl Send + FnOnce() -> Result<T, Box<dyn Error>>,
+) -> PyResult<T> {
+    // `Box<dyn Error>` is not `Send`, so it cannot come back out through
+    // `detach`; the message is what the caller sees anyway.
+    py.detach(|| convert().map_err(|e| e.to_string()))
+        .map_err(PyRuntimeError::new_err)
+}
 
 /// Convert ENDF decay, fission product yield and neutron evaluations into a
 /// transmutation Arrow directory.
@@ -19,7 +38,9 @@ use pyo3_stub_gen::derive::gen_stub_pyfunction;
 /// decay_files, fpy_files, neutron_files : list[str]
 ///     ENDF inputs. All three are needed to build a network: the decay data
 ///     says what decays into what, the neutron data what transmutes into what,
-///     and the fission yields what fission produces.
+///     and the fission yields what fission produces. A file may hold one
+///     evaluation or a whole tape of them, such as JEFF-4.0's decay and
+///     fission yield tapes; every material in it is read.
 /// output_path : str
 ///     Directory to write. Created if absent, merged into if it already holds
 ///     other subsections of the same library.
@@ -59,7 +80,7 @@ use pyo3_stub_gen::derive::gen_stub_pyfunction;
 ///     for the same nuclide with a half-life within 25% of the first's.
 ///     Half-lives and decay modes are never touched. The decay subsection's
 ///     ``provenance.json`` lists every placeholder and every replacement,
-///     with or without a fill.
+///     with or without a fill. A tape is read whole, as for ``decay_files``.
 /// decay_fill_library : str, optional
 ///     The library ``decay_fill_files`` came from, e.g. ``"jendl-5.0"``.
 ///     Required with ``decay_fill_files``.
@@ -87,6 +108,7 @@ use pyo3_stub_gen::derive::gen_stub_pyfunction;
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn convert_transmutation(
+    py: Python<'_>,
     decay_files: Vec<String>,
     fpy_files: Vec<String>,
     neutron_files: Vec<String>,
@@ -135,19 +157,20 @@ pub fn convert_transmutation(
         created_utc: created_utc.map(str::to_string).unwrap_or_default(),
     };
 
-    yani_convert::convert_transmutation_files(
-        &decay_files,
-        &fpy_files,
-        &neutron_files,
-        &decay_fill_files,
-        decay_fill_library,
-        reactions.as_deref(),
-        branch_ratios.map(PathBuf::from).as_deref(),
-        subsections.as_deref(),
-        &PathBuf::from(output_path),
-        &provenance,
-    )
-    .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    detached(py, || {
+        yani_convert::convert_transmutation_files(
+            &decay_files,
+            &fpy_files,
+            &neutron_files,
+            &decay_fill_files,
+            decay_fill_library,
+            reactions.as_deref(),
+            branch_ratios.map(PathBuf::from).as_deref(),
+            subsections.as_deref(),
+            &PathBuf::from(output_path),
+            &provenance,
+        )
+    })
 }
 
 /// Extract isomeric branching from neutron evaluations and write the
@@ -162,10 +185,11 @@ pub fn convert_transmutation(
 /// ----------
 /// neutron_files : list[str]
 ///     Neutron evaluations of the parent nuclides. MF=8/9/10 radionuclide
-///     production is what carries the branching.
+///     production is what carries the branching. A file may hold many
+///     materials, such as IRDFF-II's tape of 70, and every one is read.
 /// decay_files : list[str]
 ///     Decay evaluations, read only to build the isomer table, so the
-///     metastable ones suffice.
+///     metastable ones suffice. A tape is read whole, as for the neutron files.
 /// output_path : str
 ///     The transmutation directory to write ``branching/`` into.
 /// library, data_version, created_utc
@@ -276,15 +300,16 @@ pub fn convert_branching(
         created_utc: created_utc.map(str::to_string).unwrap_or_default(),
     };
 
-    let stats = yani_convert::convert_branching_files(
-        &neutron_files,
-        &decay_files,
-        &PathBuf::from(output_path),
-        &provenance,
-        tol_ev,
-        linearize_tol,
-    )
-    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let stats = detached(py, || {
+        yani_convert::convert_branching_files(
+            &neutron_files,
+            &decay_files,
+            &PathBuf::from(output_path),
+            &provenance,
+            tol_ev,
+            linearize_tol,
+        )
+    })?;
 
     let out = pyo3::types::PyDict::new(py);
     out.set_item("parents", stats.parents)?;
@@ -335,7 +360,10 @@ pub fn convert_branching(
 /// input_path : str
 ///     An ENDF evaluation, or an ACE table when ``source_format="ace"``.
 /// output_dir : str
-///     Directory to write ``{nuclide}.arrow/`` into.
+///     Directory to write ``{nuclide}.arrow/`` into. With
+///     ``source_format="endf"``, NJOY also works in a hidden directory here,
+///     so this disk needs room for its tapes; the directory is removed when
+///     the conversion ends.
 /// source_format : {"endf", "ace"}
 ///     ``"endf"`` runs NJOY to reconstruct resonances and Doppler broaden,
 ///     which is the documented route and the only one that can reach an
@@ -382,6 +410,7 @@ pub fn convert_branching(
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn convert_neutron_xs(
+    py: Python<'_>,
     input_path: &str,
     output_dir: &str,
     source_format: &str,
@@ -413,14 +442,15 @@ pub fn convert_neutron_xs(
         created_utc: created_utc.map(str::to_string).unwrap_or_default(),
     };
 
-    yamc_convert::entry::convert_neutron_xs(
-        &source,
-        &PathBuf::from(output_dir),
-        &provenance,
-        covariance,
-    )
+    detached(py, || {
+        yamc_convert::entry::convert_neutron_xs(
+            &source,
+            &PathBuf::from(output_dir),
+            &provenance,
+            covariance,
+        )
+    })
     .map(|p| p.to_string_lossy().into_owned())
-    .map_err(|e| PyRuntimeError::new_err(e.to_string()))
 }
 
 /// Convert an ENDF evaluation into the full neutron transport data set.
@@ -439,7 +469,9 @@ pub fn convert_neutron_xs(
 /// input_path : str
 ///     Path to the ENDF evaluation.
 /// output_dir : str
-///     Directory to write ``{Nuclide}.arrow/`` into.
+///     Directory to write ``{Nuclide}.arrow/`` into. NJOY also works in a
+///     hidden directory here, so this disk needs room for its tapes; the
+///     directory is removed when the conversion ends.
 /// njoy_exec : str
 ///     The NJOY executable. FENDL needs the IAEA-NDS fork; upstream NJOY does
 ///     not reproduce the official release, and both builds succeed, so the
@@ -475,6 +507,7 @@ pub fn convert_neutron_xs(
     covariance = false,
 ))]
 pub fn convert_neutron_transport(
+    py: Python<'_>,
     input_path: &str,
     output_dir: &str,
     njoy_exec: &str,
@@ -496,14 +529,15 @@ pub fn convert_neutron_transport(
         created_utc: created_utc.map(str::to_string).unwrap_or_default(),
     };
 
-    yamc_convert::entry::convert_neutron_transport(
-        &source,
-        &PathBuf::from(output_dir),
-        &provenance,
-        covariance,
-    )
+    detached(py, || {
+        yamc_convert::entry::convert_neutron_transport(
+            &source,
+            &PathBuf::from(output_dir),
+            &provenance,
+            covariance,
+        )
+    })
     .map(|p| p.to_string_lossy().into_owned())
-    .map_err(|e| PyRuntimeError::new_err(e.to_string()))
 }
 
 /// Preserve a photonuclear ENDF evaluation as lossless Arrow tables.
@@ -516,6 +550,7 @@ pub fn convert_neutron_transport(
 #[pyfunction]
 #[pyo3(signature = (input_path, output_dir, library = "", data_version = "", created_utc = None))]
 pub fn convert_photonuclear(
+    py: Python<'_>,
     input_path: &str,
     output_dir: &str,
     library: &str,
@@ -527,13 +562,14 @@ pub fn convert_photonuclear(
         data_version: data_version.to_string(),
         created_utc: created_utc.map(str::to_string).unwrap_or_default(),
     };
-    yamc_convert::photonuclear::convert_photonuclear(
-        &PathBuf::from(input_path),
-        &PathBuf::from(output_dir),
-        &provenance,
-    )
+    detached(py, || {
+        yamc_convert::photonuclear::convert_photonuclear(
+            &PathBuf::from(input_path),
+            &PathBuf::from(output_dir),
+            &provenance,
+        )
+    })
     .map(|path| path.to_string_lossy().into_owned())
-    .map_err(|error| PyRuntimeError::new_err(error.to_string()))
 }
 
 /// Convert a photoatomic evaluation into the per-element photon sections.
@@ -580,6 +616,7 @@ pub fn convert_photonuclear(
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn convert_photon(
+    py: Python<'_>,
     photoatomic_path: &str,
     output_dir: &str,
     relaxation_path: Option<&str>,
@@ -619,19 +656,20 @@ pub fn convert_photon(
         created_utc: created_utc.map(str::to_string).unwrap_or_default(),
     };
 
-    yamc_convert::entry::convert_photon(
-        &photoatomic,
-        relaxation.as_deref(),
-        tabulations.as_ref(),
-        &PathBuf::from(output_dir),
-        &provenance,
-    )
+    detached(py, || {
+        yamc_convert::entry::convert_photon(
+            &photoatomic,
+            relaxation.as_deref(),
+            tabulations.as_ref(),
+            &PathBuf::from(output_dir),
+            &provenance,
+        )
+    })
     .map(|dirs| {
         dirs.into_iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect()
     })
-    .map_err(|e| PyRuntimeError::new_err(e.to_string()))
 }
 
 /// List the final states each reaction of an evaluation can leave its product
@@ -656,15 +694,16 @@ pub fn convert_photon(
 /// Parameters
 /// ----------
 /// neutron_files : list[str]
-///     Neutron evaluations. Read one at a time rather than held, so a whole
-///     sublibrary is a valid argument.
+///     Neutron evaluations, one or many materials per file. Read one file at
+///     a time rather than held, so a whole sublibrary is a valid argument.
 ///
 /// Returns
 /// -------
 /// list[dict]
-///     One entry per (parent, reaction) carrying MF=9 or MF=10, in file order,
-///     each with ``parent``, ``mt``, ``reaction`` (the transmutation reaction
-///     name, or ``None`` for an MT no chain reaction covers) and ``states``.
+///     One entry per (parent, reaction) carrying MF=9 or MF=10, in file order
+///     and then tape order, each with ``parent``, ``mt``, ``reaction`` (the
+///     transmutation reaction name, or ``None`` for an MT no chain reaction
+///     covers) and ``states``.
 ///     Each state has ``excitation_energy_eV``, ``level_index``, ``product``
 ///     and ``source``. ``excitation_energy_eV`` is ``None`` for an excited
 ///     state whose evaluation gives neither a positive MF=8 ELFS nor a
@@ -700,8 +739,9 @@ pub fn radionuclide_production(
              evaluations, so there is nothing to read without them",
         ));
     }
-    let channels = yani_convert::production::production_from_files(&neutron_files)
-        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let channels = detached(py, || {
+        yani_convert::production::production_from_files(&neutron_files)
+    })?;
 
     let out = pyo3::types::PyList::empty(py);
     for channel in channels {

@@ -74,6 +74,9 @@ def test_irdff_ii_is_refused_as_one_nuclide_s_source_too():
 def _nb93_report(sources):
     """The branching report of a Nb93 foil under a 13.5-14.5 MeV group."""
     yani.cross_section_data = "endf-b8.1"
+    yani.transmutation_decay_data = "endf-b8.1"
+    yani.transmutation_reactions = "endf-b8.1"
+    yani.transmutation_fission_yields = "endf-b8.1"
     yani.transmutation_branch_ratios = sources
     foil = yani.Material({"Nb93": 1.0}, density=8.57, temperature=294, volume=1.0)
     spectrum = yani.NeutronSource(energy=yani.sources.Histogram([1.35e7, 1.45e7], [1.0]))

@@ -27,6 +27,7 @@ use crate::arrow_helpers::{
 use arrow_array::cast::AsArray;
 use arrow_array::{Array, RecordBatch};
 use arrow_buffer::ScalarBuffer;
+use nuclear_data_schema::FORMAT_VERSION;
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -163,15 +164,6 @@ fn adopt(values: &ScalarBuffer<f64>, share: bool) -> F64Buffer {
 /// `urr.arrow`, `fission_photon.arrow` and the nu tables are optional already,
 /// each handled where it is read.
 const TRANSPORT_SECTIONS: [&str; 2] = ["products.arrow", "distributions.arrow"];
-
-/// The `format_version` this build reads.
-///
-/// 2 since the union energy grids moved out of `nuclide.arrow` into
-/// `energy.arrow`. Bumped rather than made
-/// optional: a v1 folder read by this build would find no grids at all, and a
-/// v2 folder read by an older build would find no `energy_values` column, so
-/// there is no version of "best effort" that produces a correct cross section.
-pub const FORMAT_VERSION: i64 = 2;
 
 /// Which file holds this load's cross sections.
 ///
@@ -387,12 +379,12 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
             .get("format_version")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
-        if fmt_version != FORMAT_VERSION {
+        if fmt_version != i64::from(FORMAT_VERSION) {
+            // Exactly the format the converters stamp, never best effort.
             // Version 1 put the union energy grids in `nuclide.arrow`; version
             // 2 has them in `energy.arrow`, one batch per temperature. A v1
-            // folder is not read on a
-            // best-effort basis, because the grids would simply be missing and
-            // every cross section would then interpolate against nothing.
+            // folder read here would have no grids, and every cross section
+            // would then interpolate against nothing.
             let hint = if fmt_version == 1 {
                 ". Data published before the energy grids moved to energy.arrow; \
                  re-download it, or migrate the folder with `split_energy`"
@@ -1961,6 +1953,40 @@ mod tests {
         let scope = narrow_to_present_sections(&dir.0, &requested).expect("activation load");
         assert_eq!(scope.sections, SectionScope::XsOnly);
         assert_eq!(scope.mts, requested.mts);
+    }
+
+    /// The loader reads the one format the converters stamp. A folder in any
+    /// other is refused before a section is opened, naming the format this
+    /// build reads.
+    #[test]
+    fn a_folder_in_another_format_is_refused_naming_the_one_this_build_reads() {
+        let dir = TempDir::new("stamp");
+        let stamp = |format_version: u32| {
+            let marker = serde_json::json!({ "format_version": format_version });
+            fs::write(dir.0.join("version.json"), marker.to_string()).expect("write marker");
+        };
+        let written = nuclear_data_schema::FORMAT_VERSION;
+
+        stamp(written + 1);
+        let err = read_nuclide_from_arrow(&dir.0, &LoadScope::full())
+            .expect_err("a newer format must not load")
+            .to_string();
+        let refusal = format!(
+            "format version: {} (this build reads {written})",
+            written + 1
+        );
+        assert!(err.contains(&refusal), "{err}");
+
+        // The folder has no sections, so it still fails, but on the first
+        // section rather than on the stamp.
+        stamp(written);
+        let err = read_nuclide_from_arrow(&dir.0, &LoadScope::full())
+            .expect_err("a folder without sections must not load")
+            .to_string();
+        assert!(
+            err.contains("nuclide.arrow") && !err.contains("format version"),
+            "{err}"
+        );
     }
 
     // --- histogram_interp over the concatenated column ---------------------

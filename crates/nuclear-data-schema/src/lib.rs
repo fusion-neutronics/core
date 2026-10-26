@@ -30,6 +30,20 @@ use std::sync::Arc;
 pub mod energy_ranges;
 pub mod reaction_ranges;
 
+/// The `format_version` of the published data.
+///
+/// Every `{Name}.arrow/version.json` and every transmutation chain's
+/// `manifest.json` is stamped with it, so a release's `manifest.json` and
+/// `latest.json` carry it too. The nuclide loader reads exactly this version,
+/// and `yamc_nuclide::storage::release::SUPPORTED_FORMAT_VERSIONS` must end at
+/// it, which that crate checks at compile time.
+///
+/// 2 since the union energy grids moved out of `nuclide.arrow` into
+/// `energy.arrow` and `reactions.arrow` became one record batch per (MT,
+/// temperature). Changing it changes the published format, so both binding
+/// versions move with it (`docs/developer_info.md`, "Bumping a version").
+pub const FORMAT_VERSION: u32 = 2;
+
 /// Every section, keyed by its path within the output directory.
 ///
 /// The key is exactly the relative path the file is written to, so a consumer

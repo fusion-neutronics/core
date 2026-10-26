@@ -143,7 +143,7 @@ pub fn format_version_is_readable(dir: &std::path::Path) -> bool {
     let Some(found) = marker.get("format_version").and_then(|v| v.as_i64()) else {
         return true;
     };
-    found == yamc_nuclide::arrow::nuclide_arrow::FORMAT_VERSION
+    found == i64::from(nuclear_data_schema::FORMAT_VERSION)
 }
 
 /// Whether the fixture for `nuclide` is cached, as a directory of sections.

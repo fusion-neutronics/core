@@ -1182,9 +1182,10 @@ class Material:
         Calculate the radioactive activity of the current material inventory.
         
         The material must have a ``volume`` in cm³. Atom densities are converted
-        to total atoms using ``atoms/barn-cm * 1e24 * volume``. The supplied
-        transmutation chain provides half-lives; each nuclide's activity is
-        ``N * ln(2) / half_life``. Stable nuclides are omitted.
+        to total atoms using ``atoms/barn-cm * 1e24 * volume``. The decay data
+        (``transmutation_decay_data``, which has no default) provides
+        half-lives; each nuclide's activity is ``N * ln(2) / half_life``.
+        Stable nuclides are omitted.
         
         Args:
             by_nuclide (bool): Return a ``dict[str, float]`` by nuclide instead
@@ -1203,8 +1204,9 @@ class Material:
         Calculate decay heat from the current material inventory.
         
         The material must have a ``volume`` in cm³. Atom densities are converted
-        to total atoms using ``atoms/barn-cm * 1e24 * volume``. The supplied
-        transmutation chain provides half-lives and mean decay energies.
+        to total atoms using ``atoms/barn-cm * 1e24 * volume``. The decay data
+        (``transmutation_decay_data``, which has no default) provides
+        half-lives and mean decay energies.
         
         Args:
             by_nuclide (bool): Return a ``dict[str, float]`` by nuclide instead
@@ -1489,6 +1491,10 @@ class Material:
         The transmutation network is assembled from the configured per-subsection
         sources (``yani.transmutation_decay_data`` / ``_reactions`` /
         ``_fission_yields``); decay-only schedules need only the decay source.
+        There is no default library: a source the schedule reads that is unset
+        raises ``ValueError`` before any work, naming each such setting.
+        ``_reactions`` and ``_fission_yields`` can be set to ``False`` instead,
+        for a material with no reaction rates or one in which nothing fissions.
         
         The material does **not** need ``transmutable=True``. That flag exists so
         ``Model.simulate_transmutation`` can pick which materials in a geometry to
@@ -1594,7 +1600,8 @@ class Material:
         
         Raises:
             ValueError: If an irradiation pulse lacks a NeutronSource, its energy
-                is not a Histogram, or on other invalid inputs.
+                is not a Histogram, a transmutation source the schedule reads is
+                unset, or on other invalid inputs.
         
         Examples:
             >>> spectrum = yani.NeutronSource(energy=yani.sources.Histogram("CCFE-709", flux_709))
@@ -2411,7 +2418,10 @@ class PulseSchedule:
                 never included, so there is no row-0 footgun.
         
         The transmutation network is assembled from the configured per-subsection
-        sources (``yani.transmutation_decay_data`` etc.).
+        sources: the decay data (``yani.transmutation_decay_data``) and the
+        reactions (``yani.transmutation_reactions``), which say which emitters
+        a collision makes. There is no default library, so either one unset
+        raises ``ValueError``, naming it.
         
             data_uncertainty (DataUncertainty, optional): Also propagate the
                 nuclear-data uncertainty of the dose. Two sources act on it.
@@ -4126,10 +4136,11 @@ def convert_branching(neutron_files: typing.Sequence[builtins.str], decay_files:
     ----------
     neutron_files : list[str]
         Neutron evaluations of the parent nuclides. MF=8/9/10 radionuclide
-        production is what carries the branching.
+        production is what carries the branching. A file may hold many
+        materials, such as IRDFF-II's tape of 70, and every one is read.
     decay_files : list[str]
         Decay evaluations, read only to build the isomer table, so the
-        metastable ones suffice.
+        metastable ones suffice. A tape is read whole, as for the neutron files.
     output_path : str
         The transmutation directory to write ``branching/`` into.
     library, data_version, created_utc
@@ -4220,7 +4231,9 @@ def convert_neutron_transport(input_path: builtins.str, output_dir: builtins.str
     input_path : str
         Path to the ENDF evaluation.
     output_dir : str
-        Directory to write ``{Nuclide}.arrow/`` into.
+        Directory to write ``{Nuclide}.arrow/`` into. NJOY also works in a
+        hidden directory here, so this disk needs room for its tapes; the
+        directory is removed when the conversion ends.
     njoy_exec : str
         The NJOY executable. FENDL needs the IAEA-NDS fork; upstream NJOY does
         not reproduce the official release, and both builds succeed, so the
@@ -4262,7 +4275,10 @@ def convert_neutron_xs(input_path: builtins.str, output_dir: builtins.str, sourc
     input_path : str
         An ENDF evaluation, or an ACE table when ``source_format="ace"``.
     output_dir : str
-        Directory to write ``{nuclide}.arrow/`` into.
+        Directory to write ``{nuclide}.arrow/`` into. With
+        ``source_format="endf"``, NJOY also works in a hidden directory here,
+        so this disk needs room for its tapes; the directory is removed when
+        the conversion ends.
     source_format : {"endf", "ace"}
         ``"endf"`` runs NJOY to reconstruct resonances and Doppler broaden,
         which is the documented route and the only one that can reach an
@@ -4349,7 +4365,9 @@ def convert_transmutation(decay_files: typing.Sequence[builtins.str], fpy_files:
     decay_files, fpy_files, neutron_files : list[str]
         ENDF inputs. All three are needed to build a network: the decay data
         says what decays into what, the neutron data what transmutes into what,
-        and the fission yields what fission produces.
+        and the fission yields what fission produces. A file may hold one
+        evaluation or a whole tape of them, such as JEFF-4.0's decay and
+        fission yield tapes; every material in it is read.
     output_path : str
         Directory to write. Created if absent, merged into if it already holds
         other subsections of the same library.
@@ -4389,7 +4407,7 @@ def convert_transmutation(decay_files: typing.Sequence[builtins.str], fpy_files:
         for the same nuclide with a half-life within 25% of the first's.
         Half-lives and decay modes are never touched. The decay subsection's
         ``provenance.json`` lists every placeholder and every replacement,
-        with or without a fill.
+        with or without a fill. A tape is read whole, as for ``decay_files``.
     decay_fill_library : str, optional
         The library ``decay_fill_files`` came from, e.g. ``"jendl-5.0"``.
         Required with ``decay_fill_files``.
@@ -4460,25 +4478,22 @@ def get_transmutation_branch_ratios() -> builtins.str | list[builtins.str] | Non
 
 def get_transmutation_decay_data() -> typing.Optional[builtins.str]:
     r"""
-    Get the decay-data source for the transmutation network, or ``None``.
+    Get the decay-data source for the transmutation network, or ``None`` when
+    it is unset.
     """
 
-def get_transmutation_fission_yields() -> typing.Optional[builtins.str]:
+def get_transmutation_fission_yields() -> typing.Optional[builtins.str | typing.Literal[False]]:
     r"""
-    Get the fission-yields source for the transmutation network.
-    
-    Returns the source that will actually be used -- the default library when
-    the setting is untouched or was reset with ``None`` -- or ``None`` when it
-    has been turned off with ``False``.
+    Get the fission-yields source for the transmutation network, as it was
+    assigned: the source, ``False`` when it is turned off, or ``None`` when it
+    is unset.
     """
 
-def get_transmutation_reactions() -> typing.Optional[builtins.str]:
+def get_transmutation_reactions() -> typing.Optional[builtins.str | typing.Literal[False]]:
     r"""
-    Get the reaction-topology source for the transmutation network.
-    
-    Returns the source that will actually be used -- the default library when
-    the setting is untouched or was reset with ``None`` -- or ``None`` when it
-    has been turned off with ``False``.
+    Get the reaction-topology source for the transmutation network, as it was
+    assigned: the source, ``False`` when it is turned off, or ``None`` when it
+    is unset.
     """
 
 def group_structure(name: builtins.str) -> builtins.list[builtins.float]:
@@ -4557,15 +4572,16 @@ def radionuclide_production(neutron_files: typing.Sequence[builtins.str]) -> lis
     Parameters
     ----------
     neutron_files : list[str]
-        Neutron evaluations. Read one at a time rather than held, so a whole
-        sublibrary is a valid argument.
+        Neutron evaluations, one or many materials per file. Read one file at
+        a time rather than held, so a whole sublibrary is a valid argument.
     
     Returns
     -------
     list[dict]
-        One entry per (parent, reaction) carrying MF=9 or MF=10, in file order,
-        each with ``parent``, ``mt``, ``reaction`` (the transmutation reaction
-        name, or ``None`` for an MT no chain reaction covers) and ``states``.
+        One entry per (parent, reaction) carrying MF=9 or MF=10, in file order
+        and then tape order, each with ``parent``, ``mt``, ``reaction`` (the
+        transmutation reaction name, or ``None`` for an MT no chain reaction
+        covers) and ``states``.
         Each state has ``excitation_energy_eV``, ``level_index``, ``product``
         and ``source``. ``excitation_energy_eV`` is ``None`` for an excited
         state whose evaluation gives neither a positive MF=8 ELFS nor a
@@ -4762,15 +4778,20 @@ def set_transmutation_branch_ratios(value: typing.Optional[builtins.str | typing
 
 def set_transmutation_decay_data(value: typing.Optional[builtins.str]) -> None:
     r"""
-    Set the decay-data source. Pass ``None`` to reset to the default library.
+    Set the decay-data source: a library keyword or a path.
+    
+    Every transmutation and decay quantity (activity, decay heat, dose) reads
+    it, and there is no default library, so one with it unset is refused
+    before any work, naming the setting. Pass ``None`` to unset it.
     """
 
 def set_transmutation_fission_yields(value: typing.Optional[builtins.str | typing.Literal[False]]) -> None:
     r"""
     Set the fission-yields source.
     
-    Pass a library keyword or a path to choose one, or ``None`` to go back to
-    the default library.
+    Pass a library keyword or a path to choose one. An irradiation reads it,
+    and there is no default library, so one with it unset is refused before
+    any work, naming the setting. Pass ``None`` to unset it.
     
     Pass ``False`` to turn the subsection off, which is the honest setting for
     a material nothing in which fissions and for a library that publishes no
@@ -4783,8 +4804,11 @@ def set_transmutation_reactions(value: typing.Optional[builtins.str | typing.Lit
     r"""
     Set the reaction-topology source.
     
-    Pass a library keyword or a path to choose one, or ``None`` to go back to
-    the default library.
+    Pass a library keyword or a path to choose one. An irradiation, a D1S
+    decay-photon run, ``Model.radionuclides`` and
+    ``PulseSchedule.time_correct_tally`` read it, and there is no default
+    library, so one with it unset is refused before any work, naming the
+    setting. Pass ``None`` to unset it.
     
     Pass ``False`` to turn the subsection off, for a decay-only calculation on
     a material with no reaction rates. A rate that then needs it is refused

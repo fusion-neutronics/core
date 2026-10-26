@@ -3,7 +3,7 @@
 //!
 //! The user-facing constructors (the Python `Material`, `from_atom_densities`,
 //! `mix_materials` and the material collections) give each material an id
-//! when it is built, as OpenMC does, so a tally can filter on a material before
+//! when it is built, so a tally can filter on a material before
 //! any geometry exists. The ids come from one allocator per process, which also
 //! records every id set explicitly, so an id it hands out never repeats one in
 //! use already: an earlier automatic id, or an explicit one given earlier to a

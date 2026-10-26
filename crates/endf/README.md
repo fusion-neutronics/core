@@ -34,6 +34,18 @@ let nuclide = IncidentNeutron::from_ace(&tables[0], MetastableScheme::default())
 # Ok::<(), endf::Error>(())
 ```
 
+To tell what a file holds without parsing it, `get_headers` reads the four
+records that open each material's MF=1 MT=451 (MAT, ZA, LISO, NSUB, the
+library) and, on every other line, only the MAT, MF and MT columns. A file
+that is not ENDF-6 is an error:
+
+```rust
+for header in endf::get_headers("IRDFF-II.endf")? {
+    println!("MAT {} is {:?} (NSUB {})", header.mat, header.name(), header.nsub);
+}
+# Ok::<(), endf::Error>(())
+```
+
 ## What it reads
 
 | | |

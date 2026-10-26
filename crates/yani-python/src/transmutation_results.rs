@@ -6,6 +6,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use std::collections::{BTreeMap, HashMap};
+use yamc_nuclide::config::ChainUse;
 use yani_transmute::{Estimate, LineEstimate, TransmutationResults};
 
 use crate::material::PyMaterial;
@@ -922,7 +923,7 @@ impl PyTransmutationResults {
         material_id: u32,
         step: usize,
     ) -> PyResult<Option<Vec<PyLineEstimate>>> {
-        let chain = crate::distribution::resolve_chain()?.chain;
+        let chain = crate::distribution::resolve_chain(ChainUse::Decay)?.chain;
         Ok(self
             .inner
             .photon_spectrum_uncertainty(material_id, step, &chain)
@@ -2202,7 +2203,7 @@ impl PyTransmutationResults {
         by_nuclide: bool,
         which: Derived,
     ) -> PyResult<Py<PyAny>> {
-        let chain = crate::distribution::resolve_chain()?.chain;
+        let chain = crate::distribution::resolve_chain(ChainUse::Decay)?.chain;
         if by_nuclide {
             let breakdown = match which {
                 Derived::Activity => {

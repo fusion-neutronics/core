@@ -7,6 +7,7 @@ use pyo3_stub_gen::derive::gen_stub_pyfunction;
 use crate::distribution::PyPulseSchedule;
 use crate::material::PyMaterial;
 use crate::transmutation_results::PyTransmutationResults;
+use yamc_nuclide::config::ChainUse;
 
 /// Transmute several materials over one timeline in one call.
 ///
@@ -139,7 +140,6 @@ pub fn transmute(
         }
     };
 
-    let loaded = crate::distribution::resolve_chain()?;
     let mut plans = Vec::with_capacity(materials.len());
     let mut guards = Vec::with_capacity(materials.len());
     for (i, (material, schedule)) in materials.iter().zip(&schedules).enumerate() {
@@ -159,6 +159,13 @@ pub fn transmute(
         plans.push((spectra, steps, shielding));
         guards.push(guard);
     }
+    // After the plans, which say whether anything irradiates, and before any
+    // data is read: an unset source the schedules read is refused here.
+    let loaded = crate::distribution::resolve_chain(ChainUse::transmutation(
+        plans
+            .iter()
+            .any(|(_, steps, _)| steps.iter().any(|step| step.irradiation.is_some())),
+    ))?;
 
     // Everything the solve needs is owned or borrowed from the guards, which
     // outlive it, so the GIL can be released for the length of the solve as

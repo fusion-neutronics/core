@@ -2352,6 +2352,10 @@ pub(crate) fn multi_cell_transport_kernel(
     // exit alone would only describe the LAST walk and a truncated primary
     // whose secondary then finished normally would go unreported.
     let mut truncated = 0u32;
+    // Surface the particle has just crossed (and sits REGION_CROSS_EPS
+    // past), u32::MAX for none: its torus distance treats that crossing
+    // as an exact root.
+    let mut on_surface = 4_294_967_295u32;
     while (alive == 1u32 && step < max_steps) || pend_n > 0u32 {
         if alive == 1u32 && step >= max_steps {
             truncated = 1u32;
@@ -2382,6 +2386,7 @@ pub(crate) fn multi_cell_transport_kernel(
             // A popped secondary is its own particle and holds no band yet,
             // matching `Particle::new`'s `NO_URR`.
             urr_held = 0u32;
+            on_surface = 4_294_967_295u32;
         }
         // 1. Find current cell via stackless BVH traversal (rope
         // encoding: each node carries the next-in-DFS index used
@@ -2888,6 +2893,10 @@ pub(crate) fn multi_cell_transport_kernel(
                 let p7 = surface_params[sb + 7];
                 let p8 = surface_params[sb + 8];
                 let p9 = surface_params[sb + 9];
+                let mut torus_offset = p3 * 0.0 - 1.0; // runtime-typed -1 (see rt_zero)
+                if on_surface == s {
+                    torus_offset = REGION_CROSS_EPS;
+                }
                 let mut hit = 1e30_f64;
                 if stype == 0u32 {
                     // sphere
@@ -2959,18 +2968,48 @@ pub(crate) fn multi_cell_transport_kernel(
                     // ZTorus: p0..p2 centre, p3 = a (major), p4 = b
                     // (axial minor), p5 = c (radial minor). Axial coord
                     // is z; transverse pair is (x, y).
-                    hit =
-                        torus_smallest_positive(px - p0, py - p1, pz - p2, dx, dy, dz, p3, p4, p5);
+                    hit = torus_smallest_positive(
+                        px - p0,
+                        py - p1,
+                        pz - p2,
+                        dx,
+                        dy,
+                        dz,
+                        p3,
+                        p4,
+                        p5,
+                        torus_offset,
+                    );
                 }
                 if stype == 4u32 {
                     // XTorus: axial coord is x; transverse pair is (y, z).
-                    hit =
-                        torus_smallest_positive(py - p1, pz - p2, px - p0, dy, dz, dx, p3, p4, p5);
+                    hit = torus_smallest_positive(
+                        py - p1,
+                        pz - p2,
+                        px - p0,
+                        dy,
+                        dz,
+                        dx,
+                        p3,
+                        p4,
+                        p5,
+                        torus_offset,
+                    );
                 }
                 if stype == 5u32 {
                     // YTorus: axial coord is y; transverse pair is (x, z).
-                    hit =
-                        torus_smallest_positive(px - p0, pz - p2, py - p1, dx, dz, dy, p3, p4, p5);
+                    hit = torus_smallest_positive(
+                        px - p0,
+                        pz - p2,
+                        py - p1,
+                        dx,
+                        dz,
+                        dy,
+                        p3,
+                        p4,
+                        p5,
+                        torus_offset,
+                    );
                 }
                 if stype == 6u32 {
                     // Quadric: p0..p9 = a, b, c, d, e, f, g, h, j, k.
@@ -3253,6 +3292,7 @@ pub(crate) fn multi_cell_transport_kernel(
             px += dx * d;
             py += dy * d;
             pz += dz * d;
+            on_surface = 4_294_967_295u32;
 
             // 8. Collision or surface crossing.
             if collide_first {
@@ -5757,6 +5797,7 @@ pub(crate) fn multi_cell_transport_kernel(
                     px += dx * REGION_CROSS_EPS;
                     py += dy * REGION_CROSS_EPS;
                     pz += dz * REGION_CROSS_EPS;
+                    on_surface = winner_surface;
                 }
             }
         }
