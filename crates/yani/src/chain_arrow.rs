@@ -1680,11 +1680,45 @@ fn load_optional(dir: &Path, file: &str, into: &mut SectionFiles) -> Result<(), 
     Ok(())
 }
 
+/// Read the primary file of the `reactions` or `fission_yields` subsection a
+/// caller asked for. A folder without it would load as a chain with no
+/// reactions, or no yields, that still counts the part as loaded, so every
+/// rate through it would silently produce nothing; it is refused instead,
+/// saying how to leave the part out on purpose.
+fn load_required(
+    dir: &Path,
+    subsection: &str,
+    file: &str,
+    into: &mut SectionFiles,
+) -> Result<(), Box<dyn Error>> {
+    let path = dir.join(file);
+    if !path.is_file() {
+        return Err(format!(
+            "chain subsection '{}' has no {file}{}. Point the {subsection} source at a \
+             directory holding the {subsection} subsection, or turn the subsection off \
+             (transmutation_{subsection} = False) to build the chain without it",
+            dir.display(),
+            if dir.is_dir() {
+                ""
+            } else {
+                " (the directory does not exist)"
+            },
+        )
+        .into());
+    }
+    into.insert(file.to_string(), std::fs::read(&path)?);
+    Ok(())
+}
+
 /// Parse a v2 split chain from directories on disk.
 ///
 /// Reads the section files into [`ChainSections`] and hands them to
 /// [`parse_chain_parts_from_bytes`], which holds the actual parsing. The split
 /// exists so a host without a filesystem can reach the same parser.
+///
+/// `reactions_dir` and `fpy_dir` are `None` to build the chain without that
+/// part. Given, each must hold its subsection's primary file
+/// (`reactions.arrow`, `fission_yields.arrow`).
 ///
 /// `branching` is the isomeric-branching overlay: `(source, directory)` per
 /// `branching/` subsection, in the order a channel takes its curves from
@@ -1728,10 +1762,20 @@ pub fn parse_chain_parts(
     load_optional(decay_dir, "decay_modes.arrow", &mut parts.decay)?;
     load_optional(decay_dir, "sources.arrow", &mut parts.decay)?;
     if let Some(reactions_dir) = reactions_dir {
-        load_optional(reactions_dir, "reactions.arrow", &mut parts.reactions)?;
+        load_required(
+            reactions_dir,
+            "reactions",
+            "reactions.arrow",
+            &mut parts.reactions,
+        )?;
     }
     if let Some(fpy_dir) = fpy_dir {
-        load_optional(fpy_dir, "fission_yields.arrow", &mut parts.fission_yields)?;
+        load_required(
+            fpy_dir,
+            "fission_yields",
+            "fission_yields.arrow",
+            &mut parts.fission_yields,
+        )?;
         load_optional(fpy_dir, "aliases.arrow", &mut parts.fission_yields)?;
         load_optional(fpy_dir, "evaluated_yields.arrow", &mut parts.fission_yields)?;
     }

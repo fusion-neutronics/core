@@ -885,15 +885,17 @@ impl PySimulationResults {
     /// ``combine_results`` tells which material a material filter's id names.
     ///
     /// ``data_releases`` maps each library keyword the run downloaded data
-    /// from to a dict with ``release`` (the published release identifier),
+    /// from, and the absolute path of each local release folder it read data
+    /// from, to a dict with ``release`` (the release identifier),
     /// ``manifest_sha256`` (the hash of that release's manifest, which pins
     /// every file in it), ``format_version``, ``offline`` (True when the
     /// data origin was unreachable and the newest complete cached release was
-    /// used) and ``converter_versions`` (every converter that wrote the
-    /// release's files, with its version, as its manifest lists them, e.g.
+    /// used; always False for a local folder) and ``converter_versions``
+    /// (every converter that wrote the release's files, with its version, as
+    /// its manifest lists them, e.g.
     /// ``["yamc-convert 0.1.0", "yani-convert 0.1.0"]``; empty in results
     /// saved before releases recorded them). Empty when all data came from
-    /// local directories.
+    /// local directories that are not release folders.
     #[getter]
     fn runs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let items: Vec<Bound<'py, PyDict>> = self
@@ -1139,7 +1141,7 @@ fn provenance_version() -> String {
 /// returned results are combinable via `combine_results`. Surfaces
 /// duplicate-name / duplicate-id validation as `ValueError`.
 /// The `data_releases` provenance of a run as a dict of dicts, keyed by
-/// library keyword.
+/// library keyword or local release folder path.
 pub(crate) fn data_releases_dict<'py>(
     py: Python<'py>,
     releases: &std::collections::BTreeMap<String, yamc_nuclide::storage::release::DataRelease>,

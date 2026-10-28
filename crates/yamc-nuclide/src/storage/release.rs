@@ -326,20 +326,10 @@ pub fn check_release_id(release: &str) -> Result<(), String> {
 }
 
 /// Check the files of `entry` (a folder of the release, such as
-/// `neutron/Fe56.arrow`) that are present under `dir` against the sizes the
-/// release manifest `manifest_bytes` lists. A listed file that is absent is
-/// not an error: a release folder may hold only what was downloaded.
-pub fn check_sizes(
-    dir: &std::path::Path,
-    manifest_bytes: &[u8],
-    entry: &str,
-) -> Result<(), String> {
-    let manifest: Manifest = serde_json::from_slice(manifest_bytes).map_err(|e| {
-        format!(
-            "{}: not a valid release manifest: {e}",
-            dir.join(MANIFEST).display()
-        )
-    })?;
+/// `neutron/Fe56.arrow`) that are present under `dir` against the sizes
+/// `manifest` lists. A listed file that is absent is not an error here: a
+/// release folder may hold only what was downloaded.
+pub fn check_sizes(dir: &std::path::Path, manifest: &Manifest, entry: &str) -> Result<(), String> {
     let prefix = format!("{entry}/");
     for file in manifest
         .files
@@ -355,7 +345,7 @@ pub fn check_sizes(
         {
             return Err(format!(
                 "{}: size mismatch, the release manifest says {} bytes and the file has {}. \
-                     The local copy is incomplete or modified; download it again.",
+                     The local copy is incomplete or modified; download or build it again.",
                 path.display(),
                 file.bytes,
                 meta.len()
@@ -481,6 +471,47 @@ fn checked(
             p.release, p.format_version, manifest.release, manifest.format_version
         ));
     }
+    index(manifest, manifest_sha256)
+}
+
+/// Parse the `manifest.json` at `path`, the top of a release folder on local
+/// disk (a library downloaded or built whole), or `None` when it is not a
+/// release manifest.
+///
+/// A release manifest lists the release's `files`. The `manifest.json` the
+/// converters write at the top of a chain directory lists its `subsections`
+/// instead, and a directory holding one is not a release folder. With no
+/// pointer to check against, the keyword is the one the manifest names and its
+/// hash is computed rather than compared. Its format must be one this build
+/// reads, and its paths must stay inside the folder, as for a published
+/// release.
+pub fn parse_local_manifest(
+    path: &std::path::Path,
+    bytes: &[u8],
+) -> Result<Option<Release>, String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| format!("{}: not valid JSON: {e}", path.display()))?;
+    if value.get("files").is_none() {
+        return Ok(None);
+    }
+    let manifest: Manifest = serde_json::from_value(value)
+        .map_err(|e| format!("{}: not a valid release manifest: {e}", path.display()))?;
+    if !safe_segment(&manifest.release) {
+        return Err(format!(
+            "{}: names release {:?}, which is not a valid release identifier",
+            path.display(),
+            manifest.release
+        ));
+    }
+    index(manifest, sha256_hex(bytes))
+        .map(Some)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Check that this build reads `manifest`'s format and that every path it
+/// lists stays inside the release, and index its files by path.
+fn index(manifest: Manifest, manifest_sha256: String) -> Result<Release, String> {
+    let keyword = &manifest.keyword;
     check_format_version(keyword, &manifest.release, manifest.format_version)?;
     let mut by_path = HashMap::with_capacity(manifest.files.len());
     for (i, file) in manifest.files.iter().enumerate() {
@@ -1239,7 +1270,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("neutron/Fe56.arrow")).unwrap();
         std::fs::write(dir.join("neutron/Fe56.arrow/version.json"), b"abc").unwrap();
-        let manifest = manifest_json("endf-b8.1", "2026-10-01", 2);
+        let bytes = manifest_json("endf-b8.1", "2026-10-01", 2);
+        let manifest = parse_manifest("endf-b8.1", &bytes, None).unwrap().manifest;
         assert!(check_sizes(&dir, &manifest, "neutron/Fe56.arrow").is_ok());
         // Absent files are fine: Li6 was never downloaded.
         assert!(check_sizes(&dir, &manifest, "neutron/Li6.arrow").is_ok());
@@ -1250,6 +1282,61 @@ mod tests {
             "{err}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A local manifest names its own keyword, and its hash is computed: there
+    /// is no pointer to compare either with.
+    #[test]
+    fn a_local_release_manifest_parses_with_its_own_keyword() {
+        let path = std::path::Path::new("/data/jeff-4.0/manifest.json");
+        let bytes = manifest_json("jeff-4.0", "2026-10-01", 2);
+        let release = parse_local_manifest(path, &bytes)
+            .unwrap()
+            .expect("a release manifest");
+        assert_eq!(release.manifest.keyword, "jeff-4.0");
+        assert_eq!(release.manifest_sha256, sha256_hex(&bytes));
+        assert_eq!(release.names_under("transmutation"), ["decay"]);
+    }
+
+    /// The `manifest.json` a converter writes at the top of a chain directory
+    /// lists subsections rather than files: that directory is no release
+    /// folder, and its manifest is no error.
+    #[test]
+    fn a_chain_manifest_is_not_a_release_manifest() {
+        let path = std::path::Path::new("/data/chain/manifest.json");
+        let chain = br#"{"format_version": 2, "library": "endf-b8.1", "subsections": {"decay": {"path": "decay"}}}"#;
+        assert!(parse_local_manifest(path, chain).unwrap().is_none());
+        let err = parse_local_manifest(path, b"{\"files\": [").unwrap_err();
+        assert!(
+            err.starts_with("/data/chain/manifest.json: not valid JSON"),
+            "{err}"
+        );
+        let err = parse_local_manifest(path, br#"{"files": []}"#).unwrap_err();
+        assert!(err.contains("not a valid release manifest"), "{err}");
+    }
+
+    /// A local release folder in a format this build cannot read is refused as
+    /// a published one is, naming the manifest, and so is one whose paths
+    /// leave the folder.
+    #[test]
+    fn a_local_release_manifest_is_checked_as_a_published_one_is() {
+        let path = std::path::Path::new("/data/endf-b8.1/manifest.json");
+        let err =
+            parse_local_manifest(path, &manifest_json("endf-b8.1", "2027-01-01", 99)).unwrap_err();
+        assert!(err.starts_with("/data/endf-b8.1/manifest.json: "), "{err}");
+        assert!(
+            err.contains("format_version 99") && err.contains("Upgrade"),
+            "{err}"
+        );
+        let escaping = serde_json::to_vec(&serde_json::json!({
+            "keyword": "endf-b8.1", "release": "2026-10-01", "format_version": 2,
+            "files": [{"path": "../outside", "bytes": 1, "sha256": "00"}],
+        }))
+        .unwrap();
+        let err = parse_local_manifest(path, &escaping).unwrap_err();
+        assert!(err.contains("not a path inside the release"), "{err}");
+        let unsafe_release = manifest_json("endf-b8.1", "..", 2);
+        assert!(parse_local_manifest(path, &unsafe_release).is_err());
     }
 
     #[test]

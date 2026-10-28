@@ -2707,7 +2707,8 @@ class TransmutationChain:
     def __new__(cls, path: builtins.str) -> TransmutationChain:
         r"""
         Parse a transmutation chain from a split (v2) chain directory that
-        holds `decay/`, `reactions/` and `fission_yields/` subsection subdirs.
+        holds a `decay/` subsection subdir, and the `reactions/` and
+        `fission_yields/` ones where the chain has them.
         
         Args:
             path (str): Path to the chain root directory.
@@ -2783,15 +2784,18 @@ class TransmutationResults:
     @property
     def data_releases(self) -> dict:
         r"""
-        The published nuclear-data release each library keyword came from, as
-        a dict keyed by keyword. Each value is a dict with ``release`` (the
-        release identifier), ``manifest_sha256`` (the hash of that release's
-        manifest, which pins every file in it), ``format_version``,
-        ``offline`` (True when the data origin was unreachable and the newest
-        complete cached release was used) and ``converter_versions`` (every
-        converter that wrote the release's files, with its version, as its
-        manifest lists them; empty in results recorded before releases
-        listed them). Empty when every data source was a local directory.
+        The nuclear-data release each library keyword came from, and the
+        release of each local release folder data was read from, as a dict
+        keyed by keyword or by the folder's absolute path. Each value is a dict
+        with ``release`` (the release identifier), ``manifest_sha256`` (the
+        hash of that release's manifest, which pins every file in it),
+        ``format_version``, ``offline`` (True when the data origin was
+        unreachable and the newest complete cached release was used, always
+        False for a local folder) and ``converter_versions`` (every converter
+        that wrote the release's files, with its version, as its manifest lists
+        them; empty in results recorded before releases listed them). Empty
+        when every data source was a local directory that is not a release
+        folder.
         """
     @property
     def num_steps(self) -> builtins.int:

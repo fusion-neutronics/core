@@ -29,7 +29,8 @@ pub struct PyChain {
 #[pymethods]
 impl PyChain {
     /// Parse a transmutation chain from a split (v2) chain directory that
-    /// holds `decay/`, `reactions/` and `fission_yields/` subsection subdirs.
+    /// holds a `decay/` subsection subdir, and the `reactions/` and
+    /// `fission_yields/` ones where the chain has them.
     ///
     /// Args:
     ///     path (str): Path to the chain root directory.
@@ -52,10 +53,14 @@ impl PyChain {
         } else {
             Vec::new()
         };
+        // A chain converted without a part has no folder for it. One that has
+        // the folder must hold its file, which the reader checks.
+        let part = |name: &str| Some(root.join(name)).filter(|dir| dir.is_dir());
+        let (reactions, fission_yields) = (part("reactions"), part("fission_yields"));
         let (chain, _branch) = yani::parse_chain_parts(
             &root.join("decay"),
-            Some(&root.join("reactions")),
-            Some(&root.join("fission_yields")),
+            reactions.as_deref(),
+            fission_yields.as_deref(),
             &branching,
         )
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("Failed to load chain: {e}")))?;

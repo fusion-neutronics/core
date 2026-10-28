@@ -42,9 +42,11 @@ def cf252(tmp_path):
         data_version="test",
         subsections=["decay"],
     )
+    # Converted with the decay subsection only, so the other two parts are
+    # left out: a folder without its reactions or yields file is refused.
     yamc.transmutation_decay_data = str(out)
-    yamc.transmutation_reactions = str(out)
-    yamc.transmutation_fission_yields = str(out)
+    yamc.transmutation_reactions = False
+    yamc.transmutation_fission_yields = False
     # Cf252 in iron, so the contact dose has a host whose attenuation is known.
     material = yamc.Material.from_atom_densities({"Fe56": 0.084912, "Cf252": 1.0e-9})
     material.volume = 2.0
