@@ -47,6 +47,7 @@ mpi = { version = "0.8", optional = true }
 yamt = { path = "../yamt", optional = true, features = ["arrow"] }
 yani = { path = "../yani" }
 yani-transmute = { path = "../yani-transmute", default-features = false }
+yani-decay = { path = "../yani-decay" }
 yamc-geo = { path = "../yamc-geo" }
 # Only pulled in when the `wasm` feature is on -- adds the viewer
 # templating (~30 KB of strings) to the wasm binary for

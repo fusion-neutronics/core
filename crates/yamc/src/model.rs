@@ -1813,6 +1813,35 @@ impl Model {
         transmutation_tallies: Option<Arc<TransmutationTallies>>,
         print_tracking_summary: bool,
     ) -> Result<TrackStorage, String> {
+        self.run_core::<T>(
+            settings,
+            selection,
+            transmutation_tallies,
+            print_tracking_summary,
+            None,
+        )
+    }
+
+    /// A CPU run that captures decay photons at birth or replays captured
+    /// ones as its source (see [`crate::shutdown_dose`]).
+    pub(crate) fn run_staged(
+        &mut self,
+        settings: &TransportSettings,
+        staged: crate::shutdown_dose::StagedRun<'_>,
+    ) -> Result<(), String> {
+        self.run_core::<NoOpTracker>(settings, None, None, false, Some(staged))
+            .map(|_| ())
+    }
+
+    fn run_core<T: Tracker + Clone>(
+        &mut self,
+        settings: &TransportSettings,
+        selection: Option<HistorySelection>,
+        transmutation_tallies: Option<Arc<TransmutationTallies>>,
+        print_tracking_summary: bool,
+        staged: Option<crate::shutdown_dose::StagedRun<'_>>,
+    ) -> Result<TrackStorage, String> {
+        use crate::shutdown_dose::{Captured, RawBirth, StagedRun};
         let threads = settings.threads;
         let start_time = crate::util::timer::Timer::start();
         let debug = std::env::var("YAMC_DEBUG").is_ok();
@@ -1848,6 +1877,12 @@ impl Model {
         let mpi_rank = mpi_ctx.rank();
         let mpi_size = mpi_ctx.size();
         let is_root = mpi_ctx.is_root();
+
+        if staged.is_some() && mpi_size > 1 {
+            return Err(
+                "the staged shutdown dose runs on one process; run it without MPI".to_string(),
+            );
+        }
 
         // Only root prints MPI info
         if is_root && mpi_size > 1 {
@@ -2047,6 +2082,20 @@ impl Model {
                 pnf.resolve(&mut nuclide_registry);
             }
         }
+        // A replay's photons carry their parents as this run's ids, interned
+        // after the filters so a parent the filters name matches them.
+        let replay = match &staged {
+            Some(StagedRun::Replay(r)) => Some(*r),
+            _ => None,
+        };
+        let replay_ids: Vec<yamc_nuclide::nuclide_registry::NuclideId> = replay
+            .map(|r| {
+                r.parents
+                    .iter()
+                    .map(|n| nuclide_registry.intern(n))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         // Global particle ID counter for tracking (atomic for thread safety)
         // Arc so the heartbeat thread can read this live progress counter
@@ -2164,6 +2213,11 @@ impl Model {
                     })
                 })
                 .collect();
+
+        // A capture keeps one birth list per rayon worker, like the Welford slots.
+        let capture_pool: Option<Vec<parking_lot::Mutex<Vec<RawBirth>>>> =
+            matches!(staged, Some(StagedRun::Capture(_)))
+                .then(|| (0..n_rayon_threads).map(|_| Default::default()).collect());
 
         // The transmutation tally's per-history statistics, when on, keep a
         // scratch vector per rayon worker the same way; size it for this pool.
@@ -2579,8 +2633,10 @@ impl Model {
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                                 // Start with the source particle
-                                let mut particle =
-                                    self.sample_source_with(&source_selector, rng);
+                                let mut particle = match replay {
+                                    Some(r) => r.sample(rng, &replay_ids),
+                                    None => self.sample_source_with(&source_selector, rng),
+                                };
                                 particle.alive = true;
                                 // Every replica starts at the source with
                                 // the nominal's weight.
@@ -2692,6 +2748,33 @@ impl Model {
                                              weight and bias every tally low without saying \
                                              so."
                                         );
+                                    }
+
+                                    // A capture records each decay photon at
+                                    // birth and leaves it untracked.
+                                    if let (Some(pool), Some(parent)) =
+                                        (&capture_pool, particle.parent_nuclide)
+                                    {
+                                        let cell = if particle.current_cell_index
+                                            != yamc_particle::particle::NO_CELL
+                                        {
+                                            Some(particle.current_cell_index)
+                                        } else {
+                                            let p = particle.position;
+                                            self.geometry
+                                                .find_cell_index((p[0], p[1], p[2]))
+                                                .map(|i| i as u32)
+                                        };
+                                        if let Some(cell) = cell {
+                                            pool[thread_idx].lock().push(RawBirth {
+                                                position: particle.position,
+                                                energy: particle.energy,
+                                                weight: particle.weight,
+                                                parent,
+                                                cell,
+                                            });
+                                        }
+                                        continue;
                                     }
 
                                     match tracking_mode {
@@ -3231,6 +3314,14 @@ impl Model {
                 "WARNING: {} lost particle(s) detected. Geometry may have gaps.",
                 total_lost
             );
+        }
+
+        if let (Some(StagedRun::Capture(out)), Some(pool)) = (staged, capture_pool) {
+            *out = Some(Captured::from_raw(
+                pool.into_iter().flat_map(|m| m.into_inner()).collect(),
+                &nuclide_registry,
+                global_particle_id.load(std::sync::atomic::Ordering::Relaxed),
+            ));
         }
 
         // Merge all collected tracks from all batches

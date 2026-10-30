@@ -112,6 +112,7 @@ __all__ = [
     "set_transmutation_decay_data",
     "set_transmutation_fission_yields",
     "set_transmutation_reactions",
+    "simulate_shutdown_dose",
     "solid_contact_samples",
     "solid_overlaps",
     "solid_shared_volume",
@@ -584,17 +585,39 @@ class Cooldown:
     A cooling step: no source, the materials just decay for `duration`.
     """
     @property
+    def model(self) -> typing.Optional[typing.Any]:
+        r"""
+        The Model the machine cools in, or ``None``.
+        """
+    @property
+    def moves(self) -> builtins.dict[builtins.str, builtins.list[builtins.list[builtins.float]]]:
+        r"""
+        The moved cells, ``{name: 4x4 matrix}``.
+        """
+    @property
     def duration(self) -> builtins.float:
         r"""
         Cooldown duration in seconds.
         """
-    def __new__(cls, duration: typing.Any) -> Cooldown:
+    def __new__(cls, duration: typing.Any, model: typing.Optional[typing.Any] = None, moves: typing.Optional[typing.Any] = None) -> Cooldown:
         r"""
         Create a cooling step.
         
         Args:
             duration: A number of seconds, or a ``(value, unit)`` tuple such as
                 ``(7, "d")``. Units: s, min, h, d, a (year).
+            model: The yamc ``Model`` the machine is in while it cools, for
+                ``yamc.simulate_shutdown_dose``: the decay photons of every
+                earlier irradiation are transported through its geometry. It
+                needs no source. Cells absent from it have been removed and no
+                longer emit; a cell of the same name is the same component. A
+                later step without a ``model`` stays in this one.
+            moves: Cells of ``model`` that sit away from their reference
+                position (where they were built in the model they were
+                irradiated in, unless that step moved them too), as
+                ``{cell or cell name: (dx, dy, dz)}`` in cm or a 4x4 rigid
+                transformation matrix. The activation moves with the cell;
+                ``model`` must already hold the cell at its moved position.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -4052,6 +4075,16 @@ class Pulse:
     for `duration`.
     """
     @property
+    def model(self) -> typing.Optional[typing.Any]:
+        r"""
+        The Model this pulse irradiates, or ``None``.
+        """
+    @property
+    def moves(self) -> builtins.dict[builtins.str, builtins.list[builtins.list[builtins.float]]]:
+        r"""
+        The moved cells, ``{name: 4x4 matrix}``.
+        """
+    @property
     def source(self) -> typing.Optional[typing.Any]:
         r"""
         The neutron source active during this pulse, or ``None`` if sourceless.
@@ -4076,7 +4109,7 @@ class Pulse:
         r"""
         Pulse duration in seconds.
         """
-    def __new__(cls, rate: builtins.float, duration: typing.Any, source: typing.Optional[typing.Any] = None, flux_std_dev: typing.Optional[typing.Sequence[builtins.float]] = None, flux_covariance: typing.Optional[typing.Sequence[typing.Sequence[builtins.float]]] = None) -> Pulse:
+    def __new__(cls, rate: builtins.float, duration: typing.Any, source: typing.Optional[typing.Any] = None, flux_std_dev: typing.Optional[typing.Sequence[builtins.float]] = None, flux_covariance: typing.Optional[typing.Sequence[typing.Sequence[builtins.float]]] = None, model: typing.Optional[typing.Any] = None, moves: typing.Optional[typing.Any] = None) -> Pulse:
         r"""
         Create an irradiation pulse.
         
@@ -4115,6 +4148,15 @@ class Pulse:
                 the other. It must be symmetric and positive semi-definite, and
                 is checked. Each replica's flux perturbation is drawn through
                 its factor, so correlated bins move together.
+            model: The yamc ``Model`` this pulse irradiates, for
+                ``yamc.simulate_shutdown_dose``: its geometry, materials and
+                neutron source are the machine during this pulse. Give it
+                instead of ``source``. A later step without a ``model`` stays in
+                this one.
+            moves: Cells of ``model`` that sit away from their reference
+                position, as ``{cell or cell name: (dx, dy, dz)}`` in cm or a
+                4x4 rigid transformation matrix. Only with ``model``; see
+                ``Cooldown`` for how moves work.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -8330,6 +8372,58 @@ def set_transmutation_reactions(value: typing.Optional[builtins.str | typing.Lit
     a material with no reaction rates. A rate that then needs it is refused
     when the burnup matrix is built, naming the nuclide and the reaction,
     rather than being solved as though the reaction produced nothing.
+    """
+
+def simulate_shutdown_dose(schedule: PulseSchedule, tallies: typing.Sequence[Tally], total_particles: builtins.int, seed: builtins.int = 1, threads: typing.Optional[builtins.int] = None) -> builtins.dict[builtins.str, DoseResult]:
+    r"""
+    Simulate the shutdown dose rate of a machine that changes along its
+    irradiation and cooling schedule.
+    
+    Each step of ``schedule`` names the ``Model`` the machine is in
+    (``Pulse(model=...)``, ``Cooldown(model=...)``; a step without one stays in
+    the previous step's). A model can add cells, leave cells out (removed
+    components no longer emit, though what they emitted before still decays
+    with them should they come back) and hold cells somewhere else (say where
+    with the step's ``moves``). Cells are the same component across models when
+    they have the same name, so name every cell that activates.
+    
+    For every model a pulse irradiates in, the neutrons are transported once
+    and each decay photon (D1S) is recorded where it is born. For every pair of
+    irradiation and observation configurations those photons are then moved
+    with their cells and transported through the observation step's model,
+    with ``tallies`` binned by parent radionuclide. The per-radionuclide time
+    correction of each irradiation's own pulses then gives the dose at the end
+    of every step. No step of the schedule needs a transport run of its own.
+    
+    Runs on the CPU, on one process. ``std_dev`` is the photon transport's
+    statistical error, given the recorded decay photons; the neutron
+    transport's is not included.
+    
+    Args:
+        schedule: A ``PulseSchedule`` whose steps name models.
+        tallies: Photon tallies to score the dose in, without
+            ``parent_nuclides`` (they are binned by every radionuclide the
+            irradiations make). Each needs a unique ``name``, and must be valid
+            in every model the schedule observes (a cell filter's cells must
+            exist in each).
+        total_particles: Histories per transport run: each irradiated model's
+            neutron run and each photon run.
+        seed: Base random seed.
+        threads: Worker threads; ``None`` uses all cores.
+    
+    Returns:
+        ``{tally name: DoseResult}``, each with one row per schedule step:
+        ``.mean`` / ``.std_dev`` / ``.by_nuclide`` / ``.times``.
+    
+    Examples:
+        >>> schedule = yamc.PulseSchedule([
+        ...     yamc.Pulse(model=dt_reactor, rate=1e18, duration=(1, "a")),
+        ...     yamc.Cooldown(model=opened, duration=(1, "d"),
+        ...                   moves={"blanket": (0, 0, 300)}),
+        ... ])
+        >>> dose = yamc.simulate_shutdown_dose(schedule, tallies=[dose_tally],
+        ...                                    total_particles=100_000)
+        >>> dose["dose"].mean[-1]
     """
 
 def solid_contact_samples(vertices: typing.Sequence[typing.Sequence[builtins.float]], solids: typing.Sequence[tuple[builtins.int, typing.Sequence[typing.Sequence[builtins.int]]]], tolerance: builtins.float, samples: builtins.int = 8) -> builtins.list[tuple[builtins.int, builtins.int, builtins.list[builtins.list[builtins.float]]]]:

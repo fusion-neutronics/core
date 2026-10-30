@@ -237,7 +237,9 @@ impl Tally {
     /// this projection, so they can never drift apart -- and adding a
     /// field to `TallySerde` fails to compile here until the projection
     /// (and therefore both consumers) is updated.
-    pub(crate) fn to_serde(&self) -> TallySerde {
+    /// Public so a caller can derive a fresh tally from this one's
+    /// configuration (`Tally::from(t.to_serde())`), e.g. with a filter added.
+    pub fn to_serde(&self) -> TallySerde {
         TallySerde {
             tally_id: self.tally_id,
             name: self.name.clone(),

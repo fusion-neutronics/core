@@ -49,6 +49,95 @@ pub fn parse_duration(obj: &Bound<'_, PyAny>) -> PyResult<f64> {
     ))
 }
 
+/// Where a step's moved cells sit: cell name -> homogeneous 4x4 rigid motion
+/// from the cell's reference position (cm). Checked to be rigid by yamc.
+pub type Moves = Vec<(String, [[f64; 4]; 4])>;
+
+/// One step of a staged schedule, with its machine configuration resolved
+/// (a step that names no `model` takes the previous step's).
+pub struct StagedStep {
+    pub rate: f64,
+    pub duration: f64,
+    pub model: Py<PyAny>,
+    pub moves: Moves,
+}
+
+/// Parse `moves`: ``{cell or cell name: (dx, dy, dz) or 4x4 matrix}``. A key
+/// that is not a str is read by its ``name``, so a ``Cell`` works directly.
+fn parse_moves(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Moves> {
+    let Some(obj) = obj else {
+        return Ok(Vec::new());
+    };
+    let dict = obj.cast::<PyDict>().map_err(|_| {
+        PyTypeError::new_err("moves must be a dict {cell: translation or 4x4 matrix}")
+    })?;
+    let mut out = Vec::new();
+    for (k, v) in dict.iter() {
+        let name: String = match k.extract::<String>() {
+            Ok(n) => n,
+            Err(_) => k
+                .getattr("name")
+                .and_then(|n| n.extract::<Option<String>>())
+                .ok()
+                .flatten()
+                .ok_or_else(|| {
+                    PyValueError::new_err(
+                        "moves keys must be cell names or named cells: cells are matched \
+                         across models by name",
+                    )
+                })?,
+        };
+        let m = if let Ok(t) = v.extract::<[f64; 3]>() {
+            [
+                [1.0, 0.0, 0.0, t[0]],
+                [0.0, 1.0, 0.0, t[1]],
+                [0.0, 0.0, 1.0, t[2]],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        } else if let Ok(rows) = v.extract::<[[f64; 4]; 4]>() {
+            rows
+        } else {
+            return Err(PyValueError::new_err(format!(
+                "moves['{name}'] must be a translation (dx, dy, dz) in cm or a 4x4 rigid \
+                 transformation matrix"
+            )));
+        };
+        out.push((name, m));
+    }
+    Ok(out)
+}
+
+/// The `model` / `moves` pair a step was given, checked for shape only (the
+/// model's type is yamc's to check).
+fn parse_stage(
+    model: Option<&Bound<'_, PyAny>>,
+    moves: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<(Py<PyAny>, Moves)>> {
+    let moves = parse_moves(moves)?;
+    match model {
+        Some(m) => Ok(Some((m.clone().unbind(), moves))),
+        None if moves.is_empty() => Ok(None),
+        None => Err(PyValueError::new_err(
+            "moves needs the model the cells moved within: give model= as well",
+        )),
+    }
+}
+
+fn stage_model(py: Python<'_>, stage: &Option<(Py<PyAny>, Moves)>) -> Option<Py<PyAny>> {
+    stage.as_ref().map(|(m, _)| m.clone_ref(py))
+}
+
+fn stage_moves(stage: &Option<(Py<PyAny>, Moves)>) -> BTreeMap<String, [[f64; 4]; 4]> {
+    stage
+        .as_ref()
+        .map(|(_, m)| m.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn clone_stage(py: Python<'_>, stage: &Option<(Py<PyAny>, Moves)>) -> Option<(Py<PyAny>, Moves)> {
+    stage.as_ref().map(|(m, mv)| (m.clone_ref(py), mv.clone()))
+}
+
 /// One irradiation campaign: a neutron source held at a constant `rate` (n/s)
 /// for `duration`.
 #[gen_stub_pyclass]
@@ -68,6 +157,9 @@ pub struct PyPulse {
     /// transport source distribution and this is an activation-only concern.
     /// It also sits beside `rate`, which is the other half of the flux.
     flux_error: Option<FluxErrorInput>,
+    /// The machine configuration this pulse irradiates in, for
+    /// `yamc.simulate_shutdown_dose`: a yamc `Model` and its moved cells.
+    stage: Option<(Py<PyAny>, Moves)>,
 }
 
 /// A pulse's flux error as given, before the spectrum it is relative to is
@@ -118,15 +210,34 @@ impl PyPulse {
     ///         the other. It must be symmetric and positive semi-definite, and
     ///         is checked. Each replica's flux perturbation is drawn through
     ///         its factor, so correlated bins move together.
+    ///     model: The yamc ``Model`` this pulse irradiates, for
+    ///         ``yamc.simulate_shutdown_dose``: its geometry, materials and
+    ///         neutron source are the machine during this pulse. Give it
+    ///         instead of ``source``. A later step without a ``model`` stays in
+    ///         this one.
+    ///     moves: Cells of ``model`` that sit away from their reference
+    ///         position, as ``{cell or cell name: (dx, dy, dz)}`` in cm or a
+    ///         4x4 rigid transformation matrix. Only with ``model``; see
+    ///         ``Cooldown`` for how moves work.
     #[new]
-    #[pyo3(signature = (rate, duration, source=None, flux_std_dev=None, flux_covariance=None))]
+    #[pyo3(signature = (rate, duration, source=None, flux_std_dev=None, flux_covariance=None, model=None, moves=None))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         rate: f64,
         duration: &Bound<'_, PyAny>,
         source: Option<&Bound<'_, PyAny>>,
         flux_std_dev: Option<Vec<f64>>,
         flux_covariance: Option<Vec<Vec<f64>>>,
+        model: Option<&Bound<'_, PyAny>>,
+        moves: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
+        if source.is_some() && model.is_some() {
+            return Err(PyValueError::new_err(
+                "give a Pulse a source or a model, not both: a model's own source \
+                 irradiates it",
+            ));
+        }
+        let stage = parse_stage(model, moves)?;
         // Validate any source is a neutron source (activation is by neutrons),
         // but keep the original object so identity grouping works across steps.
         if let Some(s) = source
@@ -169,7 +280,20 @@ impl PyPulse {
             rate,
             duration_seconds: parse_duration(duration)?,
             flux_error,
+            stage,
         })
+    }
+
+    /// The Model this pulse irradiates, or ``None``.
+    #[getter]
+    fn model(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        stage_model(py, &self.stage)
+    }
+
+    /// The moved cells, ``{name: 4x4 matrix}``.
+    #[getter]
+    fn moves(&self) -> BTreeMap<String, [[f64; 4]; 4]> {
+        stage_moves(&self.stage)
     }
 
     /// The neutron source active during this pulse, or ``None`` if sourceless.
@@ -221,6 +345,9 @@ impl PyPulse {
 #[pyclass(name = "Cooldown")]
 pub struct PyCooldown {
     duration_seconds: f64,
+    /// The machine configuration during cooling, for
+    /// `yamc.simulate_shutdown_dose`.
+    stage: Option<(Py<PyAny>, Moves)>,
 }
 
 #[gen_stub_pymethods]
@@ -231,12 +358,41 @@ impl PyCooldown {
     /// Args:
     ///     duration: A number of seconds, or a ``(value, unit)`` tuple such as
     ///         ``(7, "d")``. Units: s, min, h, d, a (year).
+    ///     model: The yamc ``Model`` the machine is in while it cools, for
+    ///         ``yamc.simulate_shutdown_dose``: the decay photons of every
+    ///         earlier irradiation are transported through its geometry. It
+    ///         needs no source. Cells absent from it have been removed and no
+    ///         longer emit; a cell of the same name is the same component. A
+    ///         later step without a ``model`` stays in this one.
+    ///     moves: Cells of ``model`` that sit away from their reference
+    ///         position (where they were built in the model they were
+    ///         irradiated in, unless that step moved them too), as
+    ///         ``{cell or cell name: (dx, dy, dz)}`` in cm or a 4x4 rigid
+    ///         transformation matrix. The activation moves with the cell;
+    ///         ``model`` must already hold the cell at its moved position.
     #[new]
-    #[pyo3(signature = (duration))]
-    fn new(duration: &Bound<'_, PyAny>) -> PyResult<Self> {
+    #[pyo3(signature = (duration, model=None, moves=None))]
+    fn new(
+        duration: &Bound<'_, PyAny>,
+        model: Option<&Bound<'_, PyAny>>,
+        moves: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
         Ok(PyCooldown {
             duration_seconds: parse_duration(duration)?,
+            stage: parse_stage(model, moves)?,
         })
+    }
+
+    /// The Model the machine cools in, or ``None``.
+    #[getter]
+    fn model(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        stage_model(py, &self.stage)
+    }
+
+    /// The moved cells, ``{name: 4x4 matrix}``.
+    #[getter]
+    fn moves(&self) -> BTreeMap<String, [[f64; 4]; 4]> {
+        stage_moves(&self.stage)
     }
 
     /// Cooldown duration in seconds.
@@ -320,6 +476,7 @@ pub fn cooldown_steps(
     let mut previous = 0.0;
     for time in cumulative {
         steps.push(PyCooldown {
+            stage: None,
             duration_seconds: time - previous,
         });
         previous = time;
@@ -346,6 +503,35 @@ pub struct PyDoseResult {
     total_std_dev: Option<Py<PyAny>>,
     total_std_dev_correlated: Option<Py<PyAny>>,
     data_uncertainty_info: Option<Py<PyAny>>,
+}
+
+impl PyDoseResult {
+    /// A result with one row per step and no nuclear-data uncertainty, as
+    /// `yamc.simulate_shutdown_dose` returns.
+    pub fn from_rows(
+        py: Python<'_>,
+        mean: Vec<Vec<f64>>,
+        std_dev: Vec<Vec<f64>>,
+        by_nuclide: BTreeMap<String, Vec<Vec<f64>>>,
+        times: Vec<f64>,
+    ) -> PyResult<Self> {
+        let by_nuc = PyDict::new(py);
+        for (name, rows) in by_nuclide {
+            by_nuc.set_item(name, shape_rows(py, rows, false)?)?;
+        }
+        Ok(Self {
+            mean: shape_rows(py, mean, false)?,
+            std_dev: shape_rows(py, std_dev, false)?,
+            by_nuclide: by_nuc.into_any().unbind(),
+            times: times.into_pyobject(py)?.into_any().unbind(),
+            data_std_dev: None,
+            data_std_dev_standard_error: None,
+            data_std_dev_correlated: None,
+            total_std_dev: None,
+            total_std_dev_correlated: None,
+            data_uncertainty_info: None,
+        })
+    }
 }
 
 #[gen_stub_pymethods]
@@ -464,6 +650,8 @@ pub struct PyPulseSchedule {
     sources: Vec<Option<Py<PyAny>>>,
     /// Per-step flux error, parallel to `sources`.
     flux_error: Vec<Option<FluxErrorInput>>,
+    /// Per-step machine configuration as given, parallel to `sources`.
+    stages: Vec<Option<(Py<PyAny>, Moves)>>,
 }
 
 #[gen_stub_pymethods]
@@ -475,10 +663,12 @@ impl PyPulseSchedule {
         let mut core_steps = Vec::new();
         let mut sources: Vec<Option<Py<PyAny>>> = Vec::new();
         let mut flux_error: Vec<Option<FluxErrorInput>> = Vec::new();
+        let mut stages: Vec<Option<(Py<PyAny>, Moves)>> = Vec::new();
         for item in steps.try_iter()? {
             let item = item?;
             if let Ok(pulse) = item.cast::<PyPulse>() {
                 let p = pulse.borrow();
+                stages.push(clone_stage(item.py(), &p.stage));
                 sources.push(p.source.as_ref().map(|s| s.clone_ref(item.py())));
                 flux_error.push(p.flux_error.clone());
                 core_steps.push(yani_transmute::ScheduleStep {
@@ -487,11 +677,13 @@ impl PyPulseSchedule {
                     is_pulse: true,
                 });
             } else if let Ok(cool) = item.cast::<PyCooldown>() {
+                let c = cool.borrow();
+                stages.push(clone_stage(item.py(), &c.stage));
                 sources.push(None);
                 flux_error.push(None);
                 core_steps.push(yani_transmute::ScheduleStep {
                     rate: 0.0,
-                    dt: cool.borrow().duration_seconds,
+                    dt: c.duration_seconds,
                     is_pulse: false,
                 });
             } else {
@@ -501,10 +693,25 @@ impl PyPulseSchedule {
             }
         }
         let schedule = yani_transmute::Schedule::new(core_steps).map_err(PyValueError::new_err)?;
+        if stages.iter().any(Option::is_some) {
+            if stages[0].is_none() {
+                return Err(PyValueError::new_err(
+                    "the first step of a schedule with models needs a model: later steps \
+                     without one stay in the previous step's",
+                ));
+            }
+            if sources.iter().any(Option::is_some) {
+                return Err(PyValueError::new_err(
+                    "a schedule with models takes each pulse's source from its model; \
+                     leave Pulse.source unset",
+                ));
+            }
+        }
         Ok(PyPulseSchedule {
             schedule,
             sources,
             flux_error,
+            stages,
         })
     }
 
@@ -595,6 +802,12 @@ impl PyPulseSchedule {
         steps: Option<&Bound<'_, PyAny>>,
         data_uncertainty: Option<crate::data_uncertainty::PyDataUncertainty>,
     ) -> PyResult<PyDoseResult> {
+        if self.is_staged() {
+            return Err(PyValueError::new_err(
+                "this schedule changes the machine between steps (its steps have models); \
+                 use yamc.simulate_shutdown_dose(schedule, tallies=...) instead",
+            ));
+        }
         let distinct = self.distinct_sources(py);
         if distinct.is_empty() {
             return Err(PyValueError::new_err(
@@ -983,6 +1196,40 @@ impl PyPulseSchedule {
 
     /// Distinct pulse sources in first-appearance order, paired with the index
     /// of the first step that uses each.
+    /// True when the steps carry models (a schedule for
+    /// `yamc.simulate_shutdown_dose`).
+    pub fn is_staged(&self) -> bool {
+        self.stages.iter().any(Option::is_some)
+    }
+
+    /// Every step with its configuration resolved: a step without a model
+    /// takes the previous step's. Errors if the schedule has no models.
+    pub fn staged_steps(&self, py: Python<'_>) -> PyResult<Vec<StagedStep>> {
+        if !self.is_staged() {
+            return Err(PyValueError::new_err(
+                "simulate_shutdown_dose needs a schedule whose steps name the Model the \
+                 machine is in (Pulse(model=...), Cooldown(model=...)); for one machine \
+                 throughout, use Model(use_decay_photons=True) and \
+                 schedule.time_correct_tally",
+            ));
+        }
+        let mut out: Vec<StagedStep> = Vec::with_capacity(self.stages.len());
+        for (step, stage) in self.schedule.steps().iter().zip(&self.stages) {
+            let (model, moves) = match (stage, out.last()) {
+                (Some((m, mv)), _) => (m.clone_ref(py), mv.clone()),
+                (None, Some(prev)) => (prev.model.clone_ref(py), prev.moves.clone()),
+                (None, None) => unreachable!("the first step's model is checked at construction"),
+            };
+            out.push(StagedStep {
+                rate: step.rate,
+                duration: step.dt,
+                model,
+                moves,
+            });
+        }
+        Ok(out)
+    }
+
     fn distinct_sources(&self, py: Python<'_>) -> Vec<(Py<PyAny>, usize)> {
         let mut out: Vec<(Py<PyAny>, usize)> = Vec::new();
         for (i, source) in self.sources.iter().enumerate() {

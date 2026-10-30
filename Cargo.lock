@@ -7095,6 +7095,7 @@ dependencies = [
  "yamc-test-cache",
  "yamt",
  "yani",
+ "yani-decay",
  "yani-transmute",
 ]
 
