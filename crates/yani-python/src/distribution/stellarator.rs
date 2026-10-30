@@ -57,7 +57,7 @@ fn value_error(message: String) -> PyErr {
 ///     ...     z_lmn=[150.0],
 ///     ... )
 #[gen_stub_pyclass]
-#[pyclass(name = "StellaratorShape", module = "yamc", frozen, from_py_object)]
+#[pyclass(name = "StellaratorShape", frozen, from_py_object)]
 #[derive(Clone)]
 pub struct PyStellaratorShape {
     pub inner: Arc<StellaratorShape>,
@@ -200,7 +200,7 @@ impl PyStellaratorShape {
 /// The part of a stellarator plasma between two flux surfaces, the spatial
 /// distribution of a ``stellarator_source`` source.
 #[gen_stub_pyclass]
-#[pyclass(name = "FluxShell", module = "yamc", frozen, skip_from_py_object)]
+#[pyclass(name = "FluxShell", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyFluxShell {
     pub inner: FluxShell,

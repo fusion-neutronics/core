@@ -24,6 +24,9 @@ __all__ = [
     "tokamak_ion_temperature",
     "tokamak_convert_a_alpha_to_r_z",
     "tokamak_neutron_source_density",
+    "StellaratorShape",
+    "FluxShell",
+    "stellarator_source",
 ]
 
 @typing.final
@@ -632,4 +635,174 @@ def tokamak_neutron_source_density(*, ion_density: typing.Any, ion_temperature: 
     
     Raises:
         ValueError: If ``reaction`` is not 'DD' or 'DT'.
+    """
+
+@typing.final
+class StellaratorShape:
+    r"""
+    A stellarator plasma shape as a Fourier-Zernike series, in DESC's
+    conventions.
+    
+    ``R(rho, theta, zeta) = sum R_lmn * Z_l^m(rho, theta) * F_n(zeta)`` and
+    likewise for ``Z``, where ``Z_l^m`` is the unnormalised Zernike radial
+    polynomial ``R_l^|m|(rho)`` (equal to 1 at ``rho = 1``) times
+    ``cos(m theta)`` for ``m >= 0`` or ``sin(|m| theta)`` for ``m < 0``, and
+    ``F_n`` is ``cos(n N zeta)`` for ``n >= 0`` or ``sin(|n| N zeta)`` for
+    ``n < 0``, with ``N`` the number of field periods. ``rho`` is the square
+    root of the normalised toroidal flux and ``zeta`` the cylindrical toroidal
+    angle.
+    
+    A DESC equilibrium's ``R_lmn`` / ``Z_lmn`` with its ``R_basis.modes`` /
+    ``Z_basis.modes`` are these coefficients directly, times 100 for cm.
+    
+    Args:
+        num_field_periods: Number of field periods ``N``.
+        r_modes: ``(l, m, n)`` mode numbers of the ``R`` series.
+        r_lmn: Coefficients of the ``R`` series (cm).
+        z_modes: ``(l, m, n)`` mode numbers of the ``Z`` series.
+        z_lmn: Coefficients of the ``Z`` series (cm).
+    
+    Raises:
+        ValueError: If a mode is not a Zernike mode (``l >= |m|``,
+            ``l - |m|`` even), a mode is repeated, the lengths differ, a
+            coefficient is NaN or infinite, or the surfaces reach ``R <= 0``,
+            self-intersect or are not nested.
+    
+    Examples:
+        >>> import yani
+        >>> # A circular torus: R = 600 + 150 rho cos(theta), Z = 150 rho sin(theta)
+        >>> shape = yani.sources.StellaratorShape(
+        ...     num_field_periods=1,
+        ...     r_modes=[(0, 0, 0), (1, 1, 0)],
+        ...     r_lmn=[600.0, 150.0],
+        ...     z_modes=[(1, -1, 0)],
+        ...     z_lmn=[150.0],
+        ... )
+    """
+    @property
+    def num_field_periods(self) -> builtins.int:
+        r"""
+        Number of field periods.
+        """
+    @property
+    def r_modes(self) -> builtins.list[tuple[builtins.int, builtins.int, builtins.int]]:
+        r"""
+        ``(l, m, n)`` mode numbers of the ``R`` series.
+        """
+    @property
+    def r_lmn(self) -> builtins.list[builtins.float]:
+        r"""
+        Coefficients of the ``R`` series (cm), in the order of ``r_modes``.
+        """
+    @property
+    def z_modes(self) -> builtins.list[tuple[builtins.int, builtins.int, builtins.int]]:
+        r"""
+        ``(l, m, n)`` mode numbers of the ``Z`` series.
+        """
+    @property
+    def z_lmn(self) -> builtins.list[builtins.float]:
+        r"""
+        Coefficients of the ``Z`` series (cm), in the order of ``z_modes``.
+        """
+    def __new__(cls, *, num_field_periods: builtins.int, r_modes: typing.Sequence[typing.Sequence[builtins.int]], r_lmn: typing.Sequence[builtins.float], z_modes: typing.Sequence[typing.Sequence[builtins.int]], z_lmn: typing.Sequence[builtins.float]) -> StellaratorShape: ...
+    def volume(self) -> builtins.float:
+        r"""
+        Plasma volume (cm^3).
+        """
+    def evaluate(self, rho: typing.Any, theta: typing.Any, zeta: typing.Any) -> tuple[typing.Any, typing.Any]:
+        r"""
+        Cylindrical ``(R, Z)`` in cm at flux coordinates ``(rho, theta, zeta)``.
+        
+        Each argument is a float or a sequence of floats; scalars broadcast
+        against sequences, so a whole surface or cross-section evaluates in
+        one call.
+        
+        Args:
+            rho: Normalised radius, 0 on the axis and 1 on the boundary.
+            theta: Poloidal angle (radians).
+            zeta: Toroidal angle (radians).
+        
+        Returns:
+            An ``(R, Z)`` tuple in cm, each a float or a list of floats.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class FluxShell:
+    r"""
+    The part of a stellarator plasma between two flux surfaces, the spatial
+    distribution of a ``stellarator_source`` source.
+    """
+    @property
+    def rho(self) -> tuple[builtins.float, builtins.float]:
+        r"""
+        Inner and outer ``rho`` of the shell.
+        """
+    @property
+    def shape(self) -> StellaratorShape:
+        r"""
+        The plasma shape the shell belongs to.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+def stellarator_source(*, shape: StellaratorShape, mode: builtins.str, ion_density_centre: builtins.float, ion_density_peaking_factor: builtins.float, ion_density_pedestal: builtins.float, ion_density_separatrix: builtins.float, ion_temperature_centre: builtins.float, ion_temperature_peaking_factor: builtins.float, ion_temperature_beta: builtins.float, ion_temperature_pedestal: builtins.float, ion_temperature_separatrix: builtins.float, pedestal_rho: builtins.float, fuel: typing.Optional[typing.Mapping[builtins.str, builtins.float]] = None) -> builtins.list[NeutronSource]:
+    r"""
+    Build the neutron sources describing a stellarator plasma.
+    
+    The plasma is split into radial shells in ``rho``. Each shell becomes one
+    source per reaction, sampling positions with density
+    ``S(rho) * R * |tau|`` (the emission density times the volume element of
+    the shape) and emitting isotropically with the Ballabio spectrum at the
+    shell's emission-weighted ion temperature, so D-D and D-T neutrons keep
+    their own spectra. Strengths are normalised to sum to 1; the absolute
+    neutron rate is set by the simulation, not here.
+    
+    The density and temperature profiles are those of ``tokamak_source``
+    (Fausser et al., Fus. Eng. Des. 87 (2012) 787) with the minor radius
+    replaced by ``rho``, so the pedestal is placed by ``pedestal_rho``. Plot
+    them with ``tokamak_ion_density`` / ``tokamak_ion_temperature`` using
+    ``minor_radius=1``, ``pedestal_radius=pedestal_rho`` and ``r=rho``.
+    
+    Args:
+        shape: The plasma shape.
+        mode: Confinement mode, one of 'L', 'H' or 'A'.
+        ion_density_centre: Ion density on the magnetic axis (m^-3).
+        ion_density_peaking_factor: Ion density peaking factor (dimensionless).
+        ion_density_pedestal: Ion density at the pedestal (m^-3).
+        ion_density_separatrix: Ion density at the boundary (m^-3).
+        ion_temperature_centre: Ion temperature on the magnetic axis (eV).
+        ion_temperature_peaking_factor: Ion temperature peaking factor
+                (dimensionless, alpha_T in the reference).
+        ion_temperature_beta: Ion temperature beta exponent (dimensionless,
+                beta_T in the reference).
+        ion_temperature_pedestal: Ion temperature at the pedestal (eV).
+        ion_temperature_separatrix: Ion temperature at the boundary (eV).
+        pedestal_rho: ``rho`` of the pedestal, between 0 and 1.
+        fuel: Fuel species as keys ('D', 'T') and atom fractions as values,
+                which must sum to 1. Defaults to 50:50 D-T.
+    
+    Returns:
+        list[NeutronSource]: One source per (radial shell, reaction).
+    
+    Raises:
+        ValueError: If a parameter is NaN or infinite, out of range (for
+                example ``pedestal_rho`` outside 0 to 1), the fuel is not D
+                and/or T, or the plasma is too cold to make neutrons.
+    
+    Examples:
+        >>> import yani
+        >>> sources = yani.sources.stellarator_source(
+        ...     shape=shape,
+        ...     mode="H",
+        ...     ion_density_centre=1.09e20,
+        ...     ion_density_peaking_factor=1,
+        ...     ion_density_pedestal=1.09e20,
+        ...     ion_density_separatrix=3e19,
+        ...     ion_temperature_centre=45.9e3,
+        ...     ion_temperature_peaking_factor=8.06,
+        ...     ion_temperature_beta=6.0,
+        ...     ion_temperature_pedestal=6.09e3,
+        ...     ion_temperature_separatrix=0.1e3,
+        ...     pedestal_rho=0.8,
+        ... )  # doctest: +SKIP
     """
