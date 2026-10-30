@@ -193,5 +193,12 @@ pub fn register_distribution_classes(
         crate::distribution::py_tokamak_neutron_source_density,
         parent_module
     )?)?;
+    // The stellarator plasma source and its Fourier-Zernike shape.
+    parent_module.add_class::<crate::distribution::PyStellaratorShape>()?;
+    parent_module.add_class::<crate::distribution::PyFluxShell>()?;
+    parent_module.add_function(wrap_pyfunction!(
+        crate::distribution::py_stellarator_source,
+        parent_module
+    )?)?;
     Ok(())
 }

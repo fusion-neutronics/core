@@ -12,7 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 rand = "0.10"
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
 yamc-particle = { path = "../yamc-particle" }
 
 [dev-dependencies]

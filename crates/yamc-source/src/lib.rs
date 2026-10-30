@@ -9,6 +9,7 @@
 
 pub mod distribution;
 pub mod source;
+pub mod stellarator;
 pub mod tokamak;
 
 pub use source::Source;
