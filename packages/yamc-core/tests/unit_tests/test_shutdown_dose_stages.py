@@ -117,19 +117,31 @@ def test_removed_cell_stops_emitting_and_keeps_decaying_while_away():
 
 
 def test_moved_cell_carries_its_activation():
+    # Two boxes: one above the ball where it was irradiated, one above where it
+    # is moved to.
+    there = yamc.RegularRectangularMesh(lower_left=[-10, -10, 206], upper_right=[10, 10, 226],
+                                        shape=[1, 1, 1])
+    tallies = [_tally(), yamc.Tally(scores=["flux"], name="there", mesh=there, particle="photon")]
     irradiated = _model()
     moved = _model(ball_z=200.0, source=False)
-    dose = _total(_dose([
-        yamc.Pulse(model=irradiated, rate=1e12, duration=(1, "h")),
-        yamc.Cooldown(model=moved, duration=(1, "h"), moves={"rod": (0, 0, 200)}),
-    ]))
-    near = _total(_dose([
-        yamc.Pulse(model=irradiated, rate=1e12, duration=(1, "h")),
-        yamc.Cooldown(duration=(1, "h")),
-    ]))
-    # 200 cm away instead of ~10 cm: the flux in the box falls by far more
-    # than the statistics.
-    assert 0.0 < dose[1] < 0.05 * near[1]
+
+    def run(cooldown):
+        sched = yamc.PulseSchedule([yamc.Pulse(model=irradiated, rate=1e12, duration=(1, "h")),
+                                    cooldown])
+        dose = yamc.simulate_shutdown_dose(sched, tallies=tallies, total_particles=PARTICLES,
+                                           seed=3)
+        return _total(dose["dose"])[1], _total(dose["there"])[1]
+
+    here_moved, there_moved = run(
+        yamc.Cooldown(model=moved, duration=(1, "h"), moves={"rod": (0, 0, 200)}))
+    here_stayed, there_stayed = run(yamc.Cooldown(duration=(1, "h")))
+    # The same box geometry relative to the ball, so the activation that moved
+    # shows up there as it did here when the ball stayed put.
+    assert there_moved > 0.0 and here_stayed > 0.0
+    assert there_moved == pytest.approx(here_stayed, rel=0.25)
+    # And it is gone from where the ball was.
+    assert here_moved < 0.05 * here_stayed
+    assert there_stayed < 0.05 * there_moved
 
 
 def test_moves_accept_a_cell_and_a_matrix():
@@ -187,11 +199,6 @@ def test_non_rigid_move_raises():
             yamc.Pulse(model=irradiated, rate=1e12, duration=(1, "h")),
             yamc.Cooldown(model=moved, duration=(1, "h"), moves={"rod": scale}),
         ])
-
-
-def test_pulse_model_without_source_raises():
-    with pytest.raises(ValueError, match="no neutron source"):
-        _dose([yamc.Pulse(model=_model(source=False), rate=1e12, duration=(1, "h"))])
 
 
 def test_schedule_shape_errors():

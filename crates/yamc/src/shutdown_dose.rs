@@ -198,6 +198,9 @@ pub(crate) struct Birth {
 /// are turned into names.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RawBirth {
+    /// Global index of the source history that made it, so the births can be
+    /// put in an order that does not depend on thread scheduling.
+    pub history: u64,
     pub position: [f64; 3],
     pub energy: f64,
     pub weight: f64,
@@ -214,12 +217,15 @@ pub(crate) struct Captured {
 }
 
 impl Captured {
-    /// Name the raw births' parents from the run's registry.
+    /// Name the raw births' parents from the run's registry, in history order
+    /// (stable, so a history's births keep the order it made them in): the
+    /// same seed then gives the same replay whatever the thread count.
     pub(crate) fn from_raw(
-        raw: Vec<RawBirth>,
+        mut raw: Vec<RawBirth>,
         registry: &yamc_nuclide::nuclide_registry::NuclideRegistry,
         histories: u64,
     ) -> Self {
+        raw.sort_by_key(|b| b.history);
         let mut index: HashMap<NuclideId, u16> = HashMap::new();
         let mut parents = Vec::new();
         let mut births = Vec::with_capacity(raw.len());

@@ -2767,6 +2767,7 @@ impl Model {
                                         };
                                         if let Some(cell) = cell {
                                             pool[thread_idx].lock().push(RawBirth {
+                                                history: global_particle_index,
                                                 position: particle.position,
                                                 energy: particle.energy,
                                                 weight: particle.weight,

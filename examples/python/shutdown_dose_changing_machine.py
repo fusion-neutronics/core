@@ -6,17 +6,17 @@ plug. The campaign is
 1. a DD phase (2.45 MeV neutrons), with the port plug out,
 2. a DT phase (14.06 MeV neutrons), with the port plug in,
 3. a day of cooling as it stands,
-4. maintenance: the port plug is pulled 150 cm out along x into a cask
+4. maintenance: the port plug is pulled 300 cm out along x to a hot-cell
    position, and the dose is watched for a week,
 5. decommissioning: the plug is taken away altogether.
 
 Each step names the Model the machine is in. Cells are matched across the
 models by name, so the plug's activation follows it when it moves, starts only
 from the DT phase (it was absent during DD), and stops counting once it is gone.
-The dose is read off the decay-photon flux in a box where a worker would stand, just
-outside the port.
+The dose is read off the decay-photon flux in the hot cell, a 50 cm box around
+the plug's parked position.
 
-Uses the ``tests/`` fixtures (Fe56 neutron + Fe photon data + the SFR chain).
+Uses the ``tests/`` fixtures (Fe54-58 neutron + Fe photon data + the SFR chain).
 
 Run (from the repo root):  python examples/python/shutdown_dose_changing_machine.py
 """
@@ -30,9 +30,14 @@ yamc.transmutation_reactions = CHAIN
 yamc.transmutation_fission_yields = CHAIN
 
 
+IRON = {"Fe54": 0.0585, "Fe56": 0.9175, "Fe57": 0.0212, "Fe58": 0.0028}
+
+
 def steel():
-    mat = yamc.Material(composition={"Fe56": 1.0}, density=7.874, temperature=294)
-    mat.read_nuclear_data({"Fe56": f"{DATA_DIR}/Fe56.arrow"},
+    """Iron with its natural isotopes: Fe54(n,p) makes Mn54 (312 d) and Fe58
+    capture makes Fe59 (44 d), so the dose outlives the hours-long Mn56."""
+    mat = yamc.Material(composition=IRON, density=7.874, temperature=294)
+    mat.read_nuclear_data({n: f"{DATA_DIR}/{n}.arrow" for n in IRON},
                           photon_data={"Fe": f"{DATA_DIR}/Fe.arrow"})
     return mat
 
@@ -60,30 +65,30 @@ def machine(plug_x=None, source_energy=None):
 
 dd_phase = machine(source_energy=2.45e6)                   # no plug yet
 dt_phase = machine(plug_x=70.0, source_energy=14.06e6)     # plug in its port
-maintenance = machine(plug_x=220.0)                        # plug pulled 150 cm out
+maintenance = machine(plug_x=370.0)                        # plug pulled 300 cm out
 decommissioned = machine()                                 # plug gone
 
 schedule = yamc.PulseSchedule([
     yamc.Pulse(model=dd_phase, rate=1e16, duration=(30, "d")),
     yamc.Pulse(model=dt_phase, rate=1e17, duration=(30, "d")),
     yamc.Cooldown(duration=(1, "d")),                      # still the DT layout
-    *[yamc.Cooldown(model=maintenance, duration=(1, "d"), moves={"port plug": (150, 0, 0)})
+    *[yamc.Cooldown(model=maintenance, duration=(1, "d"), moves={"port plug": (300, 0, 0)})
       for _ in range(7)],
     yamc.Cooldown(model=decommissioned, duration=(30, "d")),
 ])
 
-# Where a worker stands: a box beside the plug's maintenance position.
-worker = yamc.RegularRectangularMesh(lower_left=[200, -40, -20], upper_right=[240, -20, 20],
-                                     shape=[1, 1, 1])
-dose_tally = yamc.Tally(scores=["flux"], name="worker", mesh=worker, particle="photon")
+# The hot cell: a box around the plug's parked position.
+hot_cell = yamc.RegularRectangularMesh(lower_left=[345, -25, -25], upper_right=[395, 25, 25],
+                                       shape=[1, 1, 1])
+dose_tally = yamc.Tally(scores=["flux"], name="hot cell", mesh=hot_cell, particle="photon")
 
-dose = yamc.simulate_shutdown_dose(schedule, tallies=[dose_tally], total_particles=20_000)["worker"]
+dose = yamc.simulate_shutdown_dose(schedule, tallies=[dose_tally], total_particles=100_000)["hot cell"]
 
 labels = ["end of DD", "end of DT", "1 d cooled"] + [f"maint. day {d}" for d in range(1, 8)] \
     + ["decommissioned"]
 for label, t, mean, std in zip(labels, dose.times, dose.mean, dose.std_dev):
     print(f"{label:>15}  t={t / 86400:6.1f} d   flux {mean[0]:.3e} +/- {std[0]:.1e} photon-cm/s")
 
-# The plug only reaches the worker once it is pulled out next to them.
+# The plug dominates once it is parked in the hot cell.
 worst = max(dose.by_nuclide, key=lambda n: np.array(dose.by_nuclide[n])[3].sum())
 print(f"largest contributor on the first maintenance day: {worst}")
