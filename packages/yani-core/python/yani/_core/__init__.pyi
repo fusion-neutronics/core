@@ -220,17 +220,39 @@ class Cooldown:
     A cooling step: no source, the materials just decay for `duration`.
     """
     @property
+    def model(self) -> typing.Optional[typing.Any]:
+        r"""
+        The Model the machine cools in, or ``None``.
+        """
+    @property
+    def moves(self) -> builtins.dict[builtins.str, builtins.list[builtins.list[builtins.float]]]:
+        r"""
+        The moved cells, ``{name: 4x4 matrix}``.
+        """
+    @property
     def duration(self) -> builtins.float:
         r"""
         Cooldown duration in seconds.
         """
-    def __new__(cls, duration: typing.Any) -> Cooldown:
+    def __new__(cls, duration: typing.Any, model: typing.Optional[typing.Any] = None, moves: typing.Optional[typing.Any] = None) -> Cooldown:
         r"""
         Create a cooling step.
         
         Args:
             duration: A number of seconds, or a ``(value, unit)`` tuple such as
                 ``(7, "d")``. Units: s, min, h, d, a (year).
+            model: The yani ``Model`` the machine is in while it cools, for
+                ``yamc.simulate_shutdown_dose``: the decay photons of every
+                earlier irradiation are transported through its geometry. It
+                needs no source. Cells absent from it have been removed and no
+                longer emit; a cell of the same name is the same component. A
+                later step without a ``model`` stays in this one.
+            moves: Cells of ``model`` that sit away from their reference
+                position (where they were built in the model they were
+                irradiated in, unless that step moved them too), as
+                ``{cell or cell name: (dx, dy, dz)}`` in cm or a 4x4 rigid
+                transformation matrix. The activation moves with the cell;
+                ``model`` must already hold the cell at its moved position.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -2313,6 +2335,16 @@ class Pulse:
     for `duration`.
     """
     @property
+    def model(self) -> typing.Optional[typing.Any]:
+        r"""
+        The Model this pulse irradiates, or ``None``.
+        """
+    @property
+    def moves(self) -> builtins.dict[builtins.str, builtins.list[builtins.list[builtins.float]]]:
+        r"""
+        The moved cells, ``{name: 4x4 matrix}``.
+        """
+    @property
     def source(self) -> typing.Optional[typing.Any]:
         r"""
         The neutron source active during this pulse, or ``None`` if sourceless.
@@ -2337,7 +2369,7 @@ class Pulse:
         r"""
         Pulse duration in seconds.
         """
-    def __new__(cls, rate: builtins.float, duration: typing.Any, source: typing.Optional[typing.Any] = None, flux_std_dev: typing.Optional[typing.Sequence[builtins.float]] = None, flux_covariance: typing.Optional[typing.Sequence[typing.Sequence[builtins.float]]] = None) -> Pulse:
+    def __new__(cls, rate: builtins.float, duration: typing.Any, source: typing.Optional[typing.Any] = None, flux_std_dev: typing.Optional[typing.Sequence[builtins.float]] = None, flux_covariance: typing.Optional[typing.Sequence[typing.Sequence[builtins.float]]] = None, model: typing.Optional[typing.Any] = None, moves: typing.Optional[typing.Any] = None) -> Pulse:
         r"""
         Create an irradiation pulse.
         
@@ -2376,6 +2408,15 @@ class Pulse:
                 the other. It must be symmetric and positive semi-definite, and
                 is checked. Each replica's flux perturbation is drawn through
                 its factor, so correlated bins move together.
+            model: The yani ``Model`` this pulse irradiates, for
+                ``yamc.simulate_shutdown_dose``: its geometry, materials and
+                neutron source are the machine during this pulse. Give it
+                instead of ``source``. A later step without a ``model`` stays in
+                this one.
+            moves: Cells of ``model`` that sit away from their reference
+                position, as ``{cell or cell name: (dx, dy, dz)}`` in cm or a
+                4x4 rigid transformation matrix. Only with ``model``; see
+                ``Cooldown`` for how moves work.
         """
     def __repr__(self) -> builtins.str: ...
 

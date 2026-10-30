@@ -162,6 +162,7 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(simulation::combine_results, m)?)?;
+    m.add_function(wrap_pyfunction!(simulation::simulate_shutdown_dose, m)?)?;
     m.add_function(wrap_pyfunction!(tally_reduce::reduce_mesh_tally_block, m)?)?;
     m.add_class::<variance_reduction::PySurvivalBiasing>()?;
     m.add_class::<variance_reduction::PyWeightWindowBounds>()?;

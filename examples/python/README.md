@@ -57,6 +57,7 @@ smoke test (see [Exercised by CI / pre-commit](#exercised-by-ci--pre-commit)).
 - [`transmutation_coupled_csg_vs_mesh.py`](transmutation_coupled_csg_vs_mesh.py) -- **(mesh)** coupled transmutation compared on CSG vs CAD-mesh geometry.
 - [`transmutation_independent_csg_vs_mesh.py`](transmutation_independent_csg_vs_mesh.py) -- **(mesh)** independent (transport-once) transmutation on CSG vs CAD-mesh geometry.
 - [`material_transmute_with_flux_from_tally.py`](material_transmute_with_flux_from_tally.py) -- standalone transmutation driven by a multigroup flux extracted from a tally.
+- [`shutdown_dose_changing_machine.py`](shutdown_dose_changing_machine.py) -- shutdown dose rate with `yamc.simulate_shutdown_dose` over a DD then DT campaign, a component pulled out for maintenance and then removed: a different model per step, with the activation following the moved cell.
 
 ## Photon transport & heating
 
@@ -86,7 +87,8 @@ data-light. Keep them runnable when changing the public API.
   [`nuclide_example.py`](nuclide_example.py), [`tbr.py`](tbr.py),
   [`usage_in_python.py`](usage_in_python.py),
   [`usage_in_python_cube.py`](usage_in_python_cube.py),
-  [`get_particle_tracks.py`](get_particle_tracks.py).
+  [`get_particle_tracks.py`](get_particle_tracks.py),
+  [`shutdown_dose_changing_machine.py`](shutdown_dose_changing_machine.py).
   The MPI test job additionally runs [`tbr.py`](tbr.py) under `mpirun`.
   ([`simple_tokamak.py`](simple_tokamak.py) is listed but commented out -- it
   runs 1M particles and OOMs the CI runner.)

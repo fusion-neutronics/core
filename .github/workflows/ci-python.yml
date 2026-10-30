@@ -985,6 +985,7 @@ jobs:
           # runner (~7 GB available). Runs fine locally; skip in CI.
           # python examples/python/simple_tokamak.py
           python examples/python/get_particle_tracks.py
+          python examples/python/shutdown_dose_changing_machine.py
 
 
   # The only job that puts BOTH wheels in one interpreter.
