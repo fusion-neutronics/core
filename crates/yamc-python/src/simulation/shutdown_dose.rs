@@ -28,16 +28,20 @@ use crate::tally::PyTally;
 /// they have the same name, so name every cell that activates.
 ///
 /// For every model a pulse irradiates in, the neutrons are transported once
-/// and each decay photon (D1S) is recorded where it is born. For every pair of
-/// irradiation and observation configurations those photons are then moved
-/// with their cells and transported through the observation step's model,
-/// with ``tallies`` binned by parent radionuclide. The per-radionuclide time
-/// correction of each irradiation's own pulses then gives the dose at the end
-/// of every step. No step of the schedule needs a transport run of its own.
+/// and each decay photon (D1S) is recorded where it is born. For every
+/// configuration the machine is observed in, each neutron history's photons,
+/// from every irradiated model, are then moved with their cells and
+/// transported through that model as one photon history, and that history's
+/// dose at the end of every step it observes is formed from the
+/// per-radionuclide time correction factors of each irradiation's own pulses.
+/// No step of the schedule needs a transport run of its own.
 ///
-/// Runs on the CPU, on one process. ``std_dev`` is the photon transport's
-/// statistical error, given the recorded decay photons; the neutron
-/// transport's is not included.
+/// ``std_dev`` is the standard error of the whole calculation: the spread of
+/// those per-history doses, so it covers the neutron transport and the photon
+/// transport, and the correlation between radionuclides and between
+/// irradiations that one neutron history carries. For a machine that never
+/// changes it is the error of the single-model D1S run. Runs on the CPU, on
+/// one process.
 ///
 /// Args:
 ///     schedule: A ``PulseSchedule`` whose steps name models.
@@ -46,8 +50,8 @@ use crate::tally::PyTally;
 ///         irradiations make). Each needs a unique ``name``, and must be valid
 ///         in every model the schedule observes (a cell filter's cells must
 ///         exist in each).
-///     total_particles: Histories per transport run: each irradiated model's
-///         neutron run and each photon run.
+///     total_particles: Neutron histories per irradiated model. Every photon
+///         run then has one history per neutron history.
 ///     seed: Base random seed.
 ///     threads: Worker threads; ``None`` uses all cores.
 ///

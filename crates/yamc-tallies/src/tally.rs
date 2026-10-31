@@ -421,7 +421,7 @@ impl Tally {
     }
 
     /// Get the number of mesh bins (1 if no mesh filter)
-    fn num_mesh_bins(&self) -> usize {
+    pub fn num_mesh_bins(&self) -> usize {
         if let Some(f) = self.get_mesh_filter() {
             return f.num_bins();
         }

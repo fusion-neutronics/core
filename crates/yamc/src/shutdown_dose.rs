@@ -8,40 +8,50 @@
 //!
 //! 1. **Capture.** For every model a pulse irradiates in, the neutrons are
 //!    transported with decay photons on, but each decay photon is recorded at
-//!    birth (position, energy, weight, parent radionuclide, birth cell) instead
-//!    of being transported.
-//! 2. **Replay.** For every (irradiation stage, observation stage) pair, those
-//!    births are moved with their cell, dropped if their cell is absent, and
-//!    emitted as the photon source of the observation stage's model, with the
-//!    user's tallies binned by parent radionuclide.
+//!    birth (source history, position, direction, energy, weight, parent
+//!    radionuclide, birth cell) instead of being transported.
+//! 2. **Replay.** For every observation stage, replay history `i` transports
+//!    every decay photon that neutron history `i` made in every irradiated
+//!    model, once each and at its own weight, moved with its cell (or dropped
+//!    if its cell is gone).
 //!
-//! A replay tally is per source neutron of its irradiation stage, exactly what
-//! a single-model D1S tally is, so the existing per-radionuclide time
-//! correction applies unchanged: the dose at the end of step `s` is the sum
-//! over irradiation stages `c` of `TCF_c(s) . R(c, stage(s))`, where `TCF_c`
-//! uses only the pulse rates of stage `c`. The replay runs once per stage
-//! pair, not once per observation time.
+//! The estimator is exact, statistics included. The dose at the end of step `s`
+//! is `D(s) = sum_c sum_p TCF_{c,p}(s) . x_{c,p}`, over the irradiation stages
+//! `c` (whose time correction factors come from their own pulses) and parent
+//! radionuclides `p`, where `x_{c,p}` is the tally of the photons stage `c`'s
+//! capture made with parent `p`. Each replay history's own `D_i(s)` is formed
+//! at the end of the history (a [`BinFold`] on the per-history scores), and the
+//! statistics are those of `D_i(s)` over the histories. The histories are
+//! independent and identically distributed, so the standard error is that of
+//! the whole calculation: the neutron transport's, the photon transport's,
+//! the correlation between parent nuclides scored by one history and between
+//! irradiation stages sharing a capture, and between captures of different
+//! models whose history `i` shares its random numbers. For a machine that never
+//! changes this is the single-model D1S estimator, so the two agree in mean and
+//! in standard deviation. Nothing is resampled, so there is nothing to tune.
+//!
+//! The replay draws its random numbers from a stream independent of the
+//! capture's: the photons of history `i` were made from the capture's history
+//! `i` stream, and transporting them on it again would correlate the photon
+//! walk with the neutron history that made it, which biases the result.
 //!
 //! Cells are matched across models by name. A stage's `placements` say where a
 //! named cell sits in that stage's model relative to its reference position,
 //! as a rigid transform; a birth made under placement `T_c` is moved by
-//! `T_o . T_c^-1` into the observation stage. Geometry is not moved for the
-//! user: the observation model must contain the cell at its new position, and
-//! every moved birth is checked to land in the cell of the same name.
-//!
-//! Standard deviations are the photon transport's, conditional on the captured
-//! births. Replays that share a capture are correlated through it, and that
-//! correlation is not propagated.
+//! `T_o . T_c^-1` into the observation stage (its direction by the rotation).
+//! Geometry is not moved for the user: the observation model must contain the
+//! cell at its new position, and every moved birth is checked to land in the
+//! cell of the same name.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-use rand::RngExt;
-
 use yamc_nuclide::config::ChainUse;
 use yamc_nuclide::nuclide_registry::NuclideId;
 use yamc_particle::particle::{Particle, ParticleType};
+use yamc_physics::util::bank::ParticleBank;
 use yamc_tallies::filter::Filter;
+use yamc_tallies::welford::{BinFold, WelfordTallyStats};
 use yamc_tallies::{ParentNuclideFilter, Tally};
 
 use crate::model::{Model, TransportSettings};
@@ -118,6 +128,11 @@ impl Placement {
         })
     }
 
+    /// The placed direction of reference direction `d`: the rotation alone.
+    pub fn rotate(&self, d: [f64; 3]) -> [f64; 3] {
+        std::array::from_fn(|i| self.0[i][0] * d[0] + self.0[i][1] * d[1] + self.0[i][2] * d[2])
+    }
+
     /// The inverse motion: rotation transposed, translation `-R^T t`.
     pub fn inverse(&self) -> Self {
         let r = |i: usize, j: usize| self.0[j][i];
@@ -179,16 +194,16 @@ pub struct ShutdownDose {
     pub radionuclides: Vec<String>,
 }
 
-/// A tally's flat mean and standard deviation.
-type MeanStd = (Vec<f64>, Vec<f64>);
-
 /// One decay photon recorded at birth by a capture run.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Birth {
+    /// Global index of the neutron history that made it.
+    pub history: u64,
     pub position: [f64; 3],
+    pub direction: [f64; 3],
     pub energy: f64,
     pub weight: f64,
-    /// Index into [`Captured::parents`].
+    /// Index into [`Captured::parents`]; in a [`ReplayPlan`], its class.
     pub parent: u16,
     /// Birth cell index in the capture model's geometry.
     pub cell: u32,
@@ -198,17 +213,16 @@ pub(crate) struct Birth {
 /// are turned into names.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RawBirth {
-    /// Global index of the source history that made it, so the births can be
-    /// put in an order that does not depend on thread scheduling.
     pub history: u64,
     pub position: [f64; 3],
+    pub direction: [f64; 3],
     pub energy: f64,
     pub weight: f64,
     pub parent: NuclideId,
     pub cell: u32,
 }
 
-/// Every decay photon a capture run made, per source neutron history.
+/// Every decay photon a capture run made, in history order.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Captured {
     pub births: Vec<Birth>,
@@ -218,8 +232,8 @@ pub(crate) struct Captured {
 
 impl Captured {
     /// Name the raw births' parents from the run's registry, in history order
-    /// (stable, so a history's births keep the order it made them in): the
-    /// same seed then gives the same replay whatever the thread count.
+    /// (stable, so a history's births keep the order it made them in, and a
+    /// seed gives the same result whatever the thread count).
     pub(crate) fn from_raw(
         mut raw: Vec<RawBirth>,
         registry: &yamc_nuclide::nuclide_registry::NuclideRegistry,
@@ -236,7 +250,9 @@ impl Captured {
                 next as u16
             });
             births.push(Birth {
+                history: b.history,
                 position: b.position,
+                direction: b.direction,
                 energy: b.energy,
                 weight: b.weight,
                 parent,
@@ -251,65 +267,55 @@ impl Captured {
     }
 }
 
-/// The photon source of a replay run: births drawn in proportion to their
-/// weight, each launched isotropically with the same weight `weight`, which
-/// is the births' total weight per source neutron of the capture. A replay
-/// tally is therefore per source neutron, as a single-model D1S tally is.
+/// What a replay transports and how it scores: the photons of every capture
+/// as they sit in the observation stage, in history order and tagged with
+/// their class (irradiation stage x parent), the class names the tallies' and
+/// photons' parent tags use, and each tally's fold onto the steps.
 #[derive(Debug, Clone)]
-pub(crate) struct ReplaySource {
+pub(crate) struct ReplayPlan {
     births: Vec<Birth>,
-    cumulative: Vec<f64>,
-    pub(crate) parents: Vec<String>,
-    weight: f64,
+    pub(crate) classes: Vec<String>,
+    pub(crate) folds: Vec<Option<Arc<BinFold>>>,
+}
+
+impl ReplayPlan {
+    /// Put every photon neutron history `history` made into `bank`, each on a
+    /// stream of its own derived from the replay history's `seed`. `ids` are
+    /// the run's ids of `classes`.
+    pub(crate) fn load(&self, history: u64, bank: &mut ParticleBank, seed: u32, ids: &[NuclideId]) {
+        let start = self.births.partition_point(|b| b.history < history);
+        let end = start + self.births[start..].partition_point(|b| b.history == history);
+        for (j, b) in self.births[start..end].iter().enumerate() {
+            let mut p = Particle::new(b.position, b.direction, b.energy);
+            p.particle_type = ParticleType::Photon;
+            p.weight = b.weight;
+            p.parent_nuclide = Some(ids[b.parent as usize]);
+            bank.add_source_particle(p, yamc_rng::secondary_seed(seed, j as u32));
+        }
+    }
+}
+
+/// A replay's folded statistics and raw sums, per tally.
+pub(crate) struct ReplayStats {
+    pub per_tally: Vec<WelfordTallyStats>,
+    pub raw_sums: Vec<Option<Vec<f64>>>,
 }
 
 /// What `Model::run_staged` does with decay photons, beyond a normal run.
 pub(crate) enum StagedRun<'a> {
-    /// Record each decay photon at birth into the vec instead of tracking it.
+    /// Record each decay photon at birth into `out` instead of tracking it.
     Capture(&'a mut Option<Captured>),
-    /// Draw the source particles from these births instead of `sources`.
-    Replay(&'a ReplaySource),
+    /// Make each history the photons `plan` holds for it instead of a source
+    /// particle, and hand back the folded statistics in `out`.
+    Replay {
+        plan: &'a ReplayPlan,
+        out: &'a mut Option<ReplayStats>,
+    },
 }
 
-impl ReplaySource {
-    fn new(births: Vec<Birth>, parents: Vec<String>, histories: u64) -> Self {
-        let mut running = 0.0;
-        let cumulative = births
-            .iter()
-            .map(|b| {
-                running += b.weight;
-                running
-            })
-            .collect();
-        Self {
-            births,
-            cumulative,
-            parents,
-            weight: running / histories.max(1) as f64,
-        }
-    }
-
-    fn total(&self) -> f64 {
-        self.cumulative.last().copied().unwrap_or(0.0)
-    }
-
-    /// One replay photon; `ids` maps `parents` to the run's nuclide ids.
-    pub(crate) fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R, ids: &[NuclideId]) -> Particle {
-        let threshold = rng.random::<f64>() * self.total();
-        let i = self
-            .cumulative
-            .partition_point(|&c| c <= threshold)
-            .min(self.births.len() - 1);
-        let b = &self.births[i];
-        let mu = 2.0 * rng.random::<f64>() - 1.0;
-        let phi = std::f64::consts::TAU * rng.random::<f64>();
-        let s = (1.0 - mu * mu).max(0.0).sqrt();
-        let mut p = Particle::new(b.position, [s * phi.cos(), s * phi.sin(), mu], b.energy);
-        p.particle_type = ParticleType::Photon;
-        p.weight = self.weight;
-        p.parent_nuclide = Some(ids[b.parent as usize]);
-        p
-    }
+/// The base seed of the replay runs: a stream independent of the capture's.
+fn replay_seed(seed: u64) -> u64 {
+    yamc_rng::expand_seed(yamc_rng::fold_base_seed(seed ^ 0xD15C_0DE5_0F5D_1D00))
 }
 
 /// Cell name -> index, refusing a name used twice (it could not say which
@@ -339,8 +345,7 @@ fn transfer(
     to: &Stage,
 ) -> Result<Vec<Birth>, String> {
     let (src, dst) = (&models[from.model], &models[to.model]);
-    let unmoved = from.model == to.model && from.placements == to.placements;
-    if unmoved {
+    if from.model == to.model && from.placements == to.placements {
         return Ok(cap.births.clone());
     }
     let dst_names = cell_names(dst)?;
@@ -390,6 +395,7 @@ fn transfer(
         }
         out.push(Birth {
             position,
+            direction: motion.rotate(b.direction),
             cell: dst_cell as u32,
             ..*b
         });
@@ -397,21 +403,26 @@ fn transfer(
     Ok(out)
 }
 
-/// `tally` with a parent-nuclide filter over `parents` appended (the bin
+/// `tally` with a parent-nuclide filter over `classes` appended (the bin
 /// layout `Tally(parent_nuclides=...)` builds), fresh of any accumulation.
-fn binned(tally: &Tally, parents: &[String]) -> Result<Arc<Tally>, String> {
+fn binned(tally: &Tally, classes: &[String]) -> Result<Arc<Tally>, String> {
+    let name = tally.name.as_deref().unwrap_or("unnamed");
     if tally.get_parent_nuclide_filter().is_some() {
         return Err(format!(
-            "tally '{}' already has parent_nuclides; leave them out, the shutdown dose \
-             bins by every radionuclide the irradiations make",
-            tally.name.as_deref().unwrap_or("unnamed")
+            "tally '{name}' already has parent_nuclides; leave them out, the shutdown dose \
+             bins by every radionuclide the irradiations make"
+        ));
+    }
+    if tally.covariance {
+        return Err(format!(
+            "tally '{name}' asks for its covariance, which the shutdown dose does not report"
         ));
     }
     let mut config = tally.to_serde();
     config
         .filters
         .push(Filter::ParentNuclide(ParentNuclideFilter::new(
-            parents.to_vec(),
+            classes.to_vec(),
         )));
     let t = Tally::from(config);
     t.validate()?;
@@ -422,9 +433,11 @@ fn binned(tally: &Tally, parents: &[String]) -> Result<Arc<Tally>, String> {
 /// `stages` over `models`.
 ///
 /// Every step is observed at its end, in its own stage. A model needs a
-/// neutron source only if a pulse irradiates in it; tallies are attached to
-/// every observation stage's model, binned by parent radionuclide here. The
-/// `models` are not modified. See the module docs for the method.
+/// neutron source only if a pulse irradiates in it; tallies are scored in
+/// every observation stage's model. The `models` are not modified. The run
+/// needs `settings.total_particles`: every capture transports that many
+/// neutron histories, and every replay that many photon histories (one per
+/// neutron history). See the module docs for the method.
 pub fn simulate_shutdown_dose(
     models: &[Model],
     stages: &[Stage],
@@ -437,6 +450,13 @@ pub fn simulate_shutdown_dose(
     }
     if tallies.is_empty() {
         return Err("give at least one tally to score the dose in".into());
+    }
+    if settings.total_particles.is_none() || settings.max_runtime.is_some() {
+        return Err(
+            "the shutdown dose needs a fixed total_particles and no max_runtime: each \
+             photon history replays the neutron history of the same index"
+                .into(),
+        );
     }
     for t in tallies {
         // Checked before any transport rather than when the tallies are binned.
@@ -459,17 +479,21 @@ pub fn simulate_shutdown_dose(
         }
     }
     // Irradiation stages (a pulse with a rate) and observation stages (all).
-    let campaigns: BTreeSet<usize> = steps
+    let campaigns: Vec<usize> = steps
         .iter()
         .filter(|s| s.rate > 0.0)
         .map(|s| s.stage)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect();
     let observed: BTreeSet<usize> = steps.iter().map(|s| s.stage).collect();
     if campaigns.is_empty() {
         return Err("the schedule irradiates nothing: no pulse has a positive rate".into());
     }
 
-    // 1. Capture once per irradiated model.
+    // 1. Capture once per irradiated model, all on the same seed: history `i`
+    //    of every capture is replayed together, so whatever their shared
+    //    random numbers correlate is inside one replay history.
     let mut captures: BTreeMap<usize, Captured> = BTreeMap::new();
     for &c in &campaigns {
         let m = stages[c].model;
@@ -494,147 +518,162 @@ pub fn simulate_shutdown_dose(
         model.run_staged(settings, StagedRun::Capture(&mut captured))?;
         captures.insert(m, captured.ok_or("capture run recorded nothing")?);
     }
+    let histories = captures.values().next().map_or(0, |c| c.histories);
+    if captures.values().any(|c| c.histories != histories) {
+        return Err("the capture runs transported different numbers of histories".into());
+    }
 
-    // Every radionuclide any irradiation makes, sorted: the tallies' parent bins.
+    // Every radionuclide any irradiation makes, sorted.
     let parents: Vec<String> = captures
         .values()
         .flat_map(|c| c.parents.iter().cloned())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-
+    let n_p = parents.len();
     let mut times = Vec::with_capacity(steps.len());
     let mut elapsed = 0.0;
     for s in steps {
         elapsed += s.duration;
         times.push(elapsed);
     }
-    if parents.is_empty() {
-        // Nothing the irradiations make emits a decay photon: zero dose.
-        let tallies = tallies
-            .iter()
-            .map(|t| {
-                let w = binned(t, &[])?.num_bins();
-                Ok(DoseTally {
-                    mean: vec![vec![0.0; w]; steps.len()],
-                    std_dev: vec![vec![0.0; w]; steps.len()],
-                    by_nuclide: BTreeMap::new(),
-                })
+    let mut out: Vec<DoseTally> = tallies
+        .iter()
+        .map(|t| {
+            let w = binned(t, &[])?.num_bins();
+            Ok(DoseTally {
+                mean: vec![vec![0.0; w]; steps.len()],
+                std_dev: vec![vec![0.0; w]; steps.len()],
+                by_nuclide: parents
+                    .iter()
+                    .map(|p| (p.clone(), vec![vec![0.0; w]; steps.len()]))
+                    .collect(),
             })
-            .collect::<Result<_, String>>()?;
+        })
+        .collect::<Result<_, String>>()?;
+    if n_p == 0 {
+        // Nothing the irradiations make emits a decay photon: zero dose.
         return Ok(ShutdownDose {
             times,
-            tallies,
+            tallies: out,
             radionuclides: parents,
         });
     }
 
-    // 2. Replay each (campaign, observation) pair, per source neutron.
-    let n_scores: Vec<usize> = tallies.iter().map(|t| t.scores.len()).collect();
-    // (campaign, observation) -> per tally (mean, std_dev).
-    let mut replays: BTreeMap<(usize, usize), Vec<MeanStd>> = BTreeMap::new();
-    for &c in &campaigns {
-        let cap = &captures[&stages[c].model];
-        for &o in &observed {
-            let births = transfer(cap, models, &stages[c], &stages[o])?;
-            let fresh: Vec<Arc<Tally>> = tallies
-                .iter()
-                .map(|t| binned(t, &parents))
-                .collect::<Result<_, _>>()?;
-            let src = ReplaySource::new(births, cap.parents.clone(), cap.histories);
-            let rows = if src.total() > 0.0 {
-                let mut model = models[stages[o].model].clone();
-                model.sources = Vec::new();
-                model.use_decay_photons = false;
-                model.transport_secondary_photons = true;
-                model.tallies = fresh.clone();
-                model.convergence_targets = Vec::new();
-                model.run_staged(settings, StagedRun::Replay(&src))?;
-                fresh
-                    .iter()
-                    .map(|t| {
-                        let r = t.finalize();
-                        (r.mean, r.standard_deviation)
-                    })
-                    .collect()
-            } else {
-                // Nothing reaches this stage (all its emitters were removed).
-                fresh
-                    .iter()
-                    .map(|t| (vec![0.0; t.num_bins()], vec![0.0; t.num_bins()]))
-                    .collect()
-            };
-            replays.insert((c, o), rows);
-        }
-    }
-
-    // 3. Time-correct each pair and sum into the steps it observes.
+    // 2. Each irradiation stage's time correction factors, from its own pulses.
     let chain = yani_transmute::load_configured_chain(ChainUse::Activation)
         .map_err(|e| format!("Failed to load transmutation chain for decay photons: {e}"))?
         .chain;
     let timesteps: Vec<f64> = steps.iter().map(|s| s.duration).collect();
-    let width = |k: usize| replays.values().next().map_or(0, |r| r[k].0.len());
-    let mut out: Vec<DoseTally> = (0..tallies.len())
-        .map(|k| {
-            let w = width(k) / parents.len();
-            DoseTally {
-                mean: vec![vec![0.0; w]; steps.len()],
-                std_dev: vec![vec![0.0; w]; steps.len()],
-                by_nuclide: BTreeMap::new(),
-            }
+    let tcfs: Vec<HashMap<String, Vec<f64>>> = campaigns
+        .iter()
+        .map(|&c| {
+            let rates: Vec<f64> = steps
+                .iter()
+                .map(|s| if s.stage == c { s.rate } else { 0.0 })
+                .collect();
+            yani_decay::time_correction_factors(&parents, &timesteps, &rates, &chain)
         })
+        .collect::<Result<_, _>>()?;
+    // Class k = (irradiation stage ci, parent pi) = ci * n_p + pi.
+    let classes: Vec<String> = (0..campaigns.len())
+        .flat_map(|ci| parents.iter().map(move |p| format!("{p}@{ci}")))
         .collect();
-    for &c in &campaigns {
-        let rates: Vec<f64> = steps
-            .iter()
-            .map(|s| if s.stage == c { s.rate } else { 0.0 })
+    let replay_settings = TransportSettings {
+        seed: replay_seed(settings.seed),
+        total_particles: Some(histories as usize),
+        ..settings.clone()
+    };
+
+    // 3. One replay per observation stage, folded onto the steps it observes.
+    for &o in &observed {
+        let rows: Vec<usize> = (0..steps.len()).filter(|&i| steps[i].stage == o).collect();
+        let mut births = Vec::new();
+        for (ci, &c) in campaigns.iter().enumerate() {
+            let cap = &captures[&stages[c].model];
+            let global: Vec<u16> = cap
+                .parents
+                .iter()
+                .map(|p| (ci * n_p + parents.binary_search(p).expect("collected above")) as u16)
+                .collect();
+            births.extend(
+                transfer(cap, models, &stages[c], &stages[o])?
+                    .into_iter()
+                    .map(|b| Birth {
+                        parent: global[b.parent as usize],
+                        ..b
+                    }),
+            );
+        }
+        if births.is_empty() {
+            continue; // every emitter was removed: zero dose, exactly
+        }
+        births.sort_by_key(|b| b.history);
+        // coeffs[k][row]: class k's factor at the end of step rows[row].
+        let coeffs: Vec<Vec<f64>> = (0..classes.len())
+            .map(|k| {
+                let tcf = &tcfs[k / n_p][&parents[k % n_p]];
+                rows.iter().map(|&s| tcf[s + 1]).collect()
+            })
             .collect();
-        let tcf = yani_decay::time_correction_factors(&parents, &timesteps, &rates, &chain)?;
-        for &o in &observed {
-            let rows: Vec<usize> = (0..steps.len()).filter(|&i| steps[i].stage == o).collect();
-            let idx: Vec<usize> = rows.iter().map(|i| i + 1).collect();
-            for (k, (mean, std)) in replays[&(c, o)].iter().enumerate() {
-                let (sum_m, sum_s) = yani_decay::apply_time_correction(
-                    mean,
-                    std,
-                    &parents,
-                    n_scores[k],
-                    &tcf,
-                    &idx,
-                    true,
-                )?;
-                let (per_m, _) = yani_decay::apply_time_correction(
-                    mean,
-                    std,
-                    &parents,
-                    n_scores[k],
-                    &tcf,
-                    &idx,
-                    false,
-                )?;
-                let d = &mut out[k];
-                for (j, &r) in rows.iter().enumerate() {
-                    for (b, (&m, &s)) in sum_m[j].iter().zip(&sum_s[j]).enumerate() {
-                        d.mean[r][b] += m;
-                        // Independent replays: variances add.
-                        d.std_dev[r][b] += s * s;
-                    }
-                    let stride = per_m[j].len() / parents.len();
-                    for (p, name) in parents.iter().enumerate() {
-                        let entry = d
-                            .by_nuclide
-                            .entry(name.clone())
-                            .or_insert_with(|| vec![vec![0.0; stride]; steps.len()]);
-                        for (b, &v) in per_m[j][p * stride..(p + 1) * stride].iter().enumerate() {
-                            entry[r][b] += v;
-                        }
-                    }
+        let fresh: Vec<Arc<Tally>> = tallies
+            .iter()
+            .map(|t| binned(t, &classes))
+            .collect::<Result<_, _>>()?;
+        let folds = fresh
+            .iter()
+            .map(|t| {
+                let inner = t.num_energy_bins() * t.num_mesh_bins();
+                BinFold::new(t.num_bins(), inner, rows.len(), &coeffs).map(|f| Some(Arc::new(f)))
+            })
+            .collect::<Result<_, _>>()?;
+        let plan = ReplayPlan {
+            births,
+            classes: classes.clone(),
+            folds,
+        };
+        let mut model = models[stages[o].model].clone();
+        model.sources = Vec::new();
+        model.use_decay_photons = false;
+        model.transport_secondary_photons = true;
+        model.tallies = fresh.clone();
+        model.convergence_targets = Vec::new();
+        let mut stats = None;
+        model.run_staged(
+            &replay_settings,
+            StagedRun::Replay {
+                plan: &plan,
+                out: &mut stats,
+            },
+        )?;
+        let stats = stats.ok_or("replay run returned no statistics")?;
+        for (k, (d, t)) in out.iter_mut().zip(&fresh).enumerate() {
+            let s = &stats.per_tally[k];
+            let std = s.std_err();
+            let w = d.mean[0].len();
+            for (r, &step) in rows.iter().enumerate() {
+                d.mean[step].copy_from_slice(&s.mean[r * w..(r + 1) * w]);
+                d.std_dev[step].copy_from_slice(&std[r * w..(r + 1) * w]);
+            }
+            // Per-parent means: linear, so from the raw sums.
+            let raw = stats.raw_sums[k]
+                .as_ref()
+                .ok_or("replay kept no raw sums")?;
+            let inner = t.num_energy_bins() * t.num_mesh_bins();
+            let n = histories.max(1) as f64;
+            for (idx, &x) in raw.iter().enumerate().filter(|(_, x)| **x != 0.0) {
+                let i = idx % inner;
+                let k = (idx / inner) % classes.len();
+                let u = (idx / (inner * classes.len())) * inner + i;
+                let rows_of = d
+                    .by_nuclide
+                    .get_mut(&parents[k % n_p])
+                    .expect("every parent");
+                for (r, &step) in rows.iter().enumerate() {
+                    rows_of[step][u] += coeffs[k][r] * x / n;
                 }
             }
         }
-    }
-    for d in &mut out {
-        d.std_dev.iter_mut().flatten().for_each(|v| *v = v.sqrt());
     }
     Ok(ShutdownDose {
         times,
@@ -706,34 +745,76 @@ mod tests {
     }
 
     #[test]
-    fn replay_weight_is_total_per_history_and_sampling_follows_weight() {
-        use rand::SeedableRng;
-        let birth = |x: f64, w: f64| Birth {
-            position: [x, 0.0, 0.0],
+    fn rotation_turns_directions_and_leaves_them_unit() {
+        let r = Placement::new([
+            [0.0, -1.0, 0.0, 10.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+        .unwrap();
+        assert!(close(r.rotate([1.0, 0.0, 0.0]), [0.0, 1.0, 0.0]));
+        // Translations do not touch directions.
+        let t = Placement::translation([5.0, 5.0, 5.0]).unwrap();
+        assert!(close(t.rotate([0.0, 0.6, 0.8]), [0.0, 0.6, 0.8]));
+    }
+
+    fn birth(history: u64, parent: u16) -> Birth {
+        Birth {
+            history,
+            position: [history as f64, 0.0, 0.0],
+            direction: [0.0, 0.0, 1.0],
             energy: 1e6,
-            weight: w,
-            parent: 0,
+            weight: 0.25 * (parent as f64 + 1.0),
+            parent,
             cell: 0,
-        };
-        let src = ReplaySource::new(
-            vec![birth(0.0, 1.0), birth(1.0, 3.0)],
-            vec!["Mn56".into()],
-            8,
-        );
-        assert_eq!(src.weight, 0.5);
-        let mut reg = yamc_nuclide::nuclide_registry::NuclideRegistry::new();
-        let ids = [reg.intern("Mn56")];
-        let mut rng = rand::rngs::StdRng::seed_from_u64(3);
-        let n = 20_000;
-        let mut ones = 0;
-        for _ in 0..n {
-            let p = src.sample(&mut rng, &ids);
-            assert_eq!(p.particle_type, ParticleType::Photon);
-            assert_eq!(p.parent_nuclide, Some(ids[0]));
-            assert!((p.direction.iter().map(|d| d * d).sum::<f64>() - 1.0).abs() < 1e-12);
-            ones += (p.position[0] == 1.0) as usize;
         }
-        let frac = ones as f64 / n as f64;
-        assert!((frac - 0.75).abs() < 0.02, "{frac}");
+    }
+
+    #[test]
+    fn a_replay_history_is_every_photon_of_its_neutron_history() {
+        let plan = ReplayPlan {
+            births: vec![birth(0, 0), birth(2, 1), birth(2, 0), birth(5, 1)],
+            classes: vec!["Mn56@0".into(), "Mn54@0".into()],
+            folds: Vec::new(),
+        };
+        let mut reg = yamc_nuclide::nuclide_registry::NuclideRegistry::new();
+        let ids: Vec<NuclideId> = plan.classes.iter().map(|c| reg.intern(c)).collect();
+        let mut bank = ParticleBank::new();
+        for (history, expect) in [(0, 1), (1, 0), (2, 2), (3, 0), (5, 1), (9, 0)] {
+            bank.clear();
+            plan.load(history, &mut bank, 7, &ids);
+            let mut got = Vec::new();
+            let mut seeds = Vec::new();
+            while let Some(p) = bank.pop_particle() {
+                assert_eq!(p.particle_type, ParticleType::Photon);
+                assert_eq!(p.position[0], history as f64);
+                seeds.push(bank.walk_seed());
+                got.push(p);
+            }
+            assert_eq!(got.len(), expect, "history {history}");
+            // Each photon at its recorded weight and parent, on its own stream.
+            for p in &got {
+                let k = ids
+                    .iter()
+                    .position(|&i| Some(i) == p.parent_nuclide)
+                    .unwrap();
+                assert_eq!(p.weight, 0.25 * (k as f64 + 1.0));
+            }
+            seeds.dedup();
+            assert_eq!(seeds.len(), expect);
+        }
+    }
+
+    #[test]
+    fn replay_stream_is_not_the_capture_stream() {
+        for seed in [0, 1, 2, 12345] {
+            let r = replay_seed(seed);
+            assert_ne!(r, seed);
+            assert_ne!(
+                yamc_rng::history_seed(r, 0),
+                yamc_rng::history_seed(seed, 0)
+            );
+        }
     }
 }
