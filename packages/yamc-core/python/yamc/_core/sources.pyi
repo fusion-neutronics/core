@@ -18,6 +18,7 @@ __all__ = [
     "Isotropic",
     "Monodirectional",
     "CylindricalRing",
+    "MeshDistribution",
     "fusion_neutron_spectrum",
     "tokamak_source",
     "tokamak_ion_density",
@@ -414,6 +415,54 @@ class CylindricalRing:
         r"""
         Rich Jupyter display: the radial / azimuthal / axial distributions
         and the cylinder origin.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class MeshDistribution:
+    r"""
+    A source spread over the elements of a mesh.
+    
+    Each element emits in proportion to its strength, from a point uniform
+    within it. Pass it as ``position=`` to ``NeutronSource`` or ``PhotonSource``.
+    
+    Args:
+        mesh: A ``RegularRectangularMesh``, ``RegularCylindricalMesh`` or a
+            tet ``MeshGeometry``.
+        strengths: One non-negative strength per element (e.g. decay photons
+            per second in each voxel), in the order a tally on the mesh
+            numbers its bins, so a mesh tally's ``mean`` can be passed
+            directly. For a ``MeshGeometry`` this is one per tetrahedron.
+            Defaults to each element's volume: uniform over the mesh.
+    
+    Raises:
+        ValueError: If ``strengths`` has the wrong length, a value that is
+            NaN, infinite or negative, or sums to zero.
+    
+    Examples:
+        >>> import yamc
+        >>> mesh = yamc.RegularRectangularMesh([0, 0, 0], [10, 10, 10], [2, 1, 1])
+        >>> space = yamc.sources.MeshDistribution(mesh, strengths=[3.0, 1.0])
+        >>> source = yamc.PhotonSource(position=space, energy=1e6)
+    """
+    @property
+    def total_strength(self) -> builtins.float:
+        r"""
+        Sum of the element strengths: the source rate when they are rates, to
+        scale per-source-particle tallies by.
+        """
+    @property
+    def num_elements(self) -> builtins.int:
+        r"""
+        Number of elements in the mesh.
+        """
+    def __new__(cls, mesh: typing.Any, strengths: typing.Optional[typing.Sequence[builtins.float]] = None) -> MeshDistribution: ...
+    def sample(self) -> builtins.list[builtins.float]:
+        r"""
+        Sample a position from the distribution.
+        
+        Returns:
+            List[float]: Position vector [x, y, z] in cm.
         """
     def __repr__(self) -> builtins.str: ...
 

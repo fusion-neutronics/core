@@ -228,13 +228,7 @@ pub struct PyMeshDistribution {
 impl PyMeshDistribution {
     #[new]
     #[pyo3(signature = (mesh, strengths=None))]
-    pub fn new(
-        #[gen_stub(override_type(
-            type_repr = "RegularRectangularMesh | RegularCylindricalMesh | MeshGeometry"
-        ))]
-        mesh: &Bound<'_, PyAny>,
-        strengths: Option<Vec<f64>>,
-    ) -> PyResult<Self> {
+    pub fn new(mesh: &Bound<'_, PyAny>, strengths: Option<Vec<f64>>) -> PyResult<Self> {
         let read = MESH_ELEMENTS_READER.get().ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err("MeshDistribution needs the yamc package")
         })?;

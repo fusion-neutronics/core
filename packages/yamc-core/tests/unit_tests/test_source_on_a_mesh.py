@@ -69,7 +69,9 @@ def test_tet_mesh(tmp_path):
     from yamc.cad import CadToYamc
 
     c2y = CadToYamc()
-    c2y.add_cadquery_object(cq.Workplane("XY").box(4, 4, 4), material_tags=["box"])
+    assembly = cq.Assembly()
+    assembly.add(cq.Workplane().box(4, 4, 4), name="box")
+    c2y.add_cadquery_object(assembly, material_tags=["box"])
     c2y.mesh(tet_volumes=["box"], target_edge_length=2.0)
     path = os.path.join(tmp_path, "box.arrow")
     c2y.to_arrow(path)
