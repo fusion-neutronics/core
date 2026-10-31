@@ -56,10 +56,34 @@
 //!
 //! # Uncertainty
 //!
-//! MT=444 carries no covariance, so damage energy would move only with the
-//! flux and the composition. The replica machinery does not keep a replica's
-//! perturbed spectrum, so no standard deviation is given for damage energy or
-//! dpa yet.
+//! With a `DataUncertainty` on the same call, each replica gets its own
+//! damage energy and dpa ([`DisplacementDamage::replicas`]), from three
+//! things that move per replica:
+//!
+//! - **Its composition.** [`accumulate`] runs over the replica's own states,
+//!   so a nuclide that burns faster in a replica damages less there.
+//! - **Its cross sections.** MT=444 carries no covariance of its own, but it
+//!   is the sum `K = Σ_mt σ_mt h_mt` of what each reaction deposits, and the
+//!   deposit per reaction `h_mt` is a property of the reaction
+//!   ([`yamc_nuclide::deposit`]). A draw moves the damage-energy rate by
+//!   `Σ_mt h_mt Δσ_mt` folded against the spectrum. Each nuclide of the
+//!   starting composition is loaded whole, its field widened to the partials
+//!   the damage energy comes from (elastic and inelastic carry most of it and
+//!   are not activation channels), and every replica reads its activation
+//!   rates and its damage energy off one draw of that field
+//!   ([`crate::covariance_fold::cell_fields_with_damage`]). What the deposits
+//!   do not reproduce, fission's share above all, is held at nominal, and
+//!   [`crate::uncertainty::Info::damage_energy`] says how much that is.
+//! - **Its flux spectrum**, where the spectrum carries a per-bin sigma: the
+//!   damage energy's own per-group terms under the replica's flux draw, as
+//!   the reaction rates are moved.
+//!
+//! Held at nominal, and listed in [`crate::uncertainty::Info::not_perturbed`]:
+//! the damage energy of transmutation products (a small share of the atoms on
+//! any schedule a dpa is asked of), short-range (LB=8) blocks, which average
+//! away over a spectrum's groups, and, for a nuclide whose resonance
+//! parameters are sampled, the resonance range the parameters would move.
+//! The displacement threshold energies are inputs and are not perturbed.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -175,6 +199,160 @@ pub struct DisplacementDamage {
     /// threshold energy, each with the largest atom fraction it reached there.
     /// Their damage energy is counted; their dpa is not.
     pub without_displacement_energy: BTreeMap<String, f64>,
+    /// Every uncertainty replica's series, when the transmutation also asked
+    /// for nuclear-data uncertainty.
+    pub replicas: Option<DamageReplicas>,
+}
+
+/// The damage series of every uncertainty replica, indexed
+/// `[replica][state]` with the states as in [`DisplacementDamage`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DamageReplicas {
+    /// Damage energy per atom of the material [eV].
+    pub damage_energy: Vec<Vec<f64>>,
+    /// NRT displacements per atom of the material.
+    pub dpa: Vec<Vec<f64>>,
+    /// Per element of [`DisplacementDamage::element_damage_energy`].
+    pub element_damage_energy: BTreeMap<String, Vec<Vec<f64>>>,
+    /// Per element of [`DisplacementDamage::element_dpa`].
+    pub element_dpa: BTreeMap<String, Vec<Vec<f64>>>,
+}
+
+/// What a material's uncertainty replicas need to move its damage energy.
+pub(crate) struct ReplicaDamage<'a> {
+    /// Every material's widened nuclides, shared so a nuclide is drawn alike
+    /// in each ([`damage_inputs`]).
+    pub inputs: &'a crate::covariance_fold::DamageInputs,
+    /// Per spectrum of the material, per nuclide of its starting
+    /// composition, the damage-energy rate per group at unit flux.
+    pub per_group: Vec<HashMap<String, Vec<f64>>>,
+}
+
+/// The per-group damage-energy rates [`ReplicaDamage::per_group`] holds, for
+/// `material`'s starting composition, whose MT=444 must be loaded.
+pub(crate) fn per_group_rates(
+    material: &Material,
+    spectra: &[MultigroupSpectrum],
+    shielding: Option<&Shielding>,
+) -> Vec<HashMap<String, Vec<f64>>> {
+    let mut names: Vec<String> = material
+        .nuclides
+        .iter()
+        .filter(|&(_, &n)| n > 0.0)
+        .map(|(name, _)| name.clone())
+        .collect();
+    names.sort();
+    spectra
+        .iter()
+        .map(|s| {
+            crate::multigroup::per_group_damage_energy_rates(
+                material,
+                &s.masses,
+                &s.boundaries,
+                shielding,
+                &names,
+            )
+            .into_iter()
+            .filter_map(|(name, groups)| Some((name, groups?)))
+            .collect()
+        })
+        .collect()
+}
+
+/// Every nuclide of every material's starting composition, loaded whole with
+/// its covariance at its material's temperature, with the damage energy per
+/// reaction of each of its non-redundant partials: what widens its field to
+/// its damage energy. Keyed by name and temperature, so a nuclide shared by
+/// several materials at one temperature is loaded once and drawn alike.
+pub(crate) fn damage_inputs(
+    materials: &[&Material],
+) -> Result<crate::covariance_fold::DamageInputs, Box<dyn std::error::Error>> {
+    use yamc_nuclide::deposit::{deposits, Response};
+    let mut wanted: BTreeMap<(String, String), Option<String>> = BTreeMap::new();
+    {
+        let cfg = yamc_nuclide::config::CONFIG
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        for m in materials {
+            let Some(temperature) = crate::temperature_of(m) else {
+                continue;
+            };
+            for (name, &n) in &m.nuclides {
+                if n <= 0.0 {
+                    continue;
+                }
+                wanted
+                    .entry((name.clone(), temperature.clone()))
+                    .or_insert_with(|| {
+                        m.nuclide_data
+                            .get(name)
+                            .and_then(|nd| nd.reload_source())
+                            .or_else(|| cfg.get_cross_section(name))
+                    });
+            }
+        }
+    }
+    let load_one = |((name, temperature), source): ((String, String), Option<String>)| {
+        let source =
+            source.ok_or_else(|| format!("{name}: no cross section source is configured"))?;
+        let scope = LoadScope::full()
+            .with_temperatures(Some(HashSet::from([temperature.clone()])))
+            .with_covariance(true);
+        let nuclide = get_or_load_nuclide(&name, &HashMap::from([(name.clone(), source)]), &scope)
+            .map_err(|e| {
+                let text = e.to_string();
+                format!("{name}: {}", text.lines().next().unwrap_or(&text))
+            })?;
+        let t = nuclide
+            .loaded_temperatures
+            .iter()
+            .position(|l| *l == temperature)
+            .or_else(|| (nuclide.loaded_temperatures.len() == 1).then_some(0));
+        let deposits = match t {
+            Some(t) => {
+                let partials: BTreeSet<i32> = nuclide.reactions[t]
+                    .iter()
+                    .filter(|(_, r)| !r.redundant)
+                    .map(|(mt, _)| *mt)
+                    .collect();
+                deposits(&nuclide, t, Response::DamageEnergy, &partials)
+            }
+            None => BTreeMap::new(),
+        };
+        Ok::<_, String>((
+            (name, temperature),
+            crate::covariance_fold::DamageDeposits { nuclide, deposits },
+        ))
+    };
+    let loaded: Vec<Result<_, String>> = {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use rayon::prelude::*;
+            wanted.into_par_iter().map(load_one).collect()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            wanted.into_iter().map(load_one).collect()
+        }
+    };
+    let mut out = crate::covariance_fold::DamageInputs::new();
+    let mut refused = Vec::new();
+    for outcome in loaded {
+        match outcome {
+            Ok((key, d)) => {
+                out.insert(key, d);
+            }
+            Err(message) => refused.push(message),
+        }
+    }
+    if !refused.is_empty() {
+        return Err(format!(
+            "the cross sections the damage-energy uncertainty draws could not be loaded:\n  {}",
+            refused.join("\n  ")
+        )
+        .into());
+    }
+    Ok(out)
 }
 
 /// The elements of a composition with a positive amount.
@@ -300,6 +478,8 @@ pub(crate) fn ensure_damage_data_loaded(
 /// `material` holds the data (with MT=444, see [`ensure_damage_data_loaded`])
 /// and the starting composition in atoms/barn-cm, as the collapse reads them;
 /// `states` are the solve's states, initial first, one more than `steps`.
+/// With `ensemble`, the material's uncertainty replicas, every replica's
+/// series too ([`DisplacementDamage::replicas`]).
 pub(crate) fn displacement_damage(
     material: &Material,
     states: &[Material],
@@ -307,6 +487,7 @@ pub(crate) fn displacement_damage(
     steps: &[TransmuteStep],
     shielding: Option<&Shielding>,
     request: &DamageRequest,
+    ensemble: Option<&crate::uncertainty::Ensemble>,
 ) -> Result<DisplacementDamage, Box<dyn std::error::Error>> {
     // Per spectrum, every nuclide present at either end of a step it drives.
     let mut wanted: Vec<HashSet<String>> = vec![HashSet::new(); spectra.len()];
@@ -366,10 +547,75 @@ pub(crate) fn displacement_damage(
         .into());
     }
 
-    let states: Vec<&HashMap<String, f64>> = states.iter().map(|m| &m.nuclides).collect();
+    let nominal: Vec<&HashMap<String, f64>> = states.iter().map(|m| &m.nuclides).collect();
     let steps: Vec<(f64, Option<(usize, f64)>)> =
         steps.iter().map(|st| (st.dt, st.irradiation)).collect();
-    Ok(accumulate(&states, &steps, &per_spectrum, request))
+    let mut out = accumulate(&nominal, &steps, &per_spectrum, request);
+    if let Some(ensemble) = ensemble.filter(|e| e.replicas() > 0) {
+        out.replicas = Some(replicas(
+            &out,
+            &nominal[0],
+            &steps,
+            &per_spectrum,
+            ensemble,
+            request,
+        ));
+    }
+    Ok(out)
+}
+
+/// Every replica's series: [`accumulate`] over the replica's own states, with
+/// each nuclide's damage-energy rate scaled by the replica's factor for it
+/// ([`crate::uncertainty::Ensemble`] keeps them).
+fn replicas(
+    nominal: &DisplacementDamage,
+    initial: &HashMap<String, f64>,
+    steps: &[(f64, Option<(usize, f64)>)],
+    per_spectrum: &[HashMap<String, Option<f64>>],
+    ensemble: &crate::uncertainty::Ensemble,
+    request: &DamageRequest,
+) -> DamageReplicas {
+    let mut out = DamageReplicas {
+        element_damage_energy: nominal
+            .element_damage_energy
+            .keys()
+            .map(|el| (el.clone(), Vec::new()))
+            .collect(),
+        element_dpa: nominal
+            .element_dpa
+            .keys()
+            .map(|el| (el.clone(), Vec::new()))
+            .collect(),
+        ..Default::default()
+    };
+    let zeros = vec![0.0; steps.len() + 1];
+    for r in 0..ensemble.replicas() {
+        let rates: Vec<HashMap<String, Option<f64>>> = per_spectrum
+            .iter()
+            .enumerate()
+            .map(|(s, rates)| {
+                rates
+                    .iter()
+                    .map(|(name, d)| {
+                        let f = ensemble.damage_factor(r, s, name);
+                        (name.clone(), d.map(|d| d * f))
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut states = vec![initial];
+        states.extend(ensemble.replica_inventories(r));
+        let d = accumulate(&states, steps, &rates, request);
+        for (el, series) in out.element_damage_energy.iter_mut() {
+            series.push(d.element_damage_energy.get(el).unwrap_or(&zeros).clone());
+        }
+        for (el, series) in out.element_dpa.iter_mut() {
+            series.push(d.element_dpa.get(el).unwrap_or(&zeros).clone());
+        }
+        out.damage_energy.push(d.damage_energy);
+        out.dpa.push(d.dpa);
+    }
+    out
 }
 
 /// One state's per-element sums.
@@ -500,6 +746,94 @@ pub(crate) fn accumulate(
     }
     out.without_damage_energy = missing;
     out
+}
+
+/// Which damage series an uncertainty getter reads.
+#[derive(Clone, Copy)]
+enum Series {
+    Dpa,
+    DamageEnergy,
+}
+
+impl crate::results::TransmutationResults {
+    /// NRT dpa at `step` (0 the initial composition, which has none), with
+    /// the nuclear-data spread on it: the material total, or with `element`
+    /// that element's own.
+    ///
+    /// `Ok(None)` when the transmutation did not ask for both displacement
+    /// damage and nuclear-data uncertainty. See [`crate::damage`] for what the
+    /// replicas move.
+    pub fn dpa_uncertainty(
+        &self,
+        material_id: u32,
+        step: usize,
+        element: Option<&str>,
+    ) -> Result<Option<crate::derived::Estimate>, String> {
+        self.damage_estimate(material_id, step, element, Series::Dpa)
+    }
+
+    /// Damage energy per atom [eV] at `step`, with the nuclear-data spread on
+    /// it, as [`Self::dpa_uncertainty`].
+    pub fn damage_energy_uncertainty(
+        &self,
+        material_id: u32,
+        step: usize,
+        element: Option<&str>,
+    ) -> Result<Option<crate::derived::Estimate>, String> {
+        self.damage_estimate(material_id, step, element, Series::DamageEnergy)
+    }
+
+    fn damage_estimate(
+        &self,
+        material_id: u32,
+        step: usize,
+        element: Option<&str>,
+        series: Series,
+    ) -> Result<Option<crate::derived::Estimate>, String> {
+        let Some(damage) = self.get_displacement_damage(material_id) else {
+            return Ok(None);
+        };
+        let Some(replicas) = &damage.replicas else {
+            return Ok(None);
+        };
+        let (nominal, samples) = match (series, element) {
+            (Series::Dpa, None) => (&damage.dpa, &replicas.dpa),
+            (Series::DamageEnergy, None) => (&damage.damage_energy, &replicas.damage_energy),
+            (Series::Dpa, Some(el)) => (
+                damage.element_dpa.get(el).ok_or_else(|| {
+                    format!(
+                        "no dpa for element {el:?}; elements with dpa: {}",
+                        damage
+                            .element_dpa
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })?,
+                &replicas.element_dpa[el],
+            ),
+            (Series::DamageEnergy, Some(el)) => (
+                damage.element_damage_energy.get(el).ok_or_else(|| {
+                    format!(
+                        "no damage energy for element {el:?}; elements present: {}",
+                        damage
+                            .element_damage_energy
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })?,
+                &replicas.element_damage_energy[el],
+            ),
+        };
+        let nominal = *nominal
+            .get(step)
+            .ok_or_else(|| format!("no step {step}: the schedule has {} states", nominal.len()))?;
+        let values: Vec<f64> = samples.iter().map(|r| r[step]).collect();
+        Ok(Some(crate::derived::estimate(nominal, &values, None, None)))
+    }
 }
 
 #[cfg(test)]
@@ -663,6 +997,40 @@ mod tests {
         close(out.without_displacement_energy["H"], 0.01);
         assert!(!out.element_dpa.contains_key("H"));
         assert!(out.element_damage_energy.contains_key("H"));
+    }
+
+    /// Each replica's series is the nominal arithmetic on its own states with
+    /// each nuclide's rate scaled by its factor; a nuclide with no factor is
+    /// at nominal.
+    #[test]
+    fn replicas_scale_by_their_factors_on_their_own_states() {
+        let start = map(&[("Fe56", 1.0), ("Cr52", 1.0)]);
+        let d = rates(&[("Fe56", Some(4.0)), ("Cr52", Some(8.0))]);
+        let steps = [(2.0, Some((0, 10.0)))];
+        let request = DamageRequest::default();
+        let nominal = accumulate(&[&start, &start], &steps, &[d.clone()], &request);
+
+        let mut ensemble = crate::uncertainty::Ensemble::new(1);
+        ensemble.push(vec![start.clone()]);
+        ensemble.push(vec![map(&[("Fe56", 1.0), ("Cr52", 0.5)])]);
+        ensemble.damage_factors = vec![
+            vec![HashMap::from([("Fe56".to_string(), 1.5)])],
+            vec![HashMap::new()],
+        ];
+        let out = replicas(&nominal, &start, &steps, &[d], &ensemble, &request);
+
+        close(out.element_damage_energy["Fe"][0][1], 1.5 * 80.0);
+        close(out.element_damage_energy["Cr"][0][1], 160.0);
+        // The second replica burned half its chromium by the end of the step.
+        let second = accumulate(
+            &[&start, &map(&[("Fe56", 1.0), ("Cr52", 0.5)])],
+            &steps,
+            &[rates(&[("Fe56", Some(4.0)), ("Cr52", Some(8.0))])],
+            &request,
+        );
+        assert_eq!(out.dpa[1], second.dpa);
+        assert_eq!(out.damage_energy[1], second.damage_energy);
+        assert_eq!(out.element_dpa["Fe"].len(), 2);
     }
 
     #[test]

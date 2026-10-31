@@ -221,11 +221,15 @@ impl CrossMaterial {
     /// full `chain`, with no spectrum to read it: what a material that lacks
     /// one of a group's nuclides still needs to draw the group. The nuclides
     /// in `without_mf32_rows` are fielded from their tape blocks alone, as
-    /// [`crate::covariance_fold::cell_fields`] fields them.
+    /// [`crate::covariance_fold::cell_fields`] fields them, and those of
+    /// `damage` widened to their damage partials as
+    /// [`crate::covariance_fold::cell_fields_with_damage`] widens them, so a
+    /// nuclide's draw is the same in every material.
     pub fn activation_fields(
         &self,
         chain: &HashMap<String, ChainNuclide>,
         without_mf32_rows: &BTreeSet<String>,
+        damage: &crate::covariance_fold::DamageInputs,
     ) -> BTreeMap<String, CellField> {
         self.nuclides
             .iter()
@@ -238,6 +242,7 @@ impl CrossMaterial {
                     without_mf32_rows.contains(name),
                     &[],
                     &[],
+                    damage.get(&(name.clone(), l.temperature.clone())),
                 )?;
                 Some((name.clone(), field))
             })

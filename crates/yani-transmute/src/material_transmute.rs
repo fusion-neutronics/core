@@ -3,7 +3,7 @@ use crate::branching_rule::{
     unmodelled_mt5_warning, Bound, BranchingChannel, BranchingReport, BranchingState, Denominator,
     DroppedChannel, ListRates, ListRule, Lists, ANYTHING, INELASTIC, MT_ANYTHING, MT_INELASTIC,
 };
-use crate::covariance_fold::{cell_fields, fold_rate_covariance, reachable_mts, FoldSpectrum};
+use crate::covariance_fold::{fold_rate_covariance, reachable_mts, FoldSpectrum};
 use crate::covariance_sample::Sampler;
 use crate::cross_material::CrossMaterial;
 use crate::damage::DamageRequest;
@@ -329,6 +329,12 @@ pub fn transmute_materials(
             case.product_threshold,
         )
         .map_err(|e| named(c, ids[c], e))?;
+        // The replicas fold the composition's MT=444 per group, before the
+        // solve, so it is loaded here rather than after.
+        if damage.is_some() && uncertainty.is_some() {
+            crate::damage::ensure_damage_data_loaded(case.material, &[])
+                .map_err(|e| named(c, ids[c], e))?;
+        }
         let mut current = case.material.clone();
         let loaded = screening.loaded();
         let composition: HashSet<String> = current.nuclides.keys().cloned().collect();
@@ -430,6 +436,31 @@ pub fn transmute_materials(
         CrossMaterial::default()
     };
 
+    // What the replicas move each material's damage energy with: the
+    // composition's nuclides widened to their damage partials, shared by every
+    // material so a nuclide is drawn alike in each, and per material its
+    // damage energy per group.
+    let damage_inputs = match (damage, uncertainty) {
+        (Some(_), Some(u)) if u.wants(crate::uncertainty::Source::CrossSections) => {
+            crate::damage::damage_inputs(&initial.iter().collect::<Vec<_>>())?
+        }
+        _ => Default::default(),
+    };
+    let replica_damage: Vec<Option<crate::damage::ReplicaDamage>> = cases
+        .iter()
+        .enumerate()
+        .map(|(c, case)| {
+            (damage.is_some() && uncertainty.is_some()).then(|| crate::damage::ReplicaDamage {
+                inputs: &damage_inputs,
+                per_group: crate::damage::per_group_rates(
+                    &initial[c],
+                    &case.spectra,
+                    case.shielding.as_ref(),
+                ),
+            })
+        })
+        .collect();
+
     // The step solves are independent, one per material.
     // The nominal steps index the shared collapses. The replicas fold and
     // factorize every spectrum they are handed and count its coverage, so
@@ -447,6 +478,7 @@ pub fn transmute_materials(
             lists: &lists,
             cross: &cross,
             isomer: isomer.as_ref(),
+            damage: replica_damage[c].as_ref(),
         });
         solve_case(
             &initial[c],
@@ -555,6 +587,7 @@ pub fn transmute_materials(
                 &case.steps,
                 case.shielding.as_ref(),
                 request,
+                results.uncertainty.get(&ids[c]),
             )
             .map_err(|e| named(c, ids[c], e))?;
             results.displacement_damage.insert(ids[c], damage);
@@ -905,6 +938,9 @@ struct Replicas<'a> {
     cross: &'a CrossMaterial,
     /// The MF=40 covariance placed on `lists`, when the isomer source is on.
     isomer: Option<&'a IsomerCovariance>,
+    /// What moves the material's damage energy, when displacement damage
+    /// was asked for.
+    damage: Option<&'a crate::damage::ReplicaDamage<'a>>,
 }
 
 /// One material's timeline, stepped from `initial` with steps whose spectrum
@@ -967,6 +1003,7 @@ fn solve_case(
             None,
             None,
             r.cross,
+            r.damage,
         )?),
         None => None,
     };
@@ -1007,6 +1044,9 @@ struct ReplicaOutcome {
     /// drawn total.
     isomer_branchings_sampled: usize,
     isomer_branchings_clipped: crate::isomer_branching_uncertainty::Clipped,
+    /// Per spectrum, the damage-energy rate over the nominal one of each
+    /// nuclide of the starting composition, when damage was asked for.
+    damage: Vec<HashMap<String, f64>>,
 }
 
 /// Load the cross sections of `nuclides` for a transport-free solve, into the
@@ -1701,6 +1741,7 @@ pub fn transport_replicas(
         Some(statistics.as_ref().unwrap_or(&no_statistics)),
         transport_isomer.as_ref(),
         cross,
+        None,
     )
 }
 
@@ -2005,8 +2046,11 @@ fn run_replicas(
     statistical: Option<&TransportStatistics<'_>>,
     transport_isomer: Option<&TransportIsomer<'_>>,
     cross: &CrossMaterial,
+    damage: Option<&crate::damage::ReplicaDamage<'_>>,
 ) -> Result<(Ensemble, Info), Box<dyn std::error::Error>> {
     check_convergence(request.convergence)?;
+    let no_inputs = crate::covariance_fold::DamageInputs::new();
+    let damage_inputs = damage.map_or(&no_inputs, |d| d.inputs);
     // The two paths each have one source the other lacks. A transport run has
     // tallied rates with a statistical covariance and no caller-supplied flux
     // error (its flux error IS the statistical one); a spectrum run has the
@@ -2104,14 +2148,15 @@ fn run_replicas(
         .collect();
     let (fields, partners) = if cross_sections {
         (
-            cell_fields(
+            crate::covariance_fold::cell_fields_with_damage(
                 initial,
                 chain,
                 &fold_spectra,
                 shielding,
                 &std::collections::BTreeSet::new(),
+                damage_inputs,
             ),
-            cross.activation_fields(chain, &std::collections::BTreeSet::new()),
+            cross.activation_fields(chain, &std::collections::BTreeSet::new(), damage_inputs),
         )
     } else {
         Default::default()
@@ -2209,18 +2254,19 @@ fn run_replicas(
             .filter(|(name, _)| !sampled.contains(*name))
             .map(|(name, field)| (name.clone(), field.clone()))
             .collect();
-        draw_fields.extend(cell_fields(
+        draw_fields.extend(crate::covariance_fold::cell_fields_with_damage(
             initial,
             chain,
             &restricted_spectra,
             shielding,
             &sampled,
+            damage_inputs,
         ));
         Sampler::coupled(
             &draw_fields,
             &folds,
             cross,
-            &cross.activation_fields(chain, &sampled),
+            &cross.activation_fields(chain, &sampled, damage_inputs),
         )
     });
     let draw_sampler = mf33_sampler.as_ref().unwrap_or(&sampler);
@@ -2526,6 +2572,9 @@ fn run_replicas(
         },
         (true, None) => crate::uncertainty::FluxResponseReport::Unperturbed,
     };
+    if damage.is_some() {
+        damage_report(&mut info, draw_sampler, &fluence, &sampled, cross_sections);
+    }
     // On the spectrum path a spectrum without a per-bin sigma, or any spectrum
     // with the source off, is used as given. When only some are, the entry
     // says so, so it never reads as held for a flux that was partly sampled.
@@ -2802,6 +2851,7 @@ fn run_replicas(
         // covariance says. Perturbing them independently would treat one
         // evaluation as two.
         let mut perturbed = Vec::with_capacity(per_spectrum.len());
+        let mut damage_factors = Vec::new();
         for (idx, (rates, weights, folded_chain)) in per_spectrum.iter().enumerate() {
             // The flux moves first, because its perturbation is defined
             // against the nominal per-group terms; the cross-section one is
@@ -2818,19 +2868,52 @@ fn run_replicas(
                 ),
                 _ => (rates, folded_chain, None, None),
             };
-            let (rates, flux_lists, refolded) = match &per_group[idx] {
-                Some(terms) => {
-                    let delta = crate::flux_uncertainty::flux_deviates(
-                        &terms.error,
-                        request.seed,
-                        replica,
-                        idx,
-                        &mut flux_coverage,
-                    );
+            let delta = per_group[idx].as_ref().map(|terms| {
+                crate::flux_uncertainty::flux_deviates(
+                    &terms.error,
+                    request.seed,
+                    replica,
+                    idx,
+                    &mut flux_coverage,
+                )
+            });
+            // The damage energy moves as the rates do: the flux first, on its
+            // own per-group terms, then the cross sections, by the deposits'
+            // share of the same draw.
+            if let Some(d) = damage {
+                let factors = d.per_group[idx]
+                    .iter()
+                    .map(|(name, groups)| {
+                        let flux = match &delta {
+                            Some(delta) => {
+                                let nominal: f64 = groups.iter().sum();
+                                let moved: f64 =
+                                    groups.iter().zip(delta).map(|(g, d)| g * (1.0 + d)).sum();
+                                if nominal > 0.0 {
+                                    moved / nominal
+                                } else {
+                                    1.0
+                                }
+                            }
+                            None => 1.0,
+                        };
+                        let xs = match replica_tallies {
+                            None => draw_sampler
+                                .damage_ratio(&xs_draw, idx, name)
+                                .unwrap_or(1.0),
+                            Some(_) => 1.0,
+                        };
+                        (name.clone(), flux * xs.max(0.0))
+                    })
+                    .collect();
+                damage_factors.push(factors);
+            }
+            let (rates, flux_lists, refolded) = match (&per_group[idx], &delta) {
+                (Some(terms), Some(delta)) => {
                     let mut rates =
-                        crate::flux_uncertainty::perturb_rates(rates, &terms.rates, &delta);
+                        crate::flux_uncertainty::perturb_rates(rates, &terms.rates, delta);
                     let flux_lists = (!terms.lists.is_empty())
-                        .then(|| crate::flux_uncertainty::perturb_lists(&terms.lists, &delta));
+                        .then(|| crate::flux_uncertainty::perturb_lists(&terms.lists, delta));
                     // The branching re-folded from this replica's productions,
                     // into the unfolded chain the nominal was folded into:
                     // the `(n,n')` isomer rates are re-made and every split
@@ -2846,7 +2929,7 @@ fn run_replicas(
                     };
                     (rates, flux_lists, refolded)
                 }
-                None => (rates.clone(), None, None),
+                _ => (rates.clone(), None, None),
             };
             // A transport replica's rates already carry its cross sections.
             let mut drawn_rates = if replica_tallies.is_some() {
@@ -2939,6 +3022,7 @@ fn run_replicas(
             statistical_floored,
             isomer_branchings_sampled: isomer_run.as_ref().map_or(0, IsomerRun::parents),
             isomer_branchings_clipped,
+            damage: damage_factors,
         })
     };
 
@@ -3000,6 +3084,9 @@ fn run_replicas(
                 info.statistical_sampled += info.statistical_rates;
             }
             ensemble.push_with_half_lives(outcome.densities, outcome.half_lives);
+            if damage.is_some() {
+                ensemble.damage_factors.push(outcome.damage);
+            }
         }
         replica = block_end as u64;
 
@@ -3106,6 +3193,7 @@ fn run_replicas(
                     statistical_in,
                     transport_isomer,
                     cross,
+                    damage,
                 )?;
                 by_source.insert(source.name().to_string(), variances_of(&sub, steps.len()));
                 // Judged on the source's own replicas, which the other
@@ -3132,6 +3220,64 @@ fn run_replicas(
         });
     }
     Ok((ensemble, info))
+}
+
+/// What the replicas did and did not move of the damage energy: per widened
+/// nuclide its [`crate::uncertainty::DamageEnergyCoverage`], weighted over the
+/// spectra by `fluence`, and what is held in [`Info::not_perturbed`].
+fn damage_report(
+    info: &mut Info,
+    sampler: &Sampler,
+    fluence: &[f64],
+    resonance_sampled: &std::collections::BTreeSet<String>,
+    cross_sections: bool,
+) {
+    let mut sums: std::collections::BTreeMap<String, [f64; 3]> = Default::default();
+    for (idx, &w) in fluence.iter().enumerate() {
+        if w <= 0.0 {
+            continue;
+        }
+        for (name, _, explained, sigma) in sampler.damage_report(idx) {
+            let s = sums.entry(name.to_string()).or_default();
+            s[0] += w;
+            s[1] += w * explained;
+            s[2] += w * sigma;
+        }
+    }
+    info.damage_energy = sums
+        .into_iter()
+        .map(|(name, [w, explained, sigma])| {
+            (
+                name,
+                crate::uncertainty::DamageEnergyCoverage {
+                    explained: explained / w,
+                    sigma: sigma / w,
+                },
+            )
+        })
+        .collect();
+    if !cross_sections {
+        info.not_perturbed
+            .push("damage energy (MT=444) through the cross sections".to_string());
+        return;
+    }
+    info.not_perturbed.extend([
+        "damage energy of transmutation products".to_string(),
+        "damage energy's short-range (LB=8) covariance".to_string(),
+        "damage energy's share no reaction's deposit reproduces (damage_energy)".to_string(),
+    ]);
+    let held: Vec<&str> = resonance_sampled
+        .iter()
+        .filter(|n| info.damage_energy.contains_key(*n))
+        .map(String::as_str)
+        .collect();
+    if !held.is_empty() {
+        info.not_perturbed.push(format!(
+            "damage energy over the resonance range of nuclides whose resonance \
+             parameters are sampled ({})",
+            held.join(", ")
+        ));
+    }
 }
 
 /// Each step's per-nuclide variance in an ensemble.

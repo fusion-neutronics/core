@@ -189,12 +189,26 @@ impl Source {
     }
 }
 
+/// One nuclide's entry in [`Info::damage_energy`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DamageEnergyCoverage {
+    /// The share of the stored MT=444 rate the deposits reproduce, the part a
+    /// draw can move.
+    pub explained: f64,
+    /// The relative sigma of the drawn damage-energy rate.
+    pub sigma: f64,
+}
+
 /// Ask for nuclear-data uncertainty on a transmutation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DataUncertainty {
     /// Base seed. The perturbation of a given nuclide in a given replica is a
     /// pure function of `(seed, replica, nuclide)`, so a rerun with the same
-    /// seed gives the same answer whatever else changed about the run.
+    /// seed gives the same answer whatever else changed about the run. The
+    /// one exception is displacement damage: asking for it widens each
+    /// composition nuclide's cross-section field to the reactions its damage
+    /// energy comes from (see [`crate::damage`]), which is a different field
+    /// and so a different draw.
     pub seed: u64,
     /// Fixed replica count, or `None` to run until every tracked sigma is
     /// known to [`Self::convergence`].
@@ -921,6 +935,15 @@ pub struct Info {
     pub isomer_production_sigma: BTreeMap<(String, String, String), f64>,
     /// MF=40 draws made, one per drawn parent per replica.
     pub isomer_branchings_sampled: usize,
+    /// With displacement damage asked for and the cross sections perturbed,
+    /// per nuclide of the starting composition whose damage energy a draw
+    /// moves: the share of its stored MT=444 rate its reactions' deposits
+    /// reproduce, `explained`, and the relative sigma of the drawn rate,
+    /// `sigma`, each weighted over the run's spectra by fluence. What the
+    /// deposits leave out (fission's share, for a fissile nuclide) is held at
+    /// nominal, so `1 - explained` is the gap; transport lists the same thing
+    /// as `unexplained_deposit`.
+    pub damage_energy: BTreeMap<String, DamageEnergyCoverage>,
     /// Per `(parent, reaction, product)`, how many list draws (one per
     /// replica per spectrum) gave the product's stated production a value
     /// that, with the list's other productions, came out above the drawn
@@ -1132,6 +1155,11 @@ pub struct Ensemble {
     moments: Vec<HashMap<String, Moments>>,
     /// `[replica][step][nuclide]`.
     samples: Vec<Vec<HashMap<String, f64>>>,
+    /// `[replica][spectrum][nuclide]`: the replica's damage-energy rate over
+    /// the nominal one, for the nuclides of the starting composition, when
+    /// displacement damage was asked for. A nuclide absent, or a replica
+    /// absent, is at nominal.
+    pub(crate) damage_factors: Vec<Vec<HashMap<String, f64>>>,
     /// `[replica]`: the half-lives [s] that replica was solved with, for the
     /// nuclides whose half-life was perturbed. Empty maps when half-lives were
     /// not perturbed.
@@ -1259,6 +1287,7 @@ impl Ensemble {
         Self {
             moments: vec![HashMap::new(); n_steps],
             samples: Vec::new(),
+            damage_factors: Vec::new(),
             half_lives: Vec::new(),
             tracked: Vec::new(),
             even: Vec::new(),
@@ -1467,6 +1496,25 @@ impl Ensemble {
     /// replica's map kept its nominal half-life there.
     pub fn half_lives(&self) -> &[HashMap<String, f64>] {
         &self.half_lives
+    }
+
+    /// Replica `replica`'s inventory at every schedule step.
+    pub(crate) fn replica_inventories(
+        &self,
+        replica: usize,
+    ) -> impl Iterator<Item = &HashMap<String, f64>> {
+        self.samples.get(replica).into_iter().flatten()
+    }
+
+    /// Replica `replica`'s damage-energy rate of `nuclide` under `spectrum`
+    /// over the nominal one: 1 where it was not moved.
+    pub(crate) fn damage_factor(&self, replica: usize, spectrum: usize, nuclide: &str) -> f64 {
+        self.damage_factors
+            .get(replica)
+            .and_then(|r| r.get(spectrum))
+            .and_then(|s| s.get(nuclide))
+            .copied()
+            .unwrap_or(1.0)
     }
 
     /// Every replica's full inventory at `step`.

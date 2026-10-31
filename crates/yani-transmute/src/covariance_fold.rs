@@ -2802,6 +2802,52 @@ pub struct CellField {
     /// Per spectrum, in order, or `None` where that spectrum has no rates or
     /// no channels for this nuclide.
     pub projections: Vec<Option<Projection>>,
+    /// Per spectrum, how its damage energy reads the field, where the field
+    /// was widened to the reactions the damage energy comes from
+    /// ([`cell_fields_with_damage`]); empty otherwise.
+    pub damage: Vec<Option<DamageProjection>>,
+}
+
+/// One nuclide's damage energy per reaction, which widens its field to the
+/// reactions its damage energy comes from ([`cell_fields_with_damage`]).
+#[derive(Debug, Clone)]
+pub struct DamageDeposits {
+    /// The nuclide with every reaction and its covariance, at the material's
+    /// temperature: the elastic and inelastic partials that carry most of the
+    /// damage energy are not activation channels, so an activation load does
+    /// not hold them.
+    pub nuclide: std::sync::Arc<yamc_nuclide::Nuclide>,
+    /// Per non-redundant partial, its damage energy per reaction [eV] on the
+    /// nuclide's grid at that temperature
+    /// ([`yamc_nuclide::deposit::deposits`]).
+    pub deposits: BTreeMap<i32, Vec<f64>>,
+}
+
+/// Every nuclide's [`DamageDeposits`], by name and temperature label.
+pub type DamageInputs = BTreeMap<(String, String), DamageDeposits>;
+
+/// The label of a nuclide's damage-energy channel in a [`DamageProjection`].
+pub const DAMAGE_ENERGY: &str = "damage energy";
+
+/// How one spectrum reads a nuclide's damage energy off its field.
+///
+/// A draw moves the damage-energy rate by `Σ_mt h_mt Δσ_mt` folded against
+/// the spectrum: one channel, [`DAMAGE_ENERGY`], whose partials are those of
+/// `σ_mt h_mt` per cell rather than of `σ_mt` (and of `h_mt` on an absolute
+/// cell, whose shift is in barns), summed over every partial a covariance
+/// reaches. A partial with no covariance of its own takes its level sum's,
+/// fully correlated, as transport applies it. Short-range (LB=8) blocks are
+/// not read: their noise averages away over a spectrum's groups.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DamageProjection {
+    /// The one channel, with `rates[0]` the stored MT=444 rate.
+    pub projection: Projection,
+    /// `∫ K φ`, the stored MT=444 row folded, in eV/s at the spectrum's
+    /// normalization.
+    pub stored: f64,
+    /// `∫ Σ_mt σ_mt h_mt φ` over every partial with a deposit: the part of
+    /// `stored` the deposits reproduce, and so the part a draw can move.
+    pub explained: f64,
 }
 
 /// Every nuclide's [`CellField`], for the spectra of one schedule.
@@ -2824,6 +2870,28 @@ pub fn cell_fields(
     shielding: Option<&Shielding>,
     without_mf32_rows: &BTreeSet<String>,
 ) -> BTreeMap<String, CellField> {
+    cell_fields_with_damage(
+        material,
+        chain,
+        spectra,
+        shielding,
+        without_mf32_rows,
+        &DamageInputs::new(),
+    )
+}
+
+/// [`cell_fields`], with each nuclide of `damage` (at the material's
+/// temperature) widened to the partials its damage energy comes from, and
+/// read by each spectrum as a [`DamageProjection`] too. One draw then moves
+/// both its activation rates and its damage energy, as one evaluation does.
+pub fn cell_fields_with_damage(
+    material: &Material,
+    chain: &std::collections::HashMap<String, ChainNuclide>,
+    spectra: &[FoldSpectrum],
+    shielding: Option<&Shielding>,
+    without_mf32_rows: &BTreeSet<String>,
+    damage: &DamageInputs,
+) -> BTreeMap<String, CellField> {
     let shapes: Vec<Option<CollapseShapes>> = spectra
         .iter()
         .map(|s| {
@@ -2841,14 +2909,16 @@ pub fn cell_fields(
     let temperature = crate::temperature_of(material);
 
     let one = |name: &&String| -> Option<(String, CellField)> {
+        let temperature = temperature.as_deref()?;
         let field = activation_field(
             name,
             chain.get(*name)?,
             material.nuclide_data.get(*name)?,
-            temperature.as_deref()?,
+            temperature,
             without_mf32_rows.contains(*name),
             spectra,
             &shapes,
+            damage.get(&((*name).clone(), temperature.to_string())),
         )?;
         Some(((*name).clone(), field))
     };
@@ -2880,7 +2950,11 @@ pub(crate) fn activation_field(
     without_mf32_rows: bool,
     spectra: &[FoldSpectrum],
     shapes: &[Option<CollapseShapes>],
+    damage: Option<&DamageDeposits>,
 ) -> Option<CellField> {
+    // Widened to the damage partials, the blocks and reactions are the full
+    // load's: the activation load holds the same data for what it holds.
+    let nuclide_data = damage.map_or(nuclide_data, |d| &*d.nuclide);
     let blocks = nuclide_data.covariance.as_ref()?;
     let tape_only: Vec<CovarianceBlock>;
     let blocks: &[CovarianceBlock] = if without_mf32_rows {
@@ -2902,6 +2976,7 @@ pub(crate) fn activation_field(
         &reactions,
         spectra,
         shapes,
+        damage.map(|d| &d.deposits),
     )
 }
 
@@ -3157,7 +3232,7 @@ fn transport_field(
         if reach.is_empty() {
             None
         } else {
-            nuclide_field(name, &reach, blocks, reactions, &[], &[])
+            nuclide_field(name, &reach, blocks, reactions, &[], &[], None)
         }
     };
     let mut field = build(&reads);
@@ -3235,6 +3310,7 @@ fn nuclide_field(
     reactions: &BTreeMap<i32, &Reaction>,
     spectra: &[FoldSpectrum],
     shapes: &[Option<CollapseShapes>],
+    deposits: Option<&BTreeMap<i32, Vec<f64>>>,
 ) -> Option<CellField> {
     let blocks = read_lumps(blocks);
     let blocks = blocks.as_ref();
@@ -3242,6 +3318,15 @@ fn nuclide_field(
     let mut reactions = reactions.clone();
     reactions.extend(sums.iter().map(|r| (r.mt_number, r)));
     let reactions = &reactions;
+
+    // The damage channels widen the reach, so their cells are drawn with the
+    // activation channels' as one field.
+    let damage = deposits.map(|d| damage_channels(blocks, reactions, d));
+    let mut reach = reach.to_vec();
+    if let Some(d) = &damage {
+        reach.extend(d.channels.iter().map(|(label, mt, _)| (label.clone(), *mt)));
+    }
+    let reach = &reach[..];
 
     // The cells come from `reach`, not from any spectrum's channels, so they do
     // not depend on which spectra read them.
@@ -3540,6 +3625,31 @@ fn nuclide_field(
         })
         .collect();
 
+    let damage = match &damage {
+        Some(d) => spectra
+            .iter()
+            .zip(shapes)
+            .map(|(spectrum, shapes)| {
+                let shape = shapes.as_ref().and_then(|s| s.shape_for(name));
+                let flux = FluxDensity {
+                    boundaries: spectrum.group_boundaries,
+                    flux: spectrum.multigroup_flux,
+                    shape: shape.as_ref(),
+                };
+                d.project(
+                    blocks,
+                    reactions,
+                    &flux,
+                    &grids,
+                    &offset,
+                    &index,
+                    [relative_cells.len(), absolute_cells.len()],
+                )
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+
     Some(CellField {
         relative_cells,
         relative,
@@ -3547,7 +3657,187 @@ fn nuclide_field(
         absolute,
         short,
         projections,
+        damage,
     })
+}
+
+/// A nuclide's damage energy as channels of its field: per channel its label,
+/// the reaction whose cells it reads and `h_eff = Σ σ_m h_m / σ_C` on the
+/// nuclide's grid over the partials `m` it moves, and every partial's
+/// `σ h` for the share the deposits reproduce.
+struct DamageChannels {
+    channels: Vec<(String, i32, Vec<f64>)>,
+    /// Every partial with a deposit, as a reaction whose cross section is
+    /// `σ h` [eV barn].
+    explained: Vec<Reaction>,
+}
+
+/// `rx` with its cross section replaced by `weight` on the nuclide's grid,
+/// times `rx`'s own cross section when `times_xs`.
+fn weighted(rx: &Reaction, weight: &[f64], times_xs: bool) -> Reaction {
+    let xs = rx.cross_section.as_slice();
+    let values: Vec<f64> = xs
+        .iter()
+        .enumerate()
+        .map(|(j, x)| {
+            let w = weight.get(rx.threshold_idx + j).copied().unwrap_or(0.0);
+            if times_xs {
+                x * w
+            } else {
+                w
+            }
+        })
+        .collect();
+    Reaction {
+        cross_section: values.into(),
+        ..rx.clone()
+    }
+}
+
+/// `rx`'s cross section on the nuclide's grid of `n` points, zero below its
+/// threshold.
+fn on_grid(rx: &Reaction, n: usize) -> Vec<f64> {
+    let mut out = vec![0.0; n];
+    for (j, x) in rx.cross_section.as_slice().iter().enumerate() {
+        if let Some(v) = out.get_mut(rx.threshold_idx + j) {
+            *v = *x;
+        }
+    }
+    out
+}
+
+/// The damage channels of a nuclide with these blocks (lumps read) and
+/// reactions (lumps added), from each partial's deposit.
+///
+/// A partial whose own terms reach a stated block is its own channel. One
+/// that reaches none but whose level sum does (MT 51 to 91 under MT 4, 600 to
+/// 649 under MT 103, ...) moves with the sum, fully correlated, as transport
+/// applies a covariance stated only on the sum
+/// ([`Read::Parent`]); the sum's channel then carries every such component's
+/// deposit. Any other partial is held at nominal, and only counts in what the
+/// deposits explain.
+fn damage_channels(
+    blocks: &[CovarianceBlock],
+    reactions: &BTreeMap<i32, &Reaction>,
+    deposits: &BTreeMap<i32, Vec<f64>>,
+) -> DamageChannels {
+    let stated: BTreeSet<i32> = blocks
+        .iter()
+        .filter(|b| !b.is_cross_material() && b.names_cross_section())
+        .filter(|b| match &b.data {
+            CovarianceData::Ni(ni) => expand_ni(ni).is_ok_and(|e| !e.is_empty()),
+            _ => false,
+        })
+        .flat_map(|b| [b.mt, b.partner_mt()])
+        .collect();
+    let reaches = |mt: i32| {
+        channel_terms(blocks, reactions, &[(String::new(), mt)])
+            .terms
+            .iter()
+            .any(|t| stated.contains(&t.mt))
+    };
+    // Per channel reaction, `Σ σ_m h_m` over the partials it moves.
+    let mut density: BTreeMap<i32, Vec<f64>> = BTreeMap::new();
+    let mut explained = Vec::new();
+    for (&mt, h) in deposits {
+        let Some(rx) = reactions.get(&mt) else {
+            continue;
+        };
+        explained.push(weighted(rx, h, true));
+        let channel = if reaches(mt) {
+            mt
+        } else {
+            match level_sum(mt) {
+                Some(sum) if reactions.contains_key(&sum) && reaches(sum) => sum,
+                _ => continue,
+            }
+        };
+        let n = h.len();
+        let xs = on_grid(rx, n);
+        let w = density.entry(channel).or_insert_with(|| vec![0.0; n]);
+        for ((w, x), h) in w.iter_mut().zip(&xs).zip(h) {
+            *w += x * h;
+        }
+    }
+    let channels = density
+        .into_iter()
+        .map(|(mt, w)| {
+            let sigma = on_grid(reactions[&mt], w.len());
+            let h_eff = w
+                .iter()
+                .zip(&sigma)
+                .map(|(w, s)| if *s > 0.0 { w / s } else { 0.0 })
+                .collect();
+            (format!("{DAMAGE_ENERGY} MT{mt}"), mt, h_eff)
+        })
+        .collect();
+    DamageChannels {
+        channels,
+        explained,
+    }
+}
+
+impl DamageChannels {
+    /// One spectrum's [`DamageProjection`] onto the field's cells, or `None`
+    /// where the nuclide has no stored MT=444 row or the spectrum no flux.
+    #[allow(clippy::too_many_arguments)]
+    fn project(
+        &self,
+        blocks: &[CovarianceBlock],
+        reactions: &BTreeMap<i32, &Reaction>,
+        flux: &FluxDensity,
+        grids: &BTreeMap<(i32, bool), Vec<f64>>,
+        offset: &BTreeMap<(i32, bool), usize>,
+        index: &[BTreeMap<usize, usize>; 2],
+        [nr, na]: [usize; 2],
+    ) -> Option<DamageProjection> {
+        let stored_row = reactions.get(&crate::damage::MT_DAMAGE_ENERGY)?;
+        let (&lo, &hi) = (flux.boundaries.first()?, flux.boundaries.last()?);
+        let whole = |rx: &Reaction| BARN_TO_CM2 * flux.xs_over(rx, &[lo, hi])[0];
+        let stored = whole(stored_row);
+        let explained = self.explained.iter().map(whole).sum();
+        let kinds: Vec<(String, i32)> = self
+            .channels
+            .iter()
+            .map(|(label, mt, _)| (label.clone(), *mt))
+            .collect();
+        let mut relative = vec![0.0; nr];
+        let mut absolute = vec![0.0; na];
+        for t in channel_terms(blocks, reactions, &kinds).terms {
+            let h_eff = &self.channels[t.channel].2;
+            let rx = reactions[&t.xs];
+            for (s, times_xs, out) in [(0usize, true, &mut relative), (1, false, &mut absolute)] {
+                let absolute = s == 1;
+                let Some(grid) = grids.get(&(t.mt, absolute)) else {
+                    continue;
+                };
+                let base = offset[&(t.mt, absolute)];
+                // Relative cells move `σ h` by their multiplier, absolute ones
+                // move `σ` by a shift in barns and so the rate by `h` times
+                // it: either way the partial is a rate integral, of `σ h` or
+                // of `h`.
+                let synthetic = weighted(rx, h_eff, times_xs);
+                let partials =
+                    partial_rates_within(flux, &synthetic, grid, Scale::Relative, t.range);
+                for (k, p) in partials.per_interval.iter().enumerate() {
+                    if let Some(&cell) = index[s].get(&(base + k)) {
+                        out[cell] += t.coefficient * p;
+                    }
+                }
+            }
+        }
+        Some(DamageProjection {
+            projection: Projection {
+                kinds: vec![DAMAGE_ENERGY.to_string()],
+                rates: vec![stored],
+                relative,
+                absolute,
+                short: vec![Vec::new()],
+            },
+            stored,
+            explained,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -3736,6 +4026,68 @@ mod stated_variance_tests {
         let ratio = c.partials_above_rate[&("W186".to_string(), "(n,gamma)".to_string())];
         assert!((ratio - 2.0).abs() < 1.0e-12, "{ratio}");
         assert_eq!(fraction(&c, "(n,gamma)").to_bits(), got.to_bits());
+    }
+
+    /// A damage channel's partial on a relative cell is `∫ σ h φ` of the
+    /// reaction the cell belongs to, a reaction with no covariance is held and
+    /// counts only in what the deposits explain, and a level with none of its
+    /// own moves with its sum.
+    #[test]
+    fn damage_energy_reads_the_cells_of_the_reactions_it_comes_from() {
+        let grid = [1.0e-5, 2.0e7];
+        let (elastic, capture, level, inelastic) =
+            (reaction(2), reaction(102), reaction(51), reaction(4));
+        let mut stored = reaction(444);
+        stored.cross_section = stored
+            .cross_section
+            .iter()
+            .map(|x| x * (2.0 + 1.0 + 3.0))
+            .collect::<Vec<f64>>()
+            .into();
+        let reactions: BTreeMap<i32, &Reaction> = BTreeMap::from([
+            (2, &elastic),
+            (4, &inelastic),
+            (51, &level),
+            (102, &capture),
+            (444, &stored),
+        ]);
+        let blocks = [
+            block(2, 2, diagonal(1, &grid, &[0.04])),
+            block(4, 4, diagonal(1, &grid, &[0.09])),
+        ];
+        let deposits = BTreeMap::from([(2, vec![2.0; 3]), (51, vec![3.0; 3]), (102, vec![1.0; 3])]);
+        let d = damage_channels(&blocks, &reactions, &deposits);
+        let channels: Vec<i32> = d.channels.iter().map(|c| c.1).collect();
+        assert_eq!(
+            channels,
+            [2, 4],
+            "capture is held, the level moves with MT 4"
+        );
+        // The level and its sum share a cross section here, so the sum's
+        // effective deposit is the level's.
+        assert!(d.channels[1].2.iter().all(|h| (h - 3.0).abs() < 1e-14));
+
+        let grids = BTreeMap::from([((2, false), grid.to_vec()), ((4, false), grid.to_vec())]);
+        let offset = BTreeMap::from([((2, false), 0), ((4, false), 1)]);
+        let index = [BTreeMap::from([(0, 0), (1, 1)]), BTreeMap::new()];
+        let p = d
+            .project(
+                &blocks,
+                &reactions,
+                &flux(),
+                &grids,
+                &offset,
+                &index,
+                [2, 0],
+            )
+            .expect("a stored row");
+        let whole = rate(1.0e-5, 2.0e7);
+        let close = |a: f64, b: f64| assert!((a - b).abs() <= 1e-12 * b.abs(), "{a} vs {b}");
+        close(p.stored, 6.0 * whole);
+        close(p.explained, 6.0 * whole);
+        close(p.projection.relative[0], 2.0 * whole);
+        close(p.projection.relative[1], 3.0 * whole);
+        assert_eq!(p.projection.rates, vec![p.stored]);
     }
 
     /// A block that is zero everywhere is still the evaluation's statement

@@ -132,3 +132,34 @@ def test_several_materials_in_one_call():
     )
     assert together.get_dpa(1) == alone.get_dpa(1)
     assert together.get_dpa(2) == alone.get_dpa(1)
+
+
+def test_dpa_carries_the_spread_of_the_flux():
+    spectrum = yamc.NeutronSource(energy=yamc.sources.Histogram(ENERGY_GROUPS, FLUX))
+    schedule = yamc.PulseSchedule([
+        yamc.Pulse(
+            rate=sum(FLUX),
+            duration=DAY,
+            source=spectrum,
+            flux_std_dev=[0.1 * f for f in FLUX],
+        ),
+        yamc.Cooldown(duration=DAY),
+    ])
+    uncertainty = yamc.DataUncertainty(seed=1, samples=16, sources=["flux_spectrum"])
+    results = _iron().transmute(
+        schedule, displacement_damage=True, data_uncertainty=uncertainty
+    )
+    dpa = results.get_dpa_uncertainty(1, 1)
+    assert dpa.nominal == results.get_dpa(1)[1]
+    assert dpa.std_dev > 0.0
+    energy = results.get_damage_energy_uncertainty(1, 1, element="Fe")
+    assert energy.std_dev / energy.nominal == pytest.approx(dpa.std_dev / dpa.nominal, rel=1e-6)
+    # The cooldown adds nothing, so the spread carries over.
+    assert results.get_dpa_uncertainty(1, 2).std_dev == dpa.std_dev
+    assert results.get_data_uncertainty_info(1)["damage_energy"] == {}
+    with pytest.raises(ValueError, match="no dpa for element"):
+        results.get_dpa_uncertainty(1, 1, element="W")
+
+    # Without data_uncertainty there is no spread to report.
+    plain = _iron().transmute(_schedule(), displacement_damage=True)
+    assert plain.get_dpa_uncertainty(1, 1) is None

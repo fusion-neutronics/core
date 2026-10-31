@@ -1840,27 +1840,46 @@ pub(crate) fn damage_energy_rates(
     shielding: Option<&Shielding>,
     nuclides: &[String],
 ) -> HashMap<String, Option<f64>> {
-    let Some(setup) = CollapseSetup::new(material, multigroup_flux, shielding) else {
-        return HashMap::new();
-    };
-    let context = setup.context(
+    per_group_damage_energy_rates(
         material,
         multigroup_flux,
         group_boundaries,
-        source_rate,
         shielding,
-    );
+        nuclides,
+    )
+    .into_iter()
+    .map(|(name, groups)| {
+        let rate = groups.map(|g| g.iter().sum::<f64>() * source_rate);
+        (name, rate)
+    })
+    .collect()
+}
+
+/// [`damage_energy_rates`] at unit flux, per group: entry `g` is group `g`'s
+/// share of the rate, so the rate is their sum, from the same walk. What a
+/// flux-spectrum draw moves group by group.
+pub(crate) fn per_group_damage_energy_rates(
+    material: &Material,
+    multigroup_flux: &[f64],
+    group_boundaries: &[f64],
+    shielding: Option<&Shielding>,
+    nuclides: &[String],
+) -> HashMap<String, Option<Vec<f64>>> {
+    let Some(setup) = CollapseSetup::new(material, multigroup_flux, shielding) else {
+        return HashMap::new();
+    };
+    let context = setup.context(material, multigroup_flux, group_boundaries, 1.0, shielding);
     let one = |name: &String| {
         let reactions = context.reactions_for(name)?;
         let reaction = reactions.get(&crate::damage::MT_DAMAGE_ENERGY)?;
         let (shape, _, _) = context.shape_for(name, reactions);
-        let mut sigma_phi_sum = 0.0;
-        context.walk_channel(reaction, shape.as_ref(), None, |_, sigma_g, phi| {
-            sigma_phi_sum += sigma_g * phi;
+        let mut groups = vec![0.0; multigroup_flux.len()];
+        context.walk_channel(reaction, shape.as_ref(), None, |g, sigma_g, phi| {
+            groups[g] += sigma_g * phi * 1.0e-24;
         });
-        Some(sigma_phi_sum * 1.0e-24 * source_rate)
+        Some(groups)
     };
-    let rates: Vec<Option<f64>> = {
+    let rates: Vec<Option<Vec<f64>>> = {
         #[cfg(not(target_arch = "wasm32"))]
         {
             use rayon::prelude::*;

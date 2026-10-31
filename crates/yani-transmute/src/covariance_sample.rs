@@ -502,6 +502,10 @@ struct View {
 pub struct Sampler {
     fields: BTreeMap<String, Field>,
     views: Vec<BTreeMap<String, View>>,
+    /// Per spectrum, each widened nuclide's damage-energy reading of its
+    /// field ([`crate::covariance_fold::DamageProjection`]), with the stored
+    /// and the explained rate.
+    damage: Vec<BTreeMap<String, (View, f64, f64)>>,
 }
 
 /// One nuclide's principal modes: a basis for the linear part of any
@@ -2066,6 +2070,11 @@ impl View {
         if r == 0.0 {
             return 1.0;
         }
+        1.0 + self.shift(i, draw) / r
+    }
+
+    /// Channel `i`'s change in rate under `draw`, in the rate's own units.
+    fn shift(&self, i: usize, draw: &NuclideDraw) -> f64 {
         let (nr, na) = (draw.relative.len(), draw.absolute.len());
         let mut shift: f64 = self.relative[i * nr..(i + 1) * nr]
             .iter()
@@ -2084,7 +2093,7 @@ impl View {
                 .map(|(w, db)| w * db)
                 .sum::<f64>();
         }
-        1.0 + shift / r
+        shift
     }
 }
 
@@ -2162,7 +2171,13 @@ impl Sampler {
         folds: &[BTreeMap<String, RateCovariance>],
     ) -> Self {
         let entries: Vec<(&String, &crate::covariance_fold::CellField)> = fields.iter().collect();
-        let one = |&(name, cells): &(&String, &crate::covariance_fold::CellField)| -> (String, Field, Vec<Option<View>>) {
+        type Built = (
+            String,
+            Field,
+            Vec<Option<View>>,
+            Vec<Option<(View, f64, f64)>>,
+        );
+        let one = |&(name, cells): &(&String, &crate::covariance_fold::CellField)| -> Built {
             let field = Field::new(cells);
             let views = cells
                 .projections
@@ -2173,9 +2188,22 @@ impl Sampler {
                         .map(|p| View::new(p, &field, folds.get(a).and_then(|f| f.get(name))))
                 })
                 .collect();
-            (name.clone(), field, views)
+            let damage = cells
+                .damage
+                .iter()
+                .map(|d| {
+                    d.as_ref().map(|d| {
+                        (
+                            View::new(&d.projection, &field, None),
+                            d.stored,
+                            d.explained,
+                        )
+                    })
+                })
+                .collect();
+            (name.clone(), field, views, damage)
         };
-        let built: Vec<(String, Field, Vec<Option<View>>)> = {
+        let built: Vec<Built> = {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 use rayon::prelude::*;
@@ -2196,11 +2224,17 @@ impl Sampler {
         let mut sampler = Sampler {
             fields: BTreeMap::new(),
             views: (0..n_spectra).map(|_| BTreeMap::new()).collect(),
+            damage: (0..n_spectra).map(|_| BTreeMap::new()).collect(),
         };
-        for (name, field, views) in built {
+        for (name, field, views, damage) in built {
             for (a, view) in views.into_iter().enumerate() {
                 if let Some(view) = view {
                     sampler.views[a].insert(name.clone(), view);
+                }
+            }
+            for (a, d) in damage.into_iter().enumerate() {
+                if let (Some(d), Some(slot)) = (d, sampler.damage.get_mut(a)) {
+                    slot.insert(name.clone(), d);
                 }
             }
             sampler.fields.insert(name, field);
@@ -2231,6 +2265,7 @@ impl Sampler {
                 (
                     name.clone(),
                     CellField {
+                        damage: Vec::new(),
                         relative_cells: (0..n)
                             .map(|i| Cell {
                                 mt: i as i32,
@@ -2575,6 +2610,40 @@ impl Sampler {
             }
         }
         (out, sampled, floored)
+    }
+
+    /// `nuclide`'s damage-energy rate under `spectrum` relative to the
+    /// stored one, `1 + ΔD / D`, under `draw`: `ΔD = Σ_mt h_mt Δσ_mt` folded
+    /// against the spectrum, over the partials its widened field covers
+    /// ([`crate::covariance_fold::cell_fields_with_damage`]). `None` for a
+    /// nuclide not widened, or this draw has no field for.
+    pub fn damage_ratio(&self, draw: &Draw, spectrum: usize, nuclide: &str) -> Option<f64> {
+        let (view, stored, _) = self.damage.get(spectrum)?.get(nuclide)?;
+        let d = draw.nuclides.get(nuclide)?;
+        (*stored != 0.0).then(|| 1.0 + view.shift(0, d) / stored)
+    }
+
+    /// Per widened nuclide under `spectrum`: the stored damage-energy rate,
+    /// the share of it the deposits reproduce, and the relative sigma of the
+    /// sampled rate.
+    pub fn damage_report(&self, spectrum: usize) -> impl Iterator<Item = (&str, f64, f64, f64)> {
+        self.damage
+            .get(spectrum)
+            .into_iter()
+            .flatten()
+            .map(|(name, (view, stored, explained))| {
+                let share = if *stored != 0.0 {
+                    explained / stored
+                } else {
+                    0.0
+                };
+                (
+                    name.as_str(),
+                    *stored,
+                    share,
+                    view.sampled_variance[0].max(0.0).sqrt(),
+                )
+            })
     }
 
     /// [`Sampler::perturb_with`] on a fresh draw, without the floor count.
@@ -3439,6 +3508,7 @@ mod tests {
             fields.insert(
                 name.to_string(),
                 CellField {
+                    damage: Vec::new(),
                     relative_cells: (0..n)
                         .map(|i| Cell {
                             mt: i as i32,
@@ -4414,6 +4484,7 @@ mod tests {
             })
         };
         CellField {
+            damage: Vec::new(),
             relative_cells: vec![
                 Cell {
                     mt: 1,
