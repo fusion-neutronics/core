@@ -21,13 +21,13 @@ use crate::distribution::PyNeutronSource;
 /// A float argument that may also be given as a sequence of floats, so the
 /// profile helpers can be called on a single radius or on a whole array of
 /// them for plotting.
-enum FloatArg {
+pub(crate) enum FloatArg {
     Scalar(f64),
     Sequence(Vec<f64>),
 }
 
 impl FloatArg {
-    fn extract(name: &str, ob: &Bound<'_, PyAny>) -> PyResult<Self> {
+    pub(crate) fn extract(name: &str, ob: &Bound<'_, PyAny>) -> PyResult<Self> {
         if let Ok(value) = ob.extract::<f64>() {
             return Ok(Self::Scalar(value));
         }
@@ -39,20 +39,20 @@ impl FloatArg {
         }
     }
 
-    fn values(&self) -> &[f64] {
+    pub(crate) fn values(&self) -> &[f64] {
         match self {
             Self::Scalar(value) => std::slice::from_ref(value),
             Self::Sequence(values) => values,
         }
     }
 
-    fn is_scalar(&self) -> bool {
+    pub(crate) fn is_scalar(&self) -> bool {
         matches!(self, Self::Scalar(_))
     }
 }
 
 /// Return a float for a scalar input and a list for a sequence input.
-fn shape_like(py: Python<'_>, scalar: bool, values: Vec<f64>) -> PyResult<Py<PyAny>> {
+pub(crate) fn shape_like(py: Python<'_>, scalar: bool, values: Vec<f64>) -> PyResult<Py<PyAny>> {
     if scalar {
         Ok(values[0].into_pyobject(py)?.into_any().unbind())
     } else {
@@ -109,7 +109,7 @@ fn parse_reaction(reaction: &str) -> PyResult<FusionReactants> {
     }
 }
 
-fn parse_fuel(fuel: Option<HashMap<String, f64>>) -> PyResult<Vec<(FuelIon, f64)>> {
+pub(crate) fn parse_fuel(fuel: Option<HashMap<String, f64>>) -> PyResult<Vec<(FuelIon, f64)>> {
     let Some(fuel) = fuel else {
         return Ok(vec![(FuelIon::Deuterium, 0.5), (FuelIon::Tritium, 0.5)]);
     };

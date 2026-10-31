@@ -6,6 +6,7 @@ mod energy;
 mod schedule;
 mod source;
 mod spatial;
+mod stellarator;
 mod tokamak;
 
 pub use angular::*;
@@ -14,4 +15,5 @@ pub use energy::*;
 pub use schedule::*;
 pub use source::*;
 pub use spatial::*;
+pub use stellarator::*;
 pub use tokamak::*;

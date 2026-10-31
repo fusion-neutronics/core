@@ -129,6 +129,10 @@ pub(crate) fn source_spatial_distribution_into_py(
             let obj = Py::new(py, PyCylindricalRing { inner: *c })?;
             Ok(obj.into_any())
         }
+        SourceSpatialDistribution::FluxShell(s) => {
+            let obj = Py::new(py, crate::distribution::PyFluxShell { inner: *s })?;
+            Ok(obj.into_any())
+        }
     }
 }
 
@@ -145,6 +149,9 @@ fn source_repr(name: &str, src: &Source, strength: f64) -> String {
         SourceSpatialDistribution::CylindricalRing(c) => {
             let o = c.origin;
             format!("CylindricalRing(origin=[{}, {}, {}])", o[0], o[1], o[2])
+        }
+        SourceSpatialDistribution::FluxShell(s) => {
+            format!("FluxShell(rho=({}, {}))", s.rho[0], s.rho[1])
         }
     };
     let energy_str = match &src.energy {

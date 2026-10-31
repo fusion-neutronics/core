@@ -246,54 +246,201 @@ impl Default for TokamakPlasma {
     }
 }
 
+/// Fausser ion density and temperature profiles in a normalised radius
+/// `x` in [0, 1] (0 on the magnetic axis, 1 at the separatrix).
+///
+/// Shared by [`TokamakPlasma`], where `x = a / minor_radius`, and the
+/// stellarator source, where `x` is `rho`, the square root of the normalised
+/// toroidal flux. Units as for [`TokamakPlasma`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlasmaProfiles {
+    pub mode: ConfinementMode,
+    pub ion_density_centre: f64,
+    pub ion_density_peaking_factor: f64,
+    pub ion_density_pedestal: f64,
+    pub ion_density_separatrix: f64,
+    pub ion_temperature_centre: f64,
+    pub ion_temperature_peaking_factor: f64,
+    pub ion_temperature_beta: f64,
+    pub ion_temperature_pedestal: f64,
+    pub ion_temperature_separatrix: f64,
+    /// Normalised radius of the pedestal, in (0, 1).
+    pub pedestal: f64,
+}
+
+impl PlasmaProfiles {
+    /// Ion density (m^-3) at normalised radius `x`.
+    pub fn ion_density(&self, x: f64) -> f64 {
+        match self.mode {
+            ConfinementMode::L => {
+                self.ion_density_centre * (1.0 - x * x).powf(self.ion_density_peaking_factor)
+            }
+            ConfinementMode::H | ConfinementMode::A if x < self.pedestal => {
+                (self.ion_density_centre - self.ion_density_pedestal)
+                    * (1.0 - (x / self.pedestal).powi(2)).powf(self.ion_density_peaking_factor)
+                    + self.ion_density_pedestal
+            }
+            ConfinementMode::H | ConfinementMode::A => {
+                (self.ion_density_pedestal - self.ion_density_separatrix) * (1.0 - x)
+                    / (1.0 - self.pedestal)
+                    + self.ion_density_separatrix
+            }
+        }
+    }
+
+    /// Ion temperature (eV) at normalised radius `x`.
+    pub fn ion_temperature(&self, x: f64) -> f64 {
+        match self.mode {
+            ConfinementMode::L => {
+                self.ion_temperature_centre
+                    * (1.0 - x * x).powf(self.ion_temperature_peaking_factor)
+            }
+            ConfinementMode::H | ConfinementMode::A if x < self.pedestal => {
+                self.ion_temperature_pedestal
+                    + (self.ion_temperature_centre - self.ion_temperature_pedestal)
+                        * (1.0 - (x / self.pedestal).powf(self.ion_temperature_beta))
+                            .powf(self.ion_temperature_peaking_factor)
+            }
+            ConfinementMode::H | ConfinementMode::A => {
+                self.ion_temperature_separatrix
+                    + (self.ion_temperature_pedestal - self.ion_temperature_separatrix) * (1.0 - x)
+                        / (1.0 - self.pedestal)
+            }
+        }
+    }
+
+    /// Refuse non-finite values, non-positive densities, negative
+    /// temperatures and a pedestal outside (0, 1).
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, value) in [
+            ("ion_density_centre", self.ion_density_centre),
+            (
+                "ion_density_peaking_factor",
+                self.ion_density_peaking_factor,
+            ),
+            ("ion_density_pedestal", self.ion_density_pedestal),
+            ("ion_density_separatrix", self.ion_density_separatrix),
+            ("ion_temperature_centre", self.ion_temperature_centre),
+            (
+                "ion_temperature_peaking_factor",
+                self.ion_temperature_peaking_factor,
+            ),
+            ("ion_temperature_beta", self.ion_temperature_beta),
+            ("ion_temperature_pedestal", self.ion_temperature_pedestal),
+            (
+                "ion_temperature_separatrix",
+                self.ion_temperature_separatrix,
+            ),
+            ("pedestal_rho", self.pedestal),
+        ] {
+            crate::distribution::check_finite(name, value)?;
+        }
+        if !(self.pedestal > 0.0 && self.pedestal < 1.0) {
+            return Err(format!(
+                "pedestal_rho must be between 0 and 1 (got {})",
+                self.pedestal
+            ));
+        }
+        for (name, value) in [
+            ("ion_density_centre", self.ion_density_centre),
+            ("ion_density_pedestal", self.ion_density_pedestal),
+            ("ion_density_separatrix", self.ion_density_separatrix),
+        ] {
+            if value <= 0.0 {
+                return Err(format!("{name} must be positive (got {value})"));
+            }
+        }
+        for (name, value) in [
+            ("ion_temperature_centre", self.ion_temperature_centre),
+            ("ion_temperature_pedestal", self.ion_temperature_pedestal),
+            (
+                "ion_temperature_separatrix",
+                self.ion_temperature_separatrix,
+            ),
+        ] {
+            if value < 0.0 {
+                return Err(format!("{name} must not be negative (got {value})"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The neutron-producing reactions `fuel` supports, each paired with the
+/// factor that turns an ion density `n_i` into the reacting pair density:
+/// `factor * n_i^2`. See [`TokamakPlasma::reactions`] for what is left out.
+pub fn fusion_reactions(fuel: &[(FuelIon, f64)]) -> Result<Vec<(FusionReactants, f64)>, String> {
+    let fraction = |ion| -> f64 {
+        fuel.iter()
+            .filter(|(species, _)| *species == ion)
+            .map(|(_, fraction)| fraction)
+            .sum()
+    };
+    let (deuterium, tritium) = (fraction(FuelIon::Deuterium), fraction(FuelIon::Tritium));
+    if deuterium == 0.0 {
+        return Err(
+            "fuel must contain deuterium: T-T fusion is not supported (yamc has no \
+             T(t,2n) neutron spectrum model)"
+                .to_string(),
+        );
+    }
+    let mut reactions = Vec::new();
+    if tritium > 0.0 {
+        reactions.push((FusionReactants::DT, deuterium * tritium));
+    }
+    reactions.push((FusionReactants::DD, 0.5 * deuterium * deuterium));
+    Ok(reactions)
+}
+
+/// Refuse an empty fuel, a fraction outside (0, 1], or fractions not
+/// summing to 1.
+pub fn validate_fuel(fuel: &[(FuelIon, f64)]) -> Result<(), String> {
+    if fuel.is_empty() {
+        return Err("fuel must contain at least one species".to_string());
+    }
+    for (species, fraction) in fuel {
+        if !fraction.is_finite() || *fraction <= 0.0 || *fraction > 1.0 {
+            return Err(format!(
+                "fuel fractions must be greater than 0 and at most 1 (got {fraction} for \
+                 {species:?})"
+            ));
+        }
+    }
+    let sum: f64 = fuel.iter().map(|(_, fraction)| fraction).sum();
+    if (sum - 1.0).abs() > 1.0e-9 {
+        return Err(format!("fuel fractions must sum to 1 (got {sum})"));
+    }
+    Ok(())
+}
+
 impl TokamakPlasma {
+    /// The profiles in normalised radius `a / minor_radius`.
+    pub fn profiles(&self) -> PlasmaProfiles {
+        PlasmaProfiles {
+            mode: self.mode,
+            ion_density_centre: self.ion_density_centre,
+            ion_density_peaking_factor: self.ion_density_peaking_factor,
+            ion_density_pedestal: self.ion_density_pedestal,
+            ion_density_separatrix: self.ion_density_separatrix,
+            ion_temperature_centre: self.ion_temperature_centre,
+            ion_temperature_peaking_factor: self.ion_temperature_peaking_factor,
+            ion_temperature_beta: self.ion_temperature_beta,
+            ion_temperature_pedestal: self.ion_temperature_pedestal,
+            ion_temperature_separatrix: self.ion_temperature_separatrix,
+            pedestal: self.pedestal_radius / self.minor_radius,
+        }
+    }
+
     /// Ion density (m^-3) on the flux surface of minor radius `a` (cm).
     pub fn ion_density(&self, a: f64) -> Result<f64, String> {
         self.check_minor_radius(a)?;
-        Ok(match self.mode {
-            ConfinementMode::L => {
-                self.ion_density_centre
-                    * (1.0 - (a / self.minor_radius).powi(2)).powf(self.ion_density_peaking_factor)
-            }
-            ConfinementMode::H | ConfinementMode::A => {
-                if a < self.pedestal_radius {
-                    (self.ion_density_centre - self.ion_density_pedestal)
-                        * (1.0 - (a / self.pedestal_radius).powi(2))
-                            .powf(self.ion_density_peaking_factor)
-                        + self.ion_density_pedestal
-                } else {
-                    (self.ion_density_pedestal - self.ion_density_separatrix)
-                        * (self.minor_radius - a)
-                        / (self.minor_radius - self.pedestal_radius)
-                        + self.ion_density_separatrix
-                }
-            }
-        })
+        Ok(self.profiles().ion_density(a / self.minor_radius))
     }
 
     /// Ion temperature (eV) on the flux surface of minor radius `a` (cm).
     pub fn ion_temperature(&self, a: f64) -> Result<f64, String> {
         self.check_minor_radius(a)?;
-        Ok(match self.mode {
-            ConfinementMode::L => {
-                self.ion_temperature_centre
-                    * (1.0 - (a / self.minor_radius).powi(2))
-                        .powf(self.ion_temperature_peaking_factor)
-            }
-            ConfinementMode::H | ConfinementMode::A => {
-                if a < self.pedestal_radius {
-                    self.ion_temperature_pedestal
-                        + (self.ion_temperature_centre - self.ion_temperature_pedestal)
-                            * (1.0 - (a / self.pedestal_radius).powf(self.ion_temperature_beta))
-                                .powf(self.ion_temperature_peaking_factor)
-                } else {
-                    self.ion_temperature_separatrix
-                        + (self.ion_temperature_pedestal - self.ion_temperature_separatrix)
-                            * (self.minor_radius - a)
-                            / (self.minor_radius - self.pedestal_radius)
-                }
-            }
-        })
+        Ok(self.profiles().ion_temperature(a / self.minor_radius))
     }
 
     /// Map `(a, alpha)` onto `(R, Z)` in cm using this plasma's shape.
@@ -323,21 +470,7 @@ impl TokamakPlasma {
     /// from the reaction Q value, where `openmc-plasma-source` uses
     /// Ballabio's tabulated 14.021 / 2.4495 MeV.
     pub fn reactions(&self) -> Result<Vec<(FusionReactants, f64)>, String> {
-        let deuterium = self.fuel_fraction(FuelIon::Deuterium);
-        let tritium = self.fuel_fraction(FuelIon::Tritium);
-        if deuterium == 0.0 {
-            return Err(
-                "fuel must contain deuterium: T-T fusion is not supported (yamc has no \
-                 T(t,2n) neutron spectrum model)"
-                    .to_string(),
-            );
-        }
-        let mut reactions = Vec::new();
-        if tritium > 0.0 {
-            reactions.push((FusionReactants::DT, deuterium * tritium));
-        }
-        reactions.push((FusionReactants::DD, 0.5 * deuterium * deuterium));
-        Ok(reactions)
+        fusion_reactions(&self.fuel)
     }
 
     /// Build the ring sources describing this plasma's neutron emission.
@@ -475,14 +608,6 @@ impl TokamakPlasma {
         }
     }
 
-    fn fuel_fraction(&self, ion: FuelIon) -> f64 {
-        self.fuel
-            .iter()
-            .filter(|(species, _)| *species == ion)
-            .map(|(_, fraction)| fraction)
-            .sum()
-    }
-
     fn check_minor_radius(&self, a: f64) -> Result<(), String> {
         if !(0.0..=self.minor_radius).contains(&a) {
             return Err(format!(
@@ -616,22 +741,7 @@ impl TokamakPlasma {
         if self.grid_density == 0 {
             return Err("grid_density must be positive (got 0)".to_string());
         }
-        if self.fuel.is_empty() {
-            return Err("fuel must contain at least one species".to_string());
-        }
-        for (species, fraction) in &self.fuel {
-            if !fraction.is_finite() || *fraction <= 0.0 || *fraction > 1.0 {
-                return Err(format!(
-                    "fuel fractions must be greater than 0 and at most 1 (got {fraction} for \
-                     {species:?})"
-                ));
-            }
-        }
-        let sum: f64 = self.fuel.iter().map(|(_, fraction)| fraction).sum();
-        if (sum - 1.0).abs() > 1.0e-9 {
-            return Err(format!("fuel fractions must sum to 1 (got {sum})"));
-        }
-        Ok(())
+        validate_fuel(&self.fuel)
     }
 }
 

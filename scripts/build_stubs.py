@@ -69,6 +69,9 @@ SUBMODULES: dict[str, list[str]] = {
         "tokamak_ion_temperature",
         "tokamak_convert_a_alpha_to_r_z",
         "tokamak_neutron_source_density",
+        "StellaratorShape",
+        "FluxShell",
+        "stellarator_source",
     ],
     "parallel": [
         "has_mpi",
