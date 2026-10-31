@@ -1249,6 +1249,9 @@ impl PyTransmutationResults {
     ///   that came out negative and were floored at zero, which only a channel
     ///   subtracting reactions or reading an additive (absolute or
     ///   short-range) covariance can.
+    /// - ``cross_section_points_floored``: with ``method="coupled"``, the
+    ///   cross-section grid values a replica's draw took below zero and that
+    ///   were floored at zero, over every replica.
     /// - ``half_lives_perturbed`` / ``no_half_life_uncertainty``: with the
     ///   ``"half_life"`` source, which reachable unstable nuclides had their
     ///   half-life sampled and which state no sigma to sample from.

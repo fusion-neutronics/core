@@ -103,12 +103,14 @@ impl Model {
     ///   and re-solve, for every source [`yani_transmute::transport_replicas`]
     ///   applies. With the coupled method, run the whole coupled calculation
     ///   again per replica instead ([`yani_transmute::coupled_uncertainty`]),
-    ///   each on its own transport seed and decay data, and refuse the sources
-    ///   a replica cannot carry yet. `None` is the default path, bit-identical
-    ///   to a build without it, and so are the nominal results of either
-    ///   method with it. With the cross-section
-    ///   source on, the transport carries a fixed number of replica
-    ///   weights ([`yani_transmute::uncertainty::transport_replicas_for`]) and
+    ///   each on its own transport seed, decay data and, with the
+    ///   cross-section source, its own nuclear data in every transport
+    ///   ([`crate::coupled_xs`]), and refuse the sources a replica cannot
+    ///   carry yet. `None` is the default path, bit-identical to a build
+    ///   without it, and so are the nominal results of either method with it.
+    ///   With the cross-section source on in independent mode, the transport
+    ///   carries a fixed number of replica weights
+    ///   ([`yani_transmute::uncertainty::transport_replicas_for`]) and
     ///   tallies every rate per replica under them, so each replica's rates
     ///   carry the flux's response to its cross sections; its nominal rates
     ///   are bit-identical to a run without.
@@ -168,15 +170,17 @@ impl Model {
             .is_some_and(|u| u.wants(yani_transmute::uncertainty::Source::IsomerBranching));
         let want_cross_sections = uncertainty
             .is_some_and(|u| u.wants(yani_transmute::uncertainty::Source::CrossSections));
-        // With the cross sections perturbed, the single transport carries one
-        // likelihood-ratio weight per replica and tallies every rate per
-        // replica under it, so each replica's rates answer its own data.
-        let replica_weights = uncertainty.filter(|_| want_cross_sections).map(|u| {
-            crate::model::TransportDataUncertainty {
+        // With the cross sections perturbed, independent mode's single
+        // transport carries one likelihood-ratio weight per replica and
+        // tallies every rate per replica under it, so each replica's rates
+        // answer its own data. A coupled replica transports on its own data
+        // instead, so its transports carry no weights.
+        let replica_weights = uncertainty
+            .filter(|_| want_cross_sections && is_independent)
+            .map(|u| crate::model::TransportDataUncertainty {
                 seed: u.seed,
                 replicas: yani_transmute::uncertainty::transport_replicas_for(u),
-            }
-        });
+            });
         if let Some(data) = &replica_weights {
             // Refused before anything runs rather than after the scouting
             // transport.
@@ -797,7 +801,8 @@ impl Model {
                         cell_indices,
                         transmuted_material,
                         has_nuclide_tallies,
-                    );
+                        &mut |_| Ok(false),
+                    )?;
                 }
             }
 
@@ -847,16 +852,29 @@ impl Model {
                 parts,
                 has_nuclide_tallies,
             };
+            // Every nuclide of every material read in full with its
+            // covariance, and fielded, once for all the replicas.
+            let mut library = match uncertainty.filter(|_| replicas.cross_sections()) {
+                Some(request) => Some(crate::coupled_xs::CoupledCrossSections::new(
+                    &start,
+                    request.seed,
+                )?),
+                None => None,
+            };
             let ensembles = replicas.run(&chain, &initial_for_replicas, &nominal, |k, edited| {
                 println!("Coupled uncertainty: replica {}...", k + 1);
                 let replica_settings = crate::model::TransportSettings {
                     seed: replicas.transport_seed(settings.seed, k),
                     ..settings.clone()
                 };
-                self.coupled_replica(&run, edited, &replica_settings)
+                let mut data = library.as_mut().map(|l| l.replica(k));
+                self.coupled_replica(&run, edited, &replica_settings, data.as_mut())
             });
             self.geometry.materials_mut().clone_from_slice(&end);
-            for (id, (ensemble, info)) in ensembles? {
+            for (id, (ensemble, mut info)) in ensembles? {
+                if let Some(l) = &library {
+                    l.report(id, &mut info);
+                }
                 results.uncertainty.insert(id, ensemble);
                 results.uncertainty_info.insert(id, info);
             }
@@ -1068,16 +1086,37 @@ impl Model {
     /// starting geometry, solved on `chain` and transported with `settings`,
     /// exactly as the nominal loop steps, returning each material's per-step
     /// inventories. Leaves the geometry at the replica's last step.
+    ///
+    /// With `data`, every material of the geometry reads that replica's
+    /// nuclear data from the start, and so does every nuclide a step loads
+    /// into one later, before its cross sections are built.
     fn coupled_replica(
         &mut self,
         run: &CoupledRun,
         chain: &Arc<HashMap<String, ChainNuclide>>,
         settings: &crate::model::TransportSettings,
+        mut data: Option<&mut crate::coupled_xs::Replica>,
     ) -> Result<
         HashMap<u32, yani_transmute::coupled_uncertainty::Inventories>,
         Box<dyn std::error::Error>,
     > {
         self.geometry.materials_mut().clone_from_slice(run.start);
+        if let Some(data) = data.as_mut() {
+            // A material several slots share is perturbed once and shared.
+            let mut made: HashMap<usize, Arc<Material>> = HashMap::new();
+            for slot in self.geometry.materials_mut().iter_mut() {
+                let at = Arc::as_ptr(slot) as usize;
+                if let Some(m) = made.get(&at) {
+                    *slot = Arc::clone(m);
+                    continue;
+                }
+                let mut material = (**slot).clone();
+                if data.apply(&mut material)? {
+                    *slot = Arc::new(material);
+                }
+                made.insert(at, Arc::clone(slot));
+            }
+        }
         let mut compositions = run.initial.clone();
         let mut fy_weights: HashMap<u32, FissionYieldWeights> = HashMap::new();
         let mut out: HashMap<u32, yani_transmute::coupled_uncertainty::Inventories> = run
@@ -1137,7 +1176,8 @@ impl Model {
                     &run.cells[&mat_id],
                     material,
                     run.has_nuclide_tallies,
-                );
+                    &mut |m| data.as_mut().map_or(Ok(false), |d| d.apply(m)),
+                )?;
             }
         }
         Ok(out)
@@ -1145,6 +1185,11 @@ impl Model {
 
     /// Hand `transmuted_material` to the next step's transport, in every
     /// cell of `cell_indices`.
+    ///
+    /// `adjust` sees the material once every nuclide it needs is loaded and
+    /// before its cross sections are built, and says whether it changed its
+    /// nuclear data: a coupled replica puts its own draw in place of what a
+    /// step loaded here.
     fn update_transport_material(
         &mut self,
         #[allow(unused_variables)] step: usize,
@@ -1152,7 +1197,8 @@ impl Model {
         cell_indices: &[usize],
         transmuted_material: Material,
         has_nuclide_tallies: bool,
-    ) {
+        adjust: &mut dyn FnMut(&mut Material) -> Result<bool, String>,
+    ) -> Result<(), String> {
         let cell_idx = cell_indices[0];
         let slot = self.geometry.cells()[cell_idx]
             .material_idx
@@ -1220,6 +1266,7 @@ impl Model {
             }
             loaded_any
         };
+        let new_nuclides_loaded = adjust(&mut transport_material)? || new_nuclides_loaded;
 
         // Drop from transport anything without transport-scope data.
         // Testing presence in `nuclide_data` is not enough now that
@@ -1313,6 +1360,7 @@ impl Model {
         for slot in slots {
             self.geometry.materials_mut()[slot as usize] = Arc::clone(&new_arc);
         }
+        Ok(())
     }
 }
 

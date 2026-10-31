@@ -184,6 +184,28 @@ pub fn thnmax<'a>(ranges: impl IntoIterator<Item = &'a ResonanceRange>) -> Optio
         .map(|e| e.min(BROADR_CEILING_EV))
 }
 
+/// Points per piece of [`pointwise`]: enough to keep a thread busy well past
+/// the cost of handing it the work.
+const POINTS_PER_PIECE: usize = 2048;
+
+/// `f` over `points` piece by piece, the pieces' results in order: in
+/// parallel off wasm. Each point's value is `f`'s alone, so the result is the
+/// one `f(points)` gives, to the bit, however the points are cut.
+fn pointwise<T: Send>(points: &[f64], f: impl Fn(&[f64]) -> Vec<T> + Sync) -> Vec<T> {
+    let pieces: Vec<Vec<T>> = {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use rayon::prelude::*;
+            points.par_chunks(POINTS_PER_PIECE).map(&f).collect()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            points.chunks(POINTS_PER_PIECE).map(&f).collect()
+        }
+    };
+    pieces.into_iter().flatten().collect()
+}
+
 /// One range ready to draw: its sampler, and the nominal reconstruction on
 /// the grid that traces it alone, which every replica's grid holds.
 struct PreparedRange {
@@ -207,7 +229,9 @@ impl PreparedRange {
     /// The nominal cross sections on `grid`, read off the cached ones where
     /// a point is one of the nominal grid's and rebuilt elsewhere.
     fn nominal_on(&self, grid: &[f64]) -> Vec<CrossSections> {
-        let mut j = 0;
+        let mut j = self
+            .nominal_grid
+            .partition_point(|&g| grid.first().is_some_and(|&e| g < e));
         grid.iter()
             .map(|&e| {
                 while j < self.nominal_grid.len() && self.nominal_grid[j] < e {
@@ -890,8 +914,8 @@ impl TransportResonance {
             let perturbed = reconstruction_at(&r.range, &r.cov, &values).map_err(fail)?;
             let rgrid = reconstruction_grid(&[r.nominal.as_ref(), perturbed.as_ref()], &r.edges)
                 .map_err(fail)?;
-            let nominal = r.nominal_on(&rgrid);
-            let drawn = cross_sections_on(perturbed.as_ref(), &rgrid);
+            let nominal = pointwise(&rgrid, |at| r.nominal_on(at));
+            let drawn = pointwise(&rgrid, |at| cross_sections_on(perturbed.as_ref(), at));
             // Zero outside the range, by a step at each end, as for the fold.
             let mut energy = Vec::with_capacity(rgrid.len() + 2);
             energy.push(rgrid[0]);
@@ -914,9 +938,20 @@ impl TransportResonance {
                 sigmas.push(sigma);
             }
             let columns: Vec<&[f64]> = sigmas.iter().map(Vec::as_slice).collect();
-            let below = broaden_many(&energy, &columns, p.awr, self.temperature, &at[..split])
-                .map_err(fail)?;
-            let above = broaden_many(&energy, &columns, p.awr, 0.0, &at[split..]).map_err(fail)?;
+            let broadened = |temperature: f64, at: &[f64]| -> Result<Vec<Vec<f64>>, String> {
+                let pieces = pointwise(at, |at| {
+                    vec![broaden_many(&energy, &columns, p.awr, temperature, at)]
+                });
+                let mut out = vec![Vec::with_capacity(at.len()); columns.len()];
+                for piece in pieces {
+                    for (o, column) in out.iter_mut().zip(piece.map_err(fail)?) {
+                        o.extend(column);
+                    }
+                }
+                Ok(out)
+            };
+            let below = broadened(self.temperature, &at[..split])?;
+            let above = broadened(0.0, &at[split..])?;
             for ((mt, below), above) in mts.iter().zip(&below).zip(&above) {
                 let target = out.get_mut(mt).expect("every slot MT is a reaction");
                 for (o, v) in target[first..last]

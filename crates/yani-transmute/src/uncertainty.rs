@@ -768,6 +768,11 @@ pub struct Info {
     /// zero: a channel that subtracts reactions (an NC derivation), or reads
     /// an absolute or short-range shift, which is additive.
     pub rates_floored: usize,
+    /// Cross-section values a coupled replica's draw took below zero, floored
+    /// at zero, over every replica and every grid point of the nuclear data
+    /// its transports read. Zero outside the coupled method, whose replicas
+    /// draw rates rather than whole cross sections.
+    pub cross_section_points_floored: usize,
     /// Spectra that carried a per-bin flux sigma, and those that did not.
     ///
     /// A spectrum taken from a published reference set has no stated error, so
