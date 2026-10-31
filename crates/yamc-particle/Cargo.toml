@@ -1,0 +1,24 @@
+[package]
+name = "yamc-particle"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Runtime particle state for yamc -- `Particle` struct and friends"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "yamc_particle"
+path = "src/lib.rs"
+
+[dependencies]
+# Default features include `arrow`, which yamc-nuclide's loader assumes
+# is on. yamc-particle only uses `NuclideId` and the re-exported
+# `ParticleType` enum from yamc-nuclide -- neither needs arrow itself --
+# but disabling it breaks the parent crate's lib build.
+yamc-nuclide = { path = "../yamc-nuclide" }
+
+[features]
+default = []
+# History tracking for collision events. Mirrored from yamc's
+# `debug_history` feature so workspace-level builds keep working.
+debug_history = []

@@ -1,0 +1,168 @@
+# Gates the wasm32-unknown-unknown build for the full `yamc` crate
+# (with `--features wasm`). The original blockers (getrandom feature
+# wiring, faer/rayon → atomic-wait, the silent bit-rot in the
+# wasm-bindgen modules) are resolved.
+# A failure here means a wasm-side regression -- please don't merge it
+# without understanding why.
+name: WASM tests
+
+on:
+  push:
+    branches: [ main ]
+  # Every pull request, whatever its base, so a PR stacked on another
+  # PR's branch is tested before it is retargeted at main.
+  pull_request:
+    # A change to prose alone cannot break a build or a test: no test, script or
+    # include_str! reads a Markdown file. Pushes to main and releases are not
+    # filtered.
+    paths-ignore: ['**/*.md', 'docs/**', 'mkdocs.yml', 'LICENSE*']
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# A newer push to a pull request makes its older run moot, so that run is
+# cancelled. Only pull-request runs: a push to main, a release and a manual
+# dispatch always finish, so nothing that builds or publishes is cut short.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Three tries over ten seconds is all cargo gives a registry that is briefly
+  # unreachable, and a release has already been lost to a twelve-second one
+  # (yani-core 0.11.0). Ten stretches the same ladder over about a minute.
+  CARGO_NET_RETRY: 10
+
+jobs:
+  build_and_test:
+    name: Rust tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Rust
+        run: rustup update stable && rustup default stable
+      # Cache the dependency build; see ci-rust.yml for why this matters.
+      # The native half of this workflow: same host target as the Rust tests
+      # workflow, but a different job set, so it keeps its own key rather than
+      # competing for that one.
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-wasm
+          cache-on-failure: true
+      # The cache below is keyed on the release latest.json names, so
+      # a new release starts from a fresh cache rather than restoring
+      # the files of the old one.
+      - name: Resolve nuclear-data release
+        id: fixtures-release
+        shell: bash
+        run: |
+          release=$(python3 scripts/fetch_test_fixtures.py --print-release)
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+      - name: Cache nuclear-data test fixtures
+        uses: actions/cache@v6
+        with:
+          # The platform cache directory yamc resolves (url_cache::cache_root):
+          # one of these exists on any runner, the others are ignored.
+          path: |
+            ~/.cache/yamc
+            ~/Library/Caches/yamc
+            ~/AppData/Local/yamc
+          key: yamc-test-fixtures-endf-b8.1-${{ steps.fixtures-release.outputs.release }}-${{ hashFiles('scripts/fetch_test_fixtures.py') }}
+      - name: Fetch nuclear-data test fixtures
+        run: python3 scripts/fetch_test_fixtures.py
+      # The browser run is not only a compile check: tests/wasm_fetch_browser.rs
+      # drives `WasmSimulation.fetchNuclearData` against the published data on
+      # yamc-data.xsplot.com from inside headless Firefox and runs transport
+      # on what arrived. That is the path an exported `Model.to_html()` page
+      # takes, and it once shipped broken (fetching bundles the CDN no longer
+      # served) with nothing here to notice. A failure in that test with an
+      # unchanged tree means the published layout moved.
+      - name: Test compile
+        run: |
+          curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+          cd crates/yamc
+          wasm-pack build --target web --features wasm
+          cargo test -p yamc --features wasm-test
+          RUST_BACKTRACE=full wasm-pack test --headless --firefox --features wasm-test
+
+  # The browser binding, which the job above does not cover: `yamc` builds for
+  # wasm32 there, but `yani-wasm` is a separate crate with its own dependency
+  # set, and nothing gated it.
+  #
+  # `pkg/` is published so a browser front end can consume a built package
+  # rather than vendoring a committed binary, which is what yani-online does
+  # today -- it carries a copy of this output and a CORE_COMMIT file recording
+  # which commit produced it, because there was nothing to download.
+  yani_wasm:
+    name: yani-wasm browser binding
+    runs-on: ubuntu-latest
+    permissions:
+      # Only the release step needs it, and only for `gh release upload`.
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Rust
+        run: rustup update stable && rustup default stable
+      # Cache the dependency build; see ci-rust.yml for why this matters.
+      # Its OWN key: this builds for wasm32-unknown-unknown, so it shares no
+      # compiled artifacts with any host-target job.
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm32
+          cache-on-failure: true
+      # The cache below is keyed on the release latest.json names, so
+      # a new release starts from a fresh cache rather than restoring
+      # the files of the old one.
+      - name: Resolve nuclear-data release
+        id: fixtures-release
+        shell: bash
+        run: |
+          release=$(python3 scripts/fetch_test_fixtures.py --print-release)
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+      - name: Cache nuclear-data test fixtures
+        uses: actions/cache@v6
+        with:
+          # The platform cache directory yamc resolves (url_cache::cache_root):
+          # one of these exists on any runner, the others are ignored.
+          path: |
+            ~/.cache/yamc
+            ~/Library/Caches/yamc
+            ~/AppData/Local/yamc
+          key: yamc-test-fixtures-endf-b8.1-${{ steps.fixtures-release.outputs.release }}-${{ hashFiles('scripts/fetch_test_fixtures.py') }}
+      # The native tests drive `YaniSession` against real Arrow fixtures. They
+      # skip themselves when the fixtures are absent rather than failing, so
+      # without this step the job would pass while asserting nothing.
+      - name: Fetch nuclear-data test fixtures
+        run: python3 scripts/fetch_test_fixtures.py
+
+      - name: Build the package
+        run: |
+          curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+          cd crates/yani-wasm
+          wasm-pack build --target web --out-dir pkg
+
+      # `--target web` only. A classic Worker needs a classic script, which is
+      # what `--target no-modules` emits, but a front end can convert the module
+      # form at load time -- yani-online does -- so a second artifact would be
+      # two things to keep in step for no gain.
+      - name: Test the binding natively
+        run: cargo test -p yani-wasm --locked
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: yani-wasm-pkg
+          path: crates/yani-wasm/pkg/
+
+      - name: Attach the package to the release
+        if: github.event_name == 'release' && github.event.action == 'published'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          tar -czf "yani-wasm-${TAG}.tar.gz" -C crates/yani-wasm pkg
+          gh release upload "$TAG" "yani-wasm-${TAG}.tar.gz" --clobber

@@ -1,0 +1,147 @@
+[package]
+name = "yamc"
+version = "0.3.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Yet Another Monte Carlo code for neutron transport simulations"
+license = "MIT OR Apache-2.0"
+exclude = [
+    "*.py",
+    "examples/python/",
+]
+
+[lib]
+name = "yamc"
+# `cdylib` is required for `wasm-pack build --features wasm` (CI lane in
+# ci-wasm.yml). `rlib` is what every downstream workspace crate links
+# against. Keep both.
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+once_cell = "1.21.3"
+nalgebra = "0.34.1"
+rand = "0.10"
+rand_chacha = { version = "0.10", optional = true }
+rayon = "1.10"
+parking_lot = "0.12"
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+sha2 = "0.10"
+wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+# `WasmSimulation.fetchNuclearData` pulls the model's nuclear data through the
+# browser's own `fetch`: wasm-bindgen-futures turns its Promises into futures
+# and back, web-sys types the Response. Only the three web-sys interfaces the
+# fetcher touches, so the binding stays small.
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", features = ["Headers", "RequestInit", "Response"], optional = true }
+# The byte-range index that rides in each nuclide's version.json, which the
+# browser fetcher plans its ranged requests from.
+nuclear-data-schema = { path = "../nuclear-data-schema", optional = true }
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+mpi = { version = "0.8", optional = true }
+yamt = { path = "../yamt", optional = true, features = ["arrow"] }
+yani = { path = "../yani" }
+yani-transmute = { path = "../yani-transmute", default-features = false }
+yani-decay = { path = "../yani-decay" }
+yamc-geo = { path = "../yamc-geo" }
+# Only pulled in when the `wasm` feature is on -- adds the viewer
+# templating (~30 KB of strings) to the wasm binary for
+# WasmSimulation.plotHtml(). Native builds skip it entirely.
+yamc-plot = { path = "../yamc-plot", optional = true }
+yamc-nuclide = { path = "../yamc-nuclide", default-features = false }
+# The ENDF sum rules, for rebuilding the redundant rows of a perturbed nuclide
+# from its partials (`xs_perturbation`).
+endf = { path = "../endf" }
+yamc-element = { path = "../yamc-element", default-features = false }
+yamc-materials = { path = "../yamc-materials", default-features = false }
+yamc-particle = { path = "../yamc-particle" }
+yamc-physics = { path = "../yamc-physics" }
+yamc-rng = { path = "../yamc-rng" }
+yamc-source = { path = "../yamc-source" }
+yamc-tallies = { path = "../yamc-tallies", default-features = false }
+yamc-gpu = { path = "../yamc-gpu", optional = true }
+
+[dev-dependencies]
+# Resolves the nuclear-data fixture cache the same way the loader does,
+# rather than through `HOME` alone.
+yamc-test-cache = { path = "../yamc-test-cache" }
+# Reconverts a fixture's covariance from a local tape, for the tests that
+# need data newer than the published fixtures.
+yamc-convert = { path = "../yamc-convert" }
+# Decompresses the committed MF=33 tapes those tests convert.
+lzma-rs = "0.3"
+tempfile = "3"
+wasm-bindgen-test = "0.3"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "cell_finding"
+harness = false
+
+[[bench]]
+name = "transport"
+harness = false
+
+# Probe examples are entirely `#![cfg(feature = "gpu")]`; declare the
+# feature requirement so cargo skips them (rather than compiling an
+# empty crate with no `main`) when `gpu` is off.
+[[example]]
+name = "probe_ttb_sampling"
+required-features = ["gpu"]
+
+[[example]]
+name = "probe_ttb_yields"
+required-features = ["gpu"]
+
+[features]
+default = ["arrow"]
+debug_xs = []
+debug_sampling = ["yamc-nuclide/debug_sampling"]
+debug_runtime = []
+debug_transmutation = ["yani-transmute/debug_transmutation"]
+debug_collision = ["yamc-nuclide/debug_collision", "yamc-materials/debug_collision"]
+debug_history = ["yamc-particle/debug_history", "yamc-physics/debug_history"]
+debug_timing = []
+debug_diagnostics = ["yamc-physics/debug_diagnostics"]
+download = ["yamc-nuclide/download", "yamc-element/download", "yamc-materials/download", "yani-transmute/download"]
+download-tls = ["download", "yamc-nuclide/download-tls", "yamc-element/download-tls", "yamc-materials/download-tls", "yani-transmute/download-tls"]
+arrow = ["yamc-nuclide/arrow", "yamc-element/arrow", "yamc-materials/arrow", "yamc-physics/arrow", "yamc-tallies/arrow", "yani-transmute/arrow"]
+mpi = ["dep:mpi"]
+wasm = [
+    "dep:wasm-bindgen",
+    "dep:js-sys",
+    "dep:console_error_panic_hook",
+    "dep:serde-wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:web-sys",
+    "dep:nuclear-data-schema",
+    # `plotHtml` on WasmSimulation pulls in the viewer templating.
+    "dep:yamc-plot"
+]
+wasm-test = ["wasm"]
+mesh = ["dep:yamt", "yamc-tallies/mesh"]
+cad = ["mesh"]
+# GPU compute path. Off by default HERE, but on by default for the wheel:
+# `yamc-python`'s `default` includes `gpu`, which turns this on for every
+# `cargo build --workspace` and every `maturin develop`. Off in this crate's own
+# default so the wasm builds and the ppc64le/riscv64 cross-checks, which go
+# through `-p yamc --no-default-features`, never see cubecl.
+# Pulls cubecl/Vulkan via yamc-gpu.
+# On macOS yamc-gpu compiles to a stub whose `GpuContext::new()` returns
+# `NoF64Adapter`, so enabling `gpu` on macOS is a clean build but a
+# runtime no-op (caller falls back to CPU).
+gpu = ["dep:yamc-gpu", "dep:rand_chacha"]
+# The previous `welford` and `welford_stage3` cargo features have been
+# removed; all three variance-accumulation methods are compiled in and
+# selected at runtime via `Tally::variance_method`.
+
+[package.metadata.cargo-machete]
+# Declared only to turn on the `wasm_js` backend for the transitive
+# getrandom (entropy source for `rand` under wasm32). No direct `use`,
+# so cargo-machete can't see they're needed.
+ignored = ["getrandom", "getrandom_v04"]

@@ -1,0 +1,2760 @@
+use crate::interpolate_linear;
+use rand::RngExt;
+use smallvec::SmallVec;
+use std::collections::HashMap;
+use yamc_element::bremsstrahlung::Bremsstrahlung;
+use yamc_element::photon::PhotonInteraction;
+use yamc_nuclide::config::CONFIG;
+use yamc_nuclide::load_scope::LoadScope;
+use yamc_nuclide::nuclide::{get_or_load_nuclide, Nuclide};
+use yamc_nuclide::nuclide_registry::NuclideId;
+
+/// Tuple returned from [`Material::sample_collision_data`]:
+/// `(distance, nuclide_name, nuclide, urr_random, nuclide_id)`.
+/// `nuclide_id` is populated only when D1S setup has run; otherwise `None`.
+pub type CollisionData<'a> = (
+    f64,
+    &'a str,
+    &'a Arc<Nuclide>,
+    Option<f64>,
+    Option<NuclideId>,
+);
+
+/// The struck nuclide chosen at a collision, without the (already-sampled)
+/// flight distance: `(name, nuclide, nuclide_id)`. Returned by
+/// [`Material::select_nuclide_smooth`] and combined with the flight distance
+/// into a [`CollisionData`] by the caller.
+pub type SelectedNuclide<'a> = (&'a str, &'a Arc<Nuclide>, Option<NuclideId>);
+
+/// Free-flight sample on the smooth (non-URR) PCG path: the
+/// sampled `distance` plus the energy-grid bracket (`i_grid`, interpolation
+/// fraction `f`) and material total `sigma_t` at the collision energy, so the
+/// caller can select the struck nuclide *after* the surface-vs-collision min
+/// (mirroring the GPU, which draws nuclide-selection only on a real collision).
+#[derive(Debug, Clone, Copy)]
+pub struct SmoothFlight {
+    pub distance: f64,
+    pub i_grid: usize,
+    pub f: f64,
+    pub sigma_t: f64,
+    /// URR probability-table band this flight sampled against, when the
+    /// material had a URR nuclide in range at this energy. Threaded back onto
+    /// the particle so the nuclide selection, the reaction split and the tally
+    /// scoring at this collision all reuse the SAME band.
+    pub urr_random: Option<f64>,
+}
+use std::sync::Arc;
+
+mod composition;
+mod id;
+mod loading;
+mod macro_xs;
+mod photon;
+
+/// Fast O(1) energy grid lookup using logarithmic binning.
+/// Instead of O(log n) binary search, this uses a pre-computed grid that maps
+/// log(E) bins to starting indices in the energy grid.
+#[derive(Debug, Clone, Default)]
+pub struct MaterialFastXS {
+    /// Maps a log(E) bin index to a starting index in the energy grid. 32-bit
+    /// for the same reason as `FastXSGrid::log_grid_index`: the
+    /// values are grid indices, and a grid long enough to overflow `u32` would
+    /// be 34 GB of `f64`. Built monotone here, so nothing to validate.
+    log_grid_index: Vec<u32>,
+    /// Log of minimum energy
+    log_e_min: f64,
+    /// Inverse of log bin width for fast bin calculation
+    inv_log_delta: f64,
+    /// Number of log bins
+    n_log_bins: usize,
+    /// Pre-computed total macroscopic XS at each energy point
+    total_xs: Vec<f64>,
+    /// Number of energy points
+    n_energy: usize,
+}
+
+impl MaterialFastXS {
+    /// Number of logarithmic bins
+    const N_LOG_BINS: usize = 8192;
+
+    /// Build the fast lookup structure from energy grid and total XS
+    #[allow(clippy::needless_range_loop)]
+    pub fn new(energy_grid: &[f64], total_xs: &[f64]) -> Option<Self> {
+        let n = energy_grid.len();
+        if n < 2 || total_xs.len() != n {
+            return None;
+        }
+
+        let e_min = energy_grid[0].max(1e-11); // Avoid log(0)
+        let e_max = energy_grid[n - 1];
+        let log_e_min = e_min.ln();
+        let log_e_max = e_max.ln();
+        let log_delta = (log_e_max - log_e_min) / Self::N_LOG_BINS as f64;
+        let inv_log_delta = 1.0 / log_delta;
+
+        // Build logarithmic grid index
+        let mut log_grid_index = vec![0u32; Self::N_LOG_BINS + 1];
+        let mut i_grid = 0;
+        for i_bin in 0..=Self::N_LOG_BINS {
+            let log_e = log_e_min + (i_bin as f64) * log_delta;
+            let e = log_e.exp();
+            // Find first energy grid point >= e
+            while i_grid < n - 1 && energy_grid[i_grid] < e {
+                i_grid += 1;
+            }
+            log_grid_index[i_bin] = i_grid.saturating_sub(1) as u32;
+        }
+
+        Some(Self {
+            log_grid_index,
+            log_e_min,
+            inv_log_delta,
+            n_log_bins: Self::N_LOG_BINS,
+            total_xs: total_xs.to_vec(),
+            n_energy: n,
+        })
+    }
+
+    /// Fast O(1) lookup of total macroscopic cross-section at given energy.
+    /// Returns (sigma_t, grid_index, interpolation_factor) for reuse.
+    #[inline]
+    pub fn lookup_total(&self, energy: f64, energy_grid: &[f64]) -> (f64, usize, f64) {
+        // Handle boundary cases
+        if energy <= energy_grid[0] {
+            return (self.total_xs[0], 0, 0.0);
+        }
+        if energy >= energy_grid[self.n_energy - 1] {
+            return (self.total_xs[self.n_energy - 1], self.n_energy - 1, 0.0);
+        }
+
+        // Use logarithmic grid for O(1) bin lookup
+        let log_e = energy.ln();
+        let bin = ((log_e - self.log_e_min) * self.inv_log_delta) as usize;
+        let bin = bin.min(self.n_log_bins - 1);
+
+        // Get narrow search range from log grid
+        let i_low = self.log_grid_index[bin] as usize;
+        let i_high = (self.log_grid_index[bin + 1] as usize + 1).min(self.n_energy);
+
+        // Short linear search in narrow range (typically 1-3 elements)
+        let mut i_grid = i_low;
+        while i_grid < i_high - 1 && energy_grid[i_grid + 1] <= energy {
+            i_grid += 1;
+        }
+        let i_grid = i_grid.min(self.n_energy - 2);
+
+        // Linear interpolation
+        let e0 = energy_grid[i_grid];
+        let e1 = energy_grid[i_grid + 1];
+        let f = (energy - e0) / (e1 - e0);
+        let sigma_t =
+            self.total_xs[i_grid] + f * (self.total_xs[i_grid + 1] - self.total_xs[i_grid]);
+
+        (sigma_t, i_grid, f)
+    }
+}
+
+// Cached microscopic cross sections: (MT filter, nuclide -> MT -> xs_values on unified grid).
+type MicroscopicXsCache = (Vec<i32>, Arc<HashMap<String, HashMap<i32, Vec<f64>>>>);
+
+/// How a material's density value is interpreted.
+///
+/// Parsed once in [`Material::new`] from the user-supplied unit string so the
+/// rest of the codebase can match on a typed value instead of re-parsing
+/// strings. The serde wire format keeps the canonical strings via
+/// [`DensityUnits::as_str`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DensityUnits {
+    /// Grams per cubic centimetre. Covers both `"g/cm3"` and `"g/cc"`
+    /// (aliases, identity factor). Canonical string is `"g/cm3"`. The
+    /// composition values are relative fractions.
+    GramsPerCc,
+    /// Kilograms per cubic metre (`"kg/m3"`); divide by 1000 to reach g/cm³.
+    /// The composition values are relative fractions.
+    KgPerM3,
+    /// Total atom density mode (`"atom/barn-cm"`): the density value is the
+    /// total atom density in atoms/barn-cm and the composition values are
+    /// relative atom fractions (requires `fraction_type = "atom"`). Per-nuclide
+    /// atom densities are `N_i = (x_i / sum x) * total`.
+    AtomPerBarnCm,
+    /// Raw per-nuclide atom-density mode (`"sum"`): the composition values are
+    /// themselves absolute atom densities (atoms/barn-cm). Not part of the
+    /// public `Material(...)` surface -- it is the canonical representation the
+    /// transmutation stepper stores via [`Material::from_nuclide_densities`] /
+    /// the `from_atom_densities` constructor, kept here for serde round-trips.
+    Sum,
+}
+
+impl DensityUnits {
+    /// Parse a user-supplied density unit string into a [`DensityUnits`].
+    ///
+    /// `"g/cm3"` and `"g/cc"` are accepted aliases for [`DensityUnits::GramsPerCc`].
+    /// `"sum"` is accepted for serde round-trips of transmuted materials but is
+    /// not a user-facing `Material(...)` unit. Returns an error on an
+    /// unsupported unit.
+    pub fn parse(input: &str) -> Result<Self, String> {
+        match input {
+            "g/cm3" | "g/cc" => Ok(DensityUnits::GramsPerCc),
+            "kg/m3" => Ok(DensityUnits::KgPerM3),
+            "atom/barn-cm" => Ok(DensityUnits::AtomPerBarnCm),
+            "sum" => Ok(DensityUnits::Sum),
+            other => Err(format!("Unsupported density unit: '{other}'")),
+        }
+    }
+
+    /// Canonical string for this unit, used for serialization and display.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DensityUnits::GramsPerCc => "g/cm3",
+            DensityUnits::KgPerM3 => "kg/m3",
+            DensityUnits::AtomPerBarnCm => "atom/barn-cm",
+            DensityUnits::Sum => "sum",
+        }
+    }
+}
+
+/// Whether a material's nuclide fractions are atom or mass fractions.
+///
+/// Parsed once in [`Material::new`]. `"volume"` is intentionally **not** a
+/// variant here: it is only a `mix_materials` input, never a stored fraction
+/// type. The serde wire format keeps the canonical strings via
+/// [`FractionType::as_str`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FractionType {
+    /// Atom fractions (`"atom"`).
+    Atom,
+    /// Mass fractions (`"mass"`).
+    Mass,
+}
+
+impl FractionType {
+    /// Parse a user-supplied fraction-type string into a [`FractionType`].
+    ///
+    /// Exactly one accepted spelling per variant (`"atom"` / `"mass"`);
+    /// anything else (including the old `"weight"`) fails hard.
+    pub fn parse(input: &str) -> Result<Self, String> {
+        match input {
+            "atom" => Ok(FractionType::Atom),
+            "mass" => Ok(FractionType::Mass),
+            other => Err(format!("fraction must be 'atom' or 'mass', got '{other}'")),
+        }
+    }
+
+    /// Canonical string for this fraction type, used for serialization.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FractionType::Atom => "atom",
+            FractionType::Mass => "mass",
+        }
+    }
+}
+
+/// Represents a heterogeneous collection of nuclides (or elements expanded to
+/// their naturally abundant isotopes) along with the material density and
+/// nuclear data needed for transport / analysis.
+///
+/// A `Material` is built complete: [`Material::new`] takes the composition,
+/// the fraction type and the density together, and there is no incremental
+/// `add_nuclide`. Elements and chemical formulas are expanded to isotopes by
+/// natural abundance in [`yamc_nuclide::composition`] before they get here.
+/// Temperature (a label, via [`Material::set_temperature`]) and volume are set
+/// afterwards. On demand the structure loads Arrow nuclide data (through the
+/// global [`yamc_nuclide::config::Config`]) and builds a unified energy grid for
+/// neutrons so reaction cross sections for different nuclides can be
+/// interpolated on a common axis.
+///
+/// Key cached members:
+/// * `unified_energy_grid_neutron` – lazily constructed common energy grid.
+/// * `macroscopic_xs_neutron` – map MT -> Σ(E) on the unified grid.
+/// * `macroscopic_xs_neutron_total_by_nuclide` – optional per‑nuclide Σ_t(E) when
+///   requested (used for sampling interacting nuclides).
+///
+/// Typical workflow:
+/// 1. Create with [`Material::new`].
+/// 2. Populate composition (nuclides or elements) and set density.
+/// 3. Optionally set temperature (clears caches if changed).
+/// 4. Call cross section building methods (e.g.
+///    [`Material::calculate_macroscopic_xs`]) or sampling utilities.
+///
+/// Serialization goes via [`MaterialSerde`] -- only the user-supplied
+/// fields persist. Loaded nuclide data and macroscopic XS caches are
+/// rebuilt on demand via `read_nuclear_data` / `calculate_macroscopic_xs`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(into = "MaterialSerde", try_from = "MaterialSerde")]
+pub struct Material {
+    /// Optional name of the material
+    pub name: Option<String>,
+    /// Unique identifier for the material. Private so that every id is set
+    /// through [`Material::set_material_id`] or
+    /// [`Material::assign_material_id`], which keep the process-wide allocator
+    /// from handing it out again.
+    material_id: Option<u32>,
+    /// Composition of the material as a map of nuclide names to their fractions.
+    /// Interpretation depends on `fraction_type`: atom fractions ("atom") or mass fractions ("mass").
+    pub nuclides: HashMap<String, f64>,
+    /// User-input order of nuclides, when known (set by the Python binding).
+    /// Each name appears at most once; expanded entries (e.g. from elements or formulas)
+    /// are ordered alphabetically within their parent input key. None when not tracked
+    /// (e.g. constructed directly from the Rust API).
+    pub nuclide_input_order: Option<Vec<String>>,
+    /// Whether nuclide fractions are atom or weight fractions. Default [`FractionType::Atom`].
+    /// Must not be changed once nuclides have been added.
+    pub fraction_type: FractionType,
+    /// Density of the material in g/cm³
+    pub density: Option<f64>,
+    /// Density unit (default: [`DensityUnits::GramsPerCc`])
+    pub density_units: DensityUnits,
+    /// Volume of the material in cm³
+    pub volume: Option<f64>,
+    /// Temperature label, the key that selects a cross-section set (e.g. `"294"`).
+    ///
+    /// Private, and `temperature_k` with it, because the two must agree: a
+    /// stale `temperature_k` makes the CPU free-gas kernel run the material at
+    /// the wrong temperature. Go through
+    /// [`Material::set_temperature`], which maintains both, or
+    /// [`Material::temperature`] to read.
+    ///
+    /// Empty means unresolved. [`Material::resolve_temperature`] fills it in
+    /// from the loaded nuclide data.
+    temperature: String,
+    /// `temperature` in Kelvin, cached for the collision hot path.
+    ///
+    /// Always parsed from `temperature` by
+    /// [`yamc_nuclide::temperature::label_to_kelvin_or_default`], the same
+    /// function the GPU extractor uses, so the two backends cannot disagree.
+    temperature_k: f64,
+    /// Loaded nuclide data (name -> `Arc<Nuclide>`) shared for this material instance
+    pub nuclide_data: HashMap<String, Arc<Nuclide>>,
+    /// Macroscopic cross sections for different MT numbers (neutron only for now)
+    /// Map of MT number (i32) -> cross sections
+    pub macroscopic_xs_neutron: HashMap<i32, Vec<f64>>,
+    /// Unified energy grid for neutrons
+    pub unified_energy_grid_neutron: Vec<f64>,
+    /// Per-nuclide macroscopic total cross section (MT=1) on the unified grid.
+    /// Indexed parallel to `sorted_nuclide_keys` (dense Vec, no String lookup).
+    pub macroscopic_xs_neutron_total_by_nuclide: Option<Vec<Vec<f64>>>,
+    /// Per-nuclide macroscopic cross sections for ALL requested MTs.
+    /// Indexed parallel to `sorted_nuclide_keys`; inner HashMap is MT -> `Vec<f64>`.
+    /// Populated when any tally uses per-nuclide scoring (`tally.nuclides`).
+    pub macroscopic_xs_neutron_by_nuclide: Option<Vec<HashMap<i32, Vec<f64>>>>,
+    /// Fast O(1) energy grid lookup structure (built after calculate_macroscopic_xs)
+    pub fast_xs: Option<MaterialFastXS>,
+    /// Cached atom densities (atoms/barn-cm) per nuclide, populated during calculate_macroscopic_xs
+    pub cached_atoms_per_barn_cm: Option<HashMap<String, f64>>,
+    /// Marks this material for the coupled transport-plus-transmutation driver.
+    ///
+    /// Only `Model::transmute` reads it, via `find_transmutable_cells`: in a
+    /// geometry full of materials it is how you say which ones to deplete.
+    /// `transmute_material` (the transport-free path behind
+    /// `Material.transmute()`) does not consult it, because there is exactly one
+    /// material in play and the caller has already named it.
+    pub transmutable: bool,
+    /// Cached microscopic XS on the unified grid (nuclide -> MT -> xs_values).
+    /// Wrapped in Arc for cheap cloning. Valid while nuclide_data + temperature unchanged.
+    /// The `Vec<i32>` stores which MTs were cached (for filter validation).
+    pub cached_microscopic_xs: Option<MicroscopicXsCache>,
+    /// Photon element indices: for each nuclide (sorted by name), the index of its
+    /// element in the global photon element store. Parallel to sorted nuclide keys.
+    /// Populated by `init_photon_data()` when `transport_secondary_photons` is enabled.
+    pub element_indices: Vec<(String, usize)>,
+    /// Cached Arc references to photon elements, parallel to `element_indices`.
+    /// Populated once during `init_photon_data()` to avoid RwLock + Arc clone
+    /// on every `get_element_by_index()` call in the hot path.
+    pub cached_elements: Vec<(String, Arc<yamc_element::photon::PhotonInteraction>)>,
+    /// Atom densities (atoms/barn-cm) aligned 1:1 with `cached_elements`.
+    /// Populated after `calculate_macroscopic_xs` + `init_photon_data` so the
+    /// photon hot path avoids a `HashMap<String, _>` lookup per collision.
+    pub cached_element_atom_densities: Vec<f64>,
+    /// Paths to photon interaction Arrow data, keyed by element symbol.
+    /// Example: {"Fe" => "path/to/Fe.arrow", "O" => "path/to/O.arrow"}
+    /// Explicit photon sources or paths inherited from the global cross-section source.
+    pub photon_data_paths: HashMap<String, String>,
+    /// Thick-target bremsstrahlung data (electron and positron).
+    /// Populated by `init_bremsstrahlung()` when TTB electron treatment is enabled.
+    pub ttb: Option<Bremsstrahlung>,
+    /// Cached sorted nuclide names for deterministic iteration over
+    /// `macroscopic_xs_neutron_total_by_nuclide`. Populated alongside that map
+    /// in `calculate_macroscopic_xs` so the hot path avoids re-sorting every collision.
+    pub sorted_nuclide_keys: Option<Vec<String>>,
+    /// NuclideIds aligned 1:1 with `sorted_nuclide_keys`. Populated at D1S setup
+    /// so the hot path can read the interned id without a HashMap<String, _> lookup.
+    /// `None` when D1S is not used; shape matches `sorted_nuclide_keys` when set.
+    pub sorted_nuclide_ids: Option<Vec<NuclideId>>,
+    /// `Arc<Nuclide>` handles aligned 1:1 with `sorted_nuclide_keys`. Populated
+    /// alongside the keys in `calculate_macroscopic_xs`. Lets `sample_collision_data`
+    /// index directly into this Vec instead of doing a `HashMap<String, _>.get(name)`
+    /// on every collision.
+    pub sorted_nuclides: Option<Vec<Arc<Nuclide>>>,
+    /// Sorted MT numbers for macroscopic neutron XS (companion to flat buffer).
+    /// Parallel to the column dimension of `macroscopic_xs_flat`.
+    pub macroscopic_xs_mt_numbers: Vec<i32>,
+    /// Flat row-major buffer: `[n_energies × n_mts]` macroscopic neutron XS.
+    /// Access XS at (energy index i, MT index j) via
+    /// `macroscopic_xs_flat[i * n_mts + j]`.
+    pub macroscopic_xs_flat: Vec<f64>,
+    /// The URR queries' view of the nuclides, resolved once per cross-section
+    /// build; see [`UrrLookup`]. Built and dropped with `fast_xs`.
+    pub urr_lookup: Option<UrrLookup>,
+}
+
+/// What the per-step URR queries read, resolved once when the macroscopic
+/// cross sections are built rather than on every step.
+///
+/// Each query used to walk `nuclide_data` (a `HashMap<String, _>`) and
+/// resolve every nuclide's temperature index by comparing labels, and
+/// [`Material::compute_urr_macro_xs`] also hashed every nuclide's name up to
+/// seven times to find its atom density and its cross sections. On a
+/// 24-nuclide steel that was most of the transport time. Built at the
+/// material's own temperature by `calculate_macroscopic_xs`, or on the fly by
+/// a query on a material without one, so the two read the same data.
+#[derive(Debug, Clone)]
+pub struct UrrLookup {
+    /// `(lo, hi)` of every loaded nuclide's probability tables at the
+    /// material's temperature. A table applies strictly inside its range, as
+    /// [`yamc_nuclide::urr::UrrData::energy_in_bounds`] tests.
+    windows: Vec<(f64, f64)>,
+    /// Per entry of `sorted_nuclide_keys`, the nuclide's probability tables
+    /// when it has any at this temperature. `None` for every other nuclide,
+    /// which [`Material::nuclide_total_with_urr`] then answers with its smooth
+    /// total without consulting the nuclide.
+    by_sorted: Vec<Option<UrrNuclide>>,
+    /// The nuclides [`Material::compute_urr_macro_xs`] sums, in name order:
+    /// every loaded nuclide with an atom density and data at the material's
+    /// temperature.
+    scoring: Vec<ScoringNuclide>,
+}
+
+/// A nuclide with probability tables at the material's temperature.
+#[derive(Debug, Clone)]
+struct UrrNuclide {
+    nuclide: Arc<Nuclide>,
+    temp_idx: usize,
+    lo: f64,
+    hi: f64,
+}
+
+/// A nuclide [`Material::compute_urr_macro_xs`] sums over.
+#[derive(Debug, Clone)]
+struct ScoringNuclide {
+    nuclide: Arc<Nuclide>,
+    atoms_per_barn_cm: f64,
+    temp_idx: usize,
+}
+
+impl UrrLookup {
+    /// True if any nuclide's probability tables cover `energy`.
+    #[inline]
+    fn in_range(&self, energy: f64) -> bool {
+        self.windows
+            .iter()
+            .any(|&(lo, hi)| energy > lo && energy < hi)
+    }
+}
+
+/// The energy range of `nuclide`'s probability tables at `temp_idx`, when it
+/// has any. An empty table covers nothing, as `energy_in_bounds` decides.
+fn urr_window(nuclide: &Nuclide, temp_idx: usize) -> Option<(f64, f64)> {
+    if !nuclide.urr_present {
+        return None;
+    }
+    let urr = nuclide.urr_data.get(temp_idx)?.as_ref()?;
+    Some((*urr.energy.first()?, *urr.energy.last()?))
+}
+
+/// One nuclide's macroscopic total in the probability-table band
+/// `urr_random` selects for it: `smooth_macro_total` scaled by the band's
+/// microscopic total over the smooth one. Unchanged where the nuclide has no
+/// table covering `energy` at `temp_idx`.
+fn perturbed_macro_total(
+    nuclide: &Nuclide,
+    temp_idx: usize,
+    smooth_macro_total: f64,
+    energy: f64,
+    urr_random: f64,
+) -> f64 {
+    match nuclide.urr_band(temp_idx, energy, urr_random) {
+        Some(band) if band.smooth_total > 1e-20 => {
+            smooth_macro_total * (band.total / band.smooth_total)
+        }
+        _ => smooth_macro_total,
+    }
+}
+
+/// Macroscopic photon cross sections computed per-collision.
+#[derive(Debug, Clone, Default)]
+pub struct MacroPhotonXS {
+    pub total: f64,
+    pub coherent: f64,
+    pub incoherent: f64,
+    pub photoelectric: f64,
+    pub pair_production: f64,
+    pub heating: f64,
+}
+
+/// URR-modified macroscopic cross-sections for tally scoring.
+/// Contains the key MTs affected by URR probability tables.
+pub struct UrrMacroXs {
+    pub total: f64,   // MT 1
+    pub elastic: f64, // MT 2
+    pub fission: f64, // MT 18
+    /// MT 102 (n,gamma). The URR nuclides' share is the probability table's
+    /// perturbed value; every other nuclide contributes its own MT 102, so a
+    /// capture tally does not collect the material's charged-particle channels.
+    pub capture: f64,
+    /// MT 27 (= disappearance + fission). Disappearance rather than capture,
+    /// so this stays what MT 27 means: the URR nuclides' share is the same
+    /// perturbed value (the tables' capture factor multiplies the smooth
+    /// disappearance, as OpenMC's does), and the rest contribute MT 101.
+    pub absorption: f64,
+}
+
+/// On-disk shape of [`Material`]. Only the user-supplied configuration --
+/// loaded nuclide data, macroscopic XS caches, photon-interaction handles,
+/// etc. are rebuilt by `read_nuclear_data` / `calculate_macroscopic_xs`
+/// after deserialize.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct MaterialSerde {
+    pub name: Option<String>,
+    pub material_id: Option<u32>,
+    pub nuclides: HashMap<String, f64>,
+    pub nuclide_input_order: Option<Vec<String>>,
+    pub fraction_type: String,
+    pub density: Option<f64>,
+    pub density_units: String,
+    pub volume: Option<f64>,
+    pub temperature: String,
+    pub transmutable: bool,
+}
+
+impl From<Material> for MaterialSerde {
+    fn from(m: Material) -> Self {
+        Self {
+            name: m.name,
+            material_id: m.material_id,
+            nuclides: m.nuclides,
+            nuclide_input_order: m.nuclide_input_order,
+            fraction_type: m.fraction_type.as_str().to_string(),
+            density: m.density,
+            density_units: m.density_units.as_str().to_string(),
+            volume: m.volume,
+            temperature: m.temperature,
+            transmutable: m.transmutable,
+        }
+    }
+}
+
+impl TryFrom<MaterialSerde> for Material {
+    type Error = String;
+    fn try_from(spec: MaterialSerde) -> Result<Self, Self::Error> {
+        let mut m = Material::new(
+            spec.nuclides,
+            &spec.fraction_type,
+            &spec.density_units,
+            spec.density,
+        )?;
+        m.name = spec.name;
+        if let Some(id) = spec.material_id {
+            m.set_material_id(id);
+        }
+        m.nuclide_input_order = spec.nuclide_input_order;
+        m.volume = spec.volume;
+        m.set_temperature(&spec.temperature);
+        m.transmutable = spec.transmutable;
+        Ok(m)
+    }
+}
+
+impl Material {
+    /// Create a new material with composition and density specified upfront.
+    ///
+    /// # Arguments
+    /// * `nuclides` - Map of nuclide names to fractions (atom or mass, per `fraction_type`)
+    /// * `fraction_type` - `"atom"` for atom fractions or `"mass"` for mass fractions
+    /// * `density_unit` - `"g/cm3"`, `"g/cc"`, `"kg/m3"`, or `"sum"` (absolute atom densities)
+    /// * `density_value` - Density value (required for g/cm3 etc., optional for "sum")
+    pub fn new(
+        nuclides: HashMap<String, f64>,
+        fraction_type: &str,
+        density_unit: &str,
+        density_value: Option<f64>,
+    ) -> Result<Material, String> {
+        let fraction_type = FractionType::parse(fraction_type)?;
+
+        // Validate each nuclide name and fraction
+        for (name, &fraction) in &nuclides {
+            yamc_nuclide::composition::validate_nuclide_name(name)?;
+            if fraction < 0.0 {
+                return Err(format!("Fraction for nuclide '{name}' cannot be negative"));
+            }
+        }
+
+        // Validate density
+        let density_units = DensityUnits::parse(density_unit)?;
+        let density = match density_units {
+            DensityUnits::Sum => {
+                if let Some(v) = density_value
+                    && v <= 0.0
+                {
+                    return Err("Density must be positive".into());
+                }
+                density_value
+            }
+            DensityUnits::AtomPerBarnCm => {
+                // Total atom density + relative atom fractions; mass fractions
+                // are incoherent with an absolute atom-density total.
+                if fraction_type == FractionType::Mass {
+                    return Err(
+                        "density_units='atom/barn-cm' requires fraction_type='atom' (a total atom \
+                         density is incoherent with mass fractions)"
+                            .into(),
+                    );
+                }
+                let v = density_value.ok_or_else(|| {
+                    format!("Density value is required for unit '{density_unit}'")
+                })?;
+                if v <= 0.0 {
+                    return Err("Density must be positive".into());
+                }
+                Some(v)
+            }
+            DensityUnits::GramsPerCc | DensityUnits::KgPerM3 => {
+                let v = density_value.ok_or_else(|| {
+                    format!("Density value is required for unit '{density_unit}'")
+                })?;
+                if v <= 0.0 {
+                    return Err("Density must be positive".into());
+                }
+                Some(v)
+            }
+        };
+
+        Ok(Material {
+            name: None,
+            material_id: None,
+            nuclides,
+            nuclide_input_order: None,
+            fraction_type,
+            density,
+            density_units,
+            volume: None,
+            temperature: String::new(),
+            temperature_k: yamc_nuclide::temperature::DEFAULT_TEMPERATURE_K,
+            nuclide_data: HashMap::new(),
+            macroscopic_xs_neutron: HashMap::new(),
+            unified_energy_grid_neutron: Vec::new(),
+            macroscopic_xs_neutron_total_by_nuclide: None,
+            macroscopic_xs_neutron_by_nuclide: None,
+            fast_xs: None,
+            cached_atoms_per_barn_cm: None,
+            transmutable: false,
+            cached_microscopic_xs: None,
+            element_indices: Vec::new(),
+            cached_elements: Vec::new(),
+            cached_element_atom_densities: Vec::new(),
+            photon_data_paths: HashMap::new(),
+            ttb: None,
+            sorted_nuclide_keys: None,
+            sorted_nuclide_ids: None,
+            sorted_nuclides: None,
+            macroscopic_xs_mt_numbers: Vec::new(),
+            macroscopic_xs_flat: Vec::new(),
+            urr_lookup: None,
+        })
+    }
+
+    /// Create a material from absolute nuclide densities, inheriting metadata
+    /// from a template material. Used for transmutation where compositions change
+    /// but material identity (name, ID, temperature, etc.) should be preserved.
+    ///
+    /// The resulting material is in "sum" mode (nuclide values are atoms/barn-cm).
+    ///
+    /// Carries the template's loaded `nuclide_data` forward, so the result can
+    /// still compute cross sections. For a transmutation RESULT that is not
+    /// wanted, since it pins the whole loaded library for the lifetime of the
+    /// returned list; use [`Material::from_nuclide_densities_without_data`].
+    pub fn from_nuclide_densities(
+        nuclide_densities: HashMap<String, f64>,
+        template: &Material,
+    ) -> Material {
+        let nuclide_data = template.nuclide_data.clone();
+        Self::from_nuclide_densities_with(nuclide_densities, template, nuclide_data)
+    }
+
+    /// The shared body of the two constructors above, taking the
+    /// `nuclide_data` map to install rather than always cloning the
+    /// template's.
+    ///
+    /// Cloning that map only to throw it away would cost, on a transmutation
+    /// step, 556 `Arc` increments and 556 decrements on refcounts every thread
+    /// shares, once per step per replica, to produce an empty map.
+    fn from_nuclide_densities_with(
+        nuclide_densities: HashMap<String, f64>,
+        template: &Material,
+        nuclide_data: HashMap<String, Arc<Nuclide>>,
+    ) -> Material {
+        Material {
+            name: template.name.clone(),
+            material_id: template.material_id,
+            nuclides: nuclide_densities,
+            nuclide_input_order: template.nuclide_input_order.clone(),
+            fraction_type: FractionType::Atom,
+            density: None,
+            density_units: DensityUnits::Sum,
+            volume: template.volume,
+            temperature: template.temperature.clone(),
+            temperature_k: template.temperature_k,
+            nuclide_data,
+            macroscopic_xs_neutron: HashMap::new(),
+            unified_energy_grid_neutron: Vec::new(),
+            macroscopic_xs_neutron_total_by_nuclide: None,
+            macroscopic_xs_neutron_by_nuclide: None,
+            fast_xs: None,
+            cached_atoms_per_barn_cm: None,
+            transmutable: template.transmutable,
+            cached_microscopic_xs: None,
+            element_indices: Vec::new(),
+            cached_elements: Vec::new(),
+            cached_element_atom_densities: Vec::new(),
+            photon_data_paths: template.photon_data_paths.clone(),
+            ttb: None,
+            sorted_nuclide_keys: None,
+            sorted_nuclide_ids: None,
+            sorted_nuclides: None,
+            macroscopic_xs_mt_numbers: Vec::new(),
+            macroscopic_xs_flat: Vec::new(),
+            urr_lookup: None,
+        }
+    }
+
+    /// As [`Material::from_nuclide_densities`], but WITHOUT carrying the
+    /// template's loaded `nuclide_data` forward.
+    ///
+    /// The transmutation stepper returns one material per timestep. Cloning
+    /// `nuclide_data` into each of them hands every step a strong reference to
+    /// the whole loaded cross-section set, and since `GLOBAL_NUCLIDE_CACHE`
+    /// holds only `Weak` refs the caller's result list then becomes the sole
+    /// owner and pins it for as long as the results are held. The pointwise data
+    /// is dead by then: the per-spectrum collapse has already reduced it to
+    /// scalar reaction rates, and the stepper reads only densities, the chain,
+    /// those rates and the fission-yield weights.
+    pub fn from_nuclide_densities_without_data(
+        nuclide_densities: HashMap<String, f64>,
+        template: &Material,
+    ) -> Material {
+        Self::from_nuclide_densities_with(nuclide_densities, template, HashMap::new())
+    }
+
+    /// Set the name of the material
+    pub fn set_name(&mut self, name: impl Into<String>) {
+        self.name = Some(name.into());
+    }
+
+    /// Populate `sorted_nuclide_ids` by interning each `sorted_nuclide_keys`
+    /// entry into the supplied registry. Called once at D1S setup time so the
+    /// hot path can read interned ids without a `HashMap<String, _>` lookup.
+    /// No-op if `sorted_nuclide_keys` is not set.
+    pub fn populate_sorted_nuclide_ids(
+        &mut self,
+        registry: &mut yamc_nuclide::nuclide_registry::NuclideRegistry,
+    ) {
+        let Some(ref keys) = self.sorted_nuclide_keys else {
+            self.sorted_nuclide_ids = None;
+            return;
+        };
+        let ids: Vec<NuclideId> = keys.iter().map(|k| registry.intern(k)).collect();
+        self.sorted_nuclide_ids = Some(ids);
+    }
+
+    /// Get the name of the material
+    pub fn get_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// Set whether this material is transmutable
+    pub fn set_transmutable(&mut self, transmutable: bool) {
+        self.transmutable = transmutable;
+    }
+
+    /// Get whether this material is transmutable
+    pub fn get_transmutable(&self) -> bool {
+        self.transmutable
+    }
+
+    /// Check if material is ready for transmutation.
+    ///
+    /// Validates that the material has required fields set for transmutation:
+    /// - Must be marked transmutable
+    /// - Must have at least one nuclide
+    /// - Must have volume specified for tally normalization
+    pub fn validate_for_transmutation(&self) -> Result<(), String> {
+        if !self.transmutable {
+            return Err("Material not marked as transmutable".into());
+        }
+        if self.nuclides.is_empty() {
+            return Err("Material has no nuclides".into());
+        }
+        if self.volume.is_none() {
+            return Err(
+                "Transmutable material must have volume specified for tally normalization".into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Drop the loaded nuclear data, and everything derived from it.
+    ///
+    /// `Material::transmute` loads the cross sections it needs into the
+    /// material and leaves them there, so a second call on the same material
+    /// does no Arrow decoding at all. That is the composition and the products
+    /// the irradiation populates, from a few dozen nuclides to a couple of
+    /// hundred for a steel, which is the right trade for
+    /// a material transmuted more than once and the wrong one for a sweep over
+    /// thousands of DISTINCT compositions -- so the release is explicit rather
+    /// than automatic.
+    ///
+    /// The material is fully usable afterwards: the next call that needs the
+    /// data loads it again.
+    pub fn release_nuclear_data(&mut self) {
+        self.nuclide_data.clear();
+        self.invalidate_xs_cache();
+    }
+
+    /// Clear all cached cross section data
+    pub fn invalidate_xs_cache(&mut self) {
+        self.macroscopic_xs_neutron.clear();
+        self.macroscopic_xs_neutron_total_by_nuclide = None;
+        self.macroscopic_xs_neutron_by_nuclide = None;
+        self.sorted_nuclide_keys = None;
+        self.sorted_nuclides = None;
+        self.unified_energy_grid_neutron.clear();
+        self.fast_xs = None;
+        self.urr_lookup = None;
+        self.cached_atoms_per_barn_cm = None;
+        self.cached_element_atom_densities.clear();
+        self.cached_microscopic_xs = None;
+        self.element_indices.clear();
+        self.macroscopic_xs_mt_numbers.clear();
+        self.macroscopic_xs_flat.clear();
+    }
+
+    /// Clear exactly the caches derived from the temperature.
+    ///
+    /// Narrower than [`Material::invalidate_xs_cache`], which also drops
+    /// `cached_atoms_per_barn_cm`, `cached_elements`, `element_indices` and
+    /// `cached_element_atom_densities`. None of those four depend on
+    /// temperature: the first three come from composition, density and the
+    /// photon element data, and dropping them here is not merely wasteful. Only
+    /// `init_photon_data` rebuilds `element_indices`, and `cached_elements` is
+    /// documented as parallel to it, so clearing one and not the other leaves
+    /// `calculate_photon_xs` indexing `cached_element_atom_densities[idx]` for
+    /// `idx` in `0..cached_elements.len()` past the end of an emptied vector --
+    /// guarded only by a `debug_assert_eq!`, so a release build panics.
+    pub fn invalidate_temperature_caches(&mut self) {
+        self.macroscopic_xs_neutron.clear();
+        self.macroscopic_xs_neutron_total_by_nuclide = None;
+        self.macroscopic_xs_neutron_by_nuclide = None;
+        self.sorted_nuclide_keys = None;
+        self.sorted_nuclides = None;
+        self.unified_energy_grid_neutron.clear();
+        self.fast_xs = None;
+        self.urr_lookup = None;
+        self.cached_microscopic_xs = None;
+        self.macroscopic_xs_mt_numbers.clear();
+        self.macroscopic_xs_flat.clear();
+    }
+
+    /// Invalidate only density-dependent caches (macroscopic XS, fast lookup).
+    /// Preserves unified energy grid and microscopic XS cache.
+    pub fn invalidate_density_caches(&mut self) {
+        self.macroscopic_xs_neutron.clear();
+        self.macroscopic_xs_neutron_total_by_nuclide = None;
+        self.macroscopic_xs_neutron_by_nuclide = None;
+        self.sorted_nuclide_keys = None;
+        self.sorted_nuclides = None;
+        self.fast_xs = None;
+        self.urr_lookup = None;
+        self.cached_atoms_per_barn_cm = None;
+        self.cached_element_atom_densities.clear();
+        self.macroscopic_xs_mt_numbers.clear();
+        self.macroscopic_xs_flat.clear();
+        // Keep: unified_energy_grid_neutron, cached_microscopic_xs
+    }
+
+    /// Sample the distance to the next collision for a neutron at the given energy.
+    /// Uses the total macroscopic cross section (MT=1).
+    /// Returns None if the cross section is zero or not available.
+    #[inline]
+    pub fn sample_distance_to_collision<R: rand::Rng + ?Sized>(
+        &self,
+        energy: f64,
+        rng: &mut R,
+    ) -> Option<f64> {
+        // Use fast O(1) lookup if available
+        let sigma_t = if let Some(ref fast_xs) = self.fast_xs {
+            let (sigma, _, _) = fast_xs.lookup_total(energy, &self.unified_energy_grid_neutron);
+            sigma
+        } else {
+            // Fallback to slow O(log n) lookup
+            let xs_vec = self.macroscopic_xs_neutron.get(&1).unwrap_or_else(|| {
+                panic!("sample_distance_to_collision: macroscopic_xs_neutron[1] missing. Did you call calculate_macroscopic_xs?");
+            });
+            if self.unified_energy_grid_neutron.is_empty() || xs_vec.is_empty() {
+                panic!(
+                    "sample_distance_to_collision: energy grid or cross section vector is empty. Did you call calculate_macroscopic_xs?"
+                );
+            }
+            crate::interpolate_linear(&self.unified_energy_grid_neutron, xs_vec, energy)
+        };
+
+        if sigma_t <= 0.0 {
+            panic!(
+                "sample_distance_to_collision: total cross section is zero or negative at energy {energy}. Check your nuclear data and energy grid."
+            );
+        }
+        let xi: f64 = rng.random_range(0.0..1.0);
+        Some(-xi.ln() / sigma_t)
+    }
+
+    /// Combined sampling of distance to collision AND interacting nuclide in one energy lookup.
+    /// More efficient than calling `sample_distance_to_collision` and
+    /// `sample_interacting_nuclide_data` separately because it reuses the O(1) energy grid index.
+    ///
+    /// Returns (distance, nuclide_name, nuclide_data, urr_random, nuclide_id) or None.
+    ///
+    /// URR semantics: when any nuclide in the material has URR probability-table data covering
+    /// `energy`, a single per-collision base seed (`urr_random`) is drawn and **each in-range
+    /// URR nuclide derives an independent probability-table band from it**, so a
+    /// multi-isotope material samples statistically independent resonance structure per isotope.
+    /// The URR-modified Σ_t is then used for both distance sampling and nuclide selection.
+    /// If `cached_urr_random` is `Some`, the base seed is reused for consistency across XS
+    /// lookups at the same energy (the struck nuclide's reaction re-derives the same band);
+    /// otherwise a new draw is taken from `rng`. When no URR is in range, no random is consumed
+    /// and the smooth fast path runs.
+    #[inline]
+    pub fn sample_collision_data<R: rand::Rng + ?Sized>(
+        &self,
+        energy: f64,
+        cached_urr_random: Option<f64>,
+        rng: &mut R,
+    ) -> Option<CollisionData<'_>> {
+        let Some(ref fast_xs) = self.fast_xs else {
+            // Slow fallback path: no per-nuclide macroscopic tables yet → no URR, no D1S id.
+            let distance = self.sample_distance_to_collision(energy, rng)?;
+            let (name, nuclide) = self.sample_interacting_nuclide_data(energy, rng)?;
+            return Some((distance, name, nuclide, None, None));
+        };
+
+        let (sigma_t_smooth, i_grid, f) =
+            fast_xs.lookup_total(energy, &self.unified_energy_grid_neutron);
+        if sigma_t_smooth <= 0.0 {
+            return None;
+        }
+
+        let by_nuclide = self.macroscopic_xs_neutron_total_by_nuclide.as_ref()?;
+        let sorted_keys = self
+            .sorted_nuclide_keys
+            .as_ref()
+            .expect("sorted_nuclide_keys must be set when by_nuclide is enabled");
+        let sorted_ids = self.sorted_nuclide_ids.as_deref();
+        let sorted_nuclides = self.sorted_nuclides.as_deref();
+
+        // Helper: lookup smooth per-nuclide macroscopic total at this grid index.
+        let smooth_nuc_xs = |idx: usize| -> f64 {
+            let xs_vec = &by_nuclide[idx];
+            if xs_vec.len() > i_grid + 1 {
+                let xs0 = xs_vec[i_grid];
+                let xs1 = xs_vec[i_grid + 1];
+                xs0 + f * (xs1 - xs0)
+            } else {
+                0.0
+            }
+        };
+
+        // Resolve the Nuclide for a given index.
+        let lookup_nuclide = |idx: usize, name: &str| -> Option<&Arc<Nuclide>> {
+            sorted_nuclides
+                .and_then(|v| v.get(idx))
+                .or_else(|| self.nuclide_data.get(name))
+        };
+
+        if self.has_urr_in_range(energy) {
+            // URR path: one per-collision base seed, from which each in-range URR
+            // nuclide derives an *independent* probability-table band (see
+            // `nuclide_total_with_urr` -> `Nuclide::urr_band`).
+            // Pass 1 computes URR-modified per-nuclide contributions and Σ_t_urr;
+            // Pass 2 samples the struck nuclide using those URR-modified contributions.
+            let urr_random = cached_urr_random.unwrap_or_else(|| rng.random::<f64>());
+
+            let mut per_nuclide_urr: SmallVec<[f64; 64]> =
+                SmallVec::with_capacity(sorted_keys.len());
+            let mut sigma_t_urr = 0.0;
+            for idx in 0..sorted_keys.len() {
+                let xs_urr = self.nuclide_total_with_urr(energy, idx, i_grid, f, urr_random);
+                per_nuclide_urr.push(xs_urr);
+                sigma_t_urr += xs_urr;
+            }
+
+            if sigma_t_urr <= 0.0 {
+                return None;
+            }
+
+            let xi: f64 = rng.random_range(0.0..1.0);
+            let distance = -xi.ln() / sigma_t_urr;
+
+            let xi_nuclide = rng.random_range(0.0..sigma_t_urr);
+            let mut accum = 0.0;
+            for (idx, &xs_urr) in per_nuclide_urr.iter().enumerate() {
+                accum += xs_urr;
+                if xi_nuclide < accum {
+                    let name = &sorted_keys[idx];
+                    let nuclide = lookup_nuclide(idx, name)?;
+                    let nuc_id = sorted_ids.and_then(|ids| ids.get(idx).copied());
+                    return Some((distance, name.as_str(), nuclide, Some(urr_random), nuc_id));
+                }
+            }
+            return None;
+        }
+
+        // Smooth path: no URR-in-range nuclides → existing fast logic, no random consumed for URR.
+        let xi: f64 = rng.random_range(0.0..1.0);
+        let distance = -xi.ln() / sigma_t_smooth;
+
+        // Single-nuclide fast path: nuclide is trivially the only one.
+        if by_nuclide.len() == 1 {
+            let name = sorted_keys.first()?;
+            let nuclide = lookup_nuclide(0, name)?;
+            let nuc_id = sorted_ids.and_then(|ids| ids.first().copied());
+            return Some((distance, name.as_str(), nuclide, None, nuc_id));
+        }
+
+        // Multi-nuclide smooth: sample nuclide proportional to smooth per-nuclide contributions.
+        let xi_nuclide = rng.random_range(0.0..sigma_t_smooth);
+        let mut accum = 0.0;
+        for (idx, name) in sorted_keys.iter().enumerate() {
+            let xs = smooth_nuc_xs(idx);
+            accum += xs;
+            if xi_nuclide < accum {
+                let nuclide = lookup_nuclide(idx, name)?;
+                let nuc_id = sorted_ids.and_then(|ids| ids.get(idx).copied());
+                return Some((distance, name.as_str(), nuclide, None, nuc_id));
+            }
+        }
+        None
+    }
+
+    /// Sample the free-flight distance on the smooth (non-URR) PCG path, drawing
+    /// `xi1` from the per-particle PCG `state`.
+    ///
+    /// This is the front half of the shared GPU/CPU collision path: the GPU
+    /// kernel draws the flight as its *first* per-step PCG sample
+    /// (`-ln(xi1) / sigma_t`) and selects the struck nuclide only after the
+    /// surface-vs-collision min wins (see [`Material::select_nuclide_smooth`]).
+    /// Splitting flight from selection lets the CPU match that draw schedule:
+    /// `xi1` every step, `xi_n` only on a real collision.
+    ///
+    /// Returns `None` -- **without consuming a PCG draw** -- when the fast path
+    /// or per-nuclide tables are unavailable. The caller then falls back to the
+    /// legacy fused `sample_collision_data` on the FastRng stream. The PCG
+    /// sample is taken only once all preconditions hold, so a fallback never
+    /// desynchronises the PCG stream.
+    ///
+    /// When a URR band applies, `urr_totals` receives every nuclide's
+    /// perturbed macroscopic total, in `sorted_nuclide_keys` order, for
+    /// [`Material::select_nuclide_smooth`] to weight the struck nuclide with at
+    /// this flight's collision instead of evaluating each probability table
+    /// again. It is left empty otherwise.
+    #[inline]
+    pub fn smooth_flight(
+        &self,
+        energy: f64,
+        held_urr: Option<f64>,
+        state: &mut u64,
+        urr_totals: &mut Vec<f64>,
+    ) -> Option<SmoothFlight> {
+        urr_totals.clear();
+        let fast_xs = self.fast_xs.as_ref()?;
+        // Per-nuclide tables are required by `select_nuclide_smooth`; bail to the
+        // legacy path together if they are absent.
+        self.macroscopic_xs_neutron_total_by_nuclide.as_ref()?;
+        let (sigma_t_smooth, i_grid, f) =
+            fast_xs.lookup_total(energy, &self.unified_energy_grid_neutron);
+        if sigma_t_smooth <= 0.0 {
+            return None;
+        }
+
+        // URR: the base uniform is drawn once per ENERGY and BEFORE the flight,
+        // matching the kernel's per-step order. A band the
+        // particle already holds at this energy is reused, so a boundary
+        // crossing does not redraw. Every draw below is `next_xi`, the mapping
+        // the GPU uses, so the two streams stay aligned.
+        let mut urr_random = None;
+        let mut sigma_t = sigma_t_smooth;
+        if self.has_urr_in_range(energy) {
+            let band = match held_urr {
+                Some(b) => b,
+                None => yamc_rng::next_xi(state),
+            };
+            urr_random = Some(band);
+            // The material total with every in-range URR nuclide perturbed by
+            // the band it derives from the shared base, so isotopes stay
+            // uncorrelated.
+            urr_totals.extend(
+                (0..self.nuclide_count_for_selection())
+                    .map(|idx| self.nuclide_total_with_urr(energy, idx, i_grid, f, band)),
+            );
+            let s: f64 = urr_totals.iter().sum();
+            // A non-positive URR total would be unphysical; fall back to the
+            // smooth total rather than bailing, because the band draw above has
+            // already advanced the stream and a bail here would desync it.
+            if s > 0.0 {
+                sigma_t = s;
+            }
+        }
+
+        let xi = yamc_rng::next_xi(state);
+        Some(SmoothFlight {
+            distance: -xi.ln() / sigma_t,
+            i_grid,
+            f,
+            sigma_t,
+            urr_random,
+        })
+    }
+
+    /// Number of nuclides the selection walk sees, i.e. the length of the
+    /// sorted per-nuclide macroscopic table.
+    fn nuclide_count_for_selection(&self) -> usize {
+        self.macroscopic_xs_neutron_total_by_nuclide
+            .as_ref()
+            .map(|v| v.len())
+            .unwrap_or(0)
+    }
+
+    /// One nuclide's macroscopic total at the bracket, URR-perturbed when its
+    /// table covers `energy`. Falls back to the smooth value otherwise.
+    fn nuclide_total_with_urr(
+        &self,
+        energy: f64,
+        idx: usize,
+        i_grid: usize,
+        f: f64,
+        urr_random: f64,
+    ) -> f64 {
+        let Some(by_nuclide) = self.macroscopic_xs_neutron_total_by_nuclide.as_ref() else {
+            return 0.0;
+        };
+        let xs_vec = &by_nuclide[idx];
+        let smooth = if xs_vec.len() > i_grid + 1 {
+            let xs0 = xs_vec[i_grid];
+            let xs1 = xs_vec[i_grid + 1];
+            xs0 + f * (xs1 - xs0)
+        } else {
+            0.0
+        };
+        if let Some(lookup) = &self.urr_lookup {
+            // Only a nuclide whose tables cover `energy` is perturbed; for
+            // every other one `urr_band` would answer `None`, so its smooth
+            // total stands without consulting it.
+            return match lookup.by_sorted.get(idx) {
+                Some(Some(u)) if energy > u.lo && energy < u.hi => {
+                    perturbed_macro_total(&u.nuclide, u.temp_idx, smooth, energy, urr_random)
+                }
+                _ => smooth,
+            };
+        }
+        let Some(keys) = self.sorted_nuclide_keys.as_ref() else {
+            return smooth;
+        };
+        let Some(name) = keys.get(idx) else {
+            return smooth;
+        };
+        let nuclide = match self
+            .sorted_nuclides
+            .as_deref()
+            .and_then(|v| v.get(idx))
+            .or_else(|| self.nuclide_data.get(name))
+        {
+            Some(n) => n,
+            None => return smooth,
+        };
+        self.nuclide_macro_total_with_urr(nuclide, smooth, energy, urr_random)
+    }
+
+    /// Select the struck nuclide on the smooth (non-URR) PCG path, drawing
+    /// `xi_n` from the per-particle PCG `state`. Call only on a real
+    /// collision (after the surface-vs-collision min), using the bracket from
+    /// [`Material::smooth_flight`].
+    ///
+    /// A single-nuclide material draws nothing (the lone nuclide is trivially the
+    /// target -- byte-identical PCG stream to the pre-multi-nuclide path). A
+    /// multi-nuclide material draws one `xi_n` and walks the per-nuclide
+    /// macroscopic totals at the energy bracket, exact twin of the GPU kernel
+    /// block (yamc-gpu shared.rs): `xi_n = next_xi * sigma_t_nuc`, then the first
+    /// nuclide whose cumulative total exceeds `xi_n` (clamped to the last on a
+    /// floating-point overshoot).
+    ///
+    /// `urr_totals` is what the flight left in its `urr_totals` when a URR
+    /// band applied, and `None` when none did.
+    #[inline]
+    pub fn select_nuclide_smooth(
+        &self,
+        i_grid: usize,
+        f: f64,
+        urr_totals: Option<&[f64]>,
+        state: &mut u64,
+    ) -> Option<SelectedNuclide<'_>> {
+        let by_nuclide = self.macroscopic_xs_neutron_total_by_nuclide.as_ref()?;
+        let sorted_keys = self.sorted_nuclide_keys.as_ref()?;
+        let sorted_ids = self.sorted_nuclide_ids.as_deref();
+        let sorted_nuclides = self.sorted_nuclides.as_deref();
+
+        let lookup_nuclide = |idx: usize, name: &str| -> Option<&Arc<Nuclide>> {
+            sorted_nuclides
+                .and_then(|v| v.get(idx))
+                .or_else(|| self.nuclide_data.get(name))
+        };
+        // A nuclide's share of the collision density follows the cross section
+        // that actually governed the flight, so an in-range URR nuclide is
+        // weighted by its PERTURBED total: the flight's own, at the same energy,
+        // bracket and band. Without a band this is the plain smooth total.
+        let smooth_nuc_xs = |idx: usize| -> f64 {
+            match urr_totals {
+                Some(totals) => totals[idx],
+                None => {
+                    let xs_vec = &by_nuclide[idx];
+                    if xs_vec.len() > i_grid + 1 {
+                        let xs0 = xs_vec[i_grid];
+                        let xs1 = xs_vec[i_grid + 1];
+                        xs0 + f * (xs1 - xs0)
+                    } else {
+                        0.0
+                    }
+                }
+            }
+        };
+
+        // Single-nuclide fast path: no PCG draw (matches the GPU `count > 1` gate).
+        if by_nuclide.len() == 1 {
+            let name = sorted_keys.first()?;
+            let nuclide = lookup_nuclide(0, name)?;
+            let nuc_id = sorted_ids.and_then(|ids| ids.first().copied());
+            return Some((name.as_str(), nuclide, nuc_id));
+        }
+
+        // Multi-nuclide: sample proportional to per-nuclide macroscopic totals at
+        // the bracket. Scale `xi_n` by the sum of those totals (the GPU's
+        // `sigma_t_nuc`), not the flight's `sigma_t`, so the two backends share
+        // the exact selection arithmetic.
+        let sigma_t_nuc: f64 = (0..by_nuclide.len()).map(smooth_nuc_xs).sum();
+        let xi_n = yamc_rng::next_xi(state) * sigma_t_nuc;
+        let mut accum = 0.0;
+        for (idx, name) in sorted_keys.iter().enumerate() {
+            accum += smooth_nuc_xs(idx);
+            if xi_n < accum {
+                let nuclide = lookup_nuclide(idx, name)?;
+                let nuc_id = sorted_ids.and_then(|ids| ids.get(idx).copied());
+                return Some((name.as_str(), nuclide, nuc_id));
+            }
+        }
+        // Floating-point overshoot (xi_n >= sigma_t_nuc): clamp to the last.
+        let last = by_nuclide.len() - 1;
+        let name = sorted_keys.get(last)?;
+        let nuclide = lookup_nuclide(last, name)?;
+        let nuc_id = sorted_ids.and_then(|ids| ids.get(last).copied());
+        Some((name.as_str(), nuclide, nuc_id))
+    }
+
+    /// URR-modified macroscopic total contribution for a single nuclide at this energy.
+    ///
+    /// Returns `smooth_macro_total` unchanged if the nuclide has no URR data at the
+    /// material's temperature or its tables do not cover `energy`; otherwise scales it
+    /// through [`perturbed_macro_total`], the primitive both paths share.
+    ///
+    /// The fallback [`Material::nuclide_total_with_urr`] takes for a material without
+    /// a [`UrrLookup`], resolving the nuclide's temperature index on every call.
+    fn nuclide_macro_total_with_urr(
+        &self,
+        nuclide: &Nuclide,
+        smooth_macro_total: f64,
+        energy: f64,
+        urr_random: f64,
+    ) -> f64 {
+        match nuclide.get_temp_idx(&self.temperature) {
+            Some(temp_idx) => {
+                perturbed_macro_total(nuclide, temp_idx, smooth_macro_total, energy, urr_random)
+            }
+            None => smooth_macro_total,
+        }
+    }
+
+    /// Resolve the nuclides the URR queries walk; see [`UrrLookup`].
+    fn build_urr_lookup(&self) -> UrrLookup {
+        let temperature = self.temperature.as_str();
+        let windows = self
+            .nuclide_data
+            .values()
+            .filter_map(|n| urr_window(n, n.get_temp_idx(temperature)?))
+            .collect();
+        let by_sorted = match self.sorted_nuclide_keys.as_ref() {
+            Some(keys) => keys
+                .iter()
+                .enumerate()
+                .map(|(idx, name)| {
+                    let nuclide = self
+                        .sorted_nuclides
+                        .as_deref()
+                        .and_then(|v| v.get(idx))
+                        .or_else(|| self.nuclide_data.get(name))?;
+                    let temp_idx = nuclide.get_temp_idx(temperature)?;
+                    let (lo, hi) = urr_window(nuclide, temp_idx)?;
+                    Some(UrrNuclide {
+                        nuclide: Arc::clone(nuclide),
+                        temp_idx,
+                        lo,
+                        hi,
+                    })
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        UrrLookup {
+            windows,
+            by_sorted,
+            scoring: self.urr_scoring_nuclides(),
+        }
+    }
+
+    /// The nuclides [`Material::compute_urr_macro_xs`] sums, in name order.
+    ///
+    /// Name order rather than `nuclide_data`'s: a `HashMap` iterates in an
+    /// order seeded per map instance, and the summation order moved the last
+    /// bit of every URR reaction-rate score from one run to the next (the
+    /// defect `calculate_macroscopic_xs_at` fixed for the material totals).
+    fn urr_scoring_nuclides(&self) -> Vec<ScoringNuclide> {
+        let owned_atoms;
+        let atoms_per_bcm = if let Some(ref cached) = self.cached_atoms_per_barn_cm {
+            cached
+        } else {
+            owned_atoms = self
+                .get_atoms_per_barn_cm()
+                .unwrap_or_else(|e| panic!("{e}"));
+            &owned_atoms
+        };
+        let mut named: Vec<(&String, ScoringNuclide)> = self
+            .nuclide_data
+            .iter()
+            .filter_map(|(name, nuclide)| {
+                Some((
+                    name,
+                    ScoringNuclide {
+                        nuclide: Arc::clone(nuclide),
+                        atoms_per_barn_cm: *atoms_per_bcm.get(name)?,
+                        temp_idx: nuclide.get_temp_idx(&self.temperature)?,
+                    },
+                ))
+            })
+            .collect();
+        named.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        named.into_iter().map(|(_, s)| s).collect()
+    }
+
+    /// Compute URR-modified macroscopic cross-sections for tally scoring.
+    /// Returns per-MT macroscopic values (total, elastic, fission, capture, absorption)
+    /// with URR probability table modifications applied, or None if no nuclide has URR.
+    pub fn compute_urr_macro_xs(&self, energy: f64, urr_random: f64) -> Option<UrrMacroXs> {
+        // No table covers `energy`, so no nuclide below can be perturbed and
+        // the answer is `None`; this is the common case, and it costs a few
+        // comparisons instead of a walk over every nuclide.
+        if !self.has_urr_in_range(energy) {
+            return None;
+        }
+        let owned_scoring;
+        let scoring = match &self.urr_lookup {
+            Some(lookup) => lookup.scoring.as_slice(),
+            None => {
+                owned_scoring = self.urr_scoring_nuclides();
+                owned_scoring.as_slice()
+            }
+        };
+
+        let mut macro_total = 0.0;
+        let mut macro_elastic = 0.0;
+        let mut macro_fission = 0.0;
+        let mut macro_capture = 0.0;
+        let mut macro_disappearance = 0.0;
+        let mut any_urr = false;
+
+        for s in scoring {
+            let n_density = s.atoms_per_barn_cm;
+            let nuclide = s.nuclide.as_ref();
+            if let Some(band) = nuclide.urr_band(s.temp_idx, energy, urr_random) {
+                // Accumulate URR-modified microscopic XS * atom density
+                // Total is sum of partials + inelastic (inelastic is unmodified by URR)
+                let urr_inelastic = if band.inelastic_in_table {
+                    band.smooth_inelastic
+                } else {
+                    0.0
+                };
+                macro_total +=
+                    n_density * (band.elastic + urr_inelastic + band.capture + band.fission);
+                macro_elastic += n_density * band.elastic;
+                macro_fission += n_density * band.fission;
+                // The same perturbed value on both accumulators. Inside the
+                // band the table's capture factor multiplies the smooth
+                // DISAPPEARANCE (`urr.sample` is handed
+                // `smooth_absorption - smooth_fission`, which is what
+                // OpenMC's `capture *= (micro.absorption - micro.fission)`
+                // does), and OpenMC scores an (n,gamma) tally from exactly
+                // that for a nuclide whose tables are in range. The
+                // charged-particle channels it folds in are negligible for
+                // the heavy nuclides that have tables, which is the
+                // approximation both codes make.
+                macro_capture += n_density * band.capture;
+                macro_disappearance += n_density * band.capture;
+                any_urr = true;
+            } else if let Some(fast_grid) = nuclide.fast_xs.get(s.temp_idx) {
+                // Non-URR nuclide (or URR not applicable): accumulate smooth
+                // contributions, all from one grid search.
+                let ((total, absorption, _, fission), (i_grid, f)) =
+                    fast_grid.lookup_with_index(energy);
+                let elastic = fast_grid
+                    .elastic_idx
+                    .map(|idx| fast_grid.scatter_xs_interp(i_grid, f, idx))
+                    .unwrap_or(0.0);
+                macro_total += n_density * total;
+                macro_elastic += n_density * elastic;
+                macro_fission += n_density * fission;
+                // Two accumulators, because the two scores want different
+                // things from a nuclide whose tables are not in range. MT 27
+                // is built below as `disappearance + fission`, OpenMC's
+                // `micro.absorption = capture + fission` where its `capture` is
+                // `absorption - fission`; asking MT 102 for that would drop the
+                // charged-particle absorption channels. An (n,gamma)
+                // tally wants MT 102 itself: OpenMC substitutes disappearance
+                // only for the nuclide whose `use_ptable` is set, so a Be9 or a
+                // Cr52 beside a URR nuclide keeps its own capture rather than
+                // donating its (n,alpha) to the material's.
+                //
+                // MT 102 is the library's own radiative-capture column. It used
+                // to be derived as `(absorption - fission).max(0.0)`, which is
+                // OpenMC's expression but not OpenMC's input: `absorption` here
+                // is the disappearance partial, which already excludes fission,
+                // so that read zero for every fissile nuclide (U235 at 10 keV:
+                // 1.06 b against fission 2.91 b) and, without fission, still
+                // counted the charged-particle channels as capture (149x high
+                // for Fe56 at 14 MeV). A library without an MT 102 column
+                // stands disappearance in for it, which equals capture wherever
+                // the charged-particle channels are closed.
+                let capture = if fast_grid.xs_ngamma.is_empty() {
+                    absorption
+                } else {
+                    fast_grid.lookup_ngamma(i_grid, f)
+                };
+                macro_capture += n_density * capture;
+                macro_disappearance += n_density * absorption;
+            }
+        }
+
+        if any_urr {
+            let absorption = macro_disappearance + macro_fission;
+            Some(UrrMacroXs {
+                total: macro_total,
+                elastic: macro_elastic,
+                fission: macro_fission,
+                capture: macro_capture,
+                absorption,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Macroscopic total cross section Σ_t(E), with URR probability-table modifications
+    /// applied if any nuclide has URR data in range at this energy.
+    ///
+    /// Decouples the Σ_t-at-a-point query from nuclide sampling. Useful for callers
+    /// that need Σ_t without committing to a reaction sample (e.g. Woodcock tracking,
+    /// flux/source biasing previews, visualisation).
+    ///
+    /// If no nuclide has URR data in range, returns `(sigma_t_smooth, None)` and does
+    /// not consume a random number. Otherwise samples `urr_random` (or reuses
+    /// `cached_urr_random` if `Some`), applies URR consistently across all in-range
+    /// URR nuclides via [`Material::compute_urr_macro_xs`], and returns
+    /// `(sigma_t_with_urr, Some(urr_random))`. Cache the returned random so subsequent
+    /// queries -- or a later [`Material::sample_collision_data`] call -- at the same
+    /// energy stay consistent.
+    ///
+    /// URR semantics match those used for tally scoring: all in-range URR nuclides
+    /// receive URR-modified contributions, each deriving an independent probability
+    /// table band from the shared base seed; non-URR nuclides keep their
+    /// smooth contributions. For single-URR-nuclide materials this matches the Σ_t used
+    /// internally by `sample_collision_data`; for multi-nuclide materials with multiple
+    /// URR nuclides it may differ slightly (`sample_collision_data` applies URR only to
+    /// the sampled nuclide).
+    pub fn total_xs_with_urr<R: rand::Rng + ?Sized>(
+        &self,
+        energy: f64,
+        cached_urr_random: Option<f64>,
+        rng: &mut R,
+    ) -> (f64, Option<f64>) {
+        let sigma_t_smooth = self.lookup_xs_by_mt(1, energy);
+
+        if !self.has_urr_in_range(energy) {
+            return (sigma_t_smooth, None);
+        }
+
+        let urr_random = cached_urr_random.unwrap_or_else(|| rng.random::<f64>());
+        match self.compute_urr_macro_xs(energy, urr_random) {
+            Some(urr_macro) => (urr_macro.total, Some(urr_random)),
+            None => (sigma_t_smooth, None),
+        }
+    }
+
+    /// URR-aware upper bound on the macroscopic total cross section at
+    /// `energy`. Used by Woodcock majorant construction.
+    ///
+    /// For energies outside any URR nuclide's URR range this returns
+    /// the same value as `lookup_xs_by_mt(1, energy)`. Inside a URR
+    /// range, replaces each URR-bearing nuclide's smooth contribution
+    /// with its worst-case URR-sampled contribution (the max value
+    /// across the probability-table CDF). The result is guaranteed
+    /// `≥ Σ_t(urr_random=anything, energy)`.
+    ///
+    /// Construction-time cost is `O(n_urr_nuclides × n_cdf)` per
+    /// energy, which is fine because the majorant is built once at
+    /// simulation start.
+    pub fn total_xs_majorant(&self, energy: f64) -> f64 {
+        let smooth_total = self.lookup_xs_by_mt(1, energy);
+        if !self.has_urr_in_range(energy) {
+            return smooth_total;
+        }
+
+        let owned_atoms;
+        let atoms_per_bcm = if let Some(ref cached) = self.cached_atoms_per_barn_cm {
+            cached
+        } else {
+            owned_atoms = self
+                .get_atoms_per_barn_cm()
+                .unwrap_or_else(|e| panic!("{e}"));
+            &owned_atoms
+        };
+
+        let mut adjusted = smooth_total;
+        for (name, nuclide) in &self.nuclide_data {
+            if !nuclide.urr_present {
+                continue;
+            }
+            let Some(temp_idx) = nuclide.get_temp_idx(&self.temperature) else {
+                continue;
+            };
+            let Some(urr) = nuclide.urr_data.get(temp_idx).and_then(|opt| opt.as_ref()) else {
+                continue;
+            };
+            if !urr.energy_in_bounds(energy) {
+                continue;
+            }
+            let Some(&n_density) = atoms_per_bcm.get(name) else {
+                continue;
+            };
+            let Some(fast_grid) = nuclide.fast_xs.get(temp_idx) else {
+                continue;
+            };
+
+            // Smooth micro Σ_t for this nuclide (subtract its smooth
+            // macro contribution, then add the URR-max macro
+            // contribution).
+            let (smooth_micro_total, _, smooth_micro_scatter, smooth_micro_fission) =
+                fast_grid.lookup(energy);
+            let (i_grid, f) = fast_grid.lookup_grid_index(energy);
+            let smooth_micro_elastic = fast_grid
+                .elastic_idx
+                .map(|idx| fast_grid.scatter_xs_interp(i_grid, f, idx))
+                .unwrap_or(0.0);
+            // Inelastic isn't modified by URR -- it stays at smooth.
+            let smooth_micro_inelastic = (smooth_micro_scatter - smooth_micro_elastic).max(0.0);
+
+            // Worst-case URR micro from this nuclide.
+            let urr_max_in_table = urr.max_total_in_table(energy);
+            let urr_max_micro = if urr.multiply_smooth {
+                // Table values are multipliers on smooth components.
+                // The contributions URR-modifies are elastic +
+                // capture + fission (matches `sample()`). Inelastic
+                // is fixed at smooth.
+                let smooth_partials = smooth_micro_elastic
+                    + smooth_micro_fission
+                    + (smooth_micro_total - smooth_micro_scatter - smooth_micro_fission).max(0.0);
+                // Worst case: all URR-modified partials scaled by the
+                // single largest factor in the table. This is a (mild)
+                // over-bound -- the table actually applies separate
+                // factors per partial -- and is what we want for a
+                // majorant.
+                let scaled = smooth_partials * urr_max_in_table;
+                let inelastic_contrib = if urr.inelastic_flag > 0 {
+                    smooth_micro_inelastic
+                } else {
+                    0.0
+                };
+                scaled + inelastic_contrib
+            } else {
+                // Table values are absolute -- max sum of partials
+                // from `urr.max_total_in_table` plus inelastic.
+                let inelastic_contrib = if urr.inelastic_flag > 0 {
+                    smooth_micro_inelastic
+                } else {
+                    0.0
+                };
+                urr_max_in_table + inelastic_contrib
+            };
+
+            // Adjust the macro total: remove smooth contribution, add
+            // URR-max contribution.
+            adjusted += n_density * (urr_max_micro - smooth_micro_total);
+        }
+
+        // The URR-max can in principle be below the smooth value for
+        // some nuclides at some energies; the majorant must still
+        // bound the smooth case as well. Take the larger of the two.
+        adjusted.max(smooth_total)
+    }
+
+    /// True if **any** nuclide in this material carries URR probability-
+    /// table data at the material's temperature, regardless of energy.
+    /// Energy-independent companion to [`Self::has_urr_in_range`] --
+    /// useful for validation passes that need to reject configurations
+    /// at simulation start (e.g. Woodcock tracking with a smooth-Σ_t
+    /// majorant cannot bound URR-sampled Σ_t and would bias the
+    /// rejection loop).
+    pub fn has_urr_data(&self) -> bool {
+        for nuclide in self.nuclide_data.values() {
+            if !nuclide.urr_present {
+                continue;
+            }
+            let Some(temp_idx) = nuclide.get_temp_idx(&self.temperature) else {
+                continue;
+            };
+            if nuclide
+                .urr_data
+                .get(temp_idx)
+                .and_then(|opt| opt.as_ref())
+                .is_some()
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// True if any nuclide in this material has URR probability-table data
+    /// covering `energy` at the material's temperature.
+    ///
+    /// Called on every neutron step, so it reads the table ranges
+    /// [`UrrLookup`] resolved at the cross-section build; a material without
+    /// one walks its nuclides instead.
+    pub fn has_urr_in_range(&self, energy: f64) -> bool {
+        match &self.urr_lookup {
+            Some(lookup) => lookup.in_range(energy),
+            None => self.nuclide_data.values().any(|nuclide| {
+                nuclide
+                    .get_temp_idx(&self.temperature)
+                    .and_then(|temp_idx| urr_window(nuclide, temp_idx))
+                    .is_some_and(|(lo, hi)| energy > lo && energy < hi)
+            }),
+        }
+    }
+
+    pub fn volume(&mut self, value: Option<f64>) -> Result<Option<f64>, String> {
+        if let Some(v) = value {
+            if v <= 0.0 {
+                return Err(String::from("Volume must be positive"));
+            }
+            self.volume = Some(v);
+        }
+        Ok(self.volume)
+    }
+
+    /// The temperature label, or `""` if it has not been resolved yet.
+    pub fn temperature(&self) -> &str {
+        &self.temperature
+    }
+
+    /// The temperature in Kelvin, for physics kernels.
+    ///
+    /// Always consistent with [`Material::temperature`]; that is the point of
+    /// both fields being private.
+    pub fn temperature_k(&self) -> f64 {
+        self.temperature_k
+    }
+
+    /// Write the label and its Kelvin value without touching the caches.
+    ///
+    /// The label is normalised with `strip_k`, so `"294K"` and `"294"` name the
+    /// same temperature everywhere. Nuclide data is keyed by the stripped form
+    /// (`Nuclide::get_temp_idx` compares strings exactly), so storing the
+    /// suffixed form here would make an otherwise valid temperature unfindable.
+    ///
+    /// Private, and it must stay that way: a caller that changes the
+    /// temperature without invalidating the derived caches leaves the material
+    /// reporting one temperature while its cached grid and cross sections
+    /// belong to another. Use [`Material::set_temperature`].
+    fn assign_temperature(&mut self, temperature: impl AsRef<str>) {
+        let label = yamc_nuclide::temperature::strip_k(temperature.as_ref());
+        self.temperature_k = yamc_nuclide::temperature::label_to_kelvin_or_default(label);
+        self.temperature = String::from(label);
+    }
+
+    /// Set the temperature and drop everything derived from the old one.
+    ///
+    /// Invalidation goes through [`Material::invalidate_temperature_caches`]
+    /// rather than clearing a hand-written subset. A hand-written subset can
+    /// easily leave `cached_microscopic_xs`, `fast_xs` or the by-nuclide tables
+    /// holding the previous temperature's data, and `fast_xs` surviving an
+    /// emptied grid is itself a panic: `MaterialFastXS::lookup_total` indexes
+    /// `energy_grid[0]` unguarded.
+    pub fn set_temperature(&mut self, temperature: impl AsRef<str>) {
+        self.assign_temperature(temperature);
+        self.invalidate_temperature_caches();
+    }
+
+    /// Resolve temperature with fallback chain:
+    /// 1. Use provided temperature if Some, once it resolves against the data
+    /// 2. Fall back to material.temperature if set AND resolvable
+    /// 3. Fall back to the only temperature if nuclide data has exactly one
+    /// 4. Fall back to the default, 294 K, if material.temperature is unset and
+    ///    every nuclide can serve it
+    /// 5. Otherwise panic, naming the available temperatures
+    ///
+    /// "Resolvable" is wider than "listed": a temperature the data BRACKETS is
+    /// served by blending its two neighbours, so only a request outside the
+    /// range the data covers reaches the panic in step 5.
+    ///
+    /// The panicking form of [`Material::try_resolve_temperature`], for the
+    /// cross-section builders, which have no way to report an error.
+    pub fn resolve_temperature(&mut self, provided: Option<&str>) -> String {
+        self.try_resolve_temperature(provided)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// [`Material::resolve_temperature`], returning the failure rather than
+    /// panicking.
+    ///
+    /// Transport setup calls this before building any cross section, so a
+    /// temperature the data cannot serve reaches the caller as an error (a
+    /// Python `ValueError`) instead of a panic from inside the grid builder.
+    /// The flux-given transmutation calls it before collapsing any rate, so
+    /// both read an unset temperature at the same one.
+    ///
+    /// An unset temperature that steps 3 and 4 resolve is adopted as the
+    /// material's own. [`Material::resolved_temperature`] answers the same
+    /// question without adopting the answer.
+    pub fn try_resolve_temperature(&mut self, provided: Option<&str>) -> Result<String, String> {
+        let label = self.resolved_temperature(provided)?;
+        // Only steps 3 and 4 resolve an empty label, and they fill it in with
+        // the temperature the caches are about to be built at. Through
+        // `assign_temperature`, because filling the label in by hand is why
+        // `temperature_k` could go stale even when the user never touched the
+        // temperature at all. Not `set_temperature`: there is nothing derived
+        // from a *different* temperature to throw away, and invalidating here
+        // would drop a grid the caller is part-way through building.
+        if provided.is_none() && self.temperature.is_empty() {
+            self.assign_temperature(&label);
+        }
+        Ok(label)
+    }
+
+    /// The temperature [`Material::try_resolve_temperature`] resolves to,
+    /// without adopting it.
+    ///
+    /// For a reader that holds the material by shared reference and has to
+    /// read its cross sections at the temperature everything else does. One
+    /// rule rather than a reader's own fallback, so no reader can pick a
+    /// temperature transport would not.
+    pub fn resolved_temperature(&self, provided: Option<&str>) -> Result<String, String> {
+        // Collect all available temperatures from nuclide data
+        let mut all_temps: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for nuclide in self.nuclide_data.values() {
+            for temp in &nuclide.available_temperatures {
+                all_temps.insert(temp.clone());
+            }
+        }
+
+        // 1. Use provided temperature if given.
+        // Normalised, because callers pass the on-disk spelling: nuclide data
+        // is keyed by the stripped form, so `"900K"` would otherwise be
+        // rejected as unavailable while `"900"` succeeded on the same data.
+        // Sorted once, and reused by every check below, so one message shape
+        // serves all of them.
+        let mut sorted_all: Vec<String> = all_temps.iter().cloned().collect();
+        sorted_all.sort_by(|a, b| {
+            match (
+                yamc_nuclide::temperature::label_to_kelvin(a),
+                yamc_nuclide::temperature::label_to_kelvin(b),
+            ) {
+                (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+                _ => a.cmp(b),
+            }
+        });
+
+        if let Some(temp) = provided {
+            let label = yamc_nuclide::temperature::strip_k(temp);
+            // Validated rather than returned unchecked. An unservable label
+            // passed straight through would fail much later as a missing MT,
+            // with no mention of temperature.
+            // Skipped when there is no nuclide data at all, so the photon-only
+            // path below still works.
+            if !sorted_all.is_empty()
+                && let Err(e) = yamc_nuclide::temperature::resolve(label, &sorted_all)
+            {
+                return Err(e.to_string());
+            }
+            return Ok(label.to_string());
+        }
+
+        // Photon-only mode: no nuclide data loaded, return material temperature
+        if self.nuclide_data.is_empty() && !self.temperature.is_empty() {
+            return Ok(self.temperature.clone());
+        }
+
+        // 2. Fall back to material.temperature if set AND resolvable against
+        // the nuclide data, which includes the temperatures the data brackets.
+        if !self.temperature.is_empty()
+            && yamc_nuclide::temperature::resolve(&self.temperature, &sorted_all).is_ok()
+        {
+            return Ok(self.temperature.clone());
+        }
+
+        // 3. If material.temperature is empty and there's only one temp, use it
+        if self.temperature.is_empty() && all_temps.len() == 1 {
+            return Ok(all_temps.into_iter().next().unwrap());
+        }
+
+        // 4. An unset temperature means the documented default, 294 K, when
+        // the data can serve it (exactly, or by blending the two temperatures
+        // either side). After step 3, so a single-temperature library still
+        // runs at its one temperature rather than being refused because 294 K
+        // lies outside it. Checked per nuclide rather than against the union,
+        // so a nuclide whose evaluation ships a shorter ladder is named here
+        // instead of failing later in the grid builder.
+        if self.temperature.is_empty() {
+            let default = yamc_nuclide::temperature::DEFAULT_TEMPERATURE_K.to_string();
+            let mut names: Vec<&String> = self.nuclide_data.keys().collect();
+            names.sort();
+            let unservable = names.into_iter().find_map(|name| {
+                yamc_nuclide::temperature::resolve(
+                    &default,
+                    &self.nuclide_data[name].available_temperatures,
+                )
+                .err()
+                .map(|e| format!("nuclide '{name}': {e}"))
+            });
+            return match unservable {
+                None if !sorted_all.is_empty() => Ok(default),
+                None => Err(format!(
+                    "No temperature was set, and the nuclear data carries no \
+                     temperatures to use the default of {default} K from"
+                )),
+                Some(reason) => Err(format!(
+                    "No temperature was set, and the default of {default} K cannot \
+                     be used ({reason}). Set the material temperature to one the \
+                     nuclear data covers. Available temperatures: [{}]",
+                    sorted_all.join(", ")
+                )),
+            };
+        }
+
+        // 5. material.temperature is explicitly set but cannot be resolved.
+        // Step 2 already tried, so this only re-runs it to get the message,
+        // which carries the requested value, the range and the available list
+        // from one place rather than being rebuilt here.
+        match yamc_nuclide::temperature::resolve(&self.temperature, &sorted_all) {
+            Ok(_) => unreachable!("step 2 returns for every temperature that resolves"),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Refuse `temperature` when a nuclide's data cannot serve it, listed or
+    /// bracketed, naming the first such nuclide in name order.
+    ///
+    /// The per-nuclide half of the check. [`Material::try_resolve_temperature`]
+    /// checks a temperature the material already carries against the union of
+    /// every nuclide's temperatures, so one that most of the material can
+    /// serve passes there; this names the nuclide whose evaluation ships a
+    /// shorter ladder. [`Material::ensure_temperature_loaded`] leaves such a
+    /// nuclide alone, so a reader that skips a nuclide with nothing at its
+    /// temperature would otherwise drop it without a word.
+    pub fn check_temperature_servable(&self, temperature: &str) -> Result<(), String> {
+        let mut names: Vec<&String> = self.nuclide_data.keys().collect();
+        names.sort();
+        for name in names {
+            if let Err(e) = yamc_nuclide::temperature::resolve(
+                temperature,
+                &self.nuclide_data[name].available_temperatures,
+            ) {
+                return Err(format!("Nuclide '{name}': {e}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate that all loaded nuclides have compatible temperatures
+    /// Ensures materials don't mix nuclides with different available temperatures
+    pub fn validate_temperature_consistency(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.nuclide_data.is_empty() {
+            return Ok(());
+        }
+
+        // Collect all available temperatures for each nuclide
+        let mut nuclide_temps: Vec<(String, Vec<String>)> = Vec::new();
+        for (name, nuclide) in &self.nuclide_data {
+            let mut temps = nuclide.available_temperatures.clone();
+            temps.sort();
+            nuclide_temps.push((name.clone(), temps));
+        }
+
+        // Find common temperatures across all nuclides
+        if let Some((_first_name, first_temps)) = nuclide_temps.first() {
+            let common_temps: Vec<String> = first_temps
+                .iter()
+                .filter(|t| nuclide_temps.iter().all(|(_, temps)| temps.contains(t)))
+                .cloned()
+                .collect();
+
+            if common_temps.is_empty() {
+                // No common temperature - build detailed error message
+                let mut msg = format!(
+                    "Material '{}' has nuclides with incompatible temperature data. \
+                     No common temperature found across all nuclides.\n",
+                    self.name.as_deref().unwrap_or("unnamed")
+                );
+                for (name, temps) in &nuclide_temps {
+                    msg.push_str(&format!(
+                        "  {}: [{}]\n",
+                        name,
+                        temps
+                            .iter()
+                            .map(|s| format!("'{s}'"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+                msg.push_str(
+                    "All nuclides in a material must have at least one common temperature.",
+                );
+                return Err(msg.into());
+            }
+
+            // If material temperature is set, verify every nuclide can SERVE
+            // it, which is wider than every nuclide listing it: a temperature
+            // between two of a nuclide's rungs is served by blending them.
+            //
+            // Per nuclide rather than against the common set, because the two
+            // are no longer the same question. Intersecting the ladders first
+            // and then bracketing inside the intersection would refuse a
+            // temperature every nuclide can serve whenever their ladders differ
+            // in rungs that do not matter for this request.
+            if !self.temperature.is_empty() {
+                let unservable: Vec<&(String, Vec<String>)> = nuclide_temps
+                    .iter()
+                    .filter(|(_, temps)| {
+                        yamc_nuclide::temperature::resolve(&self.temperature, temps).is_err()
+                    })
+                    .collect();
+                if !unservable.is_empty() {
+                    let detail = unservable
+                        .iter()
+                        .map(|(name, temps)| {
+                            format!(
+                                "{name} has [{}]",
+                                temps
+                                    .iter()
+                                    .map(|s| format!("'{s}'"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    return Err(format!(
+                        "Material temperature '{}' is outside the range these \
+                         nuclides cover: {detail}",
+                        self.temperature
+                    )
+                    .into());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn get_nuclides(&self) -> Vec<String> {
+        let mut nuclides: Vec<String> = self.nuclides.keys().cloned().collect();
+        nuclides.sort(); // Sort alphabetically for consistent output
+        nuclides
+    }
+
+    /// Sample which nuclide a neutron interacts with at a given energy, using per-nuclide macroscopic total xs
+    /// Returns the nuclide name as a String, or None if not possible
+    #[inline]
+    pub fn sample_interacting_nuclide<R: rand::Rng + ?Sized>(
+        &self,
+        energy: f64,
+        rng: &mut R,
+    ) -> String {
+        let by_nuclide = self.macroscopic_xs_neutron_total_by_nuclide.as_ref().expect("macroscopic_xs_neutron_total_by_nuclide is None: call calculate_macroscopic_xs with by_nuclide=true first");
+
+        // Use cached sorted keys for deterministic iteration order
+        let sorted_keys = self
+            .sorted_nuclide_keys
+            .as_ref()
+            .expect("sorted_nuclide_keys must be set when by_nuclide is enabled");
+
+        // Fast path: single nuclide - no sampling needed
+        if sorted_keys.len() == 1 {
+            return sorted_keys[0].clone();
+        }
+
+        let mut xs_by_nuclide = Vec::with_capacity(by_nuclide.len());
+        let mut total = 0.0;
+        for (idx, nuclide) in sorted_keys.iter().enumerate() {
+            let xs_vec = &by_nuclide[idx];
+            if xs_vec.is_empty() || self.unified_energy_grid_neutron.is_empty() {
+                continue;
+            }
+            let xs = crate::interpolate_linear(&self.unified_energy_grid_neutron, xs_vec, energy);
+            if xs > 0.0 {
+                xs_by_nuclide.push((nuclide, xs));
+                total += xs;
+            }
+        }
+        if xs_by_nuclide.is_empty() || total <= 0.0 {
+            // Only build debug info if we're about to panic
+            let mut debug_info = String::new();
+            for (nuclide, xs_vec) in sorted_keys.iter().zip(by_nuclide.iter()) {
+                if xs_vec.is_empty() || self.unified_energy_grid_neutron.is_empty() {
+                    debug_info.push_str(&format!("{nuclide}: EMPTY\n"));
+                } else {
+                    let xs = crate::interpolate_linear(
+                        &self.unified_energy_grid_neutron,
+                        xs_vec,
+                        energy,
+                    );
+                    debug_info.push_str(&format!("{nuclide}: xs = {xs}\n"));
+                }
+            }
+            panic!(
+                "No nuclide has nonzero macroscopic total cross section at energy {energy}. Details:\n{debug_info}"
+            );
+        }
+        let xi = rng.random_range(0.0..total);
+        let mut accum = 0.0;
+        for (nuclide, xs) in xs_by_nuclide {
+            accum += xs;
+            if xi < accum {
+                return nuclide.clone();
+            }
+        }
+        panic!("Failed to sample nuclide: numerical error in sampling loop");
+    }
+
+    /// Sample which nuclide a neutron interacts with, returning references directly.
+    /// This avoids String allocation and HashMap lookup in the hot path.
+    /// Returns (nuclide_name, nuclide_data) or None if sampling fails.
+    #[inline]
+    pub fn sample_interacting_nuclide_data<R: rand::Rng + ?Sized>(
+        &self,
+        energy: f64,
+        rng: &mut R,
+    ) -> Option<(&str, &Arc<Nuclide>)> {
+        let by_nuclide = self.macroscopic_xs_neutron_total_by_nuclide.as_ref()?;
+
+        // Use cached sorted keys for deterministic iteration order
+        let sorted_keys = self.sorted_nuclide_keys.as_ref()?;
+
+        // Fast path: single nuclide - no sampling needed
+        if sorted_keys.len() == 1 {
+            let name = &sorted_keys[0];
+            return self.nuclide_data.get(name).map(|n| (name.as_str(), n));
+        }
+
+        let mut xs_by_nuclide = Vec::with_capacity(by_nuclide.len());
+        let mut total = 0.0;
+        for (idx, nuclide) in sorted_keys.iter().enumerate() {
+            let xs_vec = &by_nuclide[idx];
+            if xs_vec.is_empty() || self.unified_energy_grid_neutron.is_empty() {
+                continue;
+            }
+            let xs = crate::interpolate_linear(&self.unified_energy_grid_neutron, xs_vec, energy);
+            if xs > 0.0 {
+                xs_by_nuclide.push((nuclide.as_str(), xs));
+                total += xs;
+            }
+        }
+
+        if xs_by_nuclide.is_empty() || total <= 0.0 {
+            return None;
+        }
+
+        let xi = rng.random_range(0.0..total);
+        let mut accum = 0.0;
+        for (name, xs) in xs_by_nuclide {
+            accum += xs;
+            if xi < accum {
+                return self.nuclide_data.get(name).map(|n| (name, n));
+            }
+        }
+
+        None
+    }
+}
+
+// ----------------------------- Tests -----------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_element_symbol_from_nuclide() {
+        use yamc_element::element::element_symbol_from_nuclide;
+        assert_eq!(element_symbol_from_nuclide("Fe56"), "Fe");
+        assert_eq!(element_symbol_from_nuclide("Li6"), "Li");
+        assert_eq!(element_symbol_from_nuclide("Am241m"), "Am");
+        assert_eq!(element_symbol_from_nuclide("H1"), "H");
+        assert_eq!(element_symbol_from_nuclide("U235"), "U");
+        assert_eq!(element_symbol_from_nuclide("Pb208"), "Pb");
+    }
+
+    #[test]
+    fn test_new_invalid_fraction_type_errors() {
+        // Invalid percent/fraction type must fail-fast in Material::new.
+        let result = Material::new(HashMap::new(), "atomm", "sum", None);
+        assert!(result.is_err(), "invalid fraction type must return Err");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("fraction must be 'atom' or 'mass'"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn test_new_valid_inputs_store_enums() {
+        // g/cc aliases g/cm3; weight + kg/m3 parse to the expected enum variants.
+        let m_gcc = Material::new(
+            HashMap::from([("Fe56".into(), 1.0)]),
+            "atom",
+            "g/cc",
+            Some(7.874),
+        )
+        .unwrap();
+        assert_eq!(m_gcc.density_units, DensityUnits::GramsPerCc);
+        assert_eq!(m_gcc.density_units.as_str(), "g/cm3");
+        assert_eq!(m_gcc.fraction_type, FractionType::Atom);
+
+        let m_kg = Material::new(
+            HashMap::from([("Fe56".into(), 1.0)]),
+            "mass",
+            "kg/m3",
+            Some(7874.0),
+        )
+        .unwrap();
+        assert_eq!(m_kg.density_units, DensityUnits::KgPerM3);
+        assert_eq!(m_kg.fraction_type, FractionType::Mass);
+        // kg/m3 still divides by 1000 to reach g/cm3.
+        assert!((m_kg.get_mass_density().unwrap() - 7.874).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_density_units_and_fraction_type_parse_roundtrip() {
+        // parse(as_str()) is the identity over canonical strings, and g/cc maps to g/cm3.
+        assert_eq!(
+            DensityUnits::parse("g/cm3").unwrap(),
+            DensityUnits::GramsPerCc
+        );
+        assert_eq!(
+            DensityUnits::parse("g/cc").unwrap(),
+            DensityUnits::GramsPerCc
+        );
+        assert_eq!(DensityUnits::parse("kg/m3").unwrap(), DensityUnits::KgPerM3);
+        assert_eq!(DensityUnits::parse("sum").unwrap(), DensityUnits::Sum);
+        assert!(DensityUnits::parse("lb/ft3")
+            .unwrap_err()
+            .contains("Unsupported density unit: 'lb/ft3'"));
+
+        assert_eq!(FractionType::parse("atom").unwrap(), FractionType::Atom);
+        assert_eq!(FractionType::parse("mass").unwrap(), FractionType::Mass);
+        assert!(FractionType::parse("volume").is_err());
+        // The old "weight" spelling is no longer accepted.
+        assert!(FractionType::parse("weight").is_err());
+    }
+
+    #[test]
+    fn test_serde_wire_format_unchanged() {
+        // The serde wire shape (MaterialSerde) keeps the canonical strings,
+        // and a round-trip reconstructs the same enum-typed fields.
+        let mat = Material::new(
+            HashMap::from([("Fe56".into(), 1.0)]),
+            "mass",
+            "kg/m3",
+            Some(7874.0),
+        )
+        .unwrap();
+        let wire: MaterialSerde = mat.into();
+        assert_eq!(wire.fraction_type, "mass");
+        assert_eq!(wire.density_units, "kg/m3");
+
+        let back = Material::try_from(wire).unwrap();
+        assert_eq!(back.fraction_type, FractionType::Mass);
+        assert_eq!(back.density_units, DensityUnits::KgPerM3);
+        assert_eq!(back.density, Some(7874.0));
+
+        // Deserializing an invalid stored unit must error (not panic).
+        let bad = MaterialSerde {
+            name: None,
+            material_id: None,
+            nuclides: HashMap::from([("Fe56".to_string(), 1.0)]),
+            nuclide_input_order: None,
+            fraction_type: "mass".to_string(),
+            density: Some(7874.0),
+            density_units: "furlong".to_string(),
+            volume: None,
+            temperature: String::new(),
+            transmutable: false,
+        };
+        assert!(Material::try_from(bad).is_err());
+    }
+
+    #[test]
+    fn test_average_molar_mass_ao() {
+        // H2O: 2 parts H1, 1 part O16 → M_avg ≈ (2*1.007825 + 1*15.994915) / 3
+        let mat = Material::new(
+            HashMap::from([("H1".into(), 2.0), ("O16".into(), 1.0)]),
+            "atom",
+            "sum",
+            None,
+        )
+        .unwrap();
+        let amm = mat.average_molar_mass().unwrap();
+        let expected = (2.0 * 1.00782503207 + 1.0 * 15.99491461956) / 3.0;
+        assert!(
+            (amm - expected).abs() / expected < 1e-6,
+            "Expected ~{expected}, got {amm}"
+        );
+    }
+
+    #[test]
+    fn test_get_mass_density_gcm3() {
+        let mat = Material::new(
+            HashMap::from([("Fe56".into(), 1.0)]),
+            "atom",
+            "g/cm3",
+            Some(7.874),
+        )
+        .unwrap();
+        let rho = mat.get_mass_density().unwrap();
+        assert!((rho - 7.874).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_get_mass_density_kgm3() {
+        let mat = Material::new(
+            HashMap::from([("Fe56".into(), 1.0)]),
+            "atom",
+            "kg/m3",
+            Some(7874.0),
+        )
+        .unwrap();
+        let rho = mat.get_mass_density().unwrap();
+        assert!((rho - 7.874).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_mix_materials_vo_basic() {
+        // 50% water, 50% iron by volume
+        let water = Material::new(
+            HashMap::from([("H1".into(), 2.0), ("O16".into(), 1.0)]),
+            "atom",
+            "g/cm3",
+            Some(1.0),
+        )
+        .unwrap();
+
+        let iron = Material::new(
+            HashMap::from([("Fe56".into(), 1.0)]),
+            "atom",
+            "g/cm3",
+            Some(7.874),
+        )
+        .unwrap();
+
+        let mixed = Material::mix_materials(&[&water, &iron], &[0.5, 0.5], "volume", None).unwrap();
+
+        let rho = mixed.get_mass_density().unwrap();
+        // Expected: 0.5 * 1.0 + 0.5 * 7.874 = 4.437
+        assert!(
+            (rho - 4.437).abs() < 0.01,
+            "Expected ~4.437 g/cm3, got {rho}"
+        );
+        // Check all nuclides present
+        assert!(mixed.nuclides.contains_key("H1"));
+        assert!(mixed.nuclides.contains_key("O16"));
+        assert!(mixed.nuclides.contains_key("Fe56"));
+    }
+
+    #[test]
+    fn test_mix_materials_transmutable_propagation() {
+        let mut mat1 = Material::new(
+            HashMap::from([("H1".into(), 1.0)]),
+            "atom",
+            "g/cm3",
+            Some(1.0),
+        )
+        .unwrap();
+        mat1.transmutable = true;
+
+        let mat2 = Material::new(
+            HashMap::from([("Fe56".into(), 1.0)]),
+            "atom",
+            "g/cm3",
+            Some(7.874),
+        )
+        .unwrap();
+
+        let mixed = Material::mix_materials(&[&mat1, &mat2], &[0.5, 0.5], "volume", None).unwrap();
+        assert!(mixed.transmutable, "Transmutable flag should propagate");
+    }
+
+    #[test]
+    fn test_mix_materials_default_name_leaves_ids_out() {
+        // The default name is part of the model fingerprint, so it must not
+        // carry an id, which differs between two builds of one model.
+        let component = |name: Option<&str>, id: u32| {
+            let mut m = Material::new(
+                HashMap::from([("Fe56".into(), 1.0)]),
+                "atom",
+                "g/cm3",
+                Some(7.874),
+            )
+            .unwrap();
+            m.name = name.map(String::from);
+            m.set_material_id(id);
+            m
+        };
+        let (a, b) = (component(None, 41), component(Some("steel"), 42));
+        let mixed = Material::mix_materials(&[&a, &b], &[0.25, 0.75], "atom", None).unwrap();
+        assert_eq!(mixed.get_name(), Some("unnamed(0.2500)_steel(0.7500)"));
+    }
+
+    #[test]
+    fn test_mix_materials_fracs_validation() {
+        let mat = Material::new(
+            HashMap::from([("H1".into(), 1.0)]),
+            "atom",
+            "g/cm3",
+            Some(1.0),
+        )
+        .unwrap();
+
+        // Wrong number of fractions
+        let result = Material::mix_materials(&[&mat], &[0.5, 0.5], "atom", None);
+        assert!(result.is_err());
+
+        // Negative fraction
+        let result = Material::mix_materials(&[&mat, &mat], &[-0.5, 1.5], "atom", None);
+        assert!(result.is_err());
+
+        // ao fractions not summing to 1.0
+        let result = Material::mix_materials(&[&mat, &mat], &[0.3, 0.3], "atom", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_expand_formula_h2o() {
+        let nuclides =
+            yamc_nuclide::composition::expand_formula("H2O", "atom", None, None, None).unwrap();
+        // H expands to H1, H2; O expands to O16, O17, O18
+        let has_h = nuclides.keys().any(|n| n.starts_with('H'));
+        let has_o = nuclides.keys().any(|n| n.starts_with('O'));
+        assert!(has_h, "Should contain hydrogen isotopes");
+        assert!(has_o, "Should contain oxygen isotopes");
+    }
+
+    #[test]
+    fn test_expand_formula_brackets() {
+        let nuclides =
+            yamc_nuclide::composition::expand_formula("(NH4)2SO4", "atom", None, None, None)
+                .unwrap();
+        let has_n = nuclides.keys().any(|n| n.starts_with('N'));
+        let has_h = nuclides.keys().any(|n| n.starts_with('H'));
+        let has_s = nuclides.keys().any(|n| n.starts_with('S'));
+        let has_o = nuclides.keys().any(|n| n.starts_with('O'));
+        assert!(has_n, "Should contain nitrogen isotopes");
+        assert!(has_h, "Should contain hydrogen isotopes");
+        assert!(has_s, "Should contain sulfur isotopes");
+        assert!(has_o, "Should contain oxygen isotopes");
+    }
+
+    #[test]
+    fn test_expand_formula_invalid() {
+        // Empty formula
+        assert!(yamc_nuclide::composition::expand_formula("", "atom", None, None, None).is_err());
+        // Decimal multiplier
+        assert!(
+            yamc_nuclide::composition::expand_formula("H2.5O", "atom", None, None, None).is_err()
+        );
+        // Unknown element
+        assert!(
+            yamc_nuclide::composition::expand_formula("Xx2O", "atom", None, None, None).is_err()
+        );
+        // Unbalanced parens
+        assert!(
+            yamc_nuclide::composition::expand_formula("(NH4", "atom", None, None, None).is_err()
+        );
+    }
+
+    #[test]
+    fn test_formula_parse_counts() {
+        // Verify element proportions for (NH4)2SO4 via expand_formula
+        // Formula: N=2, H=8, S=1, O=4 → total atoms = 15
+        let nuclides =
+            yamc_nuclide::composition::expand_formula("(NH4)2SO4", "atom", None, None, None)
+                .unwrap();
+
+        // Sum fractions by element
+        let mut element_sums: HashMap<String, f64> = HashMap::new();
+        for (name, frac) in &nuclides {
+            let elem: String = name
+                .chars()
+                .take_while(|c| c.is_ascii_alphabetic())
+                .collect();
+            *element_sums.entry(elem).or_default() += frac;
+        }
+
+        let total: f64 = element_sums.values().sum();
+        // Normalize and check ratios match 2:8:1:4
+        assert!((element_sums["N"] / total - 2.0 / 15.0).abs() < 1e-10);
+        assert!((element_sums["H"] / total - 8.0 / 15.0).abs() < 1e-10);
+        assert!((element_sums["S"] / total - 1.0 / 15.0).abs() < 1e-10);
+        assert!((element_sums["O"] / total - 4.0 / 15.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_read_nuclear_data_or_keyword_rejects_non_keyword_non_directory() {
+        let mut mat =
+            Material::new(HashMap::from([("Li6".into(), 1.0)]), "atom", "sum", None).unwrap();
+        let err = mat
+            .read_nuclear_data_or_keyword("not-a-keyword-and-not-a-dir")
+            .expect_err("non-keyword, non-directory source must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("neither a registered data keyword nor a directory"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_keyword_load_registers_global_default_cross_section() {
+        // A material loaded from a keyword/directory source must register
+        // that source as the GLOBAL fallback (when none is configured) so
+        // nuclides that enter the problem later by name only -- e.g. the
+        // transmutation products `simulate_transmutation` preloads -- can
+        // resolve cross sections. Without the fallback every product warns
+        // "not found" and silently skips transport (V&V: second-generation
+        // product densities collapsed 100-1000x, Ar36 -> Cl36 -> S36).
+        //
+        // The registration happens up front (before the per-nuclide load),
+        // so the assertion is independent of the directory's contents.
+        let saved = {
+            let mut config = CONFIG.lock().unwrap_or_else(|p| p.into_inner());
+            std::mem::take(&mut config.default_cross_section)
+        };
+
+        let dir = std::env::temp_dir();
+        let dir_str = dir.to_str().unwrap().to_string();
+        let mut mat =
+            Material::new(HashMap::from([("Li6".into(), 1.0)]), "atom", "sum", None).unwrap();
+        let _ = mat.read_nuclear_data_or_keyword(&dir_str);
+        let registered = {
+            let config = CONFIG.lock().unwrap_or_else(|p| p.into_inner());
+            config.default_cross_section.clone()
+        };
+
+        // An explicit user configuration must WIN over the material source.
+        {
+            let mut config = CONFIG.lock().unwrap_or_else(|p| p.into_inner());
+            config.default_cross_section = Some("user-configured".into());
+        }
+        let mut mat2 =
+            Material::new(HashMap::from([("Li6".into(), 1.0)]), "atom", "sum", None).unwrap();
+        let _ = mat2.read_nuclear_data_or_keyword(&dir_str);
+        let kept = {
+            let mut config = CONFIG.lock().unwrap_or_else(|p| p.into_inner());
+            let kept = config.default_cross_section.clone();
+            config.default_cross_section = saved;
+            kept
+        };
+
+        assert_eq!(registered.as_deref(), Some(dir_str.as_str()));
+        assert_eq!(kept.as_deref(), Some("user-configured"));
+    }
+
+    #[test]
+    fn test_total_xs_with_urr_no_urr_nuclides_returns_smooth() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        let mut material = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
+        material.unified_energy_grid_neutron = vec![1.0, 10.0, 100.0];
+        material
+            .macroscopic_xs_neutron
+            .insert(1, vec![2.0, 2.0, 2.0]);
+        let mut rng = StdRng::seed_from_u64(0);
+
+        let (sigma_t, urr_random) = material.total_xs_with_urr(5.0, None, &mut rng);
+
+        assert!((sigma_t - 2.0).abs() < 1e-12);
+        assert!(
+            urr_random.is_none(),
+            "no urr_random should be returned when no nuclide has URR data"
+        );
+    }
+
+    #[test]
+    fn test_total_xs_with_urr_does_not_consume_rng_without_urr() {
+        use rand::rngs::StdRng;
+        use rand::RngExt;
+        use rand::SeedableRng;
+        let mut material = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
+        material.unified_energy_grid_neutron = vec![1.0, 10.0, 100.0];
+        material
+            .macroscopic_xs_neutron
+            .insert(1, vec![3.0, 3.0, 3.0]);
+
+        let mut rng_a = StdRng::seed_from_u64(123);
+        let mut rng_b = StdRng::seed_from_u64(123);
+
+        let _ = material.total_xs_with_urr(5.0, None, &mut rng_a);
+        // rng_b draws nothing; the two RNGs should still be in lockstep.
+        let next_a: f64 = rng_a.random();
+        let next_b: f64 = rng_b.random();
+        assert_eq!(
+            next_a, next_b,
+            "rng must not be advanced when no URR nuclide is in range"
+        );
+    }
+
+    /// `temperature_k` must follow the label, or the material transports at
+    /// 294 K whatever its label says.
+    #[test]
+    fn temperature_k_tracks_the_label() {
+        let mut m = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
+        assert_eq!(
+            m.temperature_k(),
+            yamc_nuclide::temperature::DEFAULT_TEMPERATURE_K,
+            "an unresolved material starts at room temperature"
+        );
+
+        m.set_temperature("900");
+        assert_eq!(m.temperature(), "900");
+        assert_eq!(
+            m.temperature_k(),
+            900.0,
+            "the Kelvin value the free-gas kernel reads must follow the label"
+        );
+
+        m.set_temperature("600K");
+        assert_eq!(
+            m.temperature_k(),
+            600.0,
+            "the on-disk `600K` spelling must parse the same as `600`"
+        );
+        assert_eq!(
+            m.temperature(),
+            "600",
+            "the label must be stored stripped, because nuclide data is keyed \
+             by the stripped form and `get_temp_idx` compares exactly"
+        );
+    }
+
+    /// `set_temperature` must clear every temperature-dependent cache, not
+    /// leave some holding the previous temperature's data.
+    ///
+    /// `fast_xs` mattered most: it is the "already built, skip" guard at
+    /// `model.rs`, so a material whose temperature changed after a build was
+    /// skipped at setup and transported on the old tables. `fast_xs` surviving
+    /// an emptied grid is also a panic in its own right, since
+    /// `MaterialFastXS::lookup_total` indexes `energy_grid[0]` unguarded.
+    #[test]
+    fn set_temperature_clears_every_temperature_dependent_cache() {
+        use std::sync::Arc;
+
+        let mut m = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
+        m.set_temperature("294");
+
+        // Fabricate every cache derived from the temperature.
+        m.unified_energy_grid_neutron = vec![1.0, 10.0, 100.0];
+        m.macroscopic_xs_neutron.insert(1, vec![2.0, 2.0, 2.0]);
+        m.macroscopic_xs_mt_numbers = vec![1];
+        m.macroscopic_xs_flat = vec![2.0, 2.0, 2.0];
+        m.fast_xs = MaterialFastXS::new(&[1.0, 10.0, 100.0], &[2.0, 2.0, 2.0]);
+        m.cached_microscopic_xs = Some((vec![1], Arc::new(HashMap::new())));
+        m.macroscopic_xs_neutron_total_by_nuclide = Some(vec![vec![2.0, 2.0, 2.0]]);
+        m.macroscopic_xs_neutron_by_nuclide = Some(vec![HashMap::new()]);
+        m.urr_lookup = Some(UrrLookup {
+            windows: vec![(1.0, 2.0)],
+            by_sorted: Vec::new(),
+            scoring: Vec::new(),
+        });
+
+        m.set_temperature("900");
+
+        assert!(
+            m.unified_energy_grid_neutron.is_empty(),
+            "the unified grid is built per temperature"
+        );
+        assert!(m.macroscopic_xs_neutron.is_empty(), "macroscopic XS");
+        assert!(m.macroscopic_xs_mt_numbers.is_empty(), "flat buffer index");
+        assert!(m.macroscopic_xs_flat.is_empty(), "flat buffer");
+        assert!(
+            m.fast_xs.is_none(),
+            "fast_xs is the skip guard at simulation setup, and outliving the \
+             grid it indexes into is a panic"
+        );
+        assert!(
+            m.cached_microscopic_xs.is_none(),
+            "cached_microscopic_xs is keyed by MT filter alone, so it carries \
+             no temperature of its own and must be dropped"
+        );
+        assert!(
+            m.macroscopic_xs_neutron_total_by_nuclide.is_none(),
+            "per-nuclide totals"
+        );
+        assert!(
+            m.macroscopic_xs_neutron_by_nuclide.is_none(),
+            "per-nuclide per-MT"
+        );
+        assert!(
+            m.urr_lookup.is_none(),
+            "the URR lookup holds each nuclide's temperature index and table range"
+        );
+    }
+
+    /// A query for a temperature other than the material's own must not
+    /// overwrite the material's caches, which would leave them holding the
+    /// queried temperature's data under the original label. The builders take
+    /// the temperature explicitly and only write through when it is the
+    /// material's own.
+    #[test]
+    fn a_foreign_temperature_query_leaves_the_caches_alone() {
+        let mut m = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
+        m.set_temperature("294");
+
+        let fabricated = vec![1.0, 10.0, 100.0];
+        m.unified_energy_grid_neutron = fabricated.clone();
+
+        // 900 is not this material's temperature, so this must neither return
+        // nor disturb the cached 294 grid.
+        let grid_900 = m.unified_energy_grid_neutron_at("900");
+        assert!(
+            grid_900.is_empty(),
+            "no nuclide data is loaded, so the 900 grid is empty; the point is \
+             that it did not come from the 294 cache"
+        );
+        assert_eq!(
+            m.unified_energy_grid_neutron, fabricated,
+            "the material's own cached grid must survive a query at another \
+             temperature"
+        );
+        assert_eq!(
+            m.temperature(),
+            "294",
+            "and the label must still be the material's own"
+        );
+
+        // The material's own temperature still reads and writes through.
+        let grid_294 = m.unified_energy_grid_neutron_at("294");
+        assert_eq!(grid_294, fabricated, "own temperature reads the cache");
+    }
+
+    /// The two backends must not disagree about what a label means. The GPU
+    /// extractor parses labels with the same function, so this pins the
+    /// contract they share.
+    #[test]
+    fn temperature_k_matches_the_shared_parser() {
+        for label in ["250", "294", "600K", "900", "1200", "2500K"] {
+            let mut m = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
+            m.set_temperature(label);
+            assert_eq!(
+                m.temperature_k(),
+                yamc_nuclide::temperature::label_to_kelvin_or_default(label),
+                "label {label:?} must mean one thing"
+            );
+        }
+    }
+
+    /// A serde round trip goes through `set_temperature`, which is exactly how
+    /// the stale 294.0 used to survive being written out and read back.
+    #[test]
+    fn temperature_k_survives_a_serde_round_trip() {
+        let mut m = Material::new(
+            HashMap::from([("Fe56".to_string(), 1.0)]),
+            "atom",
+            "g/cm3",
+            Some(7.874),
+        )
+        .unwrap();
+        m.set_temperature("900");
+
+        // The same conversions serde drives, without pulling in a JSON
+        // dependency: `Material` is `#[serde(into/try_from = "MaterialSerde")]`.
+        let wire: MaterialSerde = m.clone().into();
+        let back: Material = wire.try_into().expect("round trip");
+
+        assert_eq!(back.temperature(), "900");
+        assert_eq!(
+            back.temperature_k(),
+            900.0,
+            "temperature_k must be rebuilt from the label on deserialize"
+        );
+    }
+
+    /// `from_nuclide_densities` copies the label from its template, so it has to
+    /// copy a Kelvin value that agrees with it.
+    #[test]
+    fn temperature_k_is_consistent_after_templating() {
+        let mut template = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
+        template.set_temperature("1200");
+
+        let derived = Material::from_nuclide_densities(
+            HashMap::from([("Fe56".to_string(), 1e-3)]),
+            &template,
+        );
+
+        assert_eq!(derived.temperature(), "1200");
+        assert_eq!(derived.temperature_k(), 1200.0);
+        assert_eq!(
+            derived.temperature_k(),
+            yamc_nuclide::temperature::label_to_kelvin_or_default(derived.temperature()),
+            "the copied pair must still agree"
+        );
+    }
+
+    /// `UrrMacroXs::covers_mt` decides whether the transport loop computes the
+    /// URR values for a tally at all, so it has to name exactly the MTs
+    /// `macro_xs_by_mt` answers from them. The material is empty, so its
+    /// smooth answer is zero for every MT and only a covered one changes.
+    #[test]
+    fn covers_mt_names_exactly_the_mts_macro_xs_by_mt_reads() {
+        let material = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
+        let urr = UrrMacroXs {
+            total: 1.0,
+            elastic: 2.0,
+            fission: 3.0,
+            capture: 4.0,
+            absorption: 5.0,
+        };
+        for mt in -10..=1100 {
+            let reads = material.macro_xs_by_mt(mt, 1.0e4, Some(&urr))
+                != material.macro_xs_by_mt(mt, 1.0e4, None);
+            assert_eq!(reads, UrrMacroXs::covers_mt(mt), "MT {mt}");
+        }
+    }
+}

@@ -1,0 +1,299 @@
+//! `read_nuclide_from_arrow` / `read_element_from_arrow`: the readback gate.
+//!
+//! A conversion is checked by reading it back, and until these existed the only
+//! Python reader was a second implementation of the format, in the converter
+//! package that has since been retired. That is a weaker gate than it looks: a
+//! directory can satisfy every schema and still be refused by the loader that
+//! actually consumes it, and writer and reader sharing a vocabulary is how a
+//! silent fission loss once happened (the transmutation writer spelling MT 18 "fission" while the Rust
+//! consumer's map held only "(n,fission)", invisible to every Python test).
+//! These bind the real loaders, so the gate is the consumer.
+//!
+//! A summary rather than the whole nuclide. The gate asks "does yamc accept
+//! this, and does it hold what it should", and materialising megabytes of
+//! secondary distributions into Python answers neither question.
+//!
+//! Registered on both wheels. Reading a directory back is not transport, and
+//! `yani` writes chains that want the same check.
+
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::prelude::*;
+use pyo3::types::PyDict;
+use pyo3_stub_gen::derive::gen_stub_pyfunction;
+
+use yamc_nuclide::load_scope::{LoadScope, SectionScope};
+
+/// Validate evaluated photonuclear Arrow tables against their preserved ENDF.
+/// Returns the nuclide identity, MTs, per-MT energy-point counts and preserved
+/// (MF, MT) section keys. Does not invoke neutron or photoatomic transport.
+#[gen_stub_pyfunction]
+#[pyfunction]
+pub fn read_photonuclear_from_arrow(py: Python, path: &str) -> PyResult<Py<PyAny>> {
+    let summary = py
+        .detach(|| {
+            yamc_convert::photonuclear::inspect_photonuclear(std::path::Path::new(path))
+                .map_err(|error| error.to_string())
+        })
+        .map_err(|error| PyRuntimeError::new_err(format!("{path}: {error}")))?;
+    let dict = PyDict::new(py);
+    dict.set_item("name", summary.name)?;
+    dict.set_item("atomic_number", summary.atomic_number)?;
+    dict.set_item("mass_number", summary.mass_number)?;
+    dict.set_item(
+        "mts",
+        summary.energy_points.keys().copied().collect::<Vec<_>>(),
+    )?;
+    dict.set_item("energy_points", summary.energy_points)?;
+    dict.set_item("sections", summary.sections)?;
+    dict.set_item("scope_loaded", "evaluated")?;
+    Ok(dict.into())
+}
+
+/// Read a nuclide Arrow directory through yamc's own loader and describe it.
+///
+/// Parameters
+/// ----------
+/// path : str
+///     A ``{Nuclide}.arrow/`` section directory. Taken verbatim: no keyword
+///     expansion, no directory search and no download, so a validation run
+///     cannot silently check a different file from the one it named.
+/// scope : str, optional
+///     ``"full"`` (default) reads every section, which is what transport
+///     needs. ``"xs"`` reads ``nuclide.arrow``, ``energy.arrow`` and
+///     ``reactions.arrow`` only, which is what a transport-free reaction-rate
+///     collapse touches.
+///
+/// Returns
+/// -------
+/// dict
+///     ``name``, ``atomic_number``, ``mass_number``, ``atomic_weight_ratio``,
+///     ``fissionable``, ``urr_present``, ``available_temperatures``,
+///     ``loaded_temperatures``, ``mts``, ``energy_points``,
+///     ``angular_covariance``, ``nubar_covariance``, ``spectrum_covariance``,
+///     ``resonance_parameters`` and ``scope_loaded``.
+///
+///     ``energy_points`` is a dict of temperature to grid length, over the
+///     loaded temperatures. Not one number: the reader also keeps the 0 K union
+///     grid, which is longer than any of them and belongs to no temperature the
+///     other two lists mention, so a single maximum would report a grid nothing
+///     reads and hide a per-temperature grid that had been truncated.
+///
+///     There is no ``library`` key. The Arrow loader does not populate that
+///     field, so it would report ``None`` for every directory, correct or not.
+///     Read ``version.json`` for it.
+///
+///     ``angular_covariance`` is the folder's MF=34 (``angular_covariance.arrow``),
+///     summarised as ``{mt: [(l, l1), ...]}``: per reaction, the sorted (L, L1)
+///     pairs of Legendre orders a covariance block correlates. ``None`` when
+///     the folder has none. It is read whatever ``scope`` says, since it is a
+///     separate optional section.
+///
+///     ``nubar_covariance`` is the folder's MF=31 (``nubar_covariance.arrow``),
+///     summarised as the sorted fission multiplicity MTs (of 452, 455 and 456)
+///     it carries covariance for, and ``spectrum_covariance`` its MF=35
+///     (``spectrum_covariance.arrow``), as ``{mt: [(e1, e2), ...]}``: per
+///     reaction, the incident energy range of each covariance block, in tape
+///     order. Each is ``None`` when the folder has none, and both are read
+///     whatever ``scope`` says, as ``angular_covariance`` is.
+///
+///     ``resonance_parameters`` is the folder's MF=2 and MF=32
+///     (``resonance_parameters.arrow``), both parsed, summarised as the
+///     ``(lru, lrf)`` of each MF=2 energy range, isotope by isotope in tape
+///     order: LRU 1 resolved or 2 unresolved, LRF the formalism. ``None`` when
+///     the folder has none, and read whatever ``scope`` says.
+///
+///     ``scope_loaded`` is the one to assert on, and it is not always the
+///     ``scope`` asked for: a directory holding no transport sections narrows a
+///     ``"full"`` request to ``"xs"`` rather than failing it, on the theory
+///     that it is a cross-sections-only conversion. A gate that asks for
+///     ``"full"`` and does not check what it got will pass a directory with no
+///     distributions and no products.
+///
+/// Raises
+/// ------
+/// ValueError
+///     ``scope`` is neither ``"full"`` nor ``"xs"``.
+/// RuntimeError
+///     The directory is absent, is not the Arrow format version this build
+///     reads, or any section fails to parse, the stored MF=2 and MF=32 text
+///     included.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (path, scope = "full"))]
+pub fn read_nuclide_from_arrow(py: Python, path: &str, scope: &str) -> PyResult<Py<PyAny>> {
+    let requested = match scope {
+        "full" => LoadScope::full()
+            .with_angular_covariance(true)
+            .with_fission_covariance(true)
+            .with_resonance_parameters(true),
+        "xs" => LoadScope {
+            sections: SectionScope::XsOnly,
+            mts: None,
+            temperatures: None,
+            covariance: false,
+            angular_covariance: true,
+            fission_covariance: true,
+            resonance_parameters: true,
+        },
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown scope {other:?}; expected \"full\" or \"xs\""
+            )));
+        }
+    };
+
+    // The load is the expensive part (a full-scope nuclide is hundreds of MB of
+    // sections) and touches no Python, so the GIL goes back while it runs. A
+    // gate reading a published tree through a thread pool otherwise gets no
+    // parallelism at all, and blocks every other thread in the process for the
+    // duration of each read.
+    // `Box<dyn Error>` is not `Send`, so the message crosses the boundary
+    // rather than the error.
+    let nuclide = py
+        .detach(|| {
+            yamc_nuclide::nuclide_arrow::read_nuclide_from_arrow(
+                std::path::Path::new(path),
+                &requested,
+            )
+            .map_err(|e| e.to_string())
+        })
+        .map_err(|e| PyRuntimeError::new_err(format!("{path}: {e}")))?;
+
+    let dict = PyDict::new(py);
+    dict.set_item("name", nuclide.name.clone())?;
+    dict.set_item("atomic_number", nuclide.atomic_number)?;
+    dict.set_item("mass_number", nuclide.mass_number)?;
+    dict.set_item("atomic_weight_ratio", nuclide.atomic_weight_ratio)?;
+    dict.set_item("fissionable", nuclide.fissionable)?;
+    dict.set_item("urr_present", nuclide.urr_present)?;
+    dict.set_item(
+        "available_temperatures",
+        nuclide.available_temperatures.clone(),
+    )?;
+    dict.set_item("loaded_temperatures", nuclide.loaded_temperatures.clone())?;
+    dict.set_item("mts", nuclide.reaction_mts())?;
+    // Per temperature, and only the loaded ones. `energy` additionally holds
+    // the 0 K union grid, which is the longest and is listed in neither
+    // temperature list, so a maximum over the map reports a grid no load reads.
+    let energy_points = PyDict::new(py);
+    if let Some(grids) = nuclide.energy.as_ref() {
+        for temperature in &nuclide.loaded_temperatures {
+            if let Some(grid) = grids.get(temperature) {
+                energy_points.set_item(temperature, grid.len())?;
+            }
+        }
+    }
+    dict.set_item("energy_points", energy_points)?;
+    let angular = nuclide.angular_covariance.as_ref().map(|blocks| {
+        let mut by_mt: std::collections::BTreeMap<i32, Vec<(i32, i32)>> =
+            std::collections::BTreeMap::new();
+        for b in blocks.iter() {
+            by_mt.entry(b.mt).or_default().push((b.l, b.l1));
+        }
+        for pairs in by_mt.values_mut() {
+            pairs.sort_unstable();
+            pairs.dedup();
+        }
+        by_mt
+    });
+    dict.set_item("angular_covariance", angular)?;
+    let nubar = nuclide.nubar_covariance.as_ref().map(|blocks| {
+        blocks
+            .iter()
+            .map(|b| b.mt)
+            .collect::<std::collections::BTreeSet<i32>>()
+            .into_iter()
+            .collect::<Vec<i32>>()
+    });
+    dict.set_item("nubar_covariance", nubar)?;
+    let spectrum = nuclide.spectrum_covariance.as_ref().map(|blocks| {
+        let mut by_mt: std::collections::BTreeMap<i32, Vec<(f64, f64)>> =
+            std::collections::BTreeMap::new();
+        for b in blocks.iter() {
+            by_mt.entry(b.mt).or_default().push((b.e1, b.e2));
+        }
+        by_mt
+    });
+    dict.set_item("spectrum_covariance", spectrum)?;
+    let resonance = match nuclide.resonance_parameters.as_ref() {
+        Some(stored) => {
+            let (mf2, _mf32) = stored.parse().map_err(|e| {
+                PyRuntimeError::new_err(format!("{path}: resonance_parameters.arrow: {e}"))
+            })?;
+            let ranges: Vec<(i64, i64)> = mf2
+                .isotopes
+                .iter()
+                .flat_map(|isotope| isotope.ranges.iter().map(|r| (r.lru, r.lrf)))
+                .collect();
+            Some(ranges)
+        }
+        None => None,
+    };
+    dict.set_item("resonance_parameters", resonance)?;
+    dict.set_item(
+        "scope_loaded",
+        match nuclide.load_scope.sections {
+            SectionScope::Full => "full",
+            SectionScope::XsOnly => "xs",
+        },
+    )?;
+    Ok(dict.into())
+}
+
+/// Read a photoatomic Arrow directory through yamc's own loader and describe it.
+///
+/// Parameters
+/// ----------
+/// path : str
+///     An ``{Element}.arrow/`` directory. Taken verbatim, and read straight
+///     rather than through the process-global element store: that store is
+///     keyed by element name, so validating two builds of ``Fe.arrow`` in one
+///     process would get the first one back for the second call and report a
+///     false pass.
+///
+///     Publishes none of the process-wide photon grids either. An ordinary
+///     read installs the Compton momentum grid and the two TTB grids on first
+///     use, so inspecting a candidate directory in an interpreter that also
+///     runs transport would hand that candidate's grids to every later element
+///     load and every photon collision. The sampler reads the profile tables
+///     against whichever grid is installed, so a different grid changes every
+///     Doppler sample and says nothing about it.
+///
+/// Returns
+/// -------
+/// dict
+///     ``name``, ``atomic_number``, ``n_energy_points``, ``n_subshells``,
+///     ``has_atomic_relaxation``, ``has_compton_profiles`` and
+///     ``has_bremsstrahlung``.
+///
+///     The last three are the auxiliary tabulations that are not in any
+///     evaluation, so a directory converted without them reads back fine and
+///     is still not what transport wants. There is no ``scope`` here: the
+///     photon reader has one mode.
+///
+/// Raises
+/// ------
+/// RuntimeError
+///     The directory is absent, or any section fails to parse.
+#[gen_stub_pyfunction]
+#[pyfunction]
+pub fn read_element_from_arrow(py: Python, path: &str) -> PyResult<Py<PyAny>> {
+    let element = py
+        .detach(|| {
+            yamc_element::photon_arrow::inspect_photon_interaction_from_arrow(std::path::Path::new(
+                path,
+            ))
+            .map_err(|e| e.to_string())
+        })
+        .map_err(|e| PyRuntimeError::new_err(format!("{path}: {e}")))?;
+
+    let dict = PyDict::new(py);
+    dict.set_item("name", element.name.clone())?;
+    dict.set_item("atomic_number", element.atomic_number)?;
+    dict.set_item("n_energy_points", element.energy.len())?;
+    dict.set_item("n_subshells", element.shells.len())?;
+    dict.set_item("has_atomic_relaxation", element.has_atomic_relaxation)?;
+    dict.set_item("has_compton_profiles", !element.profile_pdf.is_empty())?;
+    dict.set_item("has_bremsstrahlung", !element.dcs.is_empty())?;
+    Ok(dict.into())
+}

@@ -1,0 +1,265 @@
+//! The crate used the way a consumer uses it, through its root re-exports.
+//!
+//! `golden.rs` reaches into module paths freely, because it has to name every
+//! type the dumpers touch. That makes it a poor guide to whether the crate is
+//! pleasant (or even possible) to depend on from outside. This walks the
+//! path a transport code takes, from a file to the distributions it samples,
+//! and imports everything from `endf::` rather than `endf::mf::mf6::`.
+//!
+//! It is a shape test, not a value test: the goldens check the numbers. What
+//! fails here is a type that stopped being public, a re-export that went
+//! missing, or an accessor that a consumer cannot reach without knowing the
+//! crate's internal layout.
+
+use std::path::{Path, PathBuf};
+
+use endf::{
+    q_values, tables_from_str, AngleEnergy, Chain, Decay, FissionProductYields, IncidentNeutron,
+    IncidentPhoton, Interpretation, Material, MetastableScheme, ProbabilityTables, QValues,
+    RadionuclideProduction, Tabulated1D,
+};
+
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join(name)
+}
+
+fn read_text(name: &str) -> String {
+    let path = fixture(name);
+    let raw = std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    let mut out = Vec::new();
+    std::io::Read::read_to_end(
+        &mut lzma_rust2::XzReader::new(raw.as_slice(), true),
+        &mut out,
+    )
+    .unwrap_or_else(|e| panic!("decompressing {}: {e}", path.display()));
+    String::from_utf8(out).expect("a fixture is not UTF-8")
+}
+
+/// A file to a nuclide with cross sections on it, the first thing any
+/// consumer does.
+#[test]
+fn from_a_file_to_a_cross_section() {
+    let material = Material::from_str(&read_text("n-095_Am_244.endf.xz")).unwrap();
+    assert_eq!(material.mat, 9552);
+    assert!(material.contains(3, 1));
+
+    // The sublibrary decides the class, without the caller reading NSUB.
+    let neutron = match material.interpret().unwrap() {
+        Interpretation::IncidentNeutron(n) => n,
+        other => panic!("an incident-neutron evaluation gave {other:?}"),
+    };
+    assert_eq!(neutron.name(), "Am244");
+    assert_eq!(neutron.atomic_number, 95);
+
+    // A reaction, its cross section, and the cross section evaluated.
+    let capture = &neutron.reactions[&102];
+    let xs: &Tabulated1D = capture.xs.values().next().expect("a capture cross section");
+    assert!(xs.eval(0.0253) > 0.0);
+    // No unionised energy grid from ENDF: each cross section carries its own.
+    // A consumer that wants one gets it from ACE, or builds it itself; see
+    // the ACE test below.
+    assert!(neutron.energy.is_empty());
+
+    // The same nuclide built directly, which is the other entry point.
+    let direct = IncidentNeutron::from_endf(&material).unwrap();
+    assert_eq!(direct.name(), neutron.name());
+}
+
+/// Every product distribution shape reachable without naming a private type.
+///
+/// This is the part an Arrow projection consumes, so a consumer has to be able
+/// to match on `AngleEnergy` from the crate root.
+#[test]
+fn product_distributions_are_matchable() {
+    let material = Material::from_str(&read_text("n-003_Li_006_trimmed.endf.xz")).unwrap();
+    let neutron = IncidentNeutron::from_endf(&material).unwrap();
+
+    let mut seen = 0;
+    for reaction in neutron.reactions.values() {
+        for product in &reaction.products {
+            for distribution in &product.distribution {
+                // The four shapes the Arrow schema has columns for. A new
+                // variant makes this stop compiling, which is the point.
+                match distribution {
+                    AngleEnergy::Uncorrelated(_)
+                    | AngleEnergy::Correlated(_)
+                    | AngleEnergy::KalbachMann(_)
+                    | AngleEnergy::NBodyPhaseSpace(_) => seen += 1,
+                }
+            }
+        }
+    }
+    assert!(seen > 0, "no product carried a distribution");
+}
+
+/// The ACE side, which is what a transport code actually reads.
+#[test]
+fn from_an_ace_table_to_a_nuclide() {
+    let tables = tables_from_str(&read_text("Li6.ace.xz"), None).unwrap();
+    let table = &tables[0];
+    assert!(table.name.starts_with("3006"));
+    assert!(!table.xss.is_empty());
+
+    let neutron = IncidentNeutron::from_ace(table, MetastableScheme::default()).unwrap();
+    assert_eq!(neutron.name(), "Li6");
+    assert!(!neutron.reactions.is_empty());
+    assert_eq!(neutron.temperatures().len(), 1);
+    // The unionised grid an ENDF evaluation does not have, keyed by the same
+    // temperature string the cross sections are.
+    let temperature = &neutron.temperatures()[0];
+    assert!(!neutron.energy[temperature].is_empty());
+
+    // Probability tables come back keyed by temperature, empty when the table
+    // has no URR block.
+    let urr: &std::collections::BTreeMap<String, ProbabilityTables> = &neutron.urr;
+    assert!(urr.is_empty(), "Li6 has no unresolved resonance block");
+}
+
+/// Decay data, fission yields and radionuclide production, the depletion
+/// inputs, each reachable from the crate root.
+#[test]
+fn the_depletion_inputs_are_reachable() {
+    let decay_material = Material::from_str(&read_text("dec-049_In_116m1.endf.xz")).unwrap();
+    let decay = Decay::from_material(&decay_material).unwrap();
+    assert_eq!(decay.nuclide.name, "In116_m1");
+    assert!(decay.half_life.is_some());
+    assert!(!decay.modes.is_empty());
+
+    let yields_material = Material::from_str(&read_text("synthetic-nfy.endf.xz")).unwrap();
+    let yields = FissionProductYields::from_material(&yields_material).unwrap();
+    assert_eq!(yields.nuclide.name, "U235");
+    assert_eq!(yields.energies.len(), 2);
+
+    let production_material =
+        Material::from_str(&read_text("n-049_In-115_trimmed.endf.xz")).unwrap();
+    let production = endf::radionuclide_production(&production_material);
+    assert!(!production.is_empty());
+    let states: &Vec<RadionuclideProduction> = production.values().next().unwrap();
+    assert!(states[0].excitation_energy().is_some_and(|e| e >= 0.0));
+}
+
+/// A depletion chain, built from evaluations the caller supplies.
+#[test]
+fn a_chain_can_be_built_from_materials() {
+    let decay: Vec<Material> = ["dec-049_In_116m1.endf.xz", "dec-049_In_116m2.endf.xz"]
+        .iter()
+        .map(|name| Material::from_str(&read_text(name)).unwrap())
+        .collect();
+    let neutron = vec![Material::from_str(&read_text("n-049_In-115_trimmed.endf.xz")).unwrap()];
+
+    let chain = Chain::from_endf(&decay, &[], &q_values(&neutron), &["(n,gamma)"]).unwrap();
+    assert!(!chain.nuclides.is_empty());
+}
+
+/// A placeholder average decay energy is labelled as one, and can be replaced
+/// from a library that evaluated the decay scheme.
+#[test]
+fn placeholder_decay_energies_are_labelled_and_fillable() {
+    let decay = vec![Material::from_str(&read_text("dec-050_Sn_111.endf.xz")).unwrap()];
+    let mut chain = Chain::from_endf(&decay, &[], &QValues::new(), &[]).unwrap();
+    let sn111 = chain.get("Sn111").unwrap();
+    assert_eq!(
+        sn111.decay_energy_source.as_deref(),
+        Some(endf::chain::DECAY_ENERGY_PLACEHOLDER)
+    );
+    assert!((sn111.decay_energy - 1_634_549.4).abs() < 1.0);
+
+    let jendl = vec![Material::from_str(&read_text("dec-050-Sn-111.jendl5.endf.xz")).unwrap()];
+    let report = chain
+        .fill_placeholder_decay_energies(&jendl, "jendl-5.0")
+        .unwrap();
+    assert_eq!(report.library, "jendl-5.0");
+    assert_eq!(report.replaced.len(), 1);
+    assert_eq!(report.replaced[0].0, "Sn111");
+    assert!(report.half_life_mismatch.is_empty() && report.unfilled.is_empty());
+
+    let sn111 = chain.get("Sn111").unwrap();
+    assert!((sn111.decay_energy - 693_315.8).abs() < 1.0);
+    assert_eq!(
+        sn111.decay_energy_source.as_deref(),
+        Some("filled:jendl-5.0")
+    );
+    // The half-life is still this chain's own.
+    assert_eq!(sn111.half_life, Some(2118.0));
+    // The energy's sigmas are the filling tape's, as it writes them, zeros
+    // included.
+    let candidate = endf::decay::Decay::from_material(&jendl[0]).unwrap();
+    assert_eq!(
+        sn111.decay_energy_uncertainty,
+        Some(candidate.decay_energy().1)
+    );
+    assert_eq!(
+        sn111.decay_energy_components,
+        candidate.decay_energy_components()
+    );
+
+    // Filling again finds nothing left to fill, and an evaluated record is
+    // never touched.
+    let again = chain
+        .fill_placeholder_decay_energies(&jendl, "jendl-5.0")
+        .unwrap();
+    assert_eq!(
+        again,
+        endf::chain::DecayEnergyFill {
+            library: "jendl-5.0".to_string(),
+            ..Default::default()
+        }
+    );
+    let evaluated = vec![Material::from_str(&read_text("dec-049_In_116m1.endf.xz")).unwrap()];
+    let chain = Chain::from_endf(&evaluated, &[], &QValues::new(), &[]).unwrap();
+    assert_eq!(
+        chain
+            .get("In116_m1")
+            .unwrap()
+            .decay_energy_source
+            .as_deref(),
+        Some(endf::chain::DECAY_ENERGY_EVALUATED)
+    );
+}
+
+/// Photon data, the other sublibrary with a high-level class.
+#[test]
+fn photoatomic_data_is_reachable() {
+    let material = Material::from_str(&read_text("photoat-001_H_000.endf.xz")).unwrap();
+    let photon = IncidentPhoton::from_endf(&material, None).unwrap();
+    assert_eq!(photon.atomic_number, 1);
+    assert!(!photon.reactions.is_empty());
+}
+
+/// A fissioning chain nuclide keeps the yield evaluation its yields were
+/// derived from, both MT=454 and MT=459 with DY, as the tape gives it.
+///
+/// With only Cs137 beside U235 in the decay library, most products have no
+/// decay data, so the derived yields differ from the tape's. The evaluation
+/// must not.
+#[test]
+fn a_chain_keeps_the_yield_evaluation_it_was_built_from() {
+    let decay: Vec<Material> = ["dec-092_U_235.endf.xz", "dec-055_Cs_137.endf.xz"]
+        .iter()
+        .map(|name| Material::from_str(&read_text(name)).unwrap())
+        .collect();
+    let fpy = vec![Material::from_str(&read_text("synthetic-nfy.endf.xz")).unwrap()];
+    let mut q = QValues::new();
+    q.entry("U235".to_string()).or_default().insert(18, 1.9e8);
+
+    let chain = Chain::from_endf(&decay, &fpy, &q, &[]).unwrap();
+    let u235 = chain.get("U235").unwrap();
+    let tape = FissionProductYields::from_material(&fpy[0]).unwrap();
+    assert_eq!(u235.yield_evaluation.as_ref(), Some(&tape));
+    assert!(!tape.cumulative.is_empty(), "the fixture has MT=459");
+    assert_eq!(u235.yield_energies(), tape.energies);
+
+    // Cs137 has decay data, so its derived yield is the tape's own value.
+    let thermal = &u235.yield_data["0.0253"];
+    let cs137 = tape.independent[0]
+        .iter()
+        .find(|p| p.name == "Cs137")
+        .unwrap();
+    assert_eq!(thermal["Cs137"], cs137.yield_.0);
+    // Xe135_m1 has none, so it is not in the derived yields under its own
+    // name, and the evaluation is the only place its DY survives.
+    assert!(!thermal.contains_key("Xe135_m1"));
+    assert!(tape.independent[0].iter().any(|p| p.name == "Xe135_m1"));
+}
