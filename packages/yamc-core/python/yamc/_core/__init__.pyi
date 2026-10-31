@@ -2385,9 +2385,11 @@ class MeshGeometry:
     The mesh format is the YAMC Arrow IPC mesh (``.arrow``), as produced by
     ``cad_to_yamc``. Other meshers are supported by writing that format.
     
-    Each volume in the mesh is identified by a physical group whose name
-    starts with ``mat:<material_name>``. The *materials* dictionary maps
-    those names to :class:`Material` objects.
+    Each volume in the mesh is named by a ``mat:<name>`` physical group. The
+    *materials* dictionary maps the bare ``<name>`` (as listed by
+    :attr:`volume_names`, e.g. ``{"first_wall": steel}``) to a
+    :class:`Material`. A key that matches no volume raises ``ValueError``
+    with a close match when one exists; volumes with no key are void.
     
     Outer boundary surfaces should be tagged with a physical group named
     ``boundary:vacuum`` (reflecting boundaries are not yet supported for
@@ -2437,7 +2439,7 @@ class MeshGeometry:
     
     Args:
         filename: Path to an Arrow IPC mesh file (``.arrow``).
-        materials: Mapping of material name to :class:`Material`.
+        materials: Mapping of volume name (no ``mat:`` prefix) to :class:`Material`.
         implicit_complement_material: Optional material for the unmeshed
             space between volumes.  Default ``None`` means void (free-streaming).
         graveyard_offset: Optional offset (cm) of a vacuum boundary box
