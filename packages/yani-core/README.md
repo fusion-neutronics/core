@@ -54,6 +54,12 @@ results.get_damage_energy(0)  # eV per atom, the model-free input
 results.get_displacement_damage_info(0)["displacement_energies"]
 ```
 
+Given `data_uncertainty` as well, `get_dpa_uncertainty(0, step)` and
+`get_damage_energy_uncertainty(0, step)` return the spread: each replica moves
+the damage energy through its drawn cross sections (each reaction's deposit
+times its change, elastic and inelastic included), its flux spectrum and its
+own composition.
+
 The displacement threshold energies default to ASTM E521, and to the OECD-NEA
 2015 report "Primary Radiation Damage in Materials" (NEA/NSC/DOC(2015)9) for
 elements E521 does not cover; override any of them with

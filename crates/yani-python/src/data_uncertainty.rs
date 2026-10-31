@@ -800,6 +800,14 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
         clipped.set_item(format!("{parent} {kind} {product}"), n)?;
     }
     d.set_item("isomer_branchings_clipped", clipped)?;
+    let damage = PyDict::new(py);
+    for (name, c) in &info.damage_energy {
+        let entry = PyDict::new(py);
+        entry.set_item("explained", c.explained)?;
+        entry.set_item("sigma", c.sigma)?;
+        damage.set_item(name, entry)?;
+    }
+    d.set_item("damage_energy", damage)?;
     d.set_item("statistical_rates", info.statistical_rates)?;
     d.set_item("statistical_floored", info.statistical_floored)?;
     d.set_item("statistical_sampled", info.statistical_sampled)?;

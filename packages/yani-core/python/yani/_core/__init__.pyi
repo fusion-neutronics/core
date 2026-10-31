@@ -3591,6 +3591,13 @@ class TransmutationResults:
           per spectrum) scaled the product's drawn production back to the
           drawn reaction total, the stated productions of its list having
           come out above it; a product never clipped is absent.
+        - ``damage_energy``: with ``displacement_damage=True`` and the
+          ``"cross_sections"`` source, per nuclide of the starting composition
+          ``{"explained": ..., "sigma": ...}``: the share of its stored MT=444
+          rate its reactions' deposits reproduce, the part a draw moves (the
+          rest, fission's share above all, is held, a gap), and the relative
+          sigma of its drawn damage-energy rate, each weighted over the spectra
+          by fluence.
         - ``statistical_rates``: with the ``"statistical"`` source on a
           transport run, how many tallied rates were sampled from their
           covariance; ``statistical_floored`` / ``statistical_sampled`` count
@@ -3794,7 +3801,8 @@ class TransmutationResults:
         (no displacement below ``E_d``, one up to ``2 * E_d / 0.8``) are not
         applied, which is the standard practice for a damage-energy cross
         section. The ``E_d`` used and its source are in
-        ``get_displacement_damage_info``.
+        ``get_displacement_damage_info``, and the nuclear-data spread, when
+        ``data_uncertainty`` was given too, in ``get_dpa_uncertainty``.
         
         Args:
             material_id: Material ID number.
@@ -3836,6 +3844,64 @@ class TransmutationResults:
         Raises:
             ValueError: If ``element`` is not in the material on an irradiated
                 step.
+        """
+    def get_dpa_uncertainty(self, material_id: builtins.int, step: builtins.int, element: typing.Optional[builtins.str] = None) -> typing.Optional[Estimate]:
+        r"""
+        NRT dpa at one timestep, with the nuclear-data spread on it.
+        
+        Present when the transmute call was given both
+        ``displacement_damage=True`` and ``data_uncertainty``. Each replica's
+        dpa is accumulated over its own inventory, with each starting nuclide's
+        damage-energy rate moved by the replica's draw:
+        
+        - ``"cross_sections"``: MT=444 has no covariance of its own, but it is
+          the sum over reactions of each cross section times the damage energy
+          that reaction deposits, so a draw moves it by each reaction's deposit
+          times its drawn change. The elastic and inelastic reactions, which
+          carry most of it, are drawn with the activation channels as one
+          evaluation. What no reaction's deposit reproduces (fission's share)
+          is held; ``get_data_uncertainty_info(...)["damage_energy"]`` says how much
+          that is per nuclide.
+        - ``"flux_spectrum"``: the damage energy's own per-group terms under
+          the replica's flux draw, where the spectrum has a sigma.
+        
+        Transmutation products' damage energy, short-range (LB=8) covariance
+        and the displacement threshold energies are held at nominal.
+        
+        Args:
+            material_id: Material ID number.
+            step: Timestep index (0 = initial composition, which has no dpa).
+            element: Element symbol for that element's dpa; omit it for the
+                material total.
+        
+        Returns:
+            Estimate | None: None if damage or uncertainty was not asked for,
+            or the material is not in the results.
+        
+        Raises:
+            ValueError: If ``element`` has no dpa, or there is no such step.
+        """
+    def get_damage_energy_uncertainty(self, material_id: builtins.int, step: builtins.int, element: typing.Optional[builtins.str] = None) -> typing.Optional[Estimate]:
+        r"""
+        Damage energy per atom [eV] at one timestep, with the nuclear-data
+        spread on it.
+        
+        The same replicas as ``get_dpa_uncertainty``, before the NRT
+        conversion, so its relative spread is the dpa's for a pure element.
+        
+        Args:
+            material_id: Material ID number.
+            step: Timestep index (0 = initial composition).
+            element: Element symbol for that element's damage energy; omit it
+                for the material total.
+        
+        Returns:
+            Estimate | None: None if damage or uncertainty was not asked for,
+            or the material is not in the results.
+        
+        Raises:
+            ValueError: If ``element`` is not in the material on an irradiated
+                step, or there is no such step.
         """
     def get_displacement_damage_info(self, material_id: builtins.int) -> typing.Optional[dict]:
         r"""
