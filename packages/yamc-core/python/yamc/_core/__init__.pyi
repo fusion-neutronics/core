@@ -3882,8 +3882,10 @@ class Particle:
 @typing.final
 class ParticleTrack:
     r"""
-    One particle's full history: the ordered list of `TrackEvent` steps it
-    went through, with its particle ID, parent ID, and generation. Access
+    One particle's track: the ordered list of `TrackEvent` steps it went
+    through from its birth, with its particle type ("neutron" or "photon"),
+    history, particle ID (unique within the history; 0 is the source
+    particle), parent ID, and generation. Access
     the steps via `track.events`; `len(track)` is the number of events.
     """
     @property
@@ -3892,6 +3894,16 @@ class ParticleTrack:
     def parent_id(self) -> typing.Optional[builtins.int]: ...
     @property
     def generation(self) -> builtins.int: ...
+    @property
+    def particle_type(self) -> builtins.str:
+        r"""
+        Particle species, "neutron" or "photon".
+        """
+    @property
+    def history(self) -> builtins.int:
+        r"""
+        Global index of the source history this particle belongs to.
+        """
     @property
     def events(self) -> builtins.list[TrackEvent]: ...
     def __len__(self) -> builtins.int: ...
@@ -5653,6 +5665,11 @@ class TrackEvent:
     @property
     def generation(self) -> builtins.int: ...
     @property
+    def particle_type(self) -> builtins.str:
+        r"""
+        Particle species, "neutron" or "photon".
+        """
+    @property
     def batch(self) -> builtins.int: ...
     @property
     def history(self) -> builtins.int: ...
@@ -5687,7 +5704,7 @@ class TrackEvent:
     @property
     def energy_dist(self) -> typing.Optional[builtins.str]: ...
     def __repr__(self) -> builtins.str: ...
-    def to_dict(self) -> typing.Any:
+    def to_dict(self) -> dict:
         r"""
         Convert to dict for DataFrame creation
         """
@@ -5695,10 +5712,12 @@ class TrackEvent:
 @typing.final
 class Tracks:
     r"""
-    All particle tracks recorded by a simulation. Access the per-particle
-    tracks via `.tracks`, the total step count via `total_events()`, and
+    All particle tracks recorded by a simulation, one per transported
+    particle (source and secondaries alike), ordered by history then particle
+    ID. Access them via `.tracks`, the total step count via `total_events()`,
     `to_dataframe_records()` to flatten every event into dict rows for a
-    pandas DataFrame. `len(tracks)` is the number of histories.
+    pandas DataFrame, and `to_vtkhdf()` to view them in ParaView.
+    `len(tracks)` is the number of particle tracks.
     """
     @property
     def tracks(self) -> builtins.list[ParticleTrack]:
@@ -5711,13 +5730,30 @@ class Tracks:
         """
     def __len__(self) -> builtins.int: ...
     def __repr__(self) -> builtins.str: ...
-    def to_dataframe_records(self) -> typing.Any:
+    def to_dataframe_records(self) -> list:
         r"""
         Convert all events to a flat list of dicts for DataFrame creation
         
         Examples:
             df = pd.DataFrame(tracks.to_dataframe_records())
+            photons = df[df.particle_type == "photon"]
         """
+    def polylines(self) -> dict:
+        r"""
+        Flatten the tracks into polylines, one per particle track.
+        
+        Returns a dict of flat lists: ``points`` (``[x, y, z]`` per event, cm)
+        and ``offsets`` (start of each line in ``points`` plus the total, so
+        line ``j`` is ``points[offsets[j]:offsets[j + 1]]``); per point
+        ``energy`` (eV, after the event), ``weight``, ``event_type`` and
+        ``cell_id`` (-1 if unknown); per line ``particle_type``,
+        ``particle_id``, ``parent_id`` (-1 for source particles),
+        ``generation`` and ``history``. ``event_type`` and ``particle_type``
+        are integer codes indexing ``event_type_names`` and
+        ``particle_type_names``.
+        """
+    def to_vtkhdf(self, filename: builtins.str) -> None:
+        r"""Write one polyline per particle track to a VTK-HDF PolyData file for ParaView. Requires h5py (pip install yamc[viz])."""
 
 @typing.final
 class TransmutationChain:

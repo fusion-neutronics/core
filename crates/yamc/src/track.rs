@@ -220,11 +220,11 @@ impl TrackStorage {
                 out.points.push(e.position);
                 out.energy.push(e.energy_out);
                 out.weight.push(e.weight);
-                out.event_type.push(e.event_type as u8);
+                out.event_type.push(e.event_type as u32);
                 out.cell_id.push(e.cell_id.map_or(-1, i64::from));
             }
             out.offsets.push(out.points.len() as i64);
-            out.particle_type.push(t.particle_type as u8);
+            out.particle_type.push(t.particle_type as u32);
             out.particle_id.push(t.particle_id);
             out.parent_id.push(t.parent_id.map_or(-1, |p| p as i64));
             out.generation.push(t.generation);
@@ -250,11 +250,11 @@ pub struct Polylines {
     /// Per point: statistical weight
     pub weight: Vec<f64>,
     /// Per point: [`TrackEventType`] code
-    pub event_type: Vec<u8>,
+    pub event_type: Vec<u32>,
     /// Per point: cell ID, -1 if unknown
     pub cell_id: Vec<i64>,
     /// Per line: [`ParticleType`] code
-    pub particle_type: Vec<u8>,
+    pub particle_type: Vec<u32>,
     /// Per line: particle ID within its history
     pub particle_id: Vec<u64>,
     /// Per line: parent particle ID, -1 for source particles
@@ -768,7 +768,7 @@ mod tests {
         assert_eq!(lines.offsets, vec![0, 2, 4]);
         assert_eq!(lines.particle_type, vec![0, 1]);
         assert_eq!(lines.parent_id, vec![-1, 0]);
-        assert_eq!(lines.event_type[3], TrackEventType::Leak as u8);
+        assert_eq!(lines.event_type[3], TrackEventType::Leak as u32);
         assert!(TrackEventType::ALL
             .iter()
             .enumerate()
