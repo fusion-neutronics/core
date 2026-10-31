@@ -1842,12 +1842,13 @@ impl Model {
         staged: Option<crate::shutdown_dose::StagedRun<'_>>,
     ) -> Result<TrackStorage, String> {
         use crate::shutdown_dose::{Captured, RawBirth, ReplayStats, StagedRun};
-        let (mut capture_out, replay, mut replay_out) = match staged {
-            None => (None, None, None),
-            Some(StagedRun::Capture(out)) => (Some(out), None, None),
-            Some(StagedRun::Replay { plan, out }) => (None, Some(plan), Some(out)),
+        let (mut capture_out, replay, mut replay_out, cell_source) = match staged {
+            None => (None, None, None, None),
+            Some(StagedRun::Capture(out)) => (Some(out), None, None, None),
+            Some(StagedRun::Replay { plan, out }) => (None, Some(plan), Some(out), None),
+            Some(StagedRun::Cells(c)) => (None, None, None, Some(c)),
         };
-        let staged = capture_out.is_some() || replay.is_some();
+        let staged = capture_out.is_some() || replay.is_some() || cell_source.is_some();
         let threads = settings.threads;
         let start_time = crate::util::timer::Timer::start();
         let debug = std::env::var("YAMC_DEBUG").is_ok();
@@ -2090,14 +2091,20 @@ impl Model {
         }
         // A replay's photons carry their parents as this run's ids, interned
         // after the filters so a parent the filters name matches them.
-        let replay_ids: Vec<yamc_nuclide::nuclide_registry::NuclideId> = replay
-            .map(|r| {
-                r.classes
-                    .iter()
-                    .map(|n| nuclide_registry.intern(n))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let replay_ids: Vec<yamc_nuclide::nuclide_registry::NuclideId> = match (replay, cell_source)
+        {
+            (Some(r), _) => r
+                .classes
+                .iter()
+                .map(|n| nuclide_registry.intern(n))
+                .collect(),
+            (_, Some(c)) => c
+                .parents()
+                .iter()
+                .map(|n| nuclide_registry.intern(n))
+                .collect(),
+            _ => Vec::new(),
+        };
 
         // Global particle ID counter for tracking (atomic for thread safety)
         // Arc so the heartbeat thread can read this live progress counter
@@ -2653,8 +2660,10 @@ impl Model {
                                 }
                                 // Otherwise start with the source particle.
                                 let source = replay.is_none().then(|| {
-                                    let mut particle =
-                                        self.sample_source_with(&source_selector, rng);
+                                    let mut particle = match cell_source {
+                                        Some(c) => c.sample(rng, &replay_ids),
+                                        None => self.sample_source_with(&source_selector, rng),
+                                    };
                                     particle.alive = true;
                                     // Every replica starts at the source with
                                     // the nominal's weight.

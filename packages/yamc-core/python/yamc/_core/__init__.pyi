@@ -8460,7 +8460,7 @@ def set_transmutation_reactions(value: typing.Optional[builtins.str | typing.Lit
     rather than being solved as though the reaction produced nothing.
     """
 
-def simulate_shutdown_dose(schedule: PulseSchedule, tallies: typing.Sequence[Tally], total_particles: builtins.int, seed: builtins.int = 1, threads: typing.Optional[builtins.int] = None) -> builtins.dict[builtins.str, DoseResult]:
+def simulate_shutdown_dose(schedule: PulseSchedule, tallies: typing.Sequence[Tally], total_particles: builtins.int, seed: builtins.int = 1, threads: typing.Optional[builtins.int] = None, method: builtins.str = 'd1s', mesh: typing.Optional[RegularRectangularMesh] = None) -> builtins.dict[builtins.str, DoseResult]:
     r"""
     Simulate the shutdown dose rate of a machine that changes along its
     irradiation and cooling schedule.
@@ -8489,6 +8489,28 @@ def simulate_shutdown_dose(schedule: PulseSchedule, tallies: typing.Sequence[Tal
     changes it is the error of the single-model D1S run. Runs on the CPU, on
     one process.
     
+    With ``method="r2s"`` (cell-based rigorous two-step) the inventory of every
+    material-filled cell is solved instead, through the whole schedule with the
+    cell's own neutron spectrum, so activation products that are themselves
+    activated and burnup are included. Each step then gets a photon transport
+    of its own, with every cell emitting its decay photons at that time
+    uniformly over its volume (split cells where the flux varies steeply). The
+    pulses must all irradiate in one model; cells are matched across models by
+    name and emit wherever the step's model has them. A cell's volume is
+    estimated by sampling unless ``Cell(volume=...)`` gives it.
+    
+    With ``method="r2s"`` and a ``mesh`` (cell-under-mesh R2S), every part of
+    a material-filled cell under a voxel is solved instead, with the voxel's
+    neutron spectrum (tallied in VITAMIN-J-175 groups), and emits uniformly
+    over that part, so the source follows the flux gradient through thick
+    cells without splitting them. The parts' volumes are estimated by sampling
+    each voxel. Pulses must irradiate with one set of moves, and a cell moved
+    after irradiation needs its ``moves``, as with D1S. Voxels no neutron
+    reaches are not activated.
+    
+    With R2S, ``std_dev`` is the photon transport's statistical error given
+    the solved inventories; the neutron transport's is not included.
+    
     Args:
         schedule: A ``PulseSchedule`` whose steps name models.
         tallies: Photon tallies to score the dose in, without
@@ -8497,9 +8519,16 @@ def simulate_shutdown_dose(schedule: PulseSchedule, tallies: typing.Sequence[Tal
             in every model the schedule observes (a cell filter's cells must
             exist in each).
         total_particles: Neutron histories per irradiated model. Every photon
-            run then has one history per neutron history.
+            run then has one history per neutron history (with R2S, each
+            step's photon run has this many).
         seed: Base random seed.
         threads: Worker threads; ``None`` uses all cores.
+        method: ``"d1s"`` (one-step, one photon run per pair of irradiation
+            and observation configurations) or ``"r2s"`` (cell inventories,
+            one photon run per step).
+        mesh: With ``method="r2s"``, a ``RegularRectangularMesh`` over the
+            activated components for cell-under-mesh R2S; ``None`` activates
+            whole cells.
     
     Returns:
         ``{tally name: DoseResult}``, each with one row per schedule step:
