@@ -151,13 +151,19 @@ def test_mesh_r2s_puts_the_source_where_the_bar_is_activated():
     tallies = [yamc.Tally(scores=["flux"], name=n, mesh=m, particle="photon")
                for n, m in (("near", near), ("far", far))]
     steps = [yamc.Pulse(model=_bar(), rate=1e12, duration=(1, "h"))]
-    run = lambda **kw: yamc.simulate_shutdown_dose(
-        yamc.PulseSchedule(steps), tallies=tallies, total_particles=PARTICLES, seed=3,
-        method="r2s", **kw)
+
+    def run(**kw):
+        return yamc.simulate_shutdown_dose(
+            yamc.PulseSchedule(steps), tallies=tallies, total_particles=PARTICLES, seed=3,
+            method="r2s", **kw)
+
     mesh = run(mesh=yamc.RegularRectangularMesh(lower_left=[0, -2, -2], upper_right=[40, 2, 2],
                                                 shape=[8, 1, 1]))
     cells = run()
-    ratio = lambda d: _total(d["near"])[0] / _total(d["far"])[0]
+
+    def ratio(d):
+        return _total(d["near"])[0] / _total(d["far"])[0]
+
     # The whole bar emitting uniformly is symmetric end to end; the mesh
     # follows the activation down the bar.
     assert 0.7 < ratio(cells) < 1.4
@@ -190,9 +196,12 @@ def test_mesh_r2s_moves_voxel_parts_with_their_cell():
 def test_mesh_is_refused_for_d1s_and_away_from_the_activated_cells():
     steps = [yamc.Pulse(model=_model(), rate=1e12, duration=(1, "h"))]
     tally = yamc.Tally(scores=["flux"], name="dose", mesh=MESH, particle="photon")
-    run = lambda method, mesh: yamc.simulate_shutdown_dose(
-        yamc.PulseSchedule(steps), tallies=[tally], total_particles=200, method=method,
-        mesh=mesh)
+
+    def run(method, mesh):
+        return yamc.simulate_shutdown_dose(
+            yamc.PulseSchedule(steps), tallies=[tally], total_particles=200, method=method,
+            mesh=mesh)
+
     with pytest.raises(ValueError, match="mesh is for method"):
         run("d1s", SHELL_MESH)
     with pytest.raises(ValueError, match="no material-filled cell under the mesh"):
