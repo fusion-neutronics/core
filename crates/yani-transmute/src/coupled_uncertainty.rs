@@ -90,10 +90,12 @@ impl CoupledReplicas {
             ));
         }
         if request.attribution {
-            return Err("data_uncertainty with method=\"coupled\" does not yet attribute \
+            return Err(
+                "data_uncertainty with method=\"coupled\" does not yet attribute \
                         the uncertainty by source, which would take one coupled ensemble per \
                         source; run one source at a time to measure each"
-                .to_string());
+                    .to_string(),
+            );
         }
         let half_lives = if request.wants(Source::HalfLife) {
             crate::uncertainty::half_life_candidates(chain).0
@@ -205,7 +207,10 @@ impl CoupledReplicas {
         chain: &Arc<HashMap<String, ChainNuclide>>,
         initial: &HashMap<u32, Material>,
         nominal: &HashMap<u32, Inventories>,
-        mut solve: impl FnMut(u64, &Arc<HashMap<String, ChainNuclide>>) -> Result<HashMap<u32, Inventories>, E>,
+        mut solve: impl FnMut(
+            u64,
+            &Arc<HashMap<String, ChainNuclide>>,
+        ) -> Result<HashMap<u32, Inventories>, E>,
     ) -> Result<HashMap<u32, (Ensemble, Info)>, E> {
         let request = &self.request;
         let moves = self.moves_inventory();
@@ -216,9 +221,9 @@ impl CoupledReplicas {
                 (id, self.report(material, chain, Ensemble::new(steps)))
             })
             .collect();
-        let decay_only = reports.values().any(|(e, _)| {
-            e.decay_energy_seed.is_some() || e.decay_photon_seed.is_some()
-        });
+        let decay_only = reports
+            .values()
+            .any(|(e, _)| e.decay_energy_seed.is_some() || e.decay_photon_seed.is_some());
         if !moves && !decay_only {
             for (_, info) in reports.values_mut() {
                 info.converged = true;
@@ -435,6 +440,9 @@ mod tests {
         assert!(on.moves_inventory());
         let off = CoupledReplicas::new(&request(vec![Source::HalfLife]), &chain).unwrap();
         assert!((0..8).all(|k| off.transport_seed(7, k) == 7));
-        assert!(!off.moves_inventory(), "no half-life to draw in an empty chain");
+        assert!(
+            !off.moves_inventory(),
+            "no half-life to draw in an empty chain"
+        );
     }
 }
