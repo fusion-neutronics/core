@@ -1826,7 +1826,10 @@ impl ChainEdits {
     }
 
     /// `chain` with every edit made.
-    pub(crate) fn apply(&self, chain: &HashMap<String, ChainNuclide>) -> HashMap<String, ChainNuclide> {
+    pub(crate) fn apply(
+        &self,
+        chain: &HashMap<String, ChainNuclide>,
+    ) -> HashMap<String, ChainNuclide> {
         let mut out = chain.clone();
         for (name, t) in &self.half_lives {
             if let Some(cn) = out.get_mut(name) {
