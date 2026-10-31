@@ -6,7 +6,7 @@ name: Main health
 # `main-red`, one per workflow. A later failure of the same workflow comments
 # on that issue rather than opening another, and the first success closes it.
 #
-# Some checks run only on main (macos-14 Rust tests, the full Python matrix,
+# Some checks run only on main (macos-15 Rust tests, the full Python matrix,
 # coverage), so this is what makes a failure there reach someone.
 #
 # `workflow_run` always runs the copy of this file on the default branch, so it
