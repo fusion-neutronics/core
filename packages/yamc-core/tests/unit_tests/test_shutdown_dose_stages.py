@@ -25,11 +25,11 @@ def _iron():
     return mat
 
 
-def _source():
-    return yamc.NeutronSource(position=(0, 0, 0), energy=yamc.sources.Discrete([14.06e6], [1.0]))
+def _source(energy=14.06e6):
+    return yamc.NeutronSource(position=(0, 0, 0), energy=yamc.sources.Discrete([energy], [1.0]))
 
 
-def _model(ball_z=0.0, ball=True, ball_name="rod", source=True):
+def _model(ball_z=0.0, ball=True, ball_name="rod", source=True, energy=14.06e6):
     """A void world with an iron ball of radius 5 at (0, 0, ball_z)."""
     world = yamc.Sphere(radius=400.0, boundary="vacuum")
     cells = []
@@ -39,7 +39,7 @@ def _model(ball_z=0.0, ball=True, ball_name="rod", source=True):
         cells.append(yamc.Cell(name="space", region=s.above & world.below))
     else:
         cells.append(yamc.Cell(name="space", region=world.below))
-    return yamc.Model(geometry=yamc.Geometry(cells), source=_source() if source else None,
+    return yamc.Model(geometry=yamc.Geometry(cells), source=_source(energy) if source else None,
                       verbose=[])
 
 
@@ -95,6 +95,70 @@ def test_one_model_matches_time_correct_tally():
     assert staged[0] > staged[1] > staged[2]
     by_nuc = sum(np.array(v).sum(axis=1) for v in dose.by_nuclide.values())
     assert np.allclose(by_nuc, staged)
+
+
+def test_one_model_has_the_single_model_d1s_error():
+    # Unchanged machine: the staged estimator is the coupled D1S one, so its
+    # standard error is too (the neutron transport's noise included).
+    model = _model()
+    steps = [yamc.Pulse(model=model, rate=1e12, duration=(1, "h")),
+             yamc.Cooldown(duration=(1, "h"))]
+    staged = np.array(_dose(steps).std_dev)[:, 0]
+    tally = yamc.Tally(scores=["flux"], name="dose", mesh=MESH, particle="photon",
+                       parent_nuclides=model.radionuclides())
+    d1s = yamc.Model(geometry=model.geometry, tallies=[tally], source=_source(),
+                     transport_secondary_photons=True, use_decay_photons=True, verbose=[])
+    src = _source()
+    ref = yamc.PulseSchedule([yamc.Pulse(source=src, rate=1e12, duration=(1, "h")),
+                              yamc.Cooldown(duration=(1, "h"))]).time_correct_tally(
+        d1s.simulate_transport(total_particles=PARTICLES, seed=3)[tally])
+    single = np.array(ref.std_dev)[:, 0]
+    assert np.all(staged > 0)
+    assert np.all((staged / single > 0.75) & (staged / single < 1.33)), (staged, single)
+
+
+def test_reported_error_matches_the_seed_to_seed_spread():
+    """The standard error is that of the whole calculation: across independent
+    seeds the results scatter by what each run reports. Two irradiations in two
+    models (sharing their seeds), a move, and few neutron histories, so the
+    neutron transport's noise dominates and would be missed if left out."""
+    low = _model(energy=2.45e6)
+    high = _model()
+    moved = _model(ball_z=200.0, source=False)
+    there = yamc.RegularRectangularMesh(lower_left=[-10, -10, 206], upper_right=[10, 10, 226],
+                                        shape=[1, 1, 1])
+    tally = yamc.Tally(scores=["flux"], name="there", mesh=there, particle="photon")
+    sched = yamc.PulseSchedule([
+        yamc.Pulse(model=low, rate=1e12, duration=(1, "h")),
+        yamc.Pulse(model=high, rate=1e12, duration=(1, "h")),
+        yamc.Cooldown(model=moved, duration=(1, "h"), moves={"rod": (0, 0, 200)}),
+    ])
+    means, stds = [], []
+    for seed in range(1, 41):
+        d = yamc.simulate_shutdown_dose(sched, tallies=[tally], total_particles=200,
+                                        seed=seed)["there"]
+        means.append(np.array(d.mean)[:, 0])
+        stds.append(np.array(d.std_dev)[:, 0])
+    spread = np.array(means).std(axis=0, ddof=1)
+    reported = np.array(stds).mean(axis=0)
+    # Step 2, the moved ball: 40 seeds pin the spread to about 12%, more with
+    # the heavy tail of a few activated histories.
+    assert reported[2] > 0
+    assert 0.6 < spread[2] / reported[2] < 1.6, (spread, reported)
+
+
+def test_same_seed_same_answer_whatever_the_threads():
+    steps = [yamc.Pulse(model=_model(), rate=1e12, duration=(1, "h")),
+             yamc.Cooldown(model=_model(ball_z=200.0, source=False), duration=(1, "h"),
+                           moves={"rod": (0, 0, 200)})]
+
+    def run(threads):
+        return yamc.simulate_shutdown_dose(yamc.PulseSchedule(steps), tallies=[_tally()],
+                                           total_particles=500, seed=4, threads=threads)["dose"]
+
+    one, two = run(1), run(2)
+    assert np.allclose(one.mean, two.mean, rtol=1e-12, atol=0)
+    assert np.allclose(one.std_dev, two.std_dev, rtol=1e-9, atol=0)
 
 
 # --- removing, re-adding and moving a component -------------------------------

@@ -1841,7 +1841,13 @@ impl Model {
         print_tracking_summary: bool,
         staged: Option<crate::shutdown_dose::StagedRun<'_>>,
     ) -> Result<TrackStorage, String> {
-        use crate::shutdown_dose::{Captured, RawBirth, StagedRun};
+        use crate::shutdown_dose::{Captured, RawBirth, ReplayStats, StagedRun};
+        let (mut capture_out, replay, mut replay_out) = match staged {
+            None => (None, None, None),
+            Some(StagedRun::Capture(out)) => (Some(out), None, None),
+            Some(StagedRun::Replay { plan, out }) => (None, Some(plan), Some(out)),
+        };
+        let staged = capture_out.is_some() || replay.is_some();
         let threads = settings.threads;
         let start_time = crate::util::timer::Timer::start();
         let debug = std::env::var("YAMC_DEBUG").is_ok();
@@ -1878,7 +1884,7 @@ impl Model {
         let mpi_size = mpi_ctx.size();
         let is_root = mpi_ctx.is_root();
 
-        if staged.is_some() && mpi_size > 1 {
+        if staged && mpi_size > 1 {
             return Err(
                 "the staged shutdown dose runs on one process; run it without MPI".to_string(),
             );
@@ -2084,13 +2090,9 @@ impl Model {
         }
         // A replay's photons carry their parents as this run's ids, interned
         // after the filters so a parent the filters name matches them.
-        let replay = match &staged {
-            Some(StagedRun::Replay(r)) => Some(*r),
-            _ => None,
-        };
         let replay_ids: Vec<yamc_nuclide::nuclide_registry::NuclideId> = replay
             .map(|r| {
-                r.parents
+                r.classes
                     .iter()
                     .map(|n| nuclide_registry.intern(n))
                     .collect()
@@ -2202,7 +2204,7 @@ impl Model {
                     let state =
                         yamc_tallies::welford::WelfordWorkerState::new(&welford_tally_num_bins)
                             .with_covariance(&welford_covariance);
-                    parking_lot::Mutex::new(match &replica_tallies {
+                    let state = match &replica_tallies {
                         Some(data) => state.with_replicas(
                             &vec![true; welford_tally_num_bins.len()],
                             data.replicas,
@@ -2210,14 +2212,21 @@ impl Model {
                             replica_ctx.as_ref().and_then(|r| r.modes.clone()),
                         ),
                         None => state,
-                    })
+                    };
+                    // A replay takes the statistics of each history's
+                    // time-corrected dose rather than of its raw tallies.
+                    let state = match replay {
+                        Some(plan) => state.with_folds(&plan.folds)?,
+                        None => state,
+                    };
+                    Ok(parking_lot::Mutex::new(state))
                 })
-                .collect();
+                .collect::<Result<_, String>>()?;
 
         // A capture keeps one birth list per rayon worker, like the Welford slots.
-        let capture_pool: Option<Vec<parking_lot::Mutex<Vec<RawBirth>>>> =
-            matches!(staged, Some(StagedRun::Capture(_)))
-                .then(|| (0..n_rayon_threads).map(|_| Default::default()).collect());
+        let capture_pool: Option<Vec<parking_lot::Mutex<Vec<RawBirth>>>> = capture_out
+            .is_some()
+            .then(|| (0..n_rayon_threads).map(|_| Default::default()).collect());
 
         // The transmutation tally's per-history statistics, when on, keep a
         // scratch vector per rayon worker the same way; size it for this pool.
@@ -2632,20 +2641,33 @@ impl Model {
                                 let source_particle_id = global_particle_id
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                                // Start with the source particle
-                                let mut particle = match replay {
-                                    Some(r) => r.sample(rng, &replay_ids),
-                                    None => self.sample_source_with(&source_selector, rng),
-                                };
-                                particle.alive = true;
-                                // Every replica starts at the source with
-                                // the nominal's weight.
-                                if let Some(r) = replica_ctx.as_ref() {
-                                    particle.replica = Some(r.source_state());
+                                // A replay's history is every decay photon its
+                                // neutron history made, already in hand.
+                                if let Some(plan) = replay {
+                                    plan.load(
+                                        global_particle_index,
+                                        &mut particle_bank,
+                                        source_seed,
+                                        &replay_ids,
+                                    );
                                 }
-                                particle_bank.add_source_particle(particle.clone(), source_seed);
+                                // Otherwise start with the source particle.
+                                let source = replay.is_none().then(|| {
+                                    let mut particle =
+                                        self.sample_source_with(&source_selector, rng);
+                                    particle.alive = true;
+                                    // Every replica starts at the source with
+                                    // the nominal's weight.
+                                    if let Some(r) = replica_ctx.as_ref() {
+                                        particle.replica = Some(r.source_state());
+                                    }
+                                    particle_bank
+                                        .add_source_particle(particle.clone(), source_seed);
+                                    particle
+                                });
 
                                 // Find initial cell for source birth tracking
+                                if let Some(particle) = &source {
                                 let initial_cell_id = self
                                     .geometry
                                     .find_cell_index_along(
@@ -2670,6 +2692,7 @@ impl Model {
                                     initial_cell_id,
                                     "source",
                                 );
+                                }
 
                                 // Track particle metadata for genealogy
                                 let current_particle_id = source_particle_id;
@@ -2769,6 +2792,7 @@ impl Model {
                                             pool[thread_idx].lock().push(RawBirth {
                                                 history: global_particle_index,
                                                 position: particle.position,
+                                                direction: particle.direction,
                                                 energy: particle.energy,
                                                 weight: particle.weight,
                                                 parent,
@@ -3153,8 +3177,17 @@ impl Model {
                 .into_iter()
                 .map(|m| m.into_inner())
                 .reduce(|a, b| a.combine(b));
-            if let Some(combined) = combined {
+            if let Some(mut combined) = combined {
+                let raw_sums = combined.take_raw_sums();
                 let mut global_stats = combined.finalize();
+                // A replay hands back its folded statistics as they are: the
+                // tallies' own layout is the raw one, not the folded.
+                if let Some(out) = replay_out.take() {
+                    *out = Some(ReplayStats {
+                        per_tally: std::mem::take(&mut global_stats.per_tally),
+                        raw_sums,
+                    });
+                }
                 // Under MPI each rank's Welford state covers only its own
                 // particle range. Gather the per-rank raw (mean, m2, n)
                 // state to root and fold in rank order with the same Chen
@@ -3317,7 +3350,7 @@ impl Model {
             );
         }
 
-        if let (Some(StagedRun::Capture(out)), Some(pool)) = (staged, capture_pool) {
+        if let (Some(out), Some(pool)) = (capture_out.take(), capture_pool) {
             *out = Some(Captured::from_raw(
                 pool.into_iter().flat_map(|m| m.into_inner()).collect(),
                 &nuclide_registry,

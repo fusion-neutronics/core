@@ -684,6 +684,104 @@ fn fold_replicas(row: &mut [f64], scores: &[f64]) {
     row[2 * r + 1] += mean * mean;
 }
 
+/// A linear map applied to each history's scores before their statistics are
+/// taken, so the statistics are those of the mapped quantity, exactly.
+///
+/// The raw bins are `outer x classes x inner` (one axis of the tally, the
+/// classes, between two blocks). The output is `rows x outer x inner`: output
+/// `(row, o, i)` of a history is `sum_k coeffs[k][row] * raw(o, k, i)` of that
+/// history. A mean of a mapped quantity is the mapped mean, but its variance is
+/// not the mapped variance, because the raw bins of one history are correlated;
+/// mapping each history first makes it so.
+///
+/// Used by the staged shutdown dose, where the classes are (irradiation,
+/// parent radionuclide) pairs, the rows are schedule steps and the coefficients
+/// are time correction factors.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BinFold {
+    outer: usize,
+    classes: usize,
+    inner: usize,
+    rows: usize,
+    /// Per class, its nonzero `(row, coefficient)` pairs.
+    coeffs: Vec<Vec<(u32, f64)>>,
+}
+
+impl BinFold {
+    /// A fold of `raw_bins` raw bins whose class axis has `coeffs.len()` bins
+    /// with `inner` bins inside it, onto `rows` rows: `coeffs[k][row]`.
+    pub fn new(
+        raw_bins: usize,
+        inner: usize,
+        rows: usize,
+        coeffs: &[Vec<f64>],
+    ) -> Result<Self, String> {
+        let classes = coeffs.len();
+        if classes == 0 || inner == 0 || !raw_bins.is_multiple_of(classes * inner) {
+            return Err(format!(
+                "a fold of {raw_bins} bins cannot have {classes} classes of {inner} bins"
+            ));
+        }
+        if let Some(c) = coeffs.iter().find(|c| c.len() != rows) {
+            return Err(format!(
+                "a fold onto {rows} rows got {} coefficients",
+                c.len()
+            ));
+        }
+        if coeffs.iter().flatten().any(|c| !c.is_finite()) {
+            return Err("fold coefficients must be finite".to_string());
+        }
+        Ok(Self {
+            outer: raw_bins / (classes * inner),
+            classes,
+            inner,
+            rows,
+            coeffs: coeffs
+                .iter()
+                .map(|c| {
+                    c.iter()
+                        .enumerate()
+                        .filter(|(_, v)| **v != 0.0)
+                        .map(|(r, &v)| (r as u32, v))
+                        .collect()
+                })
+                .collect(),
+        })
+    }
+
+    /// Bins before the fold.
+    pub fn raw_bins(&self) -> usize {
+        self.outer * self.classes * self.inner
+    }
+
+    /// Bins after it: `rows` blocks of the raw layout without the class axis.
+    pub fn out_bins(&self) -> usize {
+        self.rows * self.outer * self.inner
+    }
+
+    /// `f(out_bin, value)` for every output a raw bin's `x` contributes to.
+    #[inline]
+    fn apply(&self, raw: usize, x: f64, mut f: impl FnMut(u32, f64)) {
+        let i = raw % self.inner;
+        let k = (raw / self.inner) % self.classes;
+        let o = raw / (self.inner * self.classes);
+        let block = self.outer * self.inner;
+        let base = o * self.inner + i;
+        for &(row, c) in &self.coeffs[k] {
+            f((row as usize * block + base) as u32, c * x);
+        }
+    }
+}
+
+/// A tally's fold, the raw per-bin sums it still keeps (means are linear, so
+/// any other map of them can be taken afterwards), and a spare scratch.
+#[derive(Debug)]
+pub struct FoldState {
+    pub fold: std::sync::Arc<BinFold>,
+    pub raw_sums: Vec<f64>,
+    spare: rustc_hash::FxHashMap<u32, f64>,
+}
+
 /// Per-tally state for one rayon worker: Welford accumulator + per-
 /// history sparse scratch.
 ///
@@ -725,6 +823,9 @@ pub struct WelfordTallyWorker {
     /// Nuclear-data replica sums, and the current history's per-replica
     /// scratch, when the run carries correlated replica weights.
     pub replicas: Option<(ReplicaSums, rustc_hash::FxHashMap<u32, Vec<f64>>)>,
+    /// A map applied to each history's scratch before the Welford walk; then
+    /// `welford` holds the mapped bins. See [`BinFold`].
+    pub fold: Option<FoldState>,
 }
 
 /// Offset of row `r`'s diagonal in a packed upper triangle of size `n`.
@@ -745,6 +846,7 @@ impl WelfordTallyWorker {
             score_pdf: ScorePdf::new(),
             comoment: None,
             replicas: None,
+            fold: None,
         }
     }
 }
@@ -809,6 +911,41 @@ impl WelfordWorkerState {
         self
     }
 
+    /// Fold each history's scores of the tallies given a fold before taking
+    /// their statistics (see [`BinFold`]); `welford` then holds the folded
+    /// bins. Not combinable with covariance or replica sums.
+    pub fn with_folds(mut self, folds: &[Option<std::sync::Arc<BinFold>>]) -> Result<Self, String> {
+        for (t, fold) in self.tallies.iter_mut().zip(folds) {
+            let Some(fold) = fold else { continue };
+            if t.welford.len() != fold.raw_bins() {
+                return Err(format!(
+                    "a fold of {} bins was given to a tally of {}",
+                    fold.raw_bins(),
+                    t.welford.len()
+                ));
+            }
+            if t.comoment.is_some() || t.replicas.is_some() {
+                return Err("a folded tally keeps no covariance or replica sums".into());
+            }
+            t.welford = vec![WelfordBin::ZERO; fold.out_bins()];
+            t.fold = Some(FoldState {
+                raw_sums: vec![0.0; fold.raw_bins()],
+                fold: fold.clone(),
+                spare: Default::default(),
+            });
+        }
+        Ok(self)
+    }
+
+    /// The raw per-bin sums over histories of each folded tally (`None` for
+    /// the others), taken out of this state.
+    pub fn take_raw_sums(&mut self) -> Vec<Option<Vec<f64>>> {
+        self.tallies
+            .iter_mut()
+            .map(|t| t.fold.as_mut().map(|f| std::mem::take(&mut f.raw_sums)))
+            .collect()
+    }
+
     /// Whether `tally_idx` keeps replica sums.
     #[inline]
     pub fn has_replicas(&self, tally_idx: usize) -> bool {
@@ -864,6 +1001,18 @@ impl WelfordWorkerState {
     pub fn finish_history(&mut self) {
         self.n_histories += 1;
         for t in self.tallies.iter_mut() {
+            // Map the history's raw scores onto the folded bins, keeping their
+            // raw sums, and walk the folded ones below instead.
+            if let Some(f) = t.fold.as_mut() {
+                for (&raw, &x) in t.scratch_map.iter() {
+                    f.raw_sums[raw as usize] += x;
+                    f.fold.apply(raw as usize, x, |out, v| {
+                        *f.spare.entry(out).or_insert(0.0) += v;
+                    });
+                }
+                std::mem::swap(&mut t.scratch_map, &mut f.spare);
+                f.spare.clear();
+            }
             // Sum the per-history total score while doing the per-bin Welford
             // walk we already do -- so the tally-level moments / PDF cost one
             // add per touched bin plus a constant per history, never touching
@@ -950,6 +1099,11 @@ impl WelfordWorkerState {
             }
             if let (Some((ra, _)), Some((rb, _))) = (a.replicas.as_mut(), b.replicas.as_ref()) {
                 ra.add(rb).expect("workers of one run share their draws");
+            }
+            if let (Some(fa), Some(fb)) = (a.fold.as_mut(), b.fold.as_ref()) {
+                for (x, y) in fa.raw_sums.iter_mut().zip(&fb.raw_sums) {
+                    *x += y;
+                }
             }
         }
         self.n_histories += other.n_histories;
@@ -1158,6 +1312,57 @@ impl WelfordTallyStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fold's statistics are those of the folded per-history quantity,
+    /// including the correlation between the raw bins of one history, which
+    /// folding the raw means and variances afterwards would lose.
+    #[test]
+    fn fold_takes_statistics_of_the_mapped_history() {
+        // Raw: outer 1 x classes 2 x inner 2 = 4 bins. Rows: 2.
+        // row 0 = 1*class0 + 3*class1, row 1 = 2*class0 (class1 absent).
+        let coeffs = vec![vec![1.0, 2.0], vec![3.0, 0.0]];
+        let fold = std::sync::Arc::new(BinFold::new(4, 2, 2, &coeffs).unwrap());
+        assert_eq!(fold.out_bins(), 4);
+        let mut w = WelfordWorkerState::new(&[4])
+            .with_folds(&[Some(fold)])
+            .unwrap();
+        // Three histories, each touching both classes of inner bin 0, with
+        // perfectly anti-correlated scores, and one of inner bin 1.
+        let hist = [(1.0, 2.0, 5.0), (2.0, 1.0, 0.0), (3.0, 0.0, 1.0)];
+        for &(a, b, c) in &hist {
+            w.add_contribution(0, 0, a); // class 0, inner 0
+            w.add_contribution(0, 2, b); // class 1, inner 0
+            w.add_contribution(0, 1, c); // class 0, inner 1
+            w.finish_history();
+        }
+        let raw = w.take_raw_sums();
+        assert_eq!(raw[0].as_deref(), Some(&[6.0, 6.0, 3.0, 0.0][..]));
+        let stats = w.finalize();
+        let t = &stats.per_tally[0];
+        // Per-history folded values, by hand.
+        let folded: Vec<[f64; 4]> = hist
+            .iter()
+            .map(|&(a, b, c)| [a + 3.0 * b, c, 2.0 * a, 2.0 * c])
+            .collect();
+        for bin in 0..4 {
+            let xs: Vec<f64> = folded.iter().map(|h| h[bin]).collect();
+            let mean = xs.iter().sum::<f64>() / 3.0;
+            let m2: f64 = xs.iter().map(|x| (x - mean).powi(2)).sum();
+            assert!((t.mean[bin] - mean).abs() < 1e-12, "bin {bin}");
+            assert!((t.m2[bin] - m2).abs() < 1e-12, "bin {bin}");
+        }
+    }
+
+    #[test]
+    fn fold_shape_errors() {
+        assert!(BinFold::new(5, 2, 1, &[vec![1.0], vec![1.0]]).is_err());
+        assert!(BinFold::new(4, 2, 2, &[vec![1.0], vec![1.0, 2.0]]).is_err());
+        assert!(BinFold::new(4, 2, 1, &[vec![f64::NAN], vec![1.0]]).is_err());
+        let fold = std::sync::Arc::new(BinFold::new(4, 2, 1, &[vec![1.0], vec![1.0]]).unwrap());
+        assert!(WelfordWorkerState::new(&[3])
+            .with_folds(&[Some(fold)])
+            .is_err());
+    }
 
     /// One worker, fixed per-history per-bin scores, all bins touched
     /// every history. After finalize, mean and std_err should match
