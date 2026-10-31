@@ -101,8 +101,12 @@ impl Model {
     ///   step's transport solve (a per-step budget, not a whole-run one).
     /// * `uncertainty` - Resample the single transport of independent mode
     ///   and re-solve, for every source [`yani_transmute::transport_replicas`]
-    ///   applies. `None` is the default path, bit-identical to a build without
-    ///   it; with the coupled method it is an error. With the cross-section
+    ///   applies. With the coupled method, run the whole coupled calculation
+    ///   again per replica instead ([`yani_transmute::coupled_uncertainty`]),
+    ///   each on its own transport seed and decay data, and refuse the sources
+    ///   a replica cannot carry yet. `None` is the default path, bit-identical
+    ///   to a build without it, and so are the nominal results of either
+    ///   method with it. With the cross-section
     ///   source on, the transport carries a fixed number of replica
     ///   weights ([`yani_transmute::uncertainty::transport_replicas_for`]) and
     ///   tallies every rate per replica under them, so each replica's rates
@@ -145,19 +149,21 @@ impl Model {
             }
         };
         // Coupled mode re-runs transport every step, so its rates carry noise
-        // that feeds forward through the compositions; resampling one step's
-        // rates would not describe that, and a number that quietly means
-        // something else is worse than none.
-        if uncertainty.is_some() && !is_independent {
-            return Err(
-                "data_uncertainty is supported with method=\"independent\" only: \
-                        the coupled method re-runs transport every step, and propagating \
-                        its step-to-step statistical noise is out of scope"
-                    .into(),
-            );
-        }
-        let want_statistics =
-            uncertainty.is_some_and(|u| u.wants(yani_transmute::uncertainty::Source::Statistical));
+        // and data draws that feed forward through the compositions;
+        // resampling one step's rates would not describe that. Each replica is
+        // the whole coupled run again instead, and what a replica cannot carry
+        // yet is refused here, before anything runs.
+        let coupled_replicas = match uncertainty {
+            Some(request) if !is_independent => Some(
+                yani_transmute::coupled_uncertainty::CoupledReplicas::new(request, &chain)?,
+            ),
+            _ => None,
+        };
+        // The per-history covariance of one transport is what independent mode
+        // resamples; coupled replicas measure the noise by rerunning instead.
+        let want_statistics = is_independent
+            && uncertainty
+                .is_some_and(|u| u.wants(yani_transmute::uncertainty::Source::Statistical));
         let want_isomer = uncertainty
             .is_some_and(|u| u.wants(yani_transmute::uncertainty::Source::IsomerBranching));
         let want_cross_sections = uncertainty
@@ -630,6 +636,12 @@ impl Model {
         #[cfg(feature = "debug_timing")]
         let transmutation_loop_start = std::time::Instant::now();
 
+        // The geometry every coupled replica starts from: the one the nominal
+        // loop below starts from.
+        let replica_start = coupled_replicas
+            .as_ref()
+            .map(|_| self.geometry.materials().to_vec());
+
         // Transmutation loop
         for (step, (&dt, &source_rate)) in timesteps.iter().zip(source_rates.iter()).enumerate() {
             println!(
@@ -681,123 +693,48 @@ impl Model {
                         transport_start.elapsed().as_secs_f64()
                     );
 
-                    // Extract rates from transmutation tallies for each material
-                    let mut step_rates: HashMap<u32, ReactionRates> = HashMap::new();
-                    for (&mat_id, cell_indices) in &transmutable_cells {
-                        let slot = self.geometry.cells()[cell_indices[0]]
-                            .material_idx
-                            .expect("transmutable cell must have a material");
-                        let material = self.geometry.materials()[slot as usize].as_ref();
-                        let volume = material.volume.unwrap_or(1.0);
-                        let mat_rates = dep_tallies.get_reaction_rates(mat_id, volume, source_rate);
-
-                        // This step's spectrum, so this step's yield fold.
-                        let mat_weights = dep_tallies.get_fission_yield_weights(mat_id);
-                        if mat_weights.is_empty() {
-                            fy_weights.remove(&mat_id);
-                        } else {
-                            fy_weights.insert(mat_id, mat_weights);
-                        }
-
-                        #[cfg(feature = "debug_transmutation")]
-                        if !mat_rates.is_empty() {
-                            eprintln!(
-                                "\n[DEBUG transmutation] Reaction rates for material {} at step {}:",
-                                mat_id, step
-                            );
-                            let mut nuclides: Vec<_> = mat_rates.keys().collect();
-                            nuclides.sort();
-                            for nuclide in nuclides {
-                                let reactions = &mat_rates[nuclide.as_str()];
-                                let mut rxns: Vec<_> = reactions.iter().collect();
-                                rxns.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
-                                for (rx, rate) in rxns {
-                                    eprintln!("  {} {:15} {:.6e} [1/s/atom]", nuclide, rx, rate);
-                                }
-                            }
-                        }
-
-                        if !mat_rates.is_empty() {
-                            step_rates.insert(mat_id, mat_rates);
-                        }
-                    }
-                    step_rates
+                    self.tallied_step_rates(
+                        &dep_tallies,
+                        &transmutable_cells,
+                        source_rate,
+                        step,
+                        &mut fy_weights,
+                    )
                 }
             } else {
                 // Cooling period - no reactions, decay only
                 HashMap::new()
             };
 
-            // Isomeric-branching overlay: every list on a material nuclide is
-            // scored at the collision energies as `yani_transmute::
-            // branching_rule` defines it, and the (n,n') partials
-            // of every other chain parent are folded from the tally's
-            // union-grid flux moments (covering products that build up during
-            // the step too), their rates injected. When no branching
-            // subsection is configured the overlay is empty and the physics is
-            // identical to before. MT=5's `(n,X)` multiplicities come from the
-            // reactions subsection and are folded either way; what of MT=5 the
-            // chain does not model is reported, and refused above the
-            // tolerance of the material's removal.
-            let mut folded_chains: HashMap<u32, Arc<HashMap<String, ChainNuclide>>> =
-                HashMap::new();
-            let mut step_reports: HashMap<u32, Arc<yani_transmute::BranchingReport>> =
-                HashMap::new();
-            if source_rate > 0.0 {
-                for (&mat_id, cell_indices) in &transmutable_cells {
-                    let slot = self.geometry.cells()[cell_indices[0]]
-                        .material_idx
-                        .expect("transmutable cell must have a material");
-                    let cell_material = self.geometry.materials()[slot as usize].as_ref();
-                    let volume = cell_material.volume.unwrap_or(1.0);
-                    let diagnostics = dep_tallies
-                        .get_branching_diagnostics(mat_id, volume, source_rate)
-                        .with_material(cell_material);
-                    let partials = if branch.curves().is_empty() {
-                        HashMap::new()
-                    } else {
-                        dep_tallies.get_partial_rates(mat_id, volume, source_rate)
-                    };
-                    let mat_rates = rates.entry(mat_id).or_default();
-                    let named = |e: String| -> Box<dyn std::error::Error> {
-                        format!("material {mat_id}, step {}: {e}", step + 1).into()
-                    };
-                    let (folded, report) = apply_coupled_branching(
-                        &chain,
-                        &branch,
-                        &partials,
-                        mat_rates,
-                        Some(&diagnostics),
-                    )
-                    .map_err(named)?;
-                    if !partials.is_empty() {
-                        folded_chains.insert(mat_id, folded);
-                    }
-                    step_reports.insert(mat_id, Arc::new(report));
-                }
-            }
+            // Isomeric-branching overlay (see `fold_step_branching`).
+            let (folded_chains, step_reports) = if source_rate > 0.0 {
+                self.fold_step_branching(
+                    &dep_tallies,
+                    &transmutable_cells,
+                    &chain,
+                    &branch,
+                    source_rate,
+                    step,
+                    &mut rates,
+                )?
+            } else {
+                Default::default()
+            };
 
             // Transmute all materials in parallel (each material is independent)
             #[cfg(feature = "debug_timing")]
             let transmute_solve_start = std::time::Instant::now();
 
-            let transmuted_materials: Vec<(u32, Result<Material, String>)> = transmutable_cells
-                .par_iter()
-                .map(|(&mat_id, _cell_indices)| {
-                    let transmutation_input = full_compositions.get(&mat_id).unwrap();
-                    let mat_rates = rates.get(&mat_id).cloned().unwrap_or_default();
-                    let mat_fy = fy_weights.get(&mat_id).cloned().unwrap_or_default();
-                    // Use the per-material branch-folded chain when present,
-                    // else the base chain. (driver.transmute_material is just
-                    // stepper.step over its fixed chain; this lets each material
-                    // use its own spectrum-folded branching.)
-                    let ch = folded_chains.get(&mat_id).unwrap_or(&chain);
-                    let result = ForwardEulerStepper
-                        .step(transmutation_input, ch, &mat_rates, &mat_fy, parts, dt)
-                        .map_err(|e| e.to_string());
-                    (mat_id, result)
-                })
-                .collect();
+            let transmuted_materials = solve_step(
+                &transmutable_cells,
+                &full_compositions,
+                &rates,
+                &fy_weights,
+                &folded_chains,
+                &chain,
+                parts,
+                dt,
+            );
 
             #[cfg(feature = "debug_timing")]
             eprintln!(
@@ -854,168 +791,13 @@ impl Model {
 
                 // In independent mode, skip transport material updates (geometry is frozen)
                 if !is_independent {
-                    let cell_idx = cell_indices[0];
-                    let slot = self.geometry.cells()[cell_idx]
-                        .material_idx
-                        .expect("transmutable cell must have a material");
-                    let cell_material = self.geometry.materials()[slot as usize].as_ref();
-
-                    // Build transport material: start from transmuted composition
-                    let mut transport_material = transmuted_material;
-                    // Carry forward existing nuclide data from previous transport step
-                    transport_material.nuclide_data = cell_material.nuclide_data.clone();
-
-                    // Make sure everything now in the composition carries
-                    // transport-scope data. This covers nuclides transmutation
-                    // has just created, and equally the preloaded products that
-                    // hold only activation-scope cross sections and have now
-                    // grown a density; `ensure_nuclide_loaded` is
-                    // the one place that decides which of those need reading.
-                    let new_nuclides_loaded = {
-                        // Promote to transport scope only what can reach the
-                        // transport answer. "Does this nuclide have a
-                        // density?" is too broad: after one step of fission
-                        // 1269 of them do, and reading full transport data for
-                        // all of them takes 21 GB, most of it for 895
-                        // decay-only sinks that the product loader had
-                        // deliberately declined to read at all.
-                        //
-                        // Density alone is the wrong test in the other
-                        // direction: Xe135 at 3e-11 atoms/b-cm still holds
-                        // 9e7 barns, so dropping it would move the flux. So
-                        // rank by `density x peak cross section`, both of which
-                        // are already in hand, and keep everything within
-                        // `TRANSPORT_SHARE` of the material's dominant nuclide.
-                        // That is where the strong absorbers sort themselves
-                        // out: on the UO2 sphere Xe135, Gd157, Sm149 and Sm151
-                        // are the four highest peaks in the whole composition.
-                        let names: Vec<String> =
-                            transport_material.nuclides.keys().cloned().collect();
-                        let share: Vec<f64> = names
-                            .iter()
-                            .map(|name| {
-                                let density = transport_material
-                                    .nuclides
-                                    .get(name)
-                                    .copied()
-                                    .unwrap_or(0.0);
-                                density * peak_cross_section(&transport_material, name)
-                            })
-                            .collect();
-                        let dominant = share.iter().copied().fold(0.0_f64, f64::max);
-                        let cut = dominant * TRANSPORT_SHARE;
-
-                        let mut loaded_any = false;
-                        for (name, &weight) in names.iter().zip(&share) {
-                            if weight < cut {
-                                continue;
-                            }
-                            match transport_material.ensure_nuclide_loaded(name) {
-                                Ok(loaded) => {
-                                    loaded_any |= loaded;
-                                }
-                                Err(_) => {
-                                    // No cross section data available for this nuclide;
-                                    // remove it from transport (still tracked in full_compositions)
-                                }
-                            }
-                        }
-                        loaded_any
-                    };
-
-                    // Drop from transport anything without transport-scope data.
-                    // Testing presence in `nuclide_data` is not enough now that
-                    // preloaded products sit there at activation scope: one whose
-                    // widening above failed would otherwise stay in the transport
-                    // composition with no secondary distributions to collide on.
-                    // It is still tracked in full_compositions either way.
-                    let transportable: Vec<String> = transport_material
-                        .nuclides
-                        .keys()
-                        .filter(|name| transport_material.has_transport_data(name))
-                        .cloned()
-                        .collect();
-                    transport_material
-                        .nuclides
-                        .retain(|name, _| transportable.contains(name));
-
-                    #[cfg(feature = "debug_timing")]
-                    {
-                        let new_names: Vec<String> = transport_material
-                            .nuclides
-                            .keys()
-                            .filter(|name| !transport_material.nuclide_data.contains_key(*name))
-                            .cloned()
-                            .collect();
-                        if !new_names.is_empty() {
-                            eprintln!(
-                                "[TIMING] Step {} mat {}: nuclides without data: {:?}",
-                                step + 1,
-                                mat_id,
-                                new_names
-                            );
-                        }
-                        eprintln!(
-                            "[TIMING] Step {} mat {}: new_nuclides_loaded={}, transport_nuclides={}, nuclide_data={}",
-                            step + 1,
-                            mat_id,
-                            new_nuclides_loaded,
-                            transport_material.nuclides.len(),
-                            transport_material.nuclide_data.len()
-                        );
-                    }
-
-                    #[cfg(feature = "debug_timing")]
-                    let xs_start = std::time::Instant::now();
-
-                    let mt_filter = self.transport_mt_filter();
-                    if new_nuclides_loaded {
-                        // New nuclides change the energy grid and microscopic XS;
-                        // must do a full recomputation
-                        #[cfg(feature = "debug_timing")]
-                        eprintln!(
-                            "[TIMING] Step {} mat {}: FULL recomputation (new nuclides loaded)",
-                            step + 1,
-                            mat_id
-                        );
-                        transport_material.invalidate_xs_cache();
-                        transport_material.calculate_macroscopic_xs(&mt_filter, true);
-                    } else {
-                        // Only atom densities changed; reuse cached unified grid and micro XS
-                        #[cfg(feature = "debug_timing")]
-                        eprintln!(
-                            "[TIMING] Step {} mat {}: CACHED path (density-only update)",
-                            step + 1,
-                            mat_id
-                        );
-                        transport_material.unified_energy_grid_neutron =
-                            cell_material.unified_energy_grid_neutron.clone();
-                        transport_material.cached_microscopic_xs =
-                            cell_material.cached_microscopic_xs.clone();
-                        transport_material.invalidate_density_caches();
-                        transport_material.calculate_macroscopic_xs(&mt_filter, true);
-                    }
-                    if has_nuclide_tallies {
-                        transport_material.populate_per_nuclide_xs();
-                    }
-
-                    #[cfg(feature = "debug_timing")]
-                    eprintln!(
-                        "[TIMING] Step {} mat {} XS update: {:.3}s",
-                        step + 1,
+                    self.update_transport_material(
+                        step,
                         mat_id,
-                        xs_start.elapsed().as_secs_f64()
+                        cell_indices,
+                        transmuted_material,
+                        has_nuclide_tallies,
                     );
-
-                    // Update the material store for every cell slot owned by this mat_id.
-                    let new_arc = Arc::new(transport_material);
-                    let slots: Vec<u32> = cell_indices
-                        .iter()
-                        .filter_map(|&cidx| self.geometry.cells()[cidx].material_idx)
-                        .collect();
-                    for slot in slots {
-                        self.geometry.materials_mut()[slot as usize] = Arc::clone(&new_arc);
-                    }
                 }
             }
 
@@ -1033,10 +815,57 @@ impl Model {
             transmutation_loop_start.elapsed().as_secs_f64()
         );
 
+        // Coupled uncertainty: the whole coupled run again per replica, from
+        // the geometry the nominal loop started from, after which the model
+        // is put back as the nominal loop left it, so the nominal results and
+        // the model are what a run without uncertainty gives.
+        if let (Some(replicas), Some(start)) = (&coupled_replicas, replica_start) {
+            let end = self.geometry.materials().to_vec();
+            let nominal: HashMap<u32, yani_transmute::coupled_uncertainty::Inventories> =
+                transmutable_cells
+                    .keys()
+                    .map(|&id| {
+                        let per_step = (1..=timesteps.len())
+                            .map(|i| {
+                                results
+                                    .get_material(id, i)
+                                    .map(|m| m.nuclides.clone())
+                                    .unwrap_or_default()
+                            })
+                            .collect();
+                        (id, per_step)
+                    })
+                    .collect();
+            let run = CoupledRun {
+                start: &start,
+                initial: &initial_for_replicas,
+                cells: &transmutable_cells,
+                tallies: &dep_tallies,
+                timesteps: &timesteps,
+                source_rates: &source_rates,
+                branch: &branch,
+                parts,
+                has_nuclide_tallies,
+            };
+            let ensembles = replicas.run(&chain, &initial_for_replicas, &nominal, |k, edited| {
+                println!("Coupled uncertainty: replica {}...", k + 1);
+                let replica_settings = crate::model::TransportSettings {
+                    seed: replicas.transport_seed(settings.seed, k),
+                    ..settings.clone()
+                };
+                self.coupled_replica(&run, edited, &replica_settings)
+            });
+            self.geometry.materials_mut().clone_from_slice(&end);
+            for (id, (ensemble, info)) in ensembles? {
+                results.uncertainty.insert(id, ensemble);
+                results.uncertainty_info.insert(id, info);
+            }
+        }
+
         // Uncertainty: resample what the single transport produced and re-solve
         // the same schedule, per material, independently of the nominal loop
         // above, which is untouched and so bit-identical either way.
-        if let Some(request) = uncertainty {
+        if let Some(request) = uncertainty.filter(|_| is_independent) {
             // The cross-material covariance links nuclides across the
             // materials, so it is read from all of them at once, in slot
             // order (each one's draw key): ids would make the order depend on
@@ -1072,6 +901,418 @@ impl Model {
 
         results.data_releases = yamc_nuclide::url_cache::data_releases();
         Ok(results)
+    }
+}
+
+/// What every replica of a coupled run shares with the nominal one.
+struct CoupledRun<'a> {
+    /// The geometry's materials as the nominal loop started.
+    start: &'a [Arc<Material>],
+    /// Each transmutable material's starting composition, sum mode.
+    initial: &'a HashMap<u32, Material>,
+    cells: &'a HashMap<u32, Vec<usize>>,
+    tallies: &'a Arc<TransmutationTallies>,
+    timesteps: &'a [f64],
+    source_rates: &'a [f64],
+    branch: &'a Arc<yani::BranchTable>,
+    parts: yani::ChainParts,
+    has_nuclide_tallies: bool,
+}
+
+/// Each material's next composition, or why its solve failed.
+type Transmuted = Vec<(u32, Result<Material, String>)>;
+
+/// Solve one step for every transmutable material, in parallel (each is
+/// independent), from `compositions` under `rates`, each on its own
+/// branch-folded chain where it has one and on `chain` otherwise.
+#[allow(clippy::too_many_arguments)]
+fn solve_step(
+    cells: &HashMap<u32, Vec<usize>>,
+    compositions: &HashMap<u32, Material>,
+    rates: &HashMap<u32, ReactionRates>,
+    fy_weights: &HashMap<u32, FissionYieldWeights>,
+    folded_chains: &HashMap<u32, Arc<HashMap<String, ChainNuclide>>>,
+    chain: &Arc<HashMap<String, ChainNuclide>>,
+    parts: yani::ChainParts,
+    dt: f64,
+) -> Transmuted {
+    cells
+        .par_iter()
+        .map(|(&mat_id, _)| {
+            let input = compositions.get(&mat_id).unwrap();
+            let mat_rates = rates.get(&mat_id).cloned().unwrap_or_default();
+            let mat_fy = fy_weights.get(&mat_id).cloned().unwrap_or_default();
+            let ch = folded_chains.get(&mat_id).unwrap_or(chain);
+            let result = ForwardEulerStepper
+                .step(input, ch, &mat_rates, &mat_fy, parts, dt)
+                .map_err(|e| e.to_string());
+            (mat_id, result)
+        })
+        .collect()
+}
+
+impl Model {
+    /// Each material's rates from the transport just run on its current
+    /// composition, at `source_rate`, with its fission-yield fold from that
+    /// spectrum put into `fy_weights`.
+    fn tallied_step_rates(
+        &self,
+        dep_tallies: &TransmutationTallies,
+        cells: &HashMap<u32, Vec<usize>>,
+        source_rate: f64,
+        #[allow(unused_variables)] step: usize,
+        fy_weights: &mut HashMap<u32, FissionYieldWeights>,
+    ) -> HashMap<u32, ReactionRates> {
+        // Extract rates from transmutation tallies for each material
+        let mut step_rates: HashMap<u32, ReactionRates> = HashMap::new();
+        for (&mat_id, cell_indices) in cells {
+            let slot = self.geometry.cells()[cell_indices[0]]
+                .material_idx
+                .expect("transmutable cell must have a material");
+            let material = self.geometry.materials()[slot as usize].as_ref();
+            let volume = material.volume.unwrap_or(1.0);
+            let mat_rates = dep_tallies.get_reaction_rates(mat_id, volume, source_rate);
+
+            // This step's spectrum, so this step's yield fold.
+            let mat_weights = dep_tallies.get_fission_yield_weights(mat_id);
+            if mat_weights.is_empty() {
+                fy_weights.remove(&mat_id);
+            } else {
+                fy_weights.insert(mat_id, mat_weights);
+            }
+
+            #[cfg(feature = "debug_transmutation")]
+            if !mat_rates.is_empty() {
+                eprintln!(
+                    "\n[DEBUG transmutation] Reaction rates for material {} at step {}:",
+                    mat_id, step
+                );
+                let mut nuclides: Vec<_> = mat_rates.keys().collect();
+                nuclides.sort();
+                for nuclide in nuclides {
+                    let reactions = &mat_rates[nuclide.as_str()];
+                    let mut rxns: Vec<_> = reactions.iter().collect();
+                    rxns.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+                    for (rx, rate) in rxns {
+                        eprintln!("  {} {:15} {:.6e} [1/s/atom]", nuclide, rx, rate);
+                    }
+                }
+            }
+
+            if !mat_rates.is_empty() {
+                step_rates.insert(mat_id, mat_rates);
+            }
+        }
+        step_rates
+    }
+
+    /// Isomeric-branching overlay: every list on a material nuclide is
+    /// scored at the collision energies as `yani_transmute::branching_rule`
+    /// defines it, and the (n,n') partials of every other chain parent are
+    /// folded from the tally's union-grid flux moments (covering products
+    /// that build up during the step too), their rates injected into `rates`.
+    /// When no branching subsection is configured the overlay is empty and
+    /// the physics is identical to before. MT=5's `(n,X)` multiplicities
+    /// come from the reactions subsection and are folded either way; what of
+    /// MT=5 the chain does not model is reported, and refused above the
+    /// tolerance of the material's removal.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn fold_step_branching(
+        &self,
+        dep_tallies: &TransmutationTallies,
+        cells: &HashMap<u32, Vec<usize>>,
+        chain: &Arc<HashMap<String, ChainNuclide>>,
+        branch: &Arc<yani::BranchTable>,
+        source_rate: f64,
+        step: usize,
+        rates: &mut HashMap<u32, ReactionRates>,
+    ) -> Result<
+        (
+            HashMap<u32, Arc<HashMap<String, ChainNuclide>>>,
+            HashMap<u32, Arc<yani_transmute::BranchingReport>>,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let mut folded_chains: HashMap<u32, Arc<HashMap<String, ChainNuclide>>> = HashMap::new();
+        let mut step_reports: HashMap<u32, Arc<yani_transmute::BranchingReport>> = HashMap::new();
+        for (&mat_id, cell_indices) in cells {
+            let slot = self.geometry.cells()[cell_indices[0]]
+                .material_idx
+                .expect("transmutable cell must have a material");
+            let cell_material = self.geometry.materials()[slot as usize].as_ref();
+            let volume = cell_material.volume.unwrap_or(1.0);
+            let diagnostics = dep_tallies
+                .get_branching_diagnostics(mat_id, volume, source_rate)
+                .with_material(cell_material);
+            let partials = if branch.curves().is_empty() {
+                HashMap::new()
+            } else {
+                dep_tallies.get_partial_rates(mat_id, volume, source_rate)
+            };
+            let mat_rates = rates.entry(mat_id).or_default();
+            let named = |e: String| -> Box<dyn std::error::Error> {
+                format!("material {mat_id}, step {}: {e}", step + 1).into()
+            };
+            let (folded, report) =
+                apply_coupled_branching(chain, branch, &partials, mat_rates, Some(&diagnostics))
+                    .map_err(named)?;
+            if !partials.is_empty() {
+                folded_chains.insert(mat_id, folded);
+            }
+            step_reports.insert(mat_id, Arc::new(report));
+        }
+        Ok((folded_chains, step_reports))
+    }
+
+    /// One replica of the coupled run: every step of `run`'s schedule from its
+    /// starting geometry, solved on `chain` and transported with `settings`,
+    /// exactly as the nominal loop steps, returning each material's per-step
+    /// inventories. Leaves the geometry at the replica's last step.
+    fn coupled_replica(
+        &mut self,
+        run: &CoupledRun,
+        chain: &Arc<HashMap<String, ChainNuclide>>,
+        settings: &crate::model::TransportSettings,
+    ) -> Result<
+        HashMap<u32, yani_transmute::coupled_uncertainty::Inventories>,
+        Box<dyn std::error::Error>,
+    > {
+        self.geometry.materials_mut().clone_from_slice(run.start);
+        let mut compositions = run.initial.clone();
+        let mut fy_weights: HashMap<u32, FissionYieldWeights> = HashMap::new();
+        let mut out: HashMap<u32, yani_transmute::coupled_uncertainty::Inventories> = run
+            .cells
+            .keys()
+            .map(|&id| (id, Vec::with_capacity(run.timesteps.len())))
+            .collect();
+        for (step, (&dt, &source_rate)) in run.timesteps.iter().zip(run.source_rates).enumerate() {
+            let mut rates = HashMap::new();
+            let mut folded = HashMap::new();
+            if source_rate > 0.0 {
+                run.tallies.reset();
+                self.run_internal::<NoOpTracker>(
+                    settings,
+                    None,
+                    Some(Arc::clone(run.tallies)),
+                    false,
+                )?;
+                rates = self.tallied_step_rates(
+                    run.tallies,
+                    run.cells,
+                    source_rate,
+                    step,
+                    &mut fy_weights,
+                );
+                folded = self
+                    .fold_step_branching(
+                        run.tallies,
+                        run.cells,
+                        chain,
+                        run.branch,
+                        source_rate,
+                        step,
+                        &mut rates,
+                    )?
+                    .0;
+            }
+            let solved = solve_step(
+                run.cells,
+                &compositions,
+                &rates,
+                &fy_weights,
+                &folded,
+                chain,
+                run.parts,
+                dt,
+            );
+            for (mat_id, result) in solved {
+                let material = result?;
+                out.entry(mat_id)
+                    .or_default()
+                    .push(material.nuclides.clone());
+                compositions.insert(mat_id, material.clone());
+                self.update_transport_material(
+                    step,
+                    mat_id,
+                    &run.cells[&mat_id],
+                    material,
+                    run.has_nuclide_tallies,
+                );
+            }
+        }
+        Ok(out)
+    }
+
+    /// Hand `transmuted_material` to the next step's transport, in every
+    /// cell of `cell_indices`.
+    fn update_transport_material(
+        &mut self,
+        #[allow(unused_variables)] step: usize,
+        #[allow(unused_variables)] mat_id: u32,
+        cell_indices: &[usize],
+        transmuted_material: Material,
+        has_nuclide_tallies: bool,
+    ) {
+        let cell_idx = cell_indices[0];
+        let slot = self.geometry.cells()[cell_idx]
+            .material_idx
+            .expect("transmutable cell must have a material");
+        let cell_material = self.geometry.materials()[slot as usize].as_ref();
+
+        // Build transport material: start from transmuted composition
+        let mut transport_material = transmuted_material;
+        // Carry forward existing nuclide data from previous transport step
+        transport_material.nuclide_data = cell_material.nuclide_data.clone();
+
+        // Make sure everything now in the composition carries
+        // transport-scope data. This covers nuclides transmutation
+        // has just created, and equally the preloaded products that
+        // hold only activation-scope cross sections and have now
+        // grown a density; `ensure_nuclide_loaded` is
+        // the one place that decides which of those need reading.
+        let new_nuclides_loaded = {
+            // Promote to transport scope only what can reach the
+            // transport answer. "Does this nuclide have a
+            // density?" is too broad: after one step of fission
+            // 1269 of them do, and reading full transport data for
+            // all of them takes 21 GB, most of it for 895
+            // decay-only sinks that the product loader had
+            // deliberately declined to read at all.
+            //
+            // Density alone is the wrong test in the other
+            // direction: Xe135 at 3e-11 atoms/b-cm still holds
+            // 9e7 barns, so dropping it would move the flux. So
+            // rank by `density x peak cross section`, both of which
+            // are already in hand, and keep everything within
+            // `TRANSPORT_SHARE` of the material's dominant nuclide.
+            // That is where the strong absorbers sort themselves
+            // out: on the UO2 sphere Xe135, Gd157, Sm149 and Sm151
+            // are the four highest peaks in the whole composition.
+            let names: Vec<String> = transport_material.nuclides.keys().cloned().collect();
+            let share: Vec<f64> = names
+                .iter()
+                .map(|name| {
+                    let density = transport_material
+                        .nuclides
+                        .get(name)
+                        .copied()
+                        .unwrap_or(0.0);
+                    density * peak_cross_section(&transport_material, name)
+                })
+                .collect();
+            let dominant = share.iter().copied().fold(0.0_f64, f64::max);
+            let cut = dominant * TRANSPORT_SHARE;
+
+            let mut loaded_any = false;
+            for (name, &weight) in names.iter().zip(&share) {
+                if weight < cut {
+                    continue;
+                }
+                match transport_material.ensure_nuclide_loaded(name) {
+                    Ok(loaded) => {
+                        loaded_any |= loaded;
+                    }
+                    Err(_) => {
+                        // No cross section data available for this nuclide;
+                        // remove it from transport (still tracked in full_compositions)
+                    }
+                }
+            }
+            loaded_any
+        };
+
+        // Drop from transport anything without transport-scope data.
+        // Testing presence in `nuclide_data` is not enough now that
+        // preloaded products sit there at activation scope: one whose
+        // widening above failed would otherwise stay in the transport
+        // composition with no secondary distributions to collide on.
+        // It is still tracked in full_compositions either way.
+        let transportable: Vec<String> = transport_material
+            .nuclides
+            .keys()
+            .filter(|name| transport_material.has_transport_data(name))
+            .cloned()
+            .collect();
+        transport_material
+            .nuclides
+            .retain(|name, _| transportable.contains(name));
+
+        #[cfg(feature = "debug_timing")]
+        {
+            let new_names: Vec<String> = transport_material
+                .nuclides
+                .keys()
+                .filter(|name| !transport_material.nuclide_data.contains_key(*name))
+                .cloned()
+                .collect();
+            if !new_names.is_empty() {
+                eprintln!(
+                    "[TIMING] Step {} mat {}: nuclides without data: {:?}",
+                    step + 1,
+                    mat_id,
+                    new_names
+                );
+            }
+            eprintln!(
+                "[TIMING] Step {} mat {}: new_nuclides_loaded={}, transport_nuclides={}, nuclide_data={}",
+                step + 1,
+                mat_id,
+                new_nuclides_loaded,
+                transport_material.nuclides.len(),
+                transport_material.nuclide_data.len()
+            );
+        }
+
+        #[cfg(feature = "debug_timing")]
+        let xs_start = std::time::Instant::now();
+
+        let mt_filter = self.transport_mt_filter();
+        if new_nuclides_loaded {
+            // New nuclides change the energy grid and microscopic XS;
+            // must do a full recomputation
+            #[cfg(feature = "debug_timing")]
+            eprintln!(
+                "[TIMING] Step {} mat {}: FULL recomputation (new nuclides loaded)",
+                step + 1,
+                mat_id
+            );
+            transport_material.invalidate_xs_cache();
+            transport_material.calculate_macroscopic_xs(&mt_filter, true);
+        } else {
+            // Only atom densities changed; reuse cached unified grid and micro XS
+            #[cfg(feature = "debug_timing")]
+            eprintln!(
+                "[TIMING] Step {} mat {}: CACHED path (density-only update)",
+                step + 1,
+                mat_id
+            );
+            transport_material.unified_energy_grid_neutron =
+                cell_material.unified_energy_grid_neutron.clone();
+            transport_material.cached_microscopic_xs = cell_material.cached_microscopic_xs.clone();
+            transport_material.invalidate_density_caches();
+            transport_material.calculate_macroscopic_xs(&mt_filter, true);
+        }
+        if has_nuclide_tallies {
+            transport_material.populate_per_nuclide_xs();
+        }
+
+        #[cfg(feature = "debug_timing")]
+        eprintln!(
+            "[TIMING] Step {} mat {} XS update: {:.3}s",
+            step + 1,
+            mat_id,
+            xs_start.elapsed().as_secs_f64()
+        );
+
+        // Update the material store for every cell slot owned by this mat_id.
+        let new_arc = Arc::new(transport_material);
+        let slots: Vec<u32> = cell_indices
+            .iter()
+            .filter_map(|&cidx| self.geometry.cells()[cidx].material_idx)
+            .collect();
+        for slot in slots {
+            self.geometry.materials_mut()[slot as usize] = Arc::clone(&new_arc);
+        }
     }
 }
 

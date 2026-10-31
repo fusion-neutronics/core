@@ -3305,11 +3305,29 @@ class Model:
                 time-bounded transmutation is non-deterministic in history count.
         
             data_uncertainty (DataUncertainty, optional): Uncertainty on the
-                inventories, by resampling and re-solving, as
-                ``Material.transmute`` does. ``method="independent"`` only: the
-                coupled method re-runs transport every step, and propagating its
-                step-to-step noise is out of scope, so asking with it raises.
-                The sources that apply here:
+                inventories. With ``method="independent"``, by resampling the
+                one transport's rates and re-solving, as ``Material.transmute``
+                does. With ``method="coupled"``, by running the whole coupled
+                calculation once per replica: each step's rates there were
+                tallied in compositions the earlier steps' noise and data had
+                already moved, so no resampling of one step describes the
+                spread. A replica has its own transport seed when
+                ``"statistical"`` is on (the nominal one otherwise, so its
+                spread is the decay data's) and its own draw of
+                ``"half_life"``, ``"decay_branching"`` and ``"fission_yield"``,
+                the same draws an independent replica of the same index makes,
+                and every step's transport runs on that replica's compositions.
+                ``"decay_energy"`` and ``"decay_photon_lines"`` move what is
+                evaluated from each inventory, as below. This is exact, nothing
+                linearised, and costs the transport of every irradiation step
+                once per replica (at least 128 replicas unless ``samples`` is
+                set). ``"cross_sections"`` and ``"isomer_branching"`` are not
+                yet carried by a coupled replica, and nor is ``attribution``, so
+                asking for them with the coupled method raises; an empty
+                ``sources`` asks for every source, so name the sources there.
+                ``get_data_uncertainty_info``'s ``flux_response`` reads
+                ``"coupled_replicas"``. The rest of this entry describes the
+                independent method. The sources that apply there:
         
                 - ``"statistical"``: the Monte Carlo uncertainty of the tallied
                   reaction rates, from their per-history covariance, so the
