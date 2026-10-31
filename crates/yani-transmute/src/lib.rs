@@ -13,6 +13,7 @@
 //! [`CollectiveOps`].
 
 pub mod branching_rule;
+pub mod coupled_uncertainty;
 pub mod covariance_fold;
 pub mod covariance_provenance;
 pub mod covariance_sample;

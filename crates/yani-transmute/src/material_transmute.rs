@@ -1603,7 +1603,7 @@ struct TransportIsomer<'a> {
 ///
 /// `source_rates` scale the per-source-particle rates per step, which is how
 /// independent mode scales them. The coupled method re-runs transport per step
-/// and is not covered: its step-to-step noise propagation is out of scope.
+/// and is covered by [`crate::coupled_uncertainty`] instead.
 #[allow(clippy::too_many_arguments)]
 pub fn transport_replicas(
     initial: &Material,
@@ -1754,6 +1754,32 @@ struct ReplicaChains {
     folded: Vec<Arc<HashMap<String, ChainNuclide>>>,
 }
 
+/// What a material's reach starts from: its composition and every nuclide
+/// it carries data for.
+fn reach_seeds(initial: &Material) -> Vec<&str> {
+    initial
+        .nuclides
+        .keys()
+        .chain(initial.nuclide_data.keys())
+        .map(|s| s.as_str())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// `chain` pruned to what `initial` reaches through it.
+pub(crate) fn reachable_chain(
+    initial: &Material,
+    chain: &HashMap<String, ChainNuclide>,
+) -> HashMap<String, ChainNuclide> {
+    let reach = yani::reachable_nuclides(chain, &reach_seeds(initial));
+    chain
+        .iter()
+        .filter(|(name, _)| reach.contains(*name))
+        .map(|(name, cn)| (name.clone(), cn.clone()))
+        .collect()
+}
+
 /// Prune the base chain and every spectrum's folded chain to the closure the
 /// material reaches through either.
 fn replica_chains(
@@ -1761,14 +1787,7 @@ fn replica_chains(
     chain: &Arc<HashMap<String, ChainNuclide>>,
     per_spectrum: &[PerSpectrum],
 ) -> ReplicaChains {
-    let seeds: Vec<&str> = initial
-        .nuclides
-        .keys()
-        .chain(initial.nuclide_data.keys())
-        .map(|s| s.as_str())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
+    let seeds = reach_seeds(initial);
     let mut reach = yani::reachable_nuclides(chain, &seeds);
     for (_, _, folded_chain) in per_spectrum {
         reach.extend(yani::reachable_nuclides(folded_chain, &seeds));
@@ -1789,25 +1808,25 @@ fn replica_chains(
 
 /// One replica's edits to the chain's nuclear data, applied to a copy.
 #[derive(Default)]
-struct ChainEdits {
+pub(crate) struct ChainEdits {
     /// Perturbed half-lives [s].
-    half_lives: HashMap<String, f64>,
+    pub(crate) half_lives: HashMap<String, f64>,
     /// Perturbed decay branching ratios, one per row of the parent's `decays`.
-    decay_branchings: HashMap<String, Vec<f64>>,
+    pub(crate) decay_branchings: HashMap<String, Vec<f64>>,
     /// Perturbed fission yields, a new set per parent drawn, shared between
     /// the parents of one evaluation and never written into the nominal one.
-    fission_yields: HashMap<String, Arc<yani::FissionYieldSet>>,
+    pub(crate) fission_yields: HashMap<String, Arc<yani::FissionYieldSet>>,
 }
 
 impl ChainEdits {
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.half_lives.is_empty()
             && self.decay_branchings.is_empty()
             && self.fission_yields.is_empty()
     }
 
     /// `chain` with every edit made.
-    fn apply(&self, chain: &HashMap<String, ChainNuclide>) -> HashMap<String, ChainNuclide> {
+    pub(crate) fn apply(&self, chain: &HashMap<String, ChainNuclide>) -> HashMap<String, ChainNuclide> {
         let mut out = chain.clone();
         for (name, t) in &self.half_lives {
             if let Some(cn) = out.get_mut(name) {
@@ -1895,6 +1914,68 @@ fn sigma_report_nuclides(
                 .map_or(0.0, |r| r / total_time)
         },
     )
+}
+
+/// Reachable nuclides by whether a draw can move them: those with a sigma,
+/// those without, and those stating one no draw can carry.
+pub(crate) type Candidates3 = (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>);
+
+/// The unstable nuclides `initial` reaches through `chain`.
+pub(crate) fn reachable_unstable<'a>(
+    initial: &Material,
+    chain: &'a HashMap<String, ChainNuclide>,
+) -> impl Iterator<Item = (String, &'a ChainNuclide)> {
+    yani::reachable_nuclides(chain, &reach_seeds(initial))
+        .into_iter()
+        .filter_map(|name| {
+            let cn = chain.get(&name)?;
+            cn.half_life.is_some_and(|t| t > 0.0).then_some((name, cn))
+        })
+}
+
+/// The reachable nuclides' decay energies, sorted as [`Candidates3`].
+pub(crate) fn decay_energy_candidates(
+    initial: &Material,
+    chain: &HashMap<String, ChainNuclide>,
+) -> Candidates3 {
+    let mut out = Candidates3::default();
+    for (name, cn) in reachable_unstable(initial, chain) {
+        // Checked before the zero-energy skip: a sigma stated on a zero
+        // energy is one the data gives and no draw carries, so it is
+        // reported rather than dropped with the nuclides that have none.
+        let lost = crate::uncertainty::has_decay_energy_sigma_not_carried(cn);
+        if lost {
+            out.2.insert(name.clone());
+        }
+        if crate::uncertainty::has_decay_energy_sigma(cn) {
+            out.0.insert(name);
+        } else if !lost && cn.decay_energy > 0.0 {
+            out.1.insert(name);
+        }
+    }
+    out
+}
+
+/// The reachable nuclides' decay photons, sorted as [`Candidates3`].
+pub(crate) fn decay_photon_candidates(
+    initial: &Material,
+    chain: &HashMap<String, ChainNuclide>,
+) -> Candidates3 {
+    let mut out = Candidates3::default();
+    for (name, cn) in reachable_unstable(initial, chain) {
+        if !crate::uncertainty::has_decay_photons(cn) {
+            continue;
+        }
+        if crate::uncertainty::has_decay_photon_sigma_not_carried(cn) {
+            out.2.insert(name.clone());
+        }
+        if crate::uncertainty::has_decay_photon_sigma(cn) {
+            out.0.insert(name);
+        } else if !out.2.contains(&name) {
+            out.1.insert(name);
+        }
+    }
+    out
 }
 
 /// Fold the covariance, factorize it, and re-solve until every tracked sigma
@@ -2321,36 +2402,7 @@ fn run_replicas(
     let want_decay_energy = request.wants(crate::uncertainty::Source::DecayEnergy);
     let (decay_energy_perturbed, no_decay_energy_sigma, decay_energy_not_carried) =
         if want_decay_energy {
-            let seeds: Vec<&str> = initial
-                .nuclides
-                .keys()
-                .chain(initial.nuclide_data.keys())
-                .map(|s| s.as_str())
-                .collect::<HashSet<_>>()
-                .into_iter()
-                .collect();
-            let mut with = std::collections::BTreeSet::new();
-            let mut without = std::collections::BTreeSet::new();
-            let mut not_carried = std::collections::BTreeSet::new();
-            for name in yani::reachable_nuclides(chain, &seeds) {
-                let Some(cn) = chain.get(&name) else { continue };
-                if cn.half_life.is_none_or(|t| t <= 0.0) {
-                    continue;
-                }
-                // Checked before the zero-energy skip: a sigma stated on a zero
-                // energy is one the data gives and no draw carries, so it is
-                // reported rather than dropped with the nuclides that have none.
-                let lost = crate::uncertainty::has_decay_energy_sigma_not_carried(cn);
-                if lost {
-                    not_carried.insert(name.clone());
-                }
-                if crate::uncertainty::has_decay_energy_sigma(cn) {
-                    with.insert(name);
-                } else if !lost && cn.decay_energy > 0.0 {
-                    without.insert(name);
-                }
-            }
-            (with, without, not_carried)
+            decay_energy_candidates(initial, chain)
         } else {
             Default::default()
         };
@@ -2360,34 +2412,7 @@ fn run_replicas(
     let want_decay_photons = request.wants(crate::uncertainty::Source::DecayPhotonLines);
     let (decay_photons_perturbed, no_decay_photon_sigma, decay_photon_not_carried) =
         if want_decay_photons {
-            let seeds: Vec<&str> = initial
-                .nuclides
-                .keys()
-                .chain(initial.nuclide_data.keys())
-                .map(|s| s.as_str())
-                .collect::<HashSet<_>>()
-                .into_iter()
-                .collect();
-            let mut with = std::collections::BTreeSet::new();
-            let mut without = std::collections::BTreeSet::new();
-            let mut not_carried = std::collections::BTreeSet::new();
-            for name in yani::reachable_nuclides(chain, &seeds) {
-                let Some(cn) = chain.get(&name) else { continue };
-                if cn.half_life.is_none_or(|t| t <= 0.0)
-                    || !crate::uncertainty::has_decay_photons(cn)
-                {
-                    continue;
-                }
-                if crate::uncertainty::has_decay_photon_sigma_not_carried(cn) {
-                    not_carried.insert(name.clone());
-                }
-                if crate::uncertainty::has_decay_photon_sigma(cn) {
-                    with.insert(name);
-                } else if !not_carried.contains(&name) {
-                    without.insert(name);
-                }
-            }
-            (with, without, not_carried)
+            decay_photon_candidates(initial, chain)
         } else {
             Default::default()
         };

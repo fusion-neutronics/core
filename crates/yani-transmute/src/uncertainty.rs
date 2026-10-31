@@ -264,6 +264,11 @@ pub enum FluxResponseReport {
     /// A transport run with the cross-section source off: nothing perturbed
     /// what the flux depends on, so there was no response to carry.
     Unperturbed,
+    /// A coupled transport run, each replica the whole coupled calculation
+    /// again: every step's transport ran on that replica's own compositions,
+    /// so the flux answers how its earlier steps' noise and decay data moved
+    /// them. Its cross sections are the nominal ones.
+    CoupledReplicas,
 }
 
 impl FluxResponseReport {
@@ -273,6 +278,7 @@ impl FluxResponseReport {
             FluxResponseReport::Supplied => "supplied",
             FluxResponseReport::ReplicaWeights { .. } => "replica_weights",
             FluxResponseReport::Unperturbed => "unperturbed",
+            FluxResponseReport::CoupledReplicas => "coupled_replicas",
         }
     }
 }
