@@ -554,7 +554,7 @@ pub(crate) fn displacement_damage(
     if let Some(ensemble) = ensemble.filter(|e| e.replicas() > 0) {
         out.replicas = Some(replicas(
             &out,
-            &nominal[0],
+            nominal[0],
             &steps,
             &per_spectrum,
             ensemble,
@@ -1008,7 +1008,12 @@ mod tests {
         let d = rates(&[("Fe56", Some(4.0)), ("Cr52", Some(8.0))]);
         let steps = [(2.0, Some((0, 10.0)))];
         let request = DamageRequest::default();
-        let nominal = accumulate(&[&start, &start], &steps, &[d.clone()], &request);
+        let nominal = accumulate(
+            &[&start, &start],
+            &steps,
+            std::slice::from_ref(&d),
+            &request,
+        );
 
         let mut ensemble = crate::uncertainty::Ensemble::new(1);
         ensemble.push(vec![start.clone()]);

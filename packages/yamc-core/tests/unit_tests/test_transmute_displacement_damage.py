@@ -152,8 +152,11 @@ def test_dpa_carries_the_spread_of_the_flux():
     dpa = results.get_dpa_uncertainty(1, 1)
     assert dpa.nominal == results.get_dpa(1)[1]
     assert dpa.std_dev > 0.0
+    # Per element, dpa is damage energy times a constant, so the two spread
+    # alike.
     energy = results.get_damage_energy_uncertainty(1, 1, element="Fe")
-    assert energy.std_dev / energy.nominal == pytest.approx(dpa.std_dev / dpa.nominal, rel=1e-6)
+    fe = results.get_dpa_uncertainty(1, 1, element="Fe")
+    assert energy.std_dev / energy.nominal == pytest.approx(fe.std_dev / fe.nominal, rel=1e-9)
     # The cooldown adds nothing, so the spread carries over.
     assert results.get_dpa_uncertainty(1, 2).std_dev == dpa.std_dev
     assert results.get_data_uncertainty_info(1)["damage_energy"] == {}
