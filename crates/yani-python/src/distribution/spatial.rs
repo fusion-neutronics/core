@@ -2,6 +2,7 @@ use crate::distribution::{PyDiscrete, PyNormal, PyUniform};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
+use yamc_source::distribution::mesh::{MeshDistribution, MeshElements};
 use yamc_source::distribution::spatial::{CylindricalRing, Univariate};
 use yamc_source::source::SourceEnergyDistribution;
 
@@ -181,5 +182,95 @@ fn univariate_repr(u: &Univariate) -> String {
         }
         Univariate::Uniform(u) => format!("Uniform({}, {})", u.a(), u.b()),
         Univariate::Normal(n) => format!("Normal({}, {})", n.mean_val(), n.std_dev()),
+    }
+}
+
+/// Reads a mesh object's elements. Set by the yamc wheel, which owns the mesh
+/// classes; unset in the yani wheel, which has no meshes.
+pub type MeshElementsReader = for<'py> fn(&Bound<'py, PyAny>) -> PyResult<MeshElements>;
+
+/// The yamc wheel's [`MeshElementsReader`].
+pub static MESH_ELEMENTS_READER: std::sync::OnceLock<MeshElementsReader> =
+    std::sync::OnceLock::new();
+
+/// A source spread over the elements of a mesh.
+///
+/// Each element emits in proportion to its strength, from a point uniform
+/// within it. Pass it as ``position=`` to ``NeutronSource`` or ``PhotonSource``.
+///
+/// Args:
+///     mesh: A ``RegularRectangularMesh``, ``RegularCylindricalMesh`` or a
+///         tet ``MeshGeometry``.
+///     strengths: One non-negative strength per element (e.g. decay photons
+///         per second in each voxel), in the order a tally on the mesh
+///         numbers its bins, so a mesh tally's ``mean`` can be passed
+///         directly. For a ``MeshGeometry`` this is one per tetrahedron.
+///         Defaults to each element's volume: uniform over the mesh.
+///
+/// Raises:
+///     ValueError: If ``strengths`` has the wrong length, a value that is
+///         NaN, infinite or negative, or sums to zero.
+///
+/// Examples:
+///     >>> import yamc
+///     >>> mesh = yamc.RegularRectangularMesh([0, 0, 0], [10, 10, 10], [2, 1, 1])
+///     >>> space = yamc.sources.MeshDistribution(mesh, strengths=[3.0, 1.0])
+///     >>> source = yamc.PhotonSource(position=space, energy=1e6)
+#[gen_stub_pyclass]
+#[pyclass(name = "MeshDistribution", from_py_object)]
+#[derive(Clone)]
+pub struct PyMeshDistribution {
+    pub inner: MeshDistribution,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyMeshDistribution {
+    #[new]
+    #[pyo3(signature = (mesh, strengths=None))]
+    pub fn new(
+        #[gen_stub(override_type(
+            type_repr = "RegularRectangularMesh | RegularCylindricalMesh | MeshGeometry"
+        ))]
+        mesh: &Bound<'_, PyAny>,
+        strengths: Option<Vec<f64>>,
+    ) -> PyResult<Self> {
+        let read = MESH_ELEMENTS_READER.get().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("MeshDistribution needs the yamc package")
+        })?;
+        Ok(Self {
+            inner: MeshDistribution::new(read(mesh)?, strengths.as_deref())
+                .map_err(pyo3::exceptions::PyValueError::new_err)?,
+        })
+    }
+
+    /// Sample a position from the distribution.
+    ///
+    /// Returns:
+    ///     List[float]: Position vector [x, y, z] in cm.
+    pub fn sample(&self) -> [f64; 3] {
+        self.inner.sample(&mut rand::rng())
+    }
+
+    /// Sum of the element strengths: the source rate when they are rates, to
+    /// scale per-source-particle tallies by.
+    #[getter]
+    pub fn total_strength(&self) -> f64 {
+        self.inner.total()
+    }
+
+    /// Number of elements in the mesh.
+    #[getter]
+    pub fn num_elements(&self) -> usize {
+        self.inner.num_elements()
+    }
+
+    pub fn __repr__(&self) -> String {
+        format!(
+            "MeshDistribution({} of {} elements emitting, total_strength={})",
+            self.inner.num_emitting(),
+            self.inner.num_elements(),
+            self.inner.total()
+        )
     }
 }

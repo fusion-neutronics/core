@@ -25,6 +25,8 @@ pub enum SourceSpatialDistribution {
     CylindricalRing(Box<CylindricalRing>),
     /// A radial shell of a stellarator plasma
     FluxShell(Box<crate::stellarator::FluxShell>),
+    /// Spread over the elements of a mesh by per-element strength
+    Mesh(Box<crate::distribution::mesh::MeshDistribution>),
 }
 
 impl SourceEnergyDistribution {
@@ -44,6 +46,7 @@ impl SourceSpatialDistribution {
             SourceSpatialDistribution::Point(p) => p.sample(rng),
             SourceSpatialDistribution::CylindricalRing(c) => c.sample(rng),
             SourceSpatialDistribution::FluxShell(s) => s.sample(rng),
+            SourceSpatialDistribution::Mesh(m) => m.sample(rng),
         }
     }
 }

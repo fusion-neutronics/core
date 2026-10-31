@@ -154,6 +154,10 @@ pub fn register_classes(py: Python<'_>, m: &Bound<'_, PyModule>, package: &str) 
     // NeutronSource/PhotonSource stay top level as the primary builders.
     let sources = PyModule::new(py, "sources")?;
     distribution::register_distribution_classes(py, &sources)?;
+    // The meshes it spreads over are yamc's, which also supplies the reader.
+    if transport {
+        sources.add_class::<distribution::PyMeshDistribution>()?;
+    }
     add_submodule(py, m, &sources, package, "sources")?;
 
     // Lump shapes for self-shielding live under `<package>.shapes`, beside the

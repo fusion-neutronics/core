@@ -456,3 +456,40 @@ impl PyRegularCylindricalMesh {
         )
     }
 }
+
+/// The elements of a yamc mesh, for `yamc.sources.MeshDistribution`.
+pub fn read_mesh_elements(
+    mesh: &Bound<'_, PyAny>,
+) -> PyResult<yamc_source::distribution::mesh::MeshElements> {
+    use yamc_source::distribution::mesh::MeshElements;
+    if let Ok(m) = mesh.extract::<PyRef<'_, PyRegularRectangularMesh>>() {
+        let m = &m.internal;
+        return Ok(MeshElements::Rectangular {
+            lower_left: m.lower_left(),
+            width: m.width(),
+            shape: m.shape(),
+        });
+    }
+    if let Ok(m) = mesh.extract::<PyRef<'_, PyRegularCylindricalMesh>>() {
+        let m = &m.internal;
+        return Ok(MeshElements::Cylindrical {
+            origin: m.origin(),
+            r: m.r_grid().to_vec(),
+            phi: m.phi_grid().to_vec(),
+            z: m.z_grid().to_vec(),
+        });
+    }
+    #[cfg(feature = "mesh")]
+    if let Ok(m) = mesh.extract::<PyRef<'_, PyMeshGeometry>>() {
+        let t = &m.inner.mesh.topology;
+        return Ok(MeshElements::Tetrahedra(
+            t.tetrahedra
+                .iter()
+                .map(|tet| tet.map(|v| t.vertices[v as usize]))
+                .collect(),
+        ));
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "mesh must be a RegularRectangularMesh, RegularCylindricalMesh or MeshGeometry",
+    ))
+}
