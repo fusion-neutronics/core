@@ -180,7 +180,14 @@ fn each_statistical_replica_is_a_whole_coupled_run() {
     let request = request(vec![UqSource::Statistical], 3);
 
     let mut plain_model = model(&path);
-    let plain = transmute(&mut plain_model, "coupled", &schedule, &chain, BASE_SEED, None);
+    let plain = transmute(
+        &mut plain_model,
+        "coupled",
+        &schedule,
+        &chain,
+        BASE_SEED,
+        None,
+    );
     let mut uq_model = model(&path);
     let uq = transmute(
         &mut uq_model,
@@ -192,7 +199,11 @@ fn each_statistical_replica_is_a_whole_coupled_run() {
     );
     assert_eq!(inventories(&plain, steps), inventories(&uq, steps));
     let left = |m: &Model| m.geometry.materials()[0].nuclides.clone();
-    assert_eq!(left(&plain_model), left(&uq_model), "the model is left as the nominal run leaves it");
+    assert_eq!(
+        left(&plain_model),
+        left(&uq_model),
+        "the model is left as the nominal run leaves it"
+    );
 
     // Real feedback: the B10 burns down step on step, and the B10 that
     // remains captures at a rate per atom that rises as the sphere thins.
@@ -213,7 +224,10 @@ fn each_statistical_replica_is_a_whole_coupled_run() {
     let info = &uq.uncertainty_info[&1];
     assert_eq!(info.samples, 3);
     assert_eq!(info.flux_response, FluxResponseReport::CoupledReplicas);
-    assert!(!info.not_perturbed.iter().any(|s| s == "tallied-rate statistics"));
+    assert!(!info
+        .not_perturbed
+        .iter()
+        .any(|s| s == "tallied-rate statistics"));
 
     let replicas = CoupledReplicas::new(&request, &chain).expect("carried");
     for k in 0..3 {
@@ -236,12 +250,19 @@ fn each_statistical_replica_is_a_whole_coupled_run() {
 /// With the decay data drawn and no statistical source, a replica is the
 /// coupled run on its own chain with the nominal random numbers, bit for bit,
 /// and its tritium decays with the half-life the ensemble records for it.
+///
+/// The chain fixture states no half-life sigma, so the burnout's tritium is
+/// given one of 10% here.
 #[test]
 fn each_decay_data_replica_is_the_coupled_run_on_its_own_chain() {
     let (Some(path), Some(chain)) = (b10(), chain()) else {
         eprintln!("skipping: B10 or chain fixture not fetched");
         return;
     };
+    let mut edited = (*chain).clone();
+    let h3 = edited.get_mut("H3").expect("H3 in the chain");
+    h3.half_life_uncertainty = Some(0.1 * h3.half_life.expect("H3 decays"));
+    let chain: Chain = Arc::new(edited);
     let schedule = burnout();
     let steps = 4;
     let request = request(vec![UqSource::HalfLife], 2);
@@ -255,7 +276,10 @@ fn each_decay_data_replica_is_the_coupled_run_on_its_own_chain() {
     );
     let info = &uq.uncertainty_info[&1];
     assert!(info.half_lives_perturbed.contains("H3"), "{info:?}");
-    assert!(info.not_perturbed.iter().any(|s| s == "tallied-rate statistics"));
+    assert!(info
+        .not_perturbed
+        .iter()
+        .any(|s| s == "tallied-rate statistics"));
 
     let replicas = CoupledReplicas::new(&request, &chain).expect("carried");
     let half_lives = uq.uncertainty[&1].half_lives();
@@ -264,7 +288,14 @@ fn each_decay_data_replica_is_the_coupled_run_on_its_own_chain() {
         let (edited, drawn) = replicas.chain(&chain, k);
         assert_eq!(half_lives[k as usize]["H3"], drawn.half_lives["H3"]);
         assert_ne!(drawn.half_lives["H3"], chain["H3"].half_life.unwrap());
-        let rerun = transmute(&mut model(&path), "coupled", &schedule, &edited, BASE_SEED, None);
+        let rerun = transmute(
+            &mut model(&path),
+            "coupled",
+            &schedule,
+            &edited,
+            BASE_SEED,
+            None,
+        );
         assert_eq!(
             replica(&uq, k as usize, steps),
             inventories(&rerun, steps),
@@ -276,8 +307,10 @@ fn each_decay_data_replica_is_the_coupled_run_on_its_own_chain() {
 /// On a single pulse the coupled method's one transport is the independent
 /// method's, so the spread of coupled replicas run on fresh seeds must agree
 /// with the independent method's statistical sigma, drawn from the
-/// per-history covariance of that one transport. 128 replicas know a sigma to
-/// about 6%; four of those is the tolerance.
+/// per-history covariance of that one transport. 128 coupled replicas know a
+/// sigma to about 6% and 1024 independent ones to about 2%; four of their
+/// combined standard error, with the covariance's own, is the tolerance. Both
+/// also agree with the spread of 64 plain runs on 64 seeds (5.1e-4 for B10).
 #[test]
 fn on_one_pulse_the_replicas_agree_with_the_per_history_covariance() {
     let (Some(path), Some(chain)) = (b10(), chain()) else {
@@ -290,23 +323,19 @@ fn on_one_pulse_the_replicas_agree_with_the_per_history_covariance() {
         is_pulse: true,
     }])
     .expect("schedule");
-    let statistical = request(vec![UqSource::Statistical], 128);
-    let coupled = transmute(
-        &mut model(&path),
-        "coupled",
-        &schedule,
-        &chain,
-        BASE_SEED,
-        Some(&statistical),
-    );
-    let independent = transmute(
-        &mut model(&path),
-        "independent",
-        &schedule,
-        &chain,
-        BASE_SEED,
-        Some(&statistical),
-    );
+    let run = |method: &str, samples: usize| {
+        let request = request(vec![UqSource::Statistical], samples);
+        transmute(
+            &mut model(&path),
+            method,
+            &schedule,
+            &chain,
+            BASE_SEED,
+            Some(&request),
+        )
+    };
+    let coupled = run("coupled", 128);
+    let independent = run("independent", 1024);
     assert_eq!(
         inventories(&coupled, 1),
         inventories(&independent, 1),
@@ -316,7 +345,7 @@ fn on_one_pulse_the_replicas_agree_with_the_per_history_covariance() {
         let a = coupled.uncertainty[&1].std_dev_at(0)[nuclide];
         let b = independent.uncertainty[&1].std_dev_at(0)[nuclide];
         assert!(
-            (a / b - 1.0).abs() < 0.25,
+            (a / b - 1.0).abs() < 0.3,
             "{nuclide}: coupled replicas give {a:e}, the per-history covariance {b:e}"
         );
     }
