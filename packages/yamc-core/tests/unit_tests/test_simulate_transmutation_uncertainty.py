@@ -3,8 +3,8 @@
 The check that matters is against the thing a statistical uncertainty claims
 to predict: run the same problem with independent seeds, and the spread of the
 inventories across seeds must match the sigma each run reports for itself.
-The rest pins the contract: bit-identical means, the coupled method refused,
-the sources reported, the rate sigmas readable.
+The rest pins the contract: bit-identical means, the coupled method rerun
+whole per replica, the sources reported, the rate sigmas readable.
 """
 
 import os
@@ -181,9 +181,37 @@ def test_each_rate_has_a_statistical_sigma():
     assert _run().get_reaction_rate_uncertainty(MAT_ID, 0) is None
 
 
-def test_the_coupled_method_is_refused():
-    with pytest.raises(RuntimeError, match="independent"):
-        _run(method="coupled", data_uncertainty=STATISTICAL)
+@pytest.mark.parametrize(
+    "request_",
+    [
+        yamc.DataUncertainty(seed=1, samples=4),
+        yamc.DataUncertainty(seed=1, samples=4, sources=["cross_sections"]),
+        yamc.DataUncertainty(seed=1, samples=4, sources=["isomer_branching"]),
+    ],
+    ids=["every_source", "cross_sections", "isomer_branching"],
+)
+def test_the_coupled_method_refuses_what_a_replica_cannot_carry(request_):
+    with pytest.raises(RuntimeError, match="coupled"):
+        _run(method="coupled", data_uncertainty=request_)
+
+
+def test_the_coupled_method_reruns_the_whole_coupled_run():
+    """Each replica is the coupled run again on its own seed: the nominal
+    inventories are a plain coupled run's, bit for bit, and the spread is the
+    replicas'."""
+    request_ = yamc.DataUncertainty(seed=5, samples=8, sources=["statistical"])
+    plain = _run(threads=1, method="coupled")
+    uncertain = _run(threads=1, method="coupled", data_uncertainty=request_)
+    for step in range(3):
+        assert plain.get_material_nuclides(MAT_ID, step) == uncertain.get_material_nuclides(
+            MAT_ID, step
+        )
+    info = uncertain.get_data_uncertainty_info(MAT_ID)
+    assert info["flux_response"] == "coupled_replicas"
+    assert info["samples"] == 8
+    assert info["sources"] == ["statistical"]
+    assert "tallied-rate statistics" not in info["not_perturbed"]
+    assert uncertain.get_nuclide_uncertainty(MAT_ID, "Fe57", 1) > 0.0
 
 
 def test_the_cross_section_report_reads_the_tallied_spectrum_at_its_normalization():
