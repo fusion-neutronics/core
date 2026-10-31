@@ -311,6 +311,8 @@ pub(crate) enum StagedRun<'a> {
         plan: &'a ReplayPlan,
         out: &'a mut Option<ReplayStats>,
     },
+    /// Draw the source particles from activated regions' decay photons (R2S).
+    Cells(&'a crate::r2s::CellDecaySource<'a>),
 }
 
 /// The base seed of the replay runs: a stream independent of the capture's.
@@ -320,7 +322,7 @@ fn replay_seed(seed: u64) -> u64 {
 
 /// Cell name -> index, refusing a name used twice (it could not say which
 /// cell a birth belongs to).
-fn cell_names(model: &Model) -> Result<HashMap<&str, usize>, String> {
+pub(crate) fn cell_names(model: &Model) -> Result<HashMap<&str, usize>, String> {
     let mut out = HashMap::new();
     for (i, cell) in model.geometry.cells().iter().enumerate() {
         if let Some(name) = cell.name.as_deref()
@@ -405,7 +407,7 @@ fn transfer(
 
 /// `tally` with a parent-nuclide filter over `classes` appended (the bin
 /// layout `Tally(parent_nuclides=...)` builds), fresh of any accumulation.
-fn binned(tally: &Tally, classes: &[String]) -> Result<Arc<Tally>, String> {
+pub(crate) fn binned(tally: &Tally, classes: &[String]) -> Result<Arc<Tally>, String> {
     let name = tally.name.as_deref().unwrap_or("unnamed");
     if tally.get_parent_nuclide_filter().is_some() {
         return Err(format!(
@@ -429,22 +431,41 @@ fn binned(tally: &Tally, classes: &[String]) -> Result<Arc<Tally>, String> {
     Ok(Arc::new(t))
 }
 
-/// Simulate the shutdown dose rate over `steps`, whose configurations are
-/// `stages` over `models`.
-///
-/// Every step is observed at its end, in its own stage. A model needs a
-/// neutron source only if a pulse irradiates in it; tallies are scored in
-/// every observation stage's model. The `models` are not modified. The run
-/// needs `settings.total_particles`: every capture transports that many
-/// neutron histories, and every replay that many photon histories (one per
-/// neutron history). See the module docs for the method.
-pub fn simulate_shutdown_dose(
+/// The elapsed time (s) at the end of each step.
+pub(crate) fn step_times(steps: &[Step]) -> Vec<f64> {
+    steps
+        .iter()
+        .scan(0.0, |t, s| {
+            *t += s.duration;
+            Some(*t)
+        })
+        .collect()
+}
+
+/// Refuse a model a pulse irradiates in that has no neutron source.
+pub(crate) fn need_neutron_source(model: &Model, m: usize) -> Result<(), String> {
+    if model
+        .sources
+        .iter()
+        .any(|s| s.particle_type() == ParticleType::Neutron)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "a pulse irradiates in model {m}, which has no neutron source"
+        ))
+    }
+}
+
+/// Check the schedule, tallies and settings before any transport, and return
+/// the irradiation stages (a pulse with a rate) and the observation stages.
+pub(crate) fn check_inputs(
     models: &[Model],
     stages: &[Stage],
     steps: &[Step],
     tallies: &[Arc<Tally>],
     settings: &TransportSettings,
-) -> Result<ShutdownDose, String> {
+) -> Result<(Vec<usize>, BTreeSet<usize>), String> {
     if steps.is_empty() {
         return Err("the schedule has no steps".into());
     }
@@ -490,6 +511,26 @@ pub fn simulate_shutdown_dose(
     if campaigns.is_empty() {
         return Err("the schedule irradiates nothing: no pulse has a positive rate".into());
     }
+    Ok((campaigns, observed))
+}
+
+/// Simulate the shutdown dose rate over `steps`, whose configurations are
+/// `stages` over `models`.
+///
+/// Every step is observed at its end, in its own stage. A model needs a
+/// neutron source only if a pulse irradiates in it; tallies are scored in
+/// every observation stage's model. The `models` are not modified. The run
+/// needs `settings.total_particles`: every capture transports that many
+/// neutron histories, and every replay that many photon histories (one per
+/// neutron history). See the module docs for the method.
+pub fn simulate_shutdown_dose(
+    models: &[Model],
+    stages: &[Stage],
+    steps: &[Step],
+    tallies: &[Arc<Tally>],
+    settings: &TransportSettings,
+) -> Result<ShutdownDose, String> {
+    let (campaigns, observed) = check_inputs(models, stages, steps, tallies, settings)?;
 
     // 1. Capture once per irradiated model, all on the same seed: history `i`
     //    of every capture is replayed together, so whatever their shared
@@ -501,15 +542,7 @@ pub fn simulate_shutdown_dose(
             continue;
         }
         let mut model = models[m].clone();
-        if !model
-            .sources
-            .iter()
-            .any(|s| s.particle_type() == ParticleType::Neutron)
-        {
-            return Err(format!(
-                "a pulse irradiates in model {m}, which has no neutron source"
-            ));
-        }
+        need_neutron_source(&model, m)?;
         model.use_decay_photons = true;
         model.transport_secondary_photons = true;
         model.tallies = Vec::new();
@@ -531,12 +564,7 @@ pub fn simulate_shutdown_dose(
         .into_iter()
         .collect();
     let n_p = parents.len();
-    let mut times = Vec::with_capacity(steps.len());
-    let mut elapsed = 0.0;
-    for s in steps {
-        elapsed += s.duration;
-        times.push(elapsed);
-    }
+    let times = step_times(steps);
     let mut out: Vec<DoseTally> = tallies
         .iter()
         .map(|t| {

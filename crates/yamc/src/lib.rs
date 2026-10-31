@@ -6,6 +6,7 @@ pub mod geometry;
 pub mod model;
 pub mod mpi_context;
 pub mod options;
+pub mod r2s;
 pub mod shutdown_dose;
 pub mod stochastic_volume;
 pub mod track;

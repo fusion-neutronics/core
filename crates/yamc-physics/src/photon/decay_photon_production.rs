@@ -94,7 +94,7 @@ impl DecayPhotonSpectrum {
     }
 
     /// Draw one photon energy [eV].
-    fn sample<R: rand::Rng>(&self, rng: &mut R) -> f64 {
+    pub fn sample<R: rand::Rng>(&self, rng: &mut R) -> f64 {
         match self {
             DecayPhotonSpectrum::Lines {
                 energies,
@@ -116,6 +116,53 @@ impl DecayPhotonNuclideData {
     pub fn lookup_photon_prod(&self, i_grid: usize, interp_factor: f64) -> f64 {
         interp_value(&self.photon_prod, i_grid, interp_factor)
     }
+}
+
+/// The decay photon spectra of `emitter` (named `name`), each with its
+/// emission rate per atom [photons/s]: one per continuum, then one for all the
+/// lines. The chain keeps the gamma and x-ray lines apart, and drawing them
+/// from one spectrum is the same distribution with fewer to walk.
+///
+/// D1S weights each by its photons per decay; R2S by the emitter's atom count.
+/// `Err` names a continuum whose law this build cannot read.
+pub fn decay_photon_spectra(
+    name: &str,
+    emitter: &ChainNuclide,
+) -> Result<Vec<(f64, DecayPhotonSpectrum)>, String> {
+    let mut spectra = Vec::new();
+    for source in &emitter.sources {
+        let DecaySourceDistribution::Tabular {
+            energies,
+            intensities,
+            interpolation,
+        } = &source.distribution
+        else {
+            continue;
+        };
+        if source.particle != "photon" {
+            continue;
+        }
+        let rate = source
+            .distribution
+            .emission_rate()
+            .map_err(|why| format!("the decay photon continuum of {name} {why}"))?;
+        spectra.push((
+            rate,
+            DecayPhotonSpectrum::continuum(energies, intensities, *interpolation),
+        ));
+    }
+    let lines = emitter.photon_lines();
+    if !lines.is_empty() {
+        let (energies, intensities): (Vec<f64>, Vec<f64>) = lines.into_iter().unzip();
+        spectra.push((
+            intensities.iter().sum(),
+            DecayPhotonSpectrum::Lines {
+                energies,
+                intensities,
+            },
+        ));
+    }
+    Ok(spectra)
 }
 
 // =============================================================================
@@ -211,49 +258,8 @@ pub fn precompute_decay_photon_data(
                         continue;
                     }
 
-                    // One channel per continuum, then one for all the lines:
-                    // the chain keeps the gamma and x-ray lines apart, and
-                    // drawing them from one channel is the same distribution
-                    // with fewer channels to walk per collision. It is also
-                    // the channel list, yields and line order this setup had
-                    // when the file stored them merged.
-                    let mut spectra: Vec<(f64, DecayPhotonSpectrum)> = Vec::new();
-                    for source in &emitter.sources {
-                        let DecaySourceDistribution::Tabular {
-                            energies,
-                            intensities,
-                            interpolation,
-                        } = &source.distribution
-                        else {
-                            continue;
-                        };
-                        if source.particle != "photon" {
-                            continue;
-                        }
-                        // photon_per_decay = emission rate / λ (the chain
-                        // stores rates, λ × yield per decay): the continuum
-                        // integrated.
-                        let emission_rate = source.distribution.emission_rate().map_err(|why| {
-                            format!("D1S: the decay photon continuum of {} {why}", path.emitter)
-                        })?;
-                        spectra.push((
-                            emission_rate,
-                            DecayPhotonSpectrum::continuum(energies, intensities, *interpolation),
-                        ));
-                    }
-                    let lines = emitter.photon_lines();
-                    if !lines.is_empty() {
-                        let (energies, intensities): (Vec<f64>, Vec<f64>) =
-                            lines.into_iter().unzip();
-                        spectra.push((
-                            intensities.iter().sum(),
-                            DecayPhotonSpectrum::Lines {
-                                energies,
-                                intensities,
-                            },
-                        ));
-                    }
-
+                    let spectra = decay_photon_spectra(&path.emitter, emitter)
+                        .map_err(|e| format!("D1S: {e}"))?;
                     for (emission_rate, spectrum) in spectra {
                         let photon_per_decay = emission_rate / emitter_lambda;
                         let yield_constant = reaction.branching * path_branching * photon_per_decay;
