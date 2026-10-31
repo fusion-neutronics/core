@@ -2661,7 +2661,7 @@ impl Model {
                                 // Otherwise start with the source particle.
                                 let source = replay.is_none().then(|| {
                                     let mut particle = match cell_source {
-                                        Some(c) => c.sample(rng, &replay_ids, &self.geometry),
+                                        Some(c) => c.sample(rng, &replay_ids),
                                         None => self.sample_source_with(&source_selector, rng),
                                     };
                                     particle.alive = true;

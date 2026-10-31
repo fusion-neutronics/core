@@ -13,6 +13,7 @@ use pyo3_stub_gen::derive::gen_stub_pyfunction;
 use yamc::shutdown_dose::{Placement, Stage, Step};
 use yani_python::distribution::{PyDoseResult, PyPulseSchedule};
 
+use crate::geometry::PyRegularRectangularMesh;
 use crate::simulation::PyModel;
 use crate::tally::PyTally;
 
@@ -53,6 +54,15 @@ use crate::tally::PyTally;
 /// name and emit wherever the step's model has them. A cell's volume is
 /// estimated by sampling unless ``Cell(volume=...)`` gives it.
 ///
+/// With ``method="r2s"`` and a ``mesh`` (cell-under-mesh R2S), every part of
+/// a material-filled cell under a voxel is solved instead, with the voxel's
+/// neutron spectrum (tallied in VITAMIN-J-175 groups), and emits uniformly
+/// over that part, so the source follows the flux gradient through thick
+/// cells without splitting them. The parts' volumes are estimated by sampling
+/// each voxel. Pulses must irradiate with one set of moves, and a cell moved
+/// after irradiation needs its ``moves``, as with D1S. Voxels no neutron
+/// reaches are not activated.
+///
 /// With R2S, ``std_dev`` is the photon transport's statistical error given
 /// the solved inventories; the neutron transport's is not included.
 ///
@@ -71,6 +81,9 @@ use crate::tally::PyTally;
 ///     method: ``"d1s"`` (one-step, one photon run per pair of irradiation
 ///         and observation configurations) or ``"r2s"`` (cell inventories,
 ///         one photon run per step).
+///     mesh: With ``method="r2s"``, a ``RegularRectangularMesh`` over the
+///         activated components for cell-under-mesh R2S; ``None`` activates
+///         whole cells.
 ///
 /// Returns:
 ///     ``{tally name: DoseResult}``, each with one row per schedule step:
@@ -87,7 +100,7 @@ use crate::tally::PyTally;
 ///     >>> dose["dose"].mean[-1]
 #[gen_stub_pyfunction]
 #[pyfunction]
-#[pyo3(signature = (schedule, tallies, total_particles, seed=1, threads=None, method="d1s"))]
+#[pyo3(signature = (schedule, tallies, total_particles, seed=1, threads=None, method="d1s", mesh=None))]
 pub fn simulate_shutdown_dose(
     py: Python<'_>,
     schedule: &PyPulseSchedule,
@@ -96,16 +109,22 @@ pub fn simulate_shutdown_dose(
     seed: u64,
     threads: Option<usize>,
     method: &str,
+    mesh: Option<PyRegularRectangularMesh>,
 ) -> PyResult<BTreeMap<String, PyDoseResult>> {
-    let simulate = match method {
-        "d1s" => yamc::shutdown_dose::simulate_shutdown_dose,
-        "r2s" => yamc::r2s::simulate_r2s,
+    match (method, &mesh) {
+        ("r2s", _) | ("d1s", None) => {}
+        ("d1s", Some(_)) => {
+            return Err(PyValueError::new_err(
+                "mesh is for method=\"r2s\" (cell-under-mesh); D1S photons are born where \
+                 their reactions happen and need no mesh",
+            ));
+        }
         _ => {
             return Err(PyValueError::new_err(format!(
                 "method must be \"d1s\" or \"r2s\", got \"{method}\""
             )));
         }
-    };
+    }
     if total_particles == 0 {
         return Err(PyValueError::new_err("total_particles must be positive"));
     }
@@ -173,7 +192,19 @@ pub fn simulate_shutdown_dose(
         data_uncertainty: None,
     };
     let dose = py
-        .detach(|| simulate(&models, &stages, &steps, &tallies, &settings))
+        .detach(|| match method {
+            "d1s" => yamc::shutdown_dose::simulate_shutdown_dose(
+                &models, &stages, &steps, &tallies, &settings,
+            ),
+            _ => yamc::r2s::simulate_r2s(
+                &models,
+                &stages,
+                &steps,
+                &tallies,
+                &settings,
+                mesh.as_ref().map(|m| &m.internal),
+            ),
+        })
         .map_err(PyValueError::new_err)?;
     names
         .into_iter()

@@ -105,3 +105,96 @@ def test_bad_method_and_two_irradiation_models_are_refused():
         _dose(steps, method="r3s")
     with pytest.raises(ValueError, match="same model"):
         _dose(steps + [yamc.Pulse(model=_model(), rate=1e12, duration=(1, "h"))])
+
+
+# Cell-under-mesh R2S.
+
+SHELL_MESH = yamc.RegularRectangularMesh(lower_left=[-12, -12, -12], upper_right=[12, 12, 12],
+                                         shape=[3, 3, 3])
+
+
+def test_mesh_r2s_agrees_with_cells_on_a_uniformly_irradiated_shell():
+    steps = [
+        yamc.Pulse(model=_shell(), rate=1e12, duration=(1, "h")),
+        yamc.Cooldown(duration=(1, "h")),
+    ]
+    tally = yamc.Tally(scores=["flux"], name="dose", mesh=MESH, particle="photon")
+    mesh = yamc.simulate_shutdown_dose(
+        yamc.PulseSchedule(steps), tallies=[tally], total_particles=PARTICLES, seed=3,
+        method="r2s", mesh=SHELL_MESH,
+    )["dose"]
+    cells = _dose(steps)
+    a, b = _total(mesh), _total(cells)
+    sigma = np.hypot(np.array(mesh.std_dev).sum(axis=1), np.array(cells.std_dev).sum(axis=1))
+    # Multigroup against continuous-energy rates: a few percent on a threshold
+    # reaction, on top of the noise.
+    assert np.all(np.abs(a - b) < 5 * sigma + 0.05 * b), (a, b, sigma)
+    assert max(mesh.by_nuclide, key=lambda n: np.sum(mesh.by_nuclide[n][1])) == "Mn56"
+
+
+def _bar():
+    """An iron bar along x from 0 to 40 cm, irradiated from its x=0 end."""
+    world = yamc.Sphere(radius=400.0, boundary="vacuum")
+    bar = (yamc.Plane("x", 0.0).above & yamc.Plane("x", 40.0).below
+           & yamc.Cylinder("x", radius=2.0).below)
+    cells = [yamc.Cell(name="rod", region=bar, material=_iron()),
+             yamc.Cell(name="space", region=~bar & world.below)]
+    src = yamc.NeutronSource(position=(-0.5, 0, 0), energy=yamc.sources.Discrete([14.06e6], [1.0]))
+    return yamc.Model(geometry=yamc.Geometry(cells), source=src, verbose=[])
+
+
+def test_mesh_r2s_puts_the_source_where_the_bar_is_activated():
+    near = yamc.RegularRectangularMesh(lower_left=[-5, -5, 5], upper_right=[5, 5, 15],
+                                       shape=[1, 1, 1])
+    far = yamc.RegularRectangularMesh(lower_left=[35, -5, 5], upper_right=[45, 5, 15],
+                                      shape=[1, 1, 1])
+    tallies = [yamc.Tally(scores=["flux"], name=n, mesh=m, particle="photon")
+               for n, m in (("near", near), ("far", far))]
+    steps = [yamc.Pulse(model=_bar(), rate=1e12, duration=(1, "h"))]
+    run = lambda **kw: yamc.simulate_shutdown_dose(
+        yamc.PulseSchedule(steps), tallies=tallies, total_particles=PARTICLES, seed=3,
+        method="r2s", **kw)
+    mesh = run(mesh=yamc.RegularRectangularMesh(lower_left=[0, -2, -2], upper_right=[40, 2, 2],
+                                                shape=[8, 1, 1]))
+    cells = run()
+    ratio = lambda d: _total(d["near"])[0] / _total(d["far"])[0]
+    # The whole bar emitting uniformly is symmetric end to end; the mesh
+    # follows the activation down the bar.
+    assert 0.7 < ratio(cells) < 1.4
+    assert ratio(mesh) > 5 * ratio(cells)
+
+
+def test_mesh_r2s_moves_voxel_parts_with_their_cell():
+    mesh = yamc.RegularRectangularMesh(lower_left=[-3, -3, -3], upper_right=[3, 3, 3],
+                                       shape=[2, 2, 2])
+
+    def run(moves):
+        return _total(yamc.simulate_shutdown_dose(
+            yamc.PulseSchedule([
+                yamc.Pulse(model=_model(), rate=1e12, duration=(1, "h")),
+                yamc.Cooldown(model=_model(source=False, ball_z=-30.0), duration=(1, "s"),
+                              moves=moves),
+                yamc.Cooldown(model=_model(ball=False, source=False), duration=(1, "s")),
+            ]),
+            tallies=[yamc.Tally(scores=["flux"], name="dose", mesh=MESH, particle="photon")],
+            total_particles=PARTICLES, seed=3, method="r2s", mesh=mesh,
+        )["dose"])
+
+    # 30 cm further from the box, it sees a fraction of what it did.
+    moved = run({"rod": (0, 0, -30)})
+    assert moved[0] > 0 and 0 < moved[1] < 0.3 * moved[0] and moved[2] == 0.0
+    with pytest.raises(ValueError, match="give every moved cell's move"):
+        run({})
+
+
+def test_mesh_is_refused_for_d1s_and_away_from_the_activated_cells():
+    steps = [yamc.Pulse(model=_model(), rate=1e12, duration=(1, "h"))]
+    tally = yamc.Tally(scores=["flux"], name="dose", mesh=MESH, particle="photon")
+    run = lambda method, mesh: yamc.simulate_shutdown_dose(
+        yamc.PulseSchedule(steps), tallies=[tally], total_particles=200, method=method,
+        mesh=mesh)
+    with pytest.raises(ValueError, match="mesh is for method"):
+        run("d1s", SHELL_MESH)
+    with pytest.raises(ValueError, match="no material-filled cell under the mesh"):
+        run("r2s", yamc.RegularRectangularMesh(lower_left=[100, 100, 100],
+                                               upper_right=[101, 101, 101], shape=[1, 1, 1]))
