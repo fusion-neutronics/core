@@ -1703,10 +1703,21 @@ class MeshDistribution:
             numbers its bins, so a mesh tally's ``mean`` can be passed
             directly. For a ``MeshGeometry`` this is one per tetrahedron.
             Defaults to each element's volume: uniform over the mesh.
+        cells: A ``Cell`` or list of them. Each element then emits only from
+            its points in these cells, keeping its own strength: an R2S
+            voxel's decay photons are born in the activated cells under it,
+            not in the void beside them.
+        materials: A ``Material`` or list of them, as ``cells`` but for the
+            cells filled with them. Give ``cells`` or ``materials``, not both.
+            Both apply where the source meets a geometry, in a ``Model``;
+            ``sample()`` has no geometry and draws from the whole element.
     
     Raises:
         ValueError: If ``strengths`` has the wrong length, a value that is
-            NaN, infinite or negative, or sums to zero.
+            NaN, infinite or negative, or sums to zero; or both ``cells`` and
+            ``materials`` are given. A run refuses a source whose cells or
+            materials are not in the geometry, or with an emitting element
+            holding none of them.
     
     Examples:
         >>> import yani
@@ -1725,10 +1736,11 @@ class MeshDistribution:
         r"""
         Number of elements in the mesh.
         """
-    def __new__(cls, mesh: typing.Any, strengths: typing.Optional[typing.Sequence[builtins.float]] = None) -> MeshDistribution: ...
+    def __new__(cls, mesh: typing.Any, strengths: typing.Optional[typing.Sequence[builtins.float]] = None, cells: typing.Optional[typing.Any] = None, materials: typing.Optional[typing.Any] = None) -> MeshDistribution: ...
     def sample(self) -> builtins.list[builtins.float]:
         r"""
-        Sample a position from the distribution.
+        Sample a position from the distribution, anywhere in the chosen
+        element: ``cells`` and ``materials`` need the geometry of a ``Model``.
         
         Returns:
             List[float]: Position vector [x, y, z] in cm.
