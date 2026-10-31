@@ -1,7 +1,7 @@
 """VTK-HDF export for ParaView visualization.
 
 Provides ``to_vtkhdf`` methods on Tally, Geometry, Model, Cell,
-Region, and NeutronSource/PhotonSource objects.  Requires ``h5py``
+Region, NeutronSource/PhotonSource and Tracks objects.  Requires ``h5py``
 (install with ``pip install yamc[viz]``).
 
 Usage::
@@ -10,6 +10,7 @@ Usage::
     geometry.to_vtkhdf("geometry.vtkhdf", resolution=10000)
     model.to_vtkhdf("model.vtkhdf", samples=1000)  # geometry + source blocks
     model.to_vtkhdf("source.vtkhdf", include=["source"])
+    results.tracks.to_vtkhdf("tracks.vtkhdf")  # one polyline per particle
 """
 
 from __future__ import annotations
@@ -710,3 +711,98 @@ def model_to_vtkhdf(
         assembly = root.create_group("Assembly", track_order=True)
         for name in include:
             assembly[name] = _h5py.SoftLink(f"/VTKHDF/{name}")
+
+
+# ---------------------------------------------------------------------------
+# Polyline writer (particle tracks)
+# ---------------------------------------------------------------------------
+
+
+def polylines_to_vtkhdf(
+    filename: str,
+    points: Sequence[Sequence[float]],
+    offsets: Sequence[int],
+    *,
+    point_data: dict | None = None,
+    cell_data: dict | None = None,
+) -> None:
+    """Write polylines to a VTK-HDF PolyData file.
+
+    Line ``j`` runs through ``points[offsets[j]:offsets[j + 1]]``.
+
+    Args:
+        filename: Output ``.vtkhdf`` path.
+        points: ``[x, y, z]`` per point (cm).
+        offsets: Start of each line in ``points``, plus the point count
+            (length = number of lines + 1, first entry 0).
+        point_data: Arrays of one value per point, keyed by name.
+        cell_data: Arrays of one value per line, keyed by name.
+    """
+    h5py = _require_h5py()
+    points = np.asarray(points, dtype="float64").reshape(-1, 3)
+    offsets = np.asarray(offsets, dtype="int64")
+    n_points, n_lines = len(points), len(offsets) - 1
+    if n_lines < 0 or offsets[0] != 0 or offsets[-1] != n_points:
+        raise ValueError(
+            f"offsets must start at 0 and end at the point count ({n_points}), "
+            f"got {offsets[:1].tolist()} ... {offsets[-1:].tolist()}"
+        )
+    for kind, data, n in (("point", point_data, n_points), ("cell", cell_data, n_lines)):
+        for name, values in (data or {}).items():
+            if len(values) != n:
+                raise ValueError(f"{kind}_data[{name!r}] has {len(values)} values, expected {n}")
+
+    with h5py.File(filename, "w") as f:
+        root = f.create_group("VTKHDF")
+        root.attrs["Version"] = np.array([2, 1], dtype="int64")
+        root.attrs.create("Type", b"PolyData", dtype=h5py.string_dtype("ascii", 8))
+        root.create_dataset("NumberOfPoints", data=np.array([n_points], dtype="int64"))
+        root.create_dataset("Points", data=points)
+        # PolyData requires all four topology groups; only Lines is populated.
+        for name in ("Vertices", "Lines", "Polygons", "Strips"):
+            lines = name == "Lines"
+            g = root.create_group(name)
+            g.create_dataset("NumberOfCells", data=np.array([n_lines if lines else 0], dtype="int64"))
+            g.create_dataset(
+                "NumberOfConnectivityIds", data=np.array([n_points if lines else 0], dtype="int64")
+            )
+            g.create_dataset("Offsets", data=offsets if lines else np.zeros(1, dtype="int64"))
+            g.create_dataset(
+                "Connectivity", data=np.arange(n_points if lines else 0, dtype="int64")
+            )
+        for group, data in (("PointData", point_data), ("CellData", cell_data)):
+            g = root.create_group(group)
+            for name, values in (data or {}).items():
+                g.create_dataset(name, data=np.asarray(values))
+
+
+def tracks_to_vtkhdf(filename: str, tracks: yamc.Tracks) -> None:
+    """Write particle tracks to a VTK-HDF PolyData file, one polyline per track.
+
+    Per point (``PointData``): ``energy`` (eV, after the event), ``weight``,
+    ``event_type`` and ``cell_id`` (-1 if unknown). Per line (``CellData``):
+    ``particle_type``, ``particle_id``, ``parent_id`` (-1 for source
+    particles), ``generation`` and ``history``. ``event_type`` and
+    ``particle_type`` are integer codes (ParaView colours by numbers); their
+    names are stored in the root attributes ``event_type_names`` and
+    ``particle_type_names``. Coordinates are in cm, matching
+    ``Model.to_vtkhdf`` output, so the two overlay in ParaView.
+
+    Args:
+        filename: Output ``.vtkhdf`` path.
+        tracks: The ``Tracks`` from ``Model.simulate_transport(capture_tracks=...)``.
+    """
+    h5py = _require_h5py()
+    p = tracks.polylines()
+    polylines_to_vtkhdf(
+        filename,
+        p["points"],
+        p["offsets"],
+        point_data={k: p[k] for k in ("energy", "weight", "event_type", "cell_id")},
+        cell_data={
+            k: p[k] for k in ("particle_type", "particle_id", "parent_id", "generation", "history")
+        },
+    )
+    with h5py.File(filename, "a") as f:
+        for key in ("event_type_names", "particle_type_names"):
+            f["VTKHDF"].attrs[key] = np.array(p[key], dtype=h5py.string_dtype("ascii"))

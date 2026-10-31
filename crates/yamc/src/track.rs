@@ -19,7 +19,6 @@
 //! `record_collision` / `record_surface_crossing` methods.
 
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Which particle histories to capture full event tracks for.
 ///
@@ -66,12 +65,15 @@ impl HistorySelection {
     }
 }
 
+pub use yamc_particle::particle::ParticleType;
+
 /// Event types during transport
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackEventType {
     /// Particle created from the source distribution
     SourceBirth,
-    /// Particle created from a reaction (fission, n2n, etc.)
+    /// Particle popped from the bank as a descendant of another particle in
+    /// the history (reaction secondary, secondary photon, weight-window split)
     SecondaryBirth,
     /// Collision occurred (scattering, absorption, fission)
     Collision,
@@ -85,32 +87,48 @@ pub enum TrackEventType {
     Leak,
 }
 
+impl TrackEventType {
+    /// Every variant, indexed by its discriminant (the polyline event code).
+    pub const ALL: [TrackEventType; 7] = [
+        TrackEventType::SourceBirth,
+        TrackEventType::SecondaryBirth,
+        TrackEventType::Collision,
+        TrackEventType::SurfaceCrossing,
+        TrackEventType::Absorption,
+        TrackEventType::RussianRoulette,
+        TrackEventType::Leak,
+    ];
+}
+
 impl std::fmt::Display for TrackEventType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TrackEventType::SourceBirth => write!(f, "source_birth"),
-            TrackEventType::SecondaryBirth => write!(f, "secondary_birth"),
-            TrackEventType::Collision => write!(f, "collision"),
-            TrackEventType::SurfaceCrossing => write!(f, "surface_crossing"),
-            TrackEventType::Absorption => write!(f, "absorption"),
-            TrackEventType::RussianRoulette => write!(f, "russian_roulette"),
-            TrackEventType::Leak => write!(f, "leak"),
-        }
+        f.write_str(match self {
+            TrackEventType::SourceBirth => "source_birth",
+            TrackEventType::SecondaryBirth => "secondary_birth",
+            TrackEventType::Collision => "collision",
+            TrackEventType::SurfaceCrossing => "surface_crossing",
+            TrackEventType::Absorption => "absorption",
+            TrackEventType::RussianRoulette => "russian_roulette",
+            TrackEventType::Leak => "leak",
+        })
     }
 }
 
 /// A single event in a particle's track
 #[derive(Debug, Clone)]
 pub struct TrackEvent {
-    /// Unique ID across all particles
+    /// Particle ID, unique within its history (0 = the source particle)
     pub particle_id: u64,
-    /// Parent particle ID (None for source particles)
+    /// ID of the particle that banked this one, in the same history (None
+    /// for source particles)
     pub parent_id: Option<u64>,
     /// Generation (0 = source, 1+ = secondary)
     pub generation: u32,
+    /// Particle species
+    pub particle_type: ParticleType,
     /// Batch number
     pub batch: usize,
-    /// History within batch
+    /// Global history index
     pub history: usize,
     /// Type of event
     pub event_type: TrackEventType,
@@ -130,7 +148,7 @@ pub struct TrackEvent {
     pub reaction_mt: Option<i32>,
     /// Target nuclide for collisions
     pub nuclide: Option<String>,
-    /// Birth reaction type (e.g., "source", "fission", "n,2n")
+    /// Birth reaction ("source" or "secondary") on birth events
     pub birth_reaction: Option<String>,
     /// Distribution type used for angle-energy sampling
     pub distribution: Option<String>,
@@ -138,61 +156,27 @@ pub struct TrackEvent {
     pub energy_dist: Option<String>,
 }
 
-impl TrackEvent {
-    /// Create a new event with minimal required fields
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        particle_id: u64,
-        parent_id: Option<u64>,
-        generation: u32,
-        batch: usize,
-        history: usize,
-        event_type: TrackEventType,
-        position: [f64; 3],
-        direction: [f64; 3],
-        energy_in: f64,
-        energy_out: f64,
-        weight: f64,
-    ) -> Self {
-        TrackEvent {
-            particle_id,
-            parent_id,
-            generation,
-            batch,
-            history,
-            event_type,
-            position,
-            direction,
-            energy_in,
-            energy_out,
-            weight,
-            cell_id: None,
-            reaction_mt: None,
-            nuclide: None,
-            birth_reaction: None,
-            distribution: None,
-            energy_dist: None,
-        }
-    }
-}
-
-/// A complete track for a single particle
+/// The track of a single particle: its birth and every event of its walk.
 #[derive(Debug, Clone, Default)]
 pub struct ParticleTrack {
-    /// All events in this particle's history
+    /// All events in this particle's walk, starting with its birth
     pub events: Vec<TrackEvent>,
-    /// Particle ID
+    /// Particle ID, unique within its history (0 = the source particle)
     pub particle_id: u64,
-    /// Parent particle ID (None for source particles)
+    /// ID of the particle that banked this one (None for source particles)
     pub parent_id: Option<u64>,
     /// Generation (0 = source, 1+ = secondary)
     pub generation: u32,
+    /// Particle species
+    pub particle_type: ParticleType,
+    /// Global history index
+    pub history: usize,
 }
 
 /// Storage for all collected tracks
 #[derive(Debug, Clone, Default)]
 pub struct TrackStorage {
-    /// All particle tracks collected during simulation
+    /// One track per particle, ordered by `(history, particle_id)` once merged
     pub tracks: Vec<ParticleTrack>,
 }
 
@@ -205,26 +189,80 @@ impl TrackStorage {
     pub fn total_events(&self) -> usize {
         self.tracks.iter().map(|t| t.events.len()).sum()
     }
-}
 
-/// Metadata tracked per particle (only allocated when tracking enabled)
-#[derive(Debug, Clone)]
-pub struct ParticleTrackingInfo {
-    pub track_id: u64,
-    pub parent_id: Option<u64>,
-    pub generation: u32,
-    pub birth_reaction: String,
-}
-
-impl Default for ParticleTrackingInfo {
-    fn default() -> Self {
-        ParticleTrackingInfo {
-            track_id: 0,
-            parent_id: None,
-            generation: 0,
-            birth_reaction: "source".to_string(),
-        }
+    /// Order tracks by `(history, particle_id)`, making the output independent
+    /// of thread scheduling.
+    pub fn sort(&mut self) {
+        self.tracks.sort_by_key(|t| (t.history, t.particle_id));
     }
+
+    /// Flatten the tracks into one polyline per track, for VTK export or
+    /// plotting.
+    pub fn polylines(&self) -> Polylines {
+        let n_points = self.total_events();
+        let n_lines = self.tracks.len();
+        let mut out = Polylines {
+            points: Vec::with_capacity(n_points),
+            offsets: Vec::with_capacity(n_lines + 1),
+            energy: Vec::with_capacity(n_points),
+            weight: Vec::with_capacity(n_points),
+            event_type: Vec::with_capacity(n_points),
+            cell_id: Vec::with_capacity(n_points),
+            particle_type: Vec::with_capacity(n_lines),
+            particle_id: Vec::with_capacity(n_lines),
+            parent_id: Vec::with_capacity(n_lines),
+            generation: Vec::with_capacity(n_lines),
+            history: Vec::with_capacity(n_lines),
+        };
+        out.offsets.push(0);
+        for t in &self.tracks {
+            for e in &t.events {
+                out.points.push(e.position);
+                out.energy.push(e.energy_out);
+                out.weight.push(e.weight);
+                out.event_type.push(e.event_type as u8);
+                out.cell_id.push(e.cell_id.map_or(-1, i64::from));
+            }
+            out.offsets.push(out.points.len() as i64);
+            out.particle_type.push(t.particle_type as u8);
+            out.particle_id.push(t.particle_id);
+            out.parent_id.push(t.parent_id.map_or(-1, |p| p as i64));
+            out.generation.push(t.generation);
+            out.history.push(t.history as u64);
+        }
+        out
+    }
+}
+
+/// Tracks flattened into polylines: point `i` of line `j` is
+/// `points[offsets[j] + i]`. Codes: `event_type` is the [`TrackEventType`]
+/// discriminant, `particle_type` the [`ParticleType`] one (0 neutron, 1
+/// photon); a missing `cell_id` / `parent_id` is -1.
+#[derive(Debug, Clone, Default)]
+pub struct Polylines {
+    /// Event positions [x, y, z] in cm
+    pub points: Vec<[f64; 3]>,
+    /// Start of each line in `points`, plus the total point count (length
+    /// = lines + 1)
+    pub offsets: Vec<i64>,
+    /// Per point: energy after the event (eV)
+    pub energy: Vec<f64>,
+    /// Per point: statistical weight
+    pub weight: Vec<f64>,
+    /// Per point: [`TrackEventType`] code
+    pub event_type: Vec<u8>,
+    /// Per point: cell ID, -1 if unknown
+    pub cell_id: Vec<i64>,
+    /// Per line: [`ParticleType`] code
+    pub particle_type: Vec<u8>,
+    /// Per line: particle ID within its history
+    pub particle_id: Vec<u64>,
+    /// Per line: parent particle ID, -1 for source particles
+    pub parent_id: Vec<i64>,
+    /// Per line: generation
+    pub generation: Vec<u32>,
+    /// Per line: global history index
+    pub history: Vec<u64>,
 }
 
 /// Collects events that occur during particle transport.
@@ -235,6 +273,10 @@ impl Default for ParticleTrackingInfo {
 /// reaction sampling) and calls the `record_*` methods to publish the events
 /// it produced. The same trait is used regardless of transport algorithm
 /// (e.g. surface tracking, Woodcock tracking).
+///
+/// Every particle walk opens with [`record_birth`](Tracker::record_birth),
+/// which fixes the particle's identity; the other `record_*` events belong to
+/// that particle until the next birth.
 ///
 /// Monomorphisation gives zero overhead when tracking is disabled -- see
 /// [`NoOpTracker`].
@@ -249,26 +291,23 @@ pub trait Tracker: Send {
     /// Signal end of current history
     fn finish_history(&mut self);
 
-    /// Record a birth event (source or secondary)
+    /// Start a particle's track with its birth event (source or secondary).
     fn record_birth(
         &mut self,
         particle_id: u64,
         parent_id: Option<u64>,
         generation: u32,
+        particle_type: ParticleType,
         position: [f64; 3],
         direction: [f64; 3],
         energy: f64,
         weight: f64,
         cell_id: Option<u32>,
-        birth_reaction: &str,
     );
 
     /// Record a collision event
     fn record_collision(
         &mut self,
-        particle_id: u64,
-        parent_id: Option<u64>,
-        generation: u32,
         position: [f64; 3],
         direction: [f64; 3],
         energy_in: f64,
@@ -284,9 +323,6 @@ pub trait Tracker: Send {
     /// Record a surface crossing event
     fn record_surface_crossing(
         &mut self,
-        particle_id: u64,
-        parent_id: Option<u64>,
-        generation: u32,
         position: [f64; 3],
         direction: [f64; 3],
         energy: f64,
@@ -297,9 +333,6 @@ pub trait Tracker: Send {
     /// Record a termination event (absorption or leak)
     fn record_termination(
         &mut self,
-        particle_id: u64,
-        parent_id: Option<u64>,
-        generation: u32,
         position: [f64; 3],
         direction: [f64; 3],
         energy: f64,
@@ -308,7 +341,7 @@ pub trait Tracker: Send {
         event_type: TrackEventType,
     );
 
-    /// Get the next unique particle ID
+    /// Next particle ID within the current history (0 for its first particle)
     fn next_particle_id(&mut self) -> u64;
 
     /// Check if tracking is enabled (for conditional code paths)
@@ -343,63 +376,54 @@ impl Tracker for NoOpTracker {
     #[inline(always)]
     fn record_birth(
         &mut self,
-        _particle_id: u64,
-        _parent_id: Option<u64>,
-        _generation: u32,
-        _position: [f64; 3],
-        _direction: [f64; 3],
-        _energy: f64,
-        _weight: f64,
-        _cell_id: Option<u32>,
-        _birth_reaction: &str,
+        _: u64,
+        _: Option<u64>,
+        _: u32,
+        _: ParticleType,
+        _: [f64; 3],
+        _: [f64; 3],
+        _: f64,
+        _: f64,
+        _: Option<u32>,
     ) {
     }
 
     #[inline(always)]
     fn record_collision(
         &mut self,
-        _particle_id: u64,
-        _parent_id: Option<u64>,
-        _generation: u32,
-        _position: [f64; 3],
-        _direction: [f64; 3],
-        _energy_in: f64,
-        _energy_out: f64,
-        _weight: f64,
-        _cell_id: Option<u32>,
-        _mt: i32,
-        _nuclide: &str,
-        _distribution: Option<&str>,
-        _energy_dist: Option<&str>,
+        _: [f64; 3],
+        _: [f64; 3],
+        _: f64,
+        _: f64,
+        _: f64,
+        _: Option<u32>,
+        _: i32,
+        _: &str,
+        _: Option<&str>,
+        _: Option<&str>,
     ) {
     }
 
     #[inline(always)]
     fn record_surface_crossing(
         &mut self,
-        _particle_id: u64,
-        _parent_id: Option<u64>,
-        _generation: u32,
-        _position: [f64; 3],
-        _direction: [f64; 3],
-        _energy: f64,
-        _weight: f64,
-        _cell_id: Option<u32>,
+        _: [f64; 3],
+        _: [f64; 3],
+        _: f64,
+        _: f64,
+        _: Option<u32>,
     ) {
     }
 
     #[inline(always)]
     fn record_termination(
         &mut self,
-        _particle_id: u64,
-        _parent_id: Option<u64>,
-        _generation: u32,
-        _position: [f64; 3],
-        _direction: [f64; 3],
-        _energy: f64,
-        _weight: f64,
-        _cell_id: Option<u32>,
-        _event_type: TrackEventType,
+        _: [f64; 3],
+        _: [f64; 3],
+        _: f64,
+        _: f64,
+        _: Option<u32>,
+        _: TrackEventType,
     ) {
     }
 
@@ -422,15 +446,15 @@ impl Tracker for NoOpTracker {
 /// Real tracker that collects events
 #[derive(Debug, Clone)]
 pub struct RealTracker {
-    /// All collected tracks
+    /// Finished tracks
     tracks: Vec<ParticleTrack>,
-    /// Current track being built
+    /// Track of the particle currently being transported
     current_track: Option<ParticleTrack>,
     /// Current batch number
     current_batch: usize,
-    /// Current history number
+    /// Current global history index
     current_history: usize,
-    /// Next particle ID (thread-local counter)
+    /// Next particle ID within the current history
     next_id: u64,
     /// Which global history indices to capture
     selection: HistorySelection,
@@ -453,17 +477,53 @@ impl RealTracker {
         }
     }
 
-    /// Create from an existing global ID counter for thread-safety
-    pub fn with_starting_id(selection: HistorySelection, starting_id: u64) -> Self {
-        RealTracker {
-            tracks: Vec::new(),
-            current_track: None,
-            current_batch: 0,
-            current_history: 0,
-            next_id: starting_id,
-            selection,
-            active: false,
+    /// Move the current track, if it has events, into the finished tracks.
+    fn flush(&mut self) {
+        if let Some(track) = self.current_track.take()
+            && !track.events.is_empty()
+        {
+            self.tracks.push(track);
         }
+    }
+
+    /// Append an event to the current particle's track, returning it so the
+    /// caller can fill in event-specific fields.
+    #[allow(clippy::too_many_arguments)]
+    fn push(
+        &mut self,
+        event_type: TrackEventType,
+        position: [f64; 3],
+        direction: [f64; 3],
+        energy_in: f64,
+        energy_out: f64,
+        weight: f64,
+        cell_id: Option<u32>,
+    ) -> Option<&mut TrackEvent> {
+        if !self.active {
+            return None;
+        }
+        let track = self.current_track.as_mut()?;
+        track.events.push(TrackEvent {
+            particle_id: track.particle_id,
+            parent_id: track.parent_id,
+            generation: track.generation,
+            particle_type: track.particle_type,
+            batch: self.current_batch,
+            history: self.current_history,
+            event_type,
+            position,
+            direction,
+            energy_in,
+            energy_out,
+            weight,
+            cell_id,
+            reaction_mt: None,
+            nuclide: None,
+            birth_reaction: None,
+            distribution: None,
+            energy_dist: None,
+        });
+        track.events.last_mut()
     }
 }
 
@@ -476,26 +536,15 @@ impl Tracker for RealTracker {
         // Capture this history only if its global index is in the selection.
         // The decision is per-history (not monotonic), so it stays correct no
         // matter which thread processes which index.
+        self.flush();
         self.active = self.selection.contains(history as u64);
-        if !self.active {
-            return;
-        }
-
         self.current_batch = batch;
         self.current_history = history;
-        self.current_track = Some(ParticleTrack::default());
+        self.next_id = 0;
     }
 
     fn finish_history(&mut self) {
-        if !self.active {
-            return;
-        }
-
-        if let Some(track) = self.current_track.take()
-            && !track.events.is_empty()
-        {
-            self.tracks.push(track);
-        }
+        self.flush();
     }
 
     fn record_birth(
@@ -503,55 +552,39 @@ impl Tracker for RealTracker {
         particle_id: u64,
         parent_id: Option<u64>,
         generation: u32,
+        particle_type: ParticleType,
         position: [f64; 3],
         direction: [f64; 3],
         energy: f64,
         weight: f64,
         cell_id: Option<u32>,
-        birth_reaction: &str,
     ) {
         if !self.active {
             return;
         }
-
-        let event_type = if generation == 0 {
-            TrackEventType::SourceBirth
-        } else {
-            TrackEventType::SecondaryBirth
-        };
-
-        let mut event = TrackEvent::new(
+        self.flush();
+        self.current_track = Some(ParticleTrack {
+            events: Vec::new(),
             particle_id,
             parent_id,
             generation,
-            self.current_batch,
-            self.current_history,
-            event_type,
-            position,
-            direction,
-            energy,
-            energy, // energy_out same as energy_in for birth
-            weight,
-        );
-        event.cell_id = cell_id;
-        event.birth_reaction = Some(birth_reaction.to_string());
-
-        if let Some(track) = &mut self.current_track {
-            // Update track metadata from first event
-            if track.events.is_empty() {
-                track.particle_id = particle_id;
-                track.parent_id = parent_id;
-                track.generation = generation;
-            }
-            track.events.push(event);
+            particle_type,
+            history: self.current_history,
+        });
+        let (event_type, reaction) = if generation == 0 {
+            (TrackEventType::SourceBirth, "source")
+        } else {
+            (TrackEventType::SecondaryBirth, "secondary")
+        };
+        if let Some(e) = self.push(
+            event_type, position, direction, energy, energy, weight, cell_id,
+        ) {
+            e.birth_reaction = Some(reaction.to_string());
         }
     }
 
     fn record_collision(
         &mut self,
-        particle_id: u64,
-        parent_id: Option<u64>,
-        generation: u32,
         position: [f64; 3],
         direction: [f64; 3],
         energy_in: f64,
@@ -563,74 +596,31 @@ impl Tracker for RealTracker {
         distribution: Option<&str>,
         energy_dist: Option<&str>,
     ) {
-        if !self.active {
-            return;
-        }
-
-        let mut event = TrackEvent::new(
-            particle_id,
-            parent_id,
-            generation,
-            self.current_batch,
-            self.current_history,
-            TrackEventType::Collision,
-            position,
-            direction,
-            energy_in,
-            energy_out,
-            weight,
-        );
-        event.cell_id = cell_id;
-        event.reaction_mt = Some(mt);
-        event.nuclide = Some(nuclide.to_string());
-        event.distribution = distribution.map(|s| s.to_string());
-        event.energy_dist = energy_dist.map(|s| s.to_string());
-
-        if let Some(track) = &mut self.current_track {
-            track.events.push(event);
+        let kind = TrackEventType::Collision;
+        if let Some(e) = self.push(
+            kind, position, direction, energy_in, energy_out, weight, cell_id,
+        ) {
+            e.reaction_mt = Some(mt);
+            e.nuclide = Some(nuclide.to_string());
+            e.distribution = distribution.map(str::to_string);
+            e.energy_dist = energy_dist.map(str::to_string);
         }
     }
 
     fn record_surface_crossing(
         &mut self,
-        particle_id: u64,
-        parent_id: Option<u64>,
-        generation: u32,
         position: [f64; 3],
         direction: [f64; 3],
         energy: f64,
         weight: f64,
         cell_id: Option<u32>,
     ) {
-        if !self.active {
-            return;
-        }
-
-        let mut event = TrackEvent::new(
-            particle_id,
-            parent_id,
-            generation,
-            self.current_batch,
-            self.current_history,
-            TrackEventType::SurfaceCrossing,
-            position,
-            direction,
-            energy,
-            energy,
-            weight,
-        );
-        event.cell_id = cell_id;
-
-        if let Some(track) = &mut self.current_track {
-            track.events.push(event);
-        }
+        let kind = TrackEventType::SurfaceCrossing;
+        self.push(kind, position, direction, energy, energy, weight, cell_id);
     }
 
     fn record_termination(
         &mut self,
-        particle_id: u64,
-        parent_id: Option<u64>,
-        generation: u32,
         position: [f64; 3],
         direction: [f64; 3],
         energy: f64,
@@ -638,34 +628,14 @@ impl Tracker for RealTracker {
         cell_id: Option<u32>,
         event_type: TrackEventType,
     ) {
-        if !self.active {
-            return;
-        }
-
-        let mut event = TrackEvent::new(
-            particle_id,
-            parent_id,
-            generation,
-            self.current_batch,
-            self.current_history,
-            event_type,
-            position,
-            direction,
-            energy,
-            energy,
-            weight,
+        self.push(
+            event_type, position, direction, energy, energy, weight, cell_id,
         );
-        event.cell_id = cell_id;
-
-        if let Some(track) = &mut self.current_track {
-            track.events.push(event);
-        }
     }
 
     fn next_particle_id(&mut self) -> u64 {
-        let id = self.next_id;
         self.next_id += 1;
-        id
+        self.next_id - 1
     }
 
     fn should_track(&self) -> bool {
@@ -673,51 +643,10 @@ impl Tracker for RealTracker {
     }
 
     fn into_storage(mut self) -> TrackStorage {
-        // Finalize any remaining track
-        if let Some(track) = self.current_track.take()
-            && !track.events.is_empty()
-        {
-            self.tracks.push(track);
-        }
+        self.flush();
         TrackStorage {
             tracks: self.tracks,
         }
-    }
-}
-
-/// Thread-safe wrapper for collecting tracks from parallel execution
-#[derive(Debug)]
-pub struct ThreadSafeTracker {
-    /// Global particle ID counter (atomic for thread safety)
-    global_id: AtomicU64,
-    /// Which global history indices to capture
-    selection: HistorySelection,
-}
-
-impl ThreadSafeTracker {
-    pub fn new(selection: HistorySelection) -> Self {
-        ThreadSafeTracker {
-            global_id: AtomicU64::new(0),
-            selection,
-        }
-    }
-
-    /// Create a thread-local tracker with a unique ID range
-    pub fn create_thread_tracker(&self) -> RealTracker {
-        // Reserve a large block of IDs for this thread to avoid contention
-        const ID_BLOCK_SIZE: u64 = 1_000_000;
-        let starting_id = self.global_id.fetch_add(ID_BLOCK_SIZE, Ordering::Relaxed);
-        RealTracker::with_starting_id(self.selection.clone(), starting_id)
-    }
-
-    /// Merge all thread-local trackers into a single storage
-    pub fn merge_trackers(trackers: Vec<RealTracker>) -> TrackStorage {
-        let mut all_tracks = Vec::new();
-        for tracker in trackers {
-            let storage = tracker.into_storage();
-            all_tracks.extend(storage.tracks);
-        }
-        TrackStorage { tracks: all_tracks }
     }
 }
 
@@ -727,54 +656,47 @@ impl ThreadSafeTracker {
 mod tests {
     use super::*;
 
+    const O: [f64; 3] = [0.0, 0.0, 0.0];
+    const Z: [f64; 3] = [0.0, 0.0, 1.0];
+
+    fn birth<T: Tracker>(
+        t: &mut T,
+        parent: Option<(u64, u32)>,
+        particle_type: ParticleType,
+    ) -> u64 {
+        let id = t.next_particle_id();
+        let generation = parent.map_or(0, |(_, g)| g + 1);
+        t.record_birth(
+            id,
+            parent.map(|p| p.0),
+            generation,
+            particle_type,
+            O,
+            Z,
+            1e6,
+            1.0,
+            Some(1),
+        );
+        id
+    }
+
     #[test]
     fn test_noop_tracker() {
         let mut tracker = NoOpTracker::new();
         assert!(!tracker.should_track());
-        assert_eq!(tracker.next_particle_id(), 0);
-
         tracker.start_history(0, 0);
-        tracker.record_birth(
-            0,
-            None,
-            0,
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
-            1e6,
-            1.0,
-            Some(1),
-            "source",
-        );
+        birth(&mut tracker, None, ParticleType::Neutron);
         tracker.finish_history();
-
-        let storage = tracker.into_storage();
-        assert!(storage.tracks.is_empty());
+        assert!(tracker.into_storage().tracks.is_empty());
     }
 
     #[test]
     fn test_real_tracker() {
         let mut tracker = RealTracker::new(HistorySelection::All);
-
-        let pid = tracker.next_particle_id();
-        assert_eq!(pid, 0);
-
         tracker.start_history(0, 0);
         assert!(tracker.should_track());
-        tracker.record_birth(
-            pid,
-            None,
-            0,
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
-            1e6,
-            1.0,
-            Some(1),
-            "source",
-        );
+        assert_eq!(birth(&mut tracker, None, ParticleType::Neutron), 0);
         tracker.record_collision(
-            pid,
-            None,
-            0,
             [1.0, 0.0, 0.0],
             [0.5, 0.5, 0.707],
             1e6,
@@ -808,28 +730,66 @@ mod tests {
     }
 
     #[test]
+    fn test_each_particle_gets_its_own_track_with_type_and_lineage() {
+        let mut tracker = RealTracker::new(HistorySelection::All);
+        tracker.start_history(0, 7);
+        let n = birth(&mut tracker, None, ParticleType::Neutron);
+        tracker.record_surface_crossing(Z, Z, 1e6, 1.0, Some(2));
+        let p = birth(&mut tracker, Some((n, 0)), ParticleType::Photon);
+        tracker.record_termination(Z, Z, 1e5, 1.0, Some(2), TrackEventType::Leak);
+        tracker.finish_history();
+
+        let tracks = tracker.into_storage().tracks;
+        assert_eq!(tracks.len(), 2);
+        let (t0, t1) = (&tracks[0], &tracks[1]);
+        assert_eq!((t0.particle_id, t0.parent_id, t0.generation), (0, None, 0));
+        assert_eq!(
+            (t1.particle_id, t1.parent_id, t1.generation),
+            (p, Some(0), 1)
+        );
+        assert_eq!(
+            (t0.particle_type, t1.particle_type),
+            (ParticleType::Neutron, ParticleType::Photon)
+        );
+        assert_eq!((t0.history, t1.history), (7, 7));
+        assert_eq!(t1.events[0].event_type, TrackEventType::SecondaryBirth);
+        assert!(t1
+            .events
+            .iter()
+            .all(|e| e.particle_type == ParticleType::Photon));
+        assert_eq!(t1.events[1].event_type, TrackEventType::Leak);
+
+        // Polylines: one line per track, offsets bracket each line's points.
+        let mut storage = TrackStorage {
+            tracks: tracks.clone(),
+        };
+        storage.sort();
+        let lines = storage.polylines();
+        assert_eq!(lines.offsets, vec![0, 2, 4]);
+        assert_eq!(lines.particle_type, vec![0, 1]);
+        assert_eq!(lines.parent_id, vec![-1, 0]);
+        assert_eq!(lines.event_type[3], TrackEventType::Leak as u8);
+        assert!(TrackEventType::ALL
+            .iter()
+            .enumerate()
+            .all(|(i, t)| *t as usize == i));
+        assert_eq!(lines.cell_id, vec![1, 2, 1, 2]);
+
+        // IDs restart at 0 every history.
+        let mut tracker = RealTracker::new(HistorySelection::All);
+        tracker.start_history(0, 0);
+        birth(&mut tracker, None, ParticleType::Neutron);
+        tracker.start_history(0, 1);
+        assert_eq!(tracker.next_particle_id(), 0);
+    }
+
+    #[test]
     fn test_first_n_selection() {
         // first(2) captures global indices 0 and 1 only.
-        let mut tracker = RealTracker::new(HistorySelection::first(2));
-
-        for i in 0..5 {
-            tracker.start_history(0, i);
-            tracker.record_birth(
-                i as u64,
-                None,
-                0,
-                [0.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0],
-                1e6,
-                1.0,
-                Some(1),
-                "source",
-            );
-            tracker.finish_history();
-        }
-
-        let storage = tracker.into_storage();
-        assert_eq!(storage.tracks.len(), 2); // Only 2 histories tracked
+        assert_eq!(
+            captured_histories(HistorySelection::first(2), 5),
+            vec![0, 1]
+        );
     }
 
     /// Run histories 0..n through a tracker and return the captured global
@@ -838,24 +798,14 @@ mod tests {
         let mut tracker = RealTracker::new(selection);
         for i in 0..n {
             tracker.start_history(0, i);
-            tracker.record_birth(
-                i as u64,
-                None,
-                0,
-                [0.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0],
-                1e6,
-                1.0,
-                Some(1),
-                "source",
-            );
+            birth(&mut tracker, None, ParticleType::Neutron);
             tracker.finish_history();
         }
         tracker
             .into_storage()
             .tracks
             .iter()
-            .map(|t| t.events[0].history)
+            .map(|t| t.history)
             .collect()
     }
 
@@ -880,33 +830,15 @@ mod tests {
 
     #[test]
     fn test_range_and_set_selection_capture_by_global_index() {
-        // range(20, 30): histories 20..=29.
+        let range = |start, stop, step| HistorySelection::Range { start, stop, step };
         assert_eq!(
-            captured_histories(
-                HistorySelection::Range {
-                    start: 20,
-                    stop: 30,
-                    step: 1
-                },
-                50
-            ),
+            captured_histories(range(20, 30, 1), 50),
             (20..30).collect::<Vec<_>>()
         );
-
-        // range(0, 50, 10): every 10th history.
         assert_eq!(
-            captured_histories(
-                HistorySelection::Range {
-                    start: 0,
-                    stop: 50,
-                    step: 10
-                },
-                50
-            ),
+            captured_histories(range(0, 50, 10), 50),
             vec![0, 10, 20, 30, 40]
         );
-
-        // Explicit index set, captured in ascending order.
         assert_eq!(
             captured_histories(
                 HistorySelection::Set([20u64, 30, 45].into_iter().collect()),
@@ -914,16 +846,5 @@ mod tests {
             ),
             vec![20, 30, 45]
         );
-    }
-
-    #[test]
-    fn test_thread_safe_tracker() {
-        let ts_tracker = ThreadSafeTracker::new(HistorySelection::All);
-
-        let tracker1 = ts_tracker.create_thread_tracker();
-        let tracker2 = ts_tracker.create_thread_tracker();
-
-        // Each tracker should have different starting IDs
-        assert_ne!(tracker1.next_id, tracker2.next_id);
     }
 }
