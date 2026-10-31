@@ -119,14 +119,104 @@ fn assign_ids(
     Ok(())
 }
 
+/// Comma-separated quoted names, cut to the first 20 with a count of the rest.
+fn name_list(names: &[&str]) -> String {
+    const SHOWN: usize = 20;
+    let mut s = names
+        .iter()
+        .take(SHOWN)
+        .map(|n| format!("'{n}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if names.len() > SHOWN {
+        s += &format!(", ... ({} in total)", names.len());
+    }
+    s
+}
+
+/// Levenshtein distance between two strings, by characters.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut diag = row[0];
+        row[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let next = (diag + usize::from(ca != cb))
+                .min(row[j] + 1)
+                .min(row[j + 1] + 1);
+            diag = row[j + 1];
+            row[j + 1] = next;
+        }
+    }
+    row[b.len()]
+}
+
+/// Closest volume name to `key`: the name left after stripping a `mat:`
+/// prefix, else a case-insensitive match, else the nearest name within a
+/// third of the key's length in edits.
+fn closest_name<'a>(key: &str, names: &[&'a str]) -> Option<&'a str> {
+    let bare = key.strip_prefix("mat:").unwrap_or(key);
+    names
+        .iter()
+        .find(|n| n.eq_ignore_ascii_case(bare))
+        .copied()
+        .or_else(|| {
+            names
+                .iter()
+                .map(|n| (edit_distance(&bare.to_lowercase(), &n.to_lowercase()), *n))
+                .filter(|&(d, _)| d <= bare.chars().count().div_ceil(3))
+                .min()
+                .map(|(_, n)| n)
+        })
+}
+
+/// Fail when a key of `materials` names no volume, so a typo or a `mat:`
+/// prefix cannot silently leave volumes void.
+fn check_material_keys(
+    materials: &HashMap<String, Arc<Material>>,
+    names: &[Option<&str>],
+) -> Result<(), String> {
+    let mut available: Vec<&str> = names.iter().flatten().copied().collect();
+    available.sort_unstable();
+    available.dedup();
+    let mut unmatched: Vec<&str> = materials
+        .keys()
+        .map(String::as_str)
+        .filter(|k| available.binary_search(k).is_err())
+        .collect();
+    if unmatched.is_empty() {
+        return Ok(());
+    }
+    unmatched.sort_unstable();
+    let hints: Vec<String> = unmatched
+        .iter()
+        .filter_map(|k| closest_name(k, &available).map(|n| format!("'{n}' for '{k}'")))
+        .collect();
+    let hint = if hints.is_empty() {
+        String::new()
+    } else {
+        format!(" Did you mean {}?", hints.join(", "))
+    };
+    Err(format!(
+        "materials keys match no volume: {}. Volume names are: {}.{hint}",
+        name_list(&unmatched),
+        if available.is_empty() {
+            "(none)".to_string()
+        } else {
+            name_list(&available)
+        }
+    ))
+}
+
 impl MeshGeometry {
     /// Build a `MeshGeometry` from a loaded mesh and a material map.
     ///
     /// # Arguments
     /// * `mesh` -- already-loaded `yamt::MeshGeometry`
-    /// * `materials` -- mapping from material name (e.g. `"fuel"`) to YAMC
-    ///   `Material`. Names are matched against the `mat:` prefix in the
-    ///   mesh's physical group names (without the prefix).
+    /// * `materials` -- mapping from volume name (e.g. `"fuel"`) to YAMC
+    ///   `Material`. A volume's name is its `mat:<name>` physical group
+    ///   name without the `mat:` prefix, so keys are bare names.
     /// * `implicit_complement_material` -- optional material for the implicit
     ///   complement (unmeshed space). `None` means void (free-streaming,
     ///   `dist_collision = INFINITY`). `Some(mat)` assigns a real material
@@ -136,15 +226,20 @@ impl MeshGeometry {
     /// allocator, in name order, so the ids do not depend on the map's
     /// iteration order.
     ///
+    /// Volumes whose name has no key in `materials` are void, reported in
+    /// one summary line.
+    ///
     /// # Errors
-    /// Returns an error if any mesh volume references a material name that
-    /// is not present in `materials`.
+    /// Returns an error naming every key of `materials` that matches no
+    /// volume name, with the available names and a close match when one exists.
     pub fn new(
         mesh: yamt::MeshGeometry,
         materials: &HashMap<String, Arc<Material>>,
         mut implicit_complement_material: Option<Arc<Material>>,
     ) -> Result<Self, String> {
         let num_volumes = mesh.topology.num_volumes;
+        let names: Vec<Option<&str>> = (0..num_volumes).map(|v| mesh.material_name(v)).collect();
+        check_material_keys(materials, &names)?;
 
         let mut cells = Vec::with_capacity(num_volumes as usize + 1);
         let mut volume_ids = Vec::with_capacity(num_volumes as usize + 1);
@@ -156,9 +251,10 @@ impl MeshGeometry {
         let dummy_region = make_dummy_region();
 
         let mut flat_materials: Vec<Arc<Material>> = Vec::new();
+        let mut void_names: Vec<&str> = Vec::new();
 
         for vol_id in 0..num_volumes {
-            let mat_name = mesh.material_name(vol_id);
+            let mat_name = names[vol_id as usize];
 
             // Use precomputed volume from topology (divergence theorem)
             let vol_measure = mesh.topology.volume_measures.get(vol_id as usize).copied();
@@ -179,10 +275,7 @@ impl MeshGeometry {
                         Some(idx)
                     }
                     None => {
-                        eprintln!(
-                            "Warning: volume {vol_id} material \"{name}\" \
-                             not in materials map; treating as void"
-                        );
+                        void_names.push(name);
                         None
                     }
                 },
@@ -202,6 +295,16 @@ impl MeshGeometry {
 
             cells.push(cell);
             volume_ids.push(vol_id);
+        }
+
+        if !void_names.is_empty() {
+            void_names.sort_unstable();
+            void_names.dedup();
+            eprintln!(
+                "Warning: {} named volume(s) have no entry in materials and are void: {}",
+                void_names.len(),
+                name_list(&void_names)
+            );
         }
 
         // Implicit complement cell -- the last cell. Void (material_idx: None)
@@ -695,13 +798,51 @@ mod tests {
     fn test_dagmc_geometry_missing_material_treated_as_void() {
         let mesh = cube_mesh();
 
-        // Empty material map -- missing "water" is treated as void with a warning
+        // Empty material map -- the unassigned "water" volume is void
         let materials = HashMap::new();
         let result = MeshGeometry::new(mesh, &materials, None);
         assert!(result.is_ok());
         let geom = result.unwrap();
         // Volume cell should have no material (void)
         assert!(geom.cells[0].material_idx.is_none());
+    }
+
+    fn water_map(keys: &[&str]) -> HashMap<String, Arc<Material>> {
+        let water = Material::new(
+            HashMap::from([("H1".into(), 2.0), ("O16".into(), 1.0)]),
+            "atom",
+            "sum",
+            None,
+        )
+        .unwrap();
+        let water = Arc::new(water);
+        keys.iter()
+            .map(|k| (k.to_string(), Arc::clone(&water)))
+            .collect()
+    }
+
+    #[test]
+    fn test_unmatched_material_keys_are_rejected() {
+        let err = MeshGeometry::new(
+            cube_mesh(),
+            &water_map(&["mat:water", "wtaer", "zzz"]),
+            None,
+        )
+        .err()
+        .unwrap();
+        assert!(err.contains("'mat:water', 'wtaer', 'zzz'"), "{err}");
+        assert!(err.contains("Volume names are: 'water'"), "{err}");
+        assert!(
+            err.contains("Did you mean 'water' for 'mat:water', 'water' for 'wtaer'?"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_edit_distance() {
+        assert_eq!(edit_distance("frist_wall", "first_wall"), 2);
+        assert_eq!(edit_distance("", "abc"), 3);
+        assert_eq!(edit_distance("abc", "abc"), 0);
     }
 
     #[test]
