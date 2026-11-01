@@ -345,6 +345,9 @@ pub struct TransportSettings {
     pub data_uncertainty: Option<TransportDataUncertainty>,
 }
 
+/// Per material id, per replica, each nuclide's atom density [atoms/b-cm].
+pub type ReplicaCompositions = HashMap<u32, Vec<HashMap<String, f64>>>;
+
 /// Nuclear-data uncertainty for one transport run.
 ///
 /// Each history carries `replicas` weight ratios, one per draw of the
@@ -464,6 +467,13 @@ pub struct Model {
     pub last_transport_secs: Option<f64>,
     #[serde(skip)]
     pub lost_particles: Vec<crate::util::lost_particle::LostParticle>,
+    /// Per material id, per replica, the atom densities a coupled run's
+    /// replicas have reached, which a run with replica weights carries as
+    /// likelihood ratios on the nominal composition (see
+    /// [`ReplicaCompositions`]). Set by the coupled transmutation driver for
+    /// one step's transport; `None` otherwise. Runtime state; not serialized.
+    #[serde(skip)]
+    pub replica_compositions: Option<Arc<ReplicaCompositions>>,
     /// Precision-based stopping criteria. When non-empty, the transport loop
     /// stops at the first checkpoint where every convergence target is
     /// satisfied. Under MPI the check is collective: the per-tally moments are
@@ -600,6 +610,7 @@ impl Model {
             last_data_load_secs: None,
             last_transport_secs: None,
             lost_particles: Vec::new(),
+            replica_compositions: None,
             convergence_targets: Vec::new(),
         }
     }
@@ -631,6 +642,7 @@ impl Model {
             last_data_load_secs: None,
             last_transport_secs: None,
             lost_particles: Vec::new(),
+            replica_compositions: None,
             convergence_targets: Vec::new(),
         }
     }
@@ -2004,6 +2016,7 @@ impl Model {
                 transmutation_tallies.as_deref(),
                 data.replicas,
                 data.seed,
+                self.replica_compositions.as_deref(),
             )?),
             None => None,
         };

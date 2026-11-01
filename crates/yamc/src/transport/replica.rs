@@ -387,10 +387,19 @@ impl ResonanceTables {
     }
 }
 
+/// Per material id, per replica, each nuclide's atom density: the
+/// compositions a coupled run's replicas have reached, which one transport
+/// on the nominal composition carries as likelihood ratios (see
+/// [`ReplicaContext::new`]).
+type Compositions = crate::model::ReplicaCompositions;
+
 /// One nuclide of one material, as the replicas read it.
 struct ReplicaNuclide {
     /// Atoms per barn-cm.
     density: f64,
+    /// Per replica, its own density of the nuclide over [`Self::density`],
+    /// where some replica's composition differs from the nominal one.
+    ratio: Option<Vec<f64>>,
     grid: Vec<f64>,
     sources: Vec<Source>,
     /// Each covered partial's terms.
@@ -497,6 +506,25 @@ impl ReplicaNuclide {
 
     fn at(table: &[f64], (i, f): (usize, f64)) -> f64 {
         table[i] + f * (table[i + 1] - table[i])
+    }
+
+    /// The nominal total cross section at `at`, the band's total inside the
+    /// unresolved range.
+    fn total_at(&self, at: (usize, f64), band: Option<&UrrBand>) -> f64 {
+        match band {
+            Some(b) => band_values(b).iter().sum(),
+            None => self.total.as_ref().map_or(0.0, |t| xs_at(t, at)),
+        }
+    }
+
+    /// `out[k] += r_k change[k] + density (r_k - 1) nominal` over replicas
+    /// `k`: what replica `k`'s own density of the nuclide makes of a change
+    /// `change` to its cross section at nominal density, and of a nominal
+    /// macroscopic `density * nominal`.
+    fn add_scaled(ratio: &[f64], density: f64, nominal: f64, change: &[f64], out: &mut [f64]) {
+        for ((o, r), c) in out.iter_mut().zip(ratio).zip(change) {
+            *o += r * c + density * (r - 1.0) * nominal;
+        }
     }
 
     /// The probability-table band at `e` for the per-collision base seed
@@ -826,12 +854,22 @@ impl ReplicaContext {
     /// `tallies` and, with `transmutation`, for every nuclide and MT that
     /// tally scores (see [`ReplicaChanges`]). The materials' nuclear data must
     /// be loaded, with covariance, at the run's temperature.
+    ///
+    /// With `compositions`, replica `k` of each material listed there has
+    /// its own atom densities, and its ratios carry them as well as its
+    /// cross sections: a flight's `Σ'_t,k = Σ_i N'_k,i σ'_k,i`, a collision
+    /// on nuclide `i`'s `N'_k,i σ'_k,mt / (N_i σ_mt)`, a score's
+    /// `Σ'_x,k / Σ_x`. A nuclide a replica holds and the nominal does not
+    /// has no histories to carry it and is left out: the transport samples
+    /// only what the nominal composition holds. A transmutation tally's
+    /// rates are per atom and do not move with the densities.
     pub(crate) fn new(
         materials: &[Arc<Material>],
         tallies: &[Arc<Tally>],
         transmutation: Option<&TransmutationTallies>,
         replicas: usize,
         seed: u64,
+        compositions: Option<&Compositions>,
     ) -> Result<Self, String> {
         let score_mts: BTreeSet<i32> = tallies
             .iter()
@@ -857,6 +895,10 @@ impl ReplicaContext {
             let layout = transmutation
                 .zip(material.get_material_id())
                 .and_then(|(t, id)| t.layout(id));
+            let composition = compositions
+                .zip(material.get_material_id())
+                .and_then(|(c, id)| c.get(&id))
+                .map(Vec::as_slice);
             let tables = Self::material(
                 material,
                 &score_mts,
@@ -866,6 +908,7 @@ impl ReplicaContext {
                 &mut registry,
                 &cross,
                 &partners,
+                composition,
             )?;
             if let (Some(id), Some(_)) = (material.get_material_id(), tables.as_ref().and(layout)) {
                 transmutation_slots.entry(id).or_insert(slot);
@@ -920,7 +963,14 @@ impl ReplicaContext {
         registry: &mut ModeRegistry,
         cross: &CrossMaterial,
         partners: &BTreeMap<String, CellField>,
+        composition: Option<&[HashMap<String, f64>]>,
     ) -> Result<Option<ReplicaMaterial>, String> {
+        if composition.is_some_and(|c| c.len() != replicas) {
+            return Err(format!(
+                "replica compositions for {} replicas, the run carries {replicas}",
+                composition.map_or(0, <[_]>::len)
+            ));
+        }
         let sampling = resonance_sampling(material);
         let mut score_mts = score_mts.clone();
         let mut names: Vec<&String> = material.nuclides.keys().collect();
@@ -997,7 +1047,18 @@ impl ReplicaContext {
             else {
                 continue;
             };
-            any_covered |= !tab.sources.is_empty() || tab.resonance.is_some();
+            let mut tab = tab;
+            if let Some(c) = composition
+                && tab.density > 0.0
+            {
+                let ratio: Vec<f64> = c
+                    .iter()
+                    .map(|d| d.get(name).copied().unwrap_or(0.0) / tab.density)
+                    .collect();
+                tab.ratio = ratio.iter().any(|r| *r != 1.0).then_some(ratio);
+            }
+            any_covered |=
+                !tab.sources.is_empty() || tab.resonance.is_some() || tab.ratio.is_some();
             by_name.insert(name.clone(), nuclides.len());
             nuclides.push(tab);
         }
@@ -1339,6 +1400,7 @@ impl ReplicaContext {
 
         Ok(Some(ReplicaNuclide {
             density,
+            ratio: None,
             total: held.get(&1).cloned(),
             grid,
             sources,
@@ -1378,11 +1440,21 @@ impl ReplicaContext {
         let Some(m) = self.material_at(slot) else {
             return;
         };
+        let mut own_change = vec![0.0; out.len()];
         for nuc in &m.nuclides {
             let Some(at) = nuc.locate(e) else {
                 continue;
             };
-            let g = nuc.band(e, urr_random).map(|b| band_factors(&b));
+            let band = nuc.band(e, urr_random);
+            let g = band.as_ref().map(band_factors);
+            // With densities of its own a replica scales this nuclide's
+            // change and adds its density change times the nominal total.
+            let target: &mut [f64] = if nuc.ratio.is_some() {
+                own_change.fill(0.0);
+                &mut own_change
+            } else {
+                out
+            };
             for s in &nuc.sources {
                 let sum = match &g {
                     Some(g) => ReplicaNuclide::banded(s, at, g, &Channel::ALL),
@@ -1392,7 +1464,7 @@ impl ReplicaContext {
                     continue;
                 }
                 let own = ReplicaNuclide::at(&s.own, at);
-                s.add_change(e, own, nuc.density * sum, out, grad);
+                s.add_change(e, own, nuc.density * sum, target, grad);
             }
             if let Some(res) = &nuc.resonance
                 && let Some(local) = res.local(at)
@@ -1400,9 +1472,13 @@ impl ReplicaContext {
                 for m in 0..res.reactions.len() {
                     let scale = nuc.density * res.band_factor(m, g.as_ref());
                     if scale != 0.0 {
-                        res.add(m, local, scale, out);
+                        res.add(m, local, scale, target);
                     }
                 }
+            }
+            if let Some(ratio) = &nuc.ratio {
+                let total = nuc.total_at(at, band.as_ref());
+                ReplicaNuclide::add_scaled(ratio, nuc.density, total, &own_change, out);
             }
         }
     }
@@ -1411,7 +1487,38 @@ impl ReplicaContext {
     /// `nuclide` puts on each replica's ratio, into `out`; all ones where
     /// nothing perturbs it. `grad` gets the factor's gradient along the
     /// run's modes, which is its logarithm's at the nominal.
+    ///
+    /// With replica densities, times each replica's own density of the
+    /// nuclide over the nominal one: the collision's density is `N σ_mt`.
     pub(crate) fn collision_factor(
+        &self,
+        slot: Option<u32>,
+        nuclide: &str,
+        mt: i32,
+        e: f64,
+        out: &mut [f64],
+        grad: &mut [f64],
+    ) {
+        self.data_collision_factor(slot, nuclide, mt, e, out, grad);
+        self.scale_by_density(slot, nuclide, out);
+    }
+
+    /// Each replica's density of `nuclide` over the nominal one, onto `out`.
+    fn scale_by_density(&self, slot: Option<u32>, nuclide: &str, out: &mut [f64]) {
+        let ratio = self
+            .material_at(slot)
+            .and_then(|m| m.by_name.get(nuclide).map(|&i| &m.nuclides[i]))
+            .and_then(|nuc| nuc.ratio.as_ref());
+        if let Some(ratio) = ratio {
+            for (o, r) in out.iter_mut().zip(ratio) {
+                *o *= r;
+            }
+        }
+    }
+
+    /// [`Self::collision_factor`] at the nominal densities: the draw's
+    /// factor alone.
+    fn data_collision_factor(
         &self,
         slot: Option<u32>,
         nuclide: &str,
@@ -1522,12 +1629,26 @@ impl ReplicaContext {
         out: &mut [f64],
         grad: &mut [f64],
     ) {
+        self.data_reaction_factor(slot, nuclide, mt, e, out, grad);
+        self.scale_by_density(slot, nuclide, out);
+    }
+
+    /// [`Self::reaction_factor`] at the nominal densities.
+    fn data_reaction_factor(
+        &self,
+        slot: Option<u32>,
+        nuclide: &str,
+        mt: i32,
+        e: f64,
+        out: &mut [f64],
+        grad: &mut [f64],
+    ) {
         let sum = self
             .material_at(slot)
             .and_then(|m| m.by_name.get(nuclide).map(|&i| &m.nuclides[i]))
             .and_then(|nuc| Some((nuc, nuc.sums.get(&mt)?, nuc.locate(e)?)));
         let Some((nuc, sum, at)) = sum else {
-            return self.collision_factor(slot, nuclide, mt, e, out, grad);
+            return self.data_collision_factor(slot, nuclide, mt, e, out, grad);
         };
         out.fill(1.0);
         grad.fill(0.0);
@@ -1656,8 +1777,14 @@ impl ReplicaContext {
                     },
                 )
                 .collect();
+            // A replica's own density scales the nuclide's whole total.
+            let scale = nuc
+                .ratio
+                .as_ref()
+                .map_or(1.0, |r| r.iter().copied().fold(1.0_f64, f64::max));
+            let bound = |m: f64| (scale * (1.0 + m) - 1.0).max(m);
             for i in 0..n - 1 {
-                let m = relative[i].max(relative[i + 1]);
+                let m = bound(relative[i].max(relative[i + 1]));
                 let (lo, hi) = (bands.index(nuc.grid[i]), bands.index(nuc.grid[i + 1]));
                 for band in &mut margin[lo..=hi] {
                     *band = band.max(m);
@@ -1706,19 +1833,28 @@ impl ReplicaContext {
         let mut denominator = 0.0;
         let mut change = vec![0.0; out.len()];
         let mut change_grad = vec![0.0; grad.len()];
+        let mut own_change = vec![0.0; out.len()];
         for nuc in &m.nuclides {
             let Some(at) = nuc.locate(e) else {
                 continue;
             };
+            // With densities of its own a replica scales this nuclide's
+            // change and adds its density change times the nominal score.
+            let target: &mut [f64] = if nuc.ratio.is_some() {
+                own_change.fill(0.0);
+                &mut own_change
+            } else {
+                &mut change
+            };
+            let nominal;
             if let (Some(channels), Some(band)) = (banded, nuc.band(e, urr_random)) {
                 let values = band_values(&band);
-                denominator +=
-                    nuc.density * channels.iter().map(|c| values[c.index()]).sum::<f64>();
+                nominal = channels.iter().map(|c| values[c.index()]).sum::<f64>();
                 let g = band_factors(&band);
                 for src in &nuc.sources {
                     let own = ReplicaNuclide::at(&src.own, at);
                     let sum = ReplicaNuclide::banded(src, at, &g, channels);
-                    src.add_change(e, own, nuc.density * sum, &mut change, &mut change_grad);
+                    src.add_change(e, own, nuc.density * sum, target, &mut change_grad);
                 }
                 // A band's channel moves by its smooth channel's change times
                 // the band's factor, the sampled resonance parameters' too.
@@ -1732,35 +1868,39 @@ impl ReplicaContext {
                             .is_some_and(|c| channels.contains(&c));
                         if inside {
                             let scale = nuc.density * res.band_factor(m, Some(&g));
-                            res.add(m, local, scale, &mut change);
+                            res.add(m, local, scale, target);
                         }
                     }
                 }
-                continue;
-            }
-            let Some((by_source, nominal)) = nuc.scores.get(&x) else {
-                continue;
-            };
-            denominator += nuc.density * ReplicaNuclide::at(nominal, at);
-            for (s, xs) in by_source {
-                let src = &nuc.sources[*s];
-                let own = ReplicaNuclide::at(&src.own, at);
-                src.add_change(
-                    e,
-                    own,
-                    nuc.density * ReplicaNuclide::at(xs, at),
-                    &mut change,
-                    &mut change_grad,
-                );
-            }
-            if let Some((res, local, weights)) = nuc
-                .resonance
-                .as_ref()
-                .and_then(|r| Some((r, r.local(at)?, r.scores.get(&x)?)))
-            {
-                for (m, w) in weights {
-                    res.add(*m, local, nuc.density * w.at(local), &mut change);
+            } else {
+                let Some((by_source, table)) = nuc.scores.get(&x) else {
+                    continue;
+                };
+                nominal = ReplicaNuclide::at(table, at);
+                for (s, xs) in by_source {
+                    let src = &nuc.sources[*s];
+                    let own = ReplicaNuclide::at(&src.own, at);
+                    src.add_change(
+                        e,
+                        own,
+                        nuc.density * ReplicaNuclide::at(xs, at),
+                        target,
+                        &mut change_grad,
+                    );
                 }
+                if let Some((res, local, weights)) = nuc
+                    .resonance
+                    .as_ref()
+                    .and_then(|r| Some((r, r.local(at)?, r.scores.get(&x)?)))
+                {
+                    for (m, w) in weights {
+                        res.add(*m, local, nuc.density * w.at(local), target);
+                    }
+                }
+            }
+            denominator += nuc.density * nominal;
+            if let Some(ratio) = &nuc.ratio {
+                ReplicaNuclide::add_scaled(ratio, nuc.density, nominal, &own_change, &mut change);
             }
         }
         if denominator > 0.0 {
@@ -2159,7 +2299,7 @@ mod nc_derived_tests {
             return;
         };
         let replicas = 8;
-        let ctx = ReplicaContext::new(&[Arc::new(m.clone())], &[], None, replicas, SEED)
+        let ctx = ReplicaContext::new(&[Arc::new(m.clone())], &[], None, replicas, SEED, None)
             .expect("replica context");
         let (fields, _) =
             yani_transmute::covariance_fold::transport_fields(&m, &Default::default());
@@ -2226,7 +2366,7 @@ mod nc_derived_tests {
             return;
         };
         let replicas = 4096;
-        let ctx = ReplicaContext::new(&[Arc::new(m.clone())], &[], None, replicas, SEED)
+        let ctx = ReplicaContext::new(&[Arc::new(m.clone())], &[], None, replicas, SEED, None)
             .expect("replica context");
         let (fields, _) =
             yani_transmute::covariance_fold::transport_fields(&m, &Default::default());
@@ -2355,7 +2495,7 @@ mod deposit_tests {
             (Score::DamageEnergy(DamageEnergyScore), 444),
         ];
         let tallies: Vec<Arc<Tally>> = scores.iter().map(|(s, _)| tally(s.clone())).collect();
-        let ctx = ReplicaContext::new(&[Arc::new(m.clone())], &tallies, None, replicas, SEED)
+        let ctx = ReplicaContext::new(&[Arc::new(m.clone())], &tallies, None, replicas, SEED, None)
             .expect("replica context");
         let (fields, _) = yani_transmute::covariance_fold::transport_fields(m, &Default::default());
         let cells = fields

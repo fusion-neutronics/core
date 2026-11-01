@@ -391,6 +391,7 @@ impl PyModel {
             last_data_load_secs: None,
             last_transport_secs: None,
             lost_particles: Vec::new(),
+            replica_compositions: None,
             convergence_targets: Vec::new(),
         };
 
