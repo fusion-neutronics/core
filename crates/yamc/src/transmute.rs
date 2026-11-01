@@ -105,8 +105,9 @@ impl Model {
     ///   again per replica instead ([`yani_transmute::coupled_uncertainty`]),
     ///   each on its own transport seed, decay data and, with the
     ///   cross-section source, its own nuclear data in every transport
-    ///   ([`crate::coupled_xs`]), and refuse the sources a replica cannot
-    ///   carry yet. `None` is the default path, bit-identical to a build
+    ///   ([`crate::coupled_xs`]) and, with the MF=40 source, its own
+    ///   isomer production curves, and refuse attribution, which a replica
+    ///   cannot carry yet. `None` is the default path, bit-identical to a build
     ///   without it, and so are the nominal results of either method with it.
     ///   With the cross-section source on in independent mode, the transport
     ///   carries a fixed number of replica weights
@@ -156,9 +157,11 @@ impl Model {
         // the whole coupled run again instead, and what a replica cannot carry
         // yet is refused here, before anything runs.
         let coupled_replicas = match uncertainty {
-            Some(request) if !is_independent => Some(
-                yani_transmute::coupled_uncertainty::CoupledReplicas::new(request, &chain)?,
-            ),
+            Some(request) if !is_independent => {
+                Some(yani_transmute::coupled_uncertainty::CoupledReplicas::new(
+                    request, &chain, &branch,
+                )?)
+            }
             _ => None,
         };
         // The per-history covariance of one transport is what independent mode
@@ -166,8 +169,12 @@ impl Model {
         let want_statistics = is_independent
             && uncertainty
                 .is_some_and(|u| u.wants(yani_transmute::uncertainty::Source::Statistical));
-        let want_isomer = uncertainty
-            .is_some_and(|u| u.wants(yani_transmute::uncertainty::Source::IsomerBranching));
+        // The interval productions independent mode re-splits the tallied
+        // partials with. A coupled replica tallies its own partials on its own
+        // production curves instead.
+        let want_isomer = is_independent
+            && uncertainty
+                .is_some_and(|u| u.wants(yani_transmute::uncertainty::Source::IsomerBranching));
         let want_cross_sections = uncertainty
             .is_some_and(|u| u.wants(yani_transmute::uncertainty::Source::CrossSections));
         // With the cross sections perturbed, independent mode's single
@@ -849,6 +856,7 @@ impl Model {
                 timesteps: &timesteps,
                 source_rates: &source_rates,
                 branch: &branch,
+                carried: &carried,
                 parts,
                 has_nuclide_tallies,
             };
@@ -868,7 +876,8 @@ impl Model {
                     ..settings.clone()
                 };
                 let mut data = library.as_mut().map(|l| l.replica(k));
-                self.coupled_replica(&run, edited, &replica_settings, data.as_mut())
+                let branch = replicas.branch(&branch, k);
+                self.coupled_replica(&run, edited, &branch, &replica_settings, data.as_mut())
             });
             self.geometry.materials_mut().clone_from_slice(&end);
             for (id, (ensemble, mut info)) in ensembles? {
@@ -933,6 +942,8 @@ struct CoupledRun<'a> {
     timesteps: &'a [f64],
     source_rates: &'a [f64],
     branch: &'a Arc<yani::BranchTable>,
+    /// Per material, the nuclides the tallies score.
+    carried: &'a HashMap<u32, std::collections::HashSet<String>>,
     parts: yani::ChainParts,
     has_nuclide_tallies: bool,
 }
@@ -1094,6 +1105,7 @@ impl Model {
         &mut self,
         run: &CoupledRun,
         chain: &Arc<HashMap<String, ChainNuclide>>,
+        branch: &Arc<yani::BranchTable>,
         settings: &crate::model::TransportSettings,
         mut data: Option<&mut crate::coupled_xs::Replica>,
     ) -> Result<
@@ -1117,6 +1129,26 @@ impl Model {
                 made.insert(at, Arc::clone(slot));
             }
         }
+        // A replica with its own production curves tallies on them.
+        let tallies = if Arc::ptr_eq(branch, run.branch) {
+            Arc::clone(run.tallies)
+        } else {
+            let materials: HashMap<u32, &Material> = run
+                .cells
+                .iter()
+                .filter_map(|(&id, cells)| {
+                    let slot = self.geometry.cells()[*cells.first()?].material_idx?;
+                    Some((id, self.geometry.materials().get(slot as usize)?.as_ref()))
+                })
+                .collect();
+            Arc::new(TransmutationTallies::new(
+                run.cells,
+                &materials,
+                chain,
+                branch,
+                run.carried,
+            )?)
+        };
         let mut compositions = run.initial.clone();
         let mut fy_weights: HashMap<u32, FissionYieldWeights> = HashMap::new();
         let mut out: HashMap<u32, yani_transmute::coupled_uncertainty::Inventories> = run
@@ -1128,15 +1160,15 @@ impl Model {
             let mut rates = HashMap::new();
             let mut folded = HashMap::new();
             if source_rate > 0.0 {
-                run.tallies.reset();
+                tallies.reset();
                 self.run_internal::<NoOpTracker>(
                     settings,
                     None,
-                    Some(Arc::clone(run.tallies)),
+                    Some(Arc::clone(&tallies)),
                     false,
                 )?;
                 rates = self.tallied_step_rates(
-                    run.tallies,
+                    &tallies,
                     run.cells,
                     source_rate,
                     step,
@@ -1144,10 +1176,10 @@ impl Model {
                 );
                 folded = self
                     .fold_step_branching(
-                        run.tallies,
+                        &tallies,
                         run.cells,
                         chain,
-                        run.branch,
+                        branch,
                         source_rate,
                         step,
                         &mut rates,

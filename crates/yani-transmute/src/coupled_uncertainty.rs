@@ -29,10 +29,16 @@
 //! uncertainty and the spread is the sum of the two, as asked; with the cross
 //! sections alone, it would be reported as the data's.
 //!
+//! The MF=40 isomer production covariance moves the branching table: every
+//! transport of replica `k` tallies its isomeric partials, and every step
+//! splits them, on production curves carrying replica `k`'s draw, the one an
+//! independent replica of the same index makes (see
+//! [`crate::isomer_branching_uncertainty`]). A curve only moves what is
+//! tallied, not what is transported, so this source needs no seed of its
+//! own, as the decay data need none.
+//!
 //! What a replica cannot yet carry is refused rather than held at nominal:
-//! `isomer_branching`, which would need every replica's transport to read its
-//! own MF=40 production curves, and `attribution`, which would need one
-//! coupled ensemble per source.
+//! `attribution`, which would need one coupled ensemble per source.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -72,31 +78,19 @@ pub struct CoupledReplicas {
     half_lives: Vec<crate::uncertainty::HalfLifeSigma>,
     decay_branchings: Option<crate::decay_branching_uncertainty::Candidates>,
     fission_yields: Option<crate::fission_yield_uncertainty::Candidates>,
+    isomer: Option<crate::isomer_branching_uncertainty::CoupledIsomer>,
 }
 
 impl CoupledReplicas {
-    /// The draws `request` asks of a coupled run over `chain`, or an error
-    /// naming what a coupled replica does not yet carry.
+    /// The draws `request` asks of a coupled run over `chain`, whose
+    /// isomeric splits `branch` gives, or an error naming what a coupled
+    /// replica does not yet carry.
     pub fn new(
         request: &DataUncertainty,
         chain: &HashMap<String, ChainNuclide>,
+        branch: &yani::BranchTable,
     ) -> Result<Self, String> {
         check_convergence(request.convergence)?;
-        if request.wants(Source::IsomerBranching) {
-            let carried: Vec<&str> = Source::IMPLEMENTED
-                .iter()
-                .filter(|s| **s != Source::IsomerBranching)
-                .map(|s| s.name())
-                .collect();
-            return Err(format!(
-                "data_uncertainty with method=\"coupled\" runs the whole coupled \
-                 calculation once per replica, and a replica's transport does not yet read \
-                 its own MF=40 isomer production curves, so \"isomer_branching\" cannot be \
-                 carried (an empty sources list asks for every source). Name the sources: \
-                 with the coupled method these are {carried:?}; method=\"independent\" \
-                 carries every source"
-            ));
-        }
         let cross_sections = request.wants(Source::CrossSections);
         let statistical = request.wants(Source::Statistical);
         if cross_sections && !statistical {
@@ -135,7 +129,23 @@ impl CoupledReplicas {
             fission_yields: request
                 .wants(Source::FissionYield)
                 .then(|| crate::fission_yield_uncertainty::candidates(chain, chain)),
+            isomer: if request.wants(Source::IsomerBranching) {
+                Some(crate::isomer_branching_uncertainty::CoupledIsomer::new(
+                    branch, chain,
+                )?)
+            } else {
+                None
+            },
         })
+    }
+
+    /// `branch` with replica `replica`'s MF=40 draw on its stated
+    /// production curves, or `branch` itself when nothing is drawn.
+    pub fn branch(&self, branch: &Arc<yani::BranchTable>, replica: u64) -> Arc<yani::BranchTable> {
+        match self.isomer.as_ref().filter(|i| !i.is_empty()) {
+            Some(i) => Arc::new(i.branch(branch, self.request.seed, replica)),
+            None => Arc::clone(branch),
+        }
     }
 
     /// Whether each replica's transports read its own cross sections.
@@ -156,6 +166,7 @@ impl CoupledReplicas {
                 .as_ref()
                 .is_some_and(|b| !b.splits.is_empty())
             || self.fission_yields.as_ref().is_some_and(|f| !f.is_empty())
+            || self.isomer.as_ref().is_some_and(|i| !i.is_empty())
     }
 
     /// The transport seed replica `replica` runs every step with.
@@ -394,10 +405,20 @@ impl CoupledReplicas {
             info.not_perturbed
                 .insert(0, "activation cross section (MF=33)".to_string());
         }
-        info.not_perturbed.insert(
-            0,
-            "isomeric branching covariance (MF=40), every split held".to_string(),
-        );
+        match &self.isomer {
+            Some(isomer) => {
+                let reachable = reach.keys().cloned().collect();
+                let r = isomer.report(&reachable);
+                info.isomer_branchings_perturbed = r.perturbed;
+                info.isomer_branching_blocks_not_used = r.not_used;
+                info.isomer_branching_covariance_repaired = r.repaired;
+                info.isomer_branching_lognormal_not_carried = r.lognormal_not_carried;
+            }
+            None => info.not_perturbed.insert(
+                0,
+                "isomeric branching covariance (MF=40), every split held".to_string(),
+            ),
+        }
         if !self.statistical {
             info.not_perturbed
                 .insert(0, "tallied-rate statistics".to_string());
@@ -435,35 +456,39 @@ mod tests {
         }
     }
 
-    /// A source a coupled replica cannot carry is refused by name, and so is
-    /// the default request, which asks for every source. The cross sections
-    /// are carried beside the statistical source and refused without it.
+    /// Every source is carried, the default request included, which asks
+    /// for every source; the cross sections only beside the statistical
+    /// source, and attribution not at all.
     #[test]
-    fn what_a_replica_cannot_carry_is_refused() {
+    fn what_a_replica_carries() {
         let chain = HashMap::new();
+        let branch = yani::BranchTable::new();
+        let new = |r: &DataUncertainty| CoupledReplicas::new(r, &chain, &branch);
         for sources in [
             vec![],
-            vec![Source::CrossSections],
-            vec![Source::Statistical, Source::IsomerBranching],
+            vec![Source::Statistical],
+            vec![Source::Statistical, Source::CrossSections],
+            vec![Source::IsomerBranching],
         ] {
-            let err = CoupledReplicas::new(&request(sources), &chain)
-                .err()
-                .expect("refused");
-            assert!(err.contains("method=\"coupled\""), "{err}");
+            assert!(new(&request(sources.clone())).is_ok(), "{sources:?}");
         }
+        let both = new(&request(vec![Source::Statistical, Source::CrossSections])).unwrap();
+        assert!(both.cross_sections() && both.moves_inventory());
+        let err = new(&request(vec![Source::CrossSections]))
+            .err()
+            .expect("refused");
+        assert!(err.contains("\"statistical\""), "{err}");
         let attribution = DataUncertainty {
             attribution: true,
             ..request(vec![Source::Statistical])
         };
-        assert!(CoupledReplicas::new(&attribution, &chain).is_err());
-        assert!(CoupledReplicas::new(&request(vec![Source::Statistical]), &chain).is_ok());
-        let both = request(vec![Source::Statistical, Source::CrossSections]);
-        let carried = CoupledReplicas::new(&both, &chain).expect("carried");
-        assert!(carried.cross_sections() && carried.moves_inventory());
-        let err = CoupledReplicas::new(&request(vec![Source::CrossSections]), &chain)
-            .err()
-            .expect("refused");
-        assert!(err.contains("\"statistical\""), "{err}");
+        let err = new(&attribution).err().expect("refused");
+        assert!(err.contains("method=\"coupled\""), "{err}");
+        let isomer = new(&request(vec![Source::IsomerBranching])).unwrap();
+        assert!(
+            !isomer.moves_inventory(),
+            "no MF=40 to draw in an empty table"
+        );
     }
 
     /// With the statistical source on every replica's transport seed is its
@@ -472,13 +497,15 @@ mod tests {
     #[test]
     fn transport_seeds() {
         let chain = HashMap::new();
-        let on = CoupledReplicas::new(&request(vec![Source::Statistical]), &chain).unwrap();
+        let branch = yani::BranchTable::new();
+        let on =
+            CoupledReplicas::new(&request(vec![Source::Statistical]), &chain, &branch).unwrap();
         let seeds: std::collections::HashSet<u64> =
             (0..4096).map(|k| on.transport_seed(7, k)).collect();
         assert_eq!(seeds.len(), 4096);
         assert!(!seeds.contains(&7));
         assert!(on.moves_inventory());
-        let off = CoupledReplicas::new(&request(vec![Source::HalfLife]), &chain).unwrap();
+        let off = CoupledReplicas::new(&request(vec![Source::HalfLife]), &chain, &branch).unwrap();
         assert!((0..8).all(|k| off.transport_seed(7, k) == 7));
         assert!(
             !off.moves_inventory(),

@@ -184,15 +184,28 @@ def test_each_rate_has_a_statistical_sigma():
 @pytest.mark.parametrize(
     "request_",
     [
-        yamc.DataUncertainty(seed=1, samples=4),
         yamc.DataUncertainty(seed=1, samples=4, sources=["cross_sections"]),
-        yamc.DataUncertainty(seed=1, samples=4, sources=["isomer_branching"]),
+        yamc.DataUncertainty(seed=1, samples=4, sources=["statistical"], attribution=True),
     ],
-    ids=["every_source", "cross_sections_alone", "isomer_branching"],
+    ids=["cross_sections_alone", "attribution"],
 )
 def test_the_coupled_method_refuses_what_a_replica_cannot_carry(request_):
     with pytest.raises(RuntimeError, match="coupled"):
         _run(method="coupled", data_uncertainty=request_)
+
+
+def test_the_coupled_method_carries_the_default_request():
+    """An empty sources list asks for every source, and a coupled replica
+    carries them all: nothing is held at nominal that the request named."""
+    request_ = yamc.DataUncertainty(seed=1, samples=2)
+    info = _run(
+        threads=1, particles=500, method="coupled", data_uncertainty=request_
+    ).get_data_uncertainty_info(MAT_ID)
+    assert info["flux_response"] == "coupled_replicas"
+    assert "cross_sections" in info["sources"]
+    assert "isomer_branching" in info["sources"]
+    assert not any(s.startswith("isomeric branching covariance") for s in info["not_perturbed"])
+    assert "activation cross section (MF=33)" not in info["not_perturbed"]
 
 
 def test_the_coupled_method_reruns_the_whole_coupled_run():

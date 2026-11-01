@@ -326,7 +326,8 @@ fn each_replica_is_the_coupled_run_on_its_own_data() {
         .iter()
         .any(|s| s == "activation cross section (MF=33)"));
 
-    let replicas = CoupledReplicas::new(&request, &chain).expect("carried");
+    let replicas =
+        CoupledReplicas::new(&request, &chain, &yani::BranchTable::new()).expect("carried");
     for k in 0..2 {
         let seed = replicas.transport_seed(BASE_SEED, k);
         let rerun = transmute(
