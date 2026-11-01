@@ -2,6 +2,7 @@ use crate::distribution::{PyDiscrete, PyNormal, PyUniform};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
+use yamc_source::distribution::mesh::{MeshDistribution, MeshElements, SourceDomain};
 use yamc_source::distribution::spatial::{CylindricalRing, Univariate};
 use yamc_source::source::SourceEnergyDistribution;
 
@@ -182,4 +183,145 @@ fn univariate_repr(u: &Univariate) -> String {
         Univariate::Uniform(u) => format!("Uniform({}, {})", u.a(), u.b()),
         Univariate::Normal(n) => format!("Normal({}, {})", n.mean_val(), n.std_dev()),
     }
+}
+
+/// Readers for the yamc classes a mesh source is built from, which live in the
+/// yamc wheel. Set by it; unset in the yani wheel, which has no meshes.
+pub struct MeshSourceReaders {
+    /// A mesh object's elements.
+    pub elements: for<'py> fn(&Bound<'py, PyAny>) -> PyResult<MeshElements>,
+    /// The ids of a `Cell` or list of them.
+    pub cell_ids: for<'py> fn(&Bound<'py, PyAny>) -> PyResult<Vec<u32>>,
+}
+
+/// The yamc wheel's [`MeshSourceReaders`].
+pub static MESH_SOURCE_READERS: std::sync::OnceLock<MeshSourceReaders> = std::sync::OnceLock::new();
+
+/// A source spread over the elements of a mesh.
+///
+/// Each element emits in proportion to its strength, from a point uniform
+/// within it. Pass it as ``position=`` to ``NeutronSource`` or ``PhotonSource``.
+///
+/// Args:
+///     mesh: A ``RegularRectangularMesh``, ``RegularCylindricalMesh`` or a
+///         tet ``MeshGeometry``.
+///     strengths: One non-negative strength per element (e.g. decay photons
+///         per second in each voxel), in the order a tally on the mesh
+///         numbers its bins, so a mesh tally's ``mean`` can be passed
+///         directly. For a ``MeshGeometry`` this is one per tetrahedron.
+///         Defaults to each element's volume: uniform over the mesh.
+///     cells: A ``Cell`` or list of them. Each element then emits only from
+///         its points in these cells, keeping its own strength: an R2S
+///         voxel's decay photons are born in the activated cells under it,
+///         not in the void beside them.
+///     materials: A ``Material`` or list of them, as ``cells`` but for the
+///         cells filled with them. Give ``cells`` or ``materials``, not both.
+///         Both apply where the source meets a geometry, in a ``Model``;
+///         ``sample()`` has no geometry and draws from the whole element.
+///
+/// Raises:
+///     ValueError: If ``strengths`` has the wrong length, a value that is
+///         NaN, infinite or negative, or sums to zero; or both ``cells`` and
+///         ``materials`` are given. A run refuses a source whose cells or
+///         materials are not in the geometry, or with an emitting element
+///         holding none of them.
+///
+/// Examples:
+///     >>> import yamc
+///     >>> mesh = yamc.RegularRectangularMesh([0, 0, 0], [10, 10, 10], [2, 1, 1])
+///     >>> space = yamc.sources.MeshDistribution(mesh, strengths=[3.0, 1.0])
+///     >>> source = yamc.PhotonSource(position=space, energy=1e6)
+#[gen_stub_pyclass]
+#[pyclass(name = "MeshDistribution", from_py_object)]
+#[derive(Clone)]
+pub struct PyMeshDistribution {
+    pub inner: MeshDistribution,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyMeshDistribution {
+    #[new]
+    #[pyo3(signature = (mesh, strengths=None, cells=None, materials=None))]
+    pub fn new(
+        mesh: &Bound<'_, PyAny>,
+        strengths: Option<Vec<f64>>,
+        cells: Option<&Bound<'_, PyAny>>,
+        materials: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        use pyo3::exceptions::PyValueError;
+        let read = MESH_SOURCE_READERS.get().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("MeshDistribution needs the yamc package")
+        })?;
+        let domain = match (cells, materials) {
+            (Some(_), Some(_)) => {
+                return Err(PyValueError::new_err("give cells or materials, not both"))
+            }
+            (Some(c), None) => Some(SourceDomain::Cells((read.cell_ids)(c)?)),
+            (None, Some(m)) => Some(SourceDomain::Materials(material_ids(m)?)),
+            (None, None) => None,
+        };
+        let inner = MeshDistribution::new((read.elements)(mesh)?, strengths.as_deref())
+            .map_err(PyValueError::new_err)?;
+        Ok(Self {
+            inner: match domain {
+                Some(d) => inner.with_domain(d).map_err(PyValueError::new_err)?,
+                None => inner,
+            },
+        })
+    }
+
+    /// Sample a position from the distribution, anywhere in the chosen
+    /// element: ``cells`` and ``materials`` need the geometry of a ``Model``.
+    ///
+    /// Returns:
+    ///     List[float]: Position vector [x, y, z] in cm.
+    pub fn sample(&self) -> [f64; 3] {
+        self.inner.sample(&mut rand::rng())
+    }
+
+    /// Sum of the element strengths: the source rate when they are rates, to
+    /// scale per-source-particle tallies by.
+    #[getter]
+    pub fn total_strength(&self) -> f64 {
+        self.inner.total()
+    }
+
+    /// Number of elements in the mesh.
+    #[getter]
+    pub fn num_elements(&self) -> usize {
+        self.inner.num_elements()
+    }
+
+    pub fn __repr__(&self) -> String {
+        format!(
+            "MeshDistribution({} of {} elements emitting, total_strength={})",
+            self.inner.num_emitting(),
+            self.inner.num_elements(),
+            self.inner.total()
+        )
+    }
+}
+
+/// The ids of a `Material` or list of them.
+fn material_ids(ob: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
+    use crate::material::PyMaterial;
+    let mats: Vec<PyRef<'_, PyMaterial>> = match ob.extract::<PyRef<'_, PyMaterial>>() {
+        Ok(m) => vec![m],
+        Err(_) => ob.extract().map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err(
+                "materials must be a Material or a list of Material instances",
+            )
+        })?,
+    };
+    mats.iter()
+        .map(|m| {
+            m.internal.get_material_id().ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(
+                    "a Material in materials has no id; give it one with Material(id=...) \
+                     or add it to a Geometry first",
+                )
+            })
+        })
+        .collect()
 }

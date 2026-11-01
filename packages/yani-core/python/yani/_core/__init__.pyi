@@ -1688,6 +1688,66 @@ class Material:
         """
 
 @typing.final
+class MeshDistribution:
+    r"""
+    A source spread over the elements of a mesh.
+    
+    Each element emits in proportion to its strength, from a point uniform
+    within it. Pass it as ``position=`` to ``NeutronSource`` or ``PhotonSource``.
+    
+    Args:
+        mesh: A ``RegularRectangularMesh``, ``RegularCylindricalMesh`` or a
+            tet ``MeshGeometry``.
+        strengths: One non-negative strength per element (e.g. decay photons
+            per second in each voxel), in the order a tally on the mesh
+            numbers its bins, so a mesh tally's ``mean`` can be passed
+            directly. For a ``MeshGeometry`` this is one per tetrahedron.
+            Defaults to each element's volume: uniform over the mesh.
+        cells: A ``Cell`` or list of them. Each element then emits only from
+            its points in these cells, keeping its own strength: an R2S
+            voxel's decay photons are born in the activated cells under it,
+            not in the void beside them.
+        materials: A ``Material`` or list of them, as ``cells`` but for the
+            cells filled with them. Give ``cells`` or ``materials``, not both.
+            Both apply where the source meets a geometry, in a ``Model``;
+            ``sample()`` has no geometry and draws from the whole element.
+    
+    Raises:
+        ValueError: If ``strengths`` has the wrong length, a value that is
+            NaN, infinite or negative, or sums to zero; or both ``cells`` and
+            ``materials`` are given. A run refuses a source whose cells or
+            materials are not in the geometry, or with an emitting element
+            holding none of them.
+    
+    Examples:
+        >>> import yani
+        >>> mesh = yamc.RegularRectangularMesh([0, 0, 0], [10, 10, 10], [2, 1, 1])
+        >>> space = yani.sources.MeshDistribution(mesh, strengths=[3.0, 1.0])
+        >>> source = yamc.PhotonSource(position=space, energy=1e6)
+    """
+    @property
+    def total_strength(self) -> builtins.float:
+        r"""
+        Sum of the element strengths: the source rate when they are rates, to
+        scale per-source-particle tallies by.
+        """
+    @property
+    def num_elements(self) -> builtins.int:
+        r"""
+        Number of elements in the mesh.
+        """
+    def __new__(cls, mesh: typing.Any, strengths: typing.Optional[typing.Sequence[builtins.float]] = None, cells: typing.Optional[typing.Any] = None, materials: typing.Optional[typing.Any] = None) -> MeshDistribution: ...
+    def sample(self) -> builtins.list[builtins.float]:
+        r"""
+        Sample a position from the distribution, anywhere in the chosen
+        element: ``cells`` and ``materials`` need the geometry of a ``Model``.
+        
+        Returns:
+            List[float]: Position vector [x, y, z] in cm.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
 class NeutronSource:
     r"""
     A neutron particle source with spatial, energy, and angular distributions.
@@ -1696,14 +1756,14 @@ class NeutronSource:
     def position(self) -> typing.Any:
         r"""
         Spatial distribution describing where particles are sampled.
-        Returns an ``(x, y, z)`` list for a fixed point, or a
-        ``CylindricalRing`` distribution.
+        Returns an ``(x, y, z)`` list for a fixed point, or the spatial
+        distribution object.
         """
     @position.setter
     def position(self, value: typing.Any) -> None:
         r"""
-        Set the birth location: an ``(x, y, z)`` point in cm, or a
-        ``CylindricalRing``.
+        Set the birth location: an ``(x, y, z)`` point in cm, a
+        ``CylindricalRing`` or a ``MeshDistribution``.
         
         Raises:
             ValueError: If a point has a NaN or infinite coordinate.
@@ -1748,7 +1808,7 @@ class NeutronSource:
         Args:
             position: Birth location. Pass a tuple/list ``(x, y, z)`` in cm for a fixed
                    point (recommended), or a spatial distribution object
-                   (yamc.Point, yani.CylindricalRing) for finer control.
+                   (yani.sources.CylindricalRing, yani.sources.MeshDistribution) for finer control.
                    Defaults to the origin (0, 0, 0).
             energy: Birth energy. Pass a float in eV for a single energy (recommended),
                    or an energy distribution (yani.Discrete, yani.Uniform, yani.Normal)
@@ -2234,14 +2294,14 @@ class PhotonSource:
     def position(self) -> typing.Any:
         r"""
         Spatial distribution describing where particles are sampled.
-        Returns an ``(x, y, z)`` list for a fixed point, or a
-        ``CylindricalRing`` distribution.
+        Returns an ``(x, y, z)`` list for a fixed point, or the spatial
+        distribution object.
         """
     @position.setter
     def position(self, value: typing.Any) -> None:
         r"""
-        Set the birth location: an ``(x, y, z)`` point in cm, or a
-        ``CylindricalRing``.
+        Set the birth location: an ``(x, y, z)`` point in cm, a
+        ``CylindricalRing`` or a ``MeshDistribution``.
         
         Raises:
             ValueError: If a point has a NaN or infinite coordinate.
@@ -2286,7 +2346,7 @@ class PhotonSource:
         Args:
             position: Birth location. Pass a tuple/list ``(x, y, z)`` in cm for a fixed
                    point (recommended), or a spatial distribution object
-                   (yamc.Point, yani.CylindricalRing) for finer control.
+                   (yani.sources.CylindricalRing, yani.sources.MeshDistribution) for finer control.
                    Defaults to the origin (0, 0, 0).
             energy: Birth energy. Pass a float in eV for a single energy (recommended),
                    or an energy distribution (yani.Discrete, yani.Uniform, yani.Normal)

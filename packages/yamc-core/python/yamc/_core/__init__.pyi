@@ -3444,14 +3444,14 @@ class NeutronSource:
     def position(self) -> typing.Any:
         r"""
         Spatial distribution describing where particles are sampled.
-        Returns an ``(x, y, z)`` list for a fixed point, or a
-        ``CylindricalRing`` distribution.
+        Returns an ``(x, y, z)`` list for a fixed point, or the spatial
+        distribution object.
         """
     @position.setter
     def position(self, value: typing.Any) -> None:
         r"""
-        Set the birth location: an ``(x, y, z)`` point in cm, or a
-        ``CylindricalRing``.
+        Set the birth location: an ``(x, y, z)`` point in cm, a
+        ``CylindricalRing`` or a ``MeshDistribution``.
         
         Raises:
             ValueError: If a point has a NaN or infinite coordinate.
@@ -3496,7 +3496,7 @@ class NeutronSource:
         Args:
             position: Birth location. Pass a tuple/list ``(x, y, z)`` in cm for a fixed
                    point (recommended), or a spatial distribution object
-                   (yamc.Point, yamc.CylindricalRing) for finer control.
+                   (yamc.sources.CylindricalRing, yamc.sources.MeshDistribution) for finer control.
                    Defaults to the origin (0, 0, 0).
             energy: Birth energy. Pass a float in eV for a single energy (recommended),
                    or an energy distribution (yamc.Discrete, yamc.Uniform, yamc.Normal)
@@ -4014,14 +4014,14 @@ class PhotonSource:
     def position(self) -> typing.Any:
         r"""
         Spatial distribution describing where particles are sampled.
-        Returns an ``(x, y, z)`` list for a fixed point, or a
-        ``CylindricalRing`` distribution.
+        Returns an ``(x, y, z)`` list for a fixed point, or the spatial
+        distribution object.
         """
     @position.setter
     def position(self, value: typing.Any) -> None:
         r"""
-        Set the birth location: an ``(x, y, z)`` point in cm, or a
-        ``CylindricalRing``.
+        Set the birth location: an ``(x, y, z)`` point in cm, a
+        ``CylindricalRing`` or a ``MeshDistribution``.
         
         Raises:
             ValueError: If a point has a NaN or infinite coordinate.
@@ -4066,7 +4066,7 @@ class PhotonSource:
         Args:
             position: Birth location. Pass a tuple/list ``(x, y, z)`` in cm for a fixed
                    point (recommended), or a spatial distribution object
-                   (yamc.Point, yamc.CylindricalRing) for finer control.
+                   (yamc.sources.CylindricalRing, yamc.sources.MeshDistribution) for finer control.
                    Defaults to the origin (0, 0, 0).
             energy: Birth energy. Pass a float in eV for a single energy (recommended),
                    or an energy distribution (yamc.Discrete, yamc.Uniform, yamc.Normal)
