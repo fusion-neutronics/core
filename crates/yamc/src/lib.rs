@@ -1,5 +1,6 @@
 //! Core Monte Carlo particle transport: geometry and cells, the transport
 //! kernel, materials/source wiring, and the `Model` simulation driver.
+pub mod coupled_xs;
 pub mod data_uncertainty;
 pub mod geo;
 pub mod geometry;

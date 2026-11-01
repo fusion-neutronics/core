@@ -7,21 +7,32 @@
 //! Resampling one step's rates on its own would leave that feedback out. Here
 //! each replica is the coupled calculation again, start to finish: its own
 //! transport seed when the statistical source is on, its own decay data when
-//! those sources are on, every step's transport run on that replica's own
-//! compositions. The spread of the replicas' inventories is then the
-//! uncertainty of the coupled run, exactly and to all orders: nothing is
+//! those sources are on, its own cross sections in every transport when the
+//! cross-section source is on, and every step's transport run on that
+//! replica's own compositions. The spread of the replicas' inventories is then
+//! the uncertainty of the coupled run, exactly and to all orders: nothing is
 //! linearised and no step is treated as independent of another. The cost is
 //! the transport of every irradiation step once per replica.
 //!
 //! The draws are those [`crate::transport_replicas`] makes for independent
 //! mode, keyed on `(seed, replica, nuclide)`, so a nuclide's half-life, a
-//! parent's branching and an evaluation's fission yields are the same in
-//! replica `k` of either method, and shared by every material of the run.
+//! parent's branching, an evaluation's fission yields and a nuclide's cross
+//! sections are the same in replica `k` of either method, and shared by every
+//! material of the run. The transport applies the cross sections (see
+//! `yamc::coupled_xs`); this module only says which replicas to run.
+//!
+//! The cross sections are carried only beside the statistical source. A
+//! replica's transport on its own cross sections follows different histories
+//! from the nominal one whatever its seed, so its spread holds that
+//! transport's Monte Carlo noise as well as the data's, and no seed removes
+//! it. With both sources on, that noise is the statistical source's
+//! uncertainty and the spread is the sum of the two, as asked; with the cross
+//! sections alone, it would be reported as the data's.
 //!
 //! What a replica cannot yet carry is refused rather than held at nominal:
-//! `cross_sections` and `isomer_branching`, which would need every replica's
-//! transport to read its own perturbed nuclear data, and `attribution`, which
-//! would need one coupled ensemble per source.
+//! `isomer_branching`, which would need every replica's transport to read its
+//! own MF=40 production curves, and `attribution`, which would need one
+//! coupled ensemble per source.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -57,6 +68,7 @@ pub struct Drawn {
 pub struct CoupledReplicas {
     request: DataUncertainty,
     statistical: bool,
+    cross_sections: bool,
     half_lives: Vec<crate::uncertainty::HalfLifeSigma>,
     decay_branchings: Option<crate::decay_branching_uncertainty::Candidates>,
     fission_yields: Option<crate::fission_yield_uncertainty::Candidates>,
@@ -70,24 +82,34 @@ impl CoupledReplicas {
         chain: &HashMap<String, ChainNuclide>,
     ) -> Result<Self, String> {
         check_convergence(request.convergence)?;
-        let refused: Vec<&str> = [Source::CrossSections, Source::IsomerBranching]
-            .into_iter()
-            .filter(|s| request.wants(*s))
-            .map(Source::name)
-            .collect();
-        if !refused.is_empty() {
+        if request.wants(Source::IsomerBranching) {
             let carried: Vec<&str> = Source::IMPLEMENTED
                 .iter()
-                .filter(|s| !matches!(s, Source::CrossSections | Source::IsomerBranching))
+                .filter(|s| **s != Source::IsomerBranching)
                 .map(|s| s.name())
                 .collect();
             return Err(format!(
                 "data_uncertainty with method=\"coupled\" runs the whole coupled \
                  calculation once per replica, and a replica's transport does not yet read \
-                 its own perturbed nuclear data, so {refused:?} cannot be carried (an empty \
-                 sources list asks for every source). Name the sources: with the coupled \
-                 method these are {carried:?}; method=\"independent\" carries every source"
+                 its own MF=40 isomer production curves, so \"isomer_branching\" cannot be \
+                 carried (an empty sources list asks for every source). Name the sources: \
+                 with the coupled method these are {carried:?}; method=\"independent\" \
+                 carries every source"
             ));
+        }
+        let cross_sections = request.wants(Source::CrossSections);
+        let statistical = request.wants(Source::Statistical);
+        if cross_sections && !statistical {
+            return Err(
+                "data_uncertainty with method=\"coupled\" carries \"cross_sections\" only \
+                 with \"statistical\": a replica transported on its own cross sections \
+                 follows different histories from the nominal run whatever its seed, so \
+                 its spread holds the transport's Monte Carlo noise as well as the data's, \
+                 and without the statistical source that noise would be reported as the \
+                 data's. Name both, or use method=\"independent\", whose replica weights \
+                 remove the noise"
+                    .to_string(),
+            );
         }
         if request.attribution {
             return Err(
@@ -104,7 +126,8 @@ impl CoupledReplicas {
         };
         Ok(Self {
             request: request.clone(),
-            statistical: request.wants(Source::Statistical),
+            statistical,
+            cross_sections,
             half_lives,
             decay_branchings: request
                 .wants(Source::DecayBranching)
@@ -115,11 +138,18 @@ impl CoupledReplicas {
         })
     }
 
+    /// Whether each replica's transports read its own cross sections.
+    pub fn cross_sections(&self) -> bool {
+        self.cross_sections
+    }
+
     /// Whether a replica's inventory can differ from the nominal one: a
-    /// fresh transport seed, or decay data that enters the solve. Without
-    /// either every replica would repeat the nominal run.
+    /// fresh transport seed, its own cross sections, or decay data that
+    /// enters the solve. Without any every replica would repeat the nominal
+    /// run.
     pub fn moves_inventory(&self) -> bool {
         self.statistical
+            || self.cross_sections
             || !self.half_lives.is_empty()
             || self
                 .decay_branchings
@@ -360,8 +390,10 @@ impl CoupledReplicas {
                 "decay photon line energy and intensity, and continuum normalisation".to_string(),
             );
         }
-        info.not_perturbed
-            .insert(0, "activation cross section (MF=33)".to_string());
+        if !self.cross_sections {
+            info.not_perturbed
+                .insert(0, "activation cross section (MF=33)".to_string());
+        }
         info.not_perturbed.insert(
             0,
             "isomeric branching covariance (MF=40), every split held".to_string(),
@@ -404,7 +436,8 @@ mod tests {
     }
 
     /// A source a coupled replica cannot carry is refused by name, and so is
-    /// the default request, which asks for every source.
+    /// the default request, which asks for every source. The cross sections
+    /// are carried beside the statistical source and refused without it.
     #[test]
     fn what_a_replica_cannot_carry_is_refused() {
         let chain = HashMap::new();
@@ -424,6 +457,13 @@ mod tests {
         };
         assert!(CoupledReplicas::new(&attribution, &chain).is_err());
         assert!(CoupledReplicas::new(&request(vec![Source::Statistical]), &chain).is_ok());
+        let both = request(vec![Source::Statistical, Source::CrossSections]);
+        let carried = CoupledReplicas::new(&both, &chain).expect("carried");
+        assert!(carried.cross_sections() && carried.moves_inventory());
+        let err = CoupledReplicas::new(&request(vec![Source::CrossSections]), &chain)
+            .err()
+            .expect("refused");
+        assert!(err.contains("\"statistical\""), "{err}");
     }
 
     /// With the statistical source on every replica's transport seed is its

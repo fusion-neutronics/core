@@ -561,6 +561,108 @@ pub fn perturbed_nuclide(
     Ok((out, floored))
 }
 
+/// A copy of `held` with each reaction it holds at temperature `label` moved
+/// by exactly what a draw moved the same reaction of `full`, which `perturbed`
+/// is a copy of with the draw applied, and how many values came out negative
+/// and were floored at zero.
+///
+/// `held` is the same evaluation at the same temperature as `full`, loaded at
+/// a narrower scope: a transmutation product at activation scope, which holds
+/// the network's reactions and none of the transport sections. Its field over
+/// that scope is not `full`'s, so a draw of its own would not be the draw
+/// `full` takes, and a product that later enters transport, and is read in
+/// full, would change its cross sections mid-run. Moving it by `full`'s
+/// change instead keeps one draw per nuclide whatever scope holds it: a
+/// reaction `held` holds without the partials it sums (MT 103 without 600 to
+/// 649) moves by what those partials moved.
+///
+/// Only `label` moves; transport and the transmutation tallies read a
+/// nuclide at its material's temperature alone. An unmoved draw returns
+/// `held` unchanged, bit for bit.
+pub fn moved_like(
+    held: &Nuclide,
+    full: &Nuclide,
+    perturbed: &Nuclide,
+    label: &str,
+) -> Result<(Nuclide, usize), String> {
+    let name = held.name.clone().unwrap_or_else(|| "nuclide".to_string());
+    let (Some(t), Some(f), Some(p)) = (
+        held.get_temp_idx(label),
+        full.get_temp_idx(label),
+        perturbed.get_temp_idx(label),
+    ) else {
+        return Err(format!("{name}: no data at {label} K to move"));
+    };
+    let grid = |n: &Nuclide| n.energy.as_ref().and_then(|m| m.get(label)).cloned();
+    let (Some(energies), Some(full_grid)) = (grid(held), grid(full)) else {
+        return Err(format!("{name}: no energy grid at {label} K"));
+    };
+    if energies.as_slice() != full_grid.as_slice() {
+        return Err(format!(
+            "{name}: the grid it holds at {label} K is not the one its full data is on, so \
+             the draw cannot be carried over point by point"
+        ));
+    }
+    let n = energies.len();
+    let (before, after) = (&full.reactions[f], &perturbed.reactions[p]);
+    let mut new = held.reactions[t].clone();
+    let mut floored = 0;
+    for (mt, reaction) in &held.reactions[t] {
+        let (Some(b), Some(a)) = (before.get(mt), after.get(mt)) else {
+            return Err(format!(
+                "{name}: MT {mt} is held without a counterpart in its full data"
+            ));
+        };
+        if Arc::ptr_eq(a, b) {
+            continue;
+        }
+        let (b, a) = (on_full_grid(b, n), on_full_grid(a, n));
+        let start = reaction.threshold_idx;
+        let values = reaction
+            .cross_section
+            .as_slice()
+            .iter()
+            .enumerate()
+            .map(|(j, &xs)| {
+                let v = xs + (a[start + j] - b[start + j]);
+                // A KERMA or damage energy may be negative; a cross section
+                // may not.
+                if *mt < 300 && v < 0.0 {
+                    floored += 1;
+                    0.0
+                } else {
+                    v
+                }
+            })
+            .collect();
+        new.insert(*mt, Arc::new(with_values(reaction, values)));
+    }
+    let moved = new
+        .iter()
+        .any(|(mt, r)| !Arc::ptr_eq(r, &held.reactions[t][mt]));
+    if !moved {
+        return Ok((held.clone(), 0));
+    }
+    let mut out = held.clone();
+    if let Some(fast) = held.fast_xs.get(t)
+        && !fast.energy.is_empty()
+    {
+        out.fast_xs[t] = FastXSGrid::build(
+            &energies,
+            &new,
+            held.fission_photon_release.as_ref(),
+            &format!("{name} at {label} K (perturbed)"),
+        )?;
+    }
+    out.reactions[t] = new;
+    if let (Some(Some(urr)), Some(nominal)) = (out.urr_data.get_mut(t), held.fast_xs.get(t))
+        && !urr.multiply_smooth
+    {
+        urr.nominal_smooth = Some(Arc::new(nominal.clone()));
+    }
+    Ok((out, floored))
+}
+
 /// A copy of `material` with every nuclide that has a field in `fields`
 /// perturbed by `draw`, and every nuclide in `resonance` by its change, its
 /// cross-section tables cleared so the next run rebuilds them from the

@@ -3317,14 +3317,24 @@ class Model:
                 ``"half_life"``, ``"decay_branching"`` and ``"fission_yield"``,
                 the same draws an independent replica of the same index makes,
                 and every step's transport runs on that replica's compositions.
+                With ``"cross_sections"`` every transport of a replica, in every
+                material, reads nuclear data with that replica's MF=33 and
+                resonance-parameter draw applied (the draw an independent
+                replica of the same index makes), so the draw moves the flux,
+                the rates, the compositions and every later step's flux; a
+                product that enters transport mid-run keeps its draw. That
+                source is carried only beside ``"statistical"``: a replica on
+                its own cross sections follows its own histories, so its spread
+                holds the transport's noise too, and naming
+                ``"cross_sections"`` alone raises.
                 ``"decay_energy"`` and ``"decay_photon_lines"`` move what is
                 evaluated from each inventory, as below. This is exact, nothing
                 linearised, and costs the transport of every irradiation step
                 once per replica (at least 128 replicas unless ``samples`` is
-                set). ``"cross_sections"`` and ``"isomer_branching"`` are not
-                yet carried by a coupled replica, and nor is ``attribution``, so
-                asking for them with the coupled method raises; an empty
-                ``sources`` asks for every source, so name the sources there.
+                set). ``"isomer_branching"`` is not yet carried by a coupled
+                replica, and nor is ``attribution``, so asking for them with
+                the coupled method raises; an empty ``sources`` asks for every
+                source, so name the sources there.
                 ``get_data_uncertainty_info``'s ``flux_response`` reads
                 ``"coupled_replicas"``. The rest of this entry describes the
                 independent method. The sources that apply there:
@@ -6597,6 +6607,9 @@ class TransmutationResults:
           that came out negative and were floored at zero, which only a channel
           subtracting reactions or reading an additive (absolute or
           short-range) covariance can.
+        - ``cross_section_points_floored``: with ``method="coupled"``, the
+          cross-section grid values a replica's draw took below zero and that
+          were floored at zero, over every replica.
         - ``half_lives_perturbed`` / ``no_half_life_uncertainty``: with the
           ``"half_life"`` source, which reachable unstable nuclides had their
           half-life sampled and which state no sigma to sample from.
