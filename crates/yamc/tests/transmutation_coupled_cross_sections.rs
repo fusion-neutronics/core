@@ -108,6 +108,11 @@ fn pure(name: &str, dir: &Path, density: f64) -> Material {
 
 /// A sphere of `material` around a 1 keV point source.
 fn model(material: Material) -> Model {
+    model_at(material, 1.0e3)
+}
+
+/// A sphere of `material` around a point source at `energy` eV.
+fn model_at(material: Material, energy: f64) -> Model {
     let sphere = Surface {
         surface_id: Some(1),
         kind: SurfaceKind::Sphere {
@@ -125,7 +130,7 @@ fn model(material: Material) -> Model {
     let source = ParticleSource::Neutron(Source {
         space: SourceSpatialDistribution::Point(Point::new([0.0, 0.0, 0.0])),
         angle: AngularDistribution::Isotropic,
-        energy: SourceEnergyDistribution::Discrete(Discrete::new(vec![1.0e3], vec![1.0]).unwrap()),
+        energy: SourceEnergyDistribution::Discrete(Discrete::new(vec![energy], vec![1.0]).unwrap()),
         strength: 1.0,
     });
     let mut model = Model::new(geometry, vec![source], vec![]);
@@ -485,14 +490,15 @@ fn a_product_that_enters_transport_is_drawn_there() {
     assert!(spread.iter().any(|r| r["Li7"] != spread[0]["Li7"]));
 }
 
-/// Each replica's W187 over the nominal after the first step, minus one.
-fn shifts(results: &TransmutationResults) -> Vec<f64> {
-    let nominal = results.get_nuclide_density(1, "W187", 1).expect("W187");
+/// Each replica's `product` over the nominal after the first step, minus
+/// one.
+fn shifts(results: &TransmutationResults, product: &str) -> Vec<f64> {
+    let nominal = results.get_nuclide_density(1, product, 1).expect("product");
     results
         .uncertainty_inventories(1, 1)
         .expect("replicas")
         .iter()
-        .map(|i| i.get("W187").copied().unwrap_or(0.0) / nominal - 1.0)
+        .map(|i| i.get(product).copied().unwrap_or(0.0) / nominal - 1.0)
         .collect()
 }
 
@@ -507,32 +513,37 @@ fn sd(v: &[f64]) -> f64 {
 
 /// On one pulse the coupled method's transport is the independent method's,
 /// and replica `k` of either draws the same cross sections, so each coupled
-/// replica's capture moves as the independent replica's does, to within the
+/// replica's inventory moves as the independent replica's does, to within the
 /// Monte Carlo noise of its own transport. The independent replica reads the
 /// draw off the nominal histories through the replica weights, the coupled
 /// one transports on it with its own seed: two routes to one number.
+///
+/// The case is a Li7 sphere at 14 MeV, whose `(n,2n)` to Li6 carries
+/// ENDF/B-VIII.1's MF=33: the MF=33 path, without the resonance
+/// reconstruction a sampled range costs every replica (that path is pinned
+/// bit for bit by `each_replica_is_the_coupled_run_on_its_own_data`).
 ///
 /// Every coupled shift is taken from the one nominal run, whose own noise
 /// moves them all alike; the independent replicas share the nominal's
 /// histories and carry none of it. So the differences are compared about
 /// their mean, which is that one noise draw and is checked on its own. The
-/// draws move W187 by more than twice the noise (0.92% against 0.38%), and
-/// the differences spread by the noise alone (0.39%), so the agreement is
-/// replica by replica and not only in the spread.
+/// draws move Li6 by several times the noise, so the agreement is replica by
+/// replica and not only in the spread.
 #[test]
 fn on_one_pulse_each_replica_moves_as_the_independent_one() {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let (Some(dir), Some(chain)) = (w186(tmp.path()), chain()) else {
-        eprintln!("skipping: W186 or chain fixture not fetched");
+    let (Some(dir), Some(chain)) = (with_covariance(tmp.path(), "Li7", LI7_ENDF), chain()) else {
+        eprintln!("skipping: Li7 or chain fixture not fetched");
         return;
     };
-    const PARTICLES: usize = 50_000;
+    const PARTICLES: usize = 20_000;
     const REPLICAS: usize = 12;
+    const PRODUCT: &str = "Li6";
     let schedule = schedule(1);
     let run = |method: &str, sources: Vec<UqSource>, samples: usize| {
         let t = std::time::Instant::now();
         let r = transmute(
-            &mut model(tungsten(&dir)),
+            &mut model_at(pure("Li7", &dir, 0.53), 1.406e7),
             method,
             &schedule,
             &chain,
@@ -543,15 +554,21 @@ fn on_one_pulse_each_replica_moves_as_the_independent_one() {
         eprintln!("{method}, {samples} replicas: {:.2?}", t.elapsed());
         r
     };
-    let independent = shifts(&run("independent", vec![UqSource::CrossSections], REPLICAS));
+    let independent = shifts(
+        &run("independent", vec![UqSource::CrossSections], REPLICAS),
+        PRODUCT,
+    );
     let noise = run("independent", vec![UqSource::Statistical], 256);
-    let nominal = noise.get_nuclide_density(1, "W187", 1).expect("W187");
-    let noise = noise.get_nuclide_uncertainty(1, "W187", 1).expect("sigma") / nominal;
-    let coupled = shifts(&run(
-        "coupled",
-        vec![UqSource::Statistical, UqSource::CrossSections],
-        REPLICAS,
-    ));
+    let nominal = noise.get_nuclide_density(1, PRODUCT, 1).expect("product");
+    let noise = noise.get_nuclide_uncertainty(1, PRODUCT, 1).expect("sigma") / nominal;
+    let coupled = shifts(
+        &run(
+            "coupled",
+            vec![UqSource::Statistical, UqSource::CrossSections],
+            REPLICAS,
+        ),
+        PRODUCT,
+    );
     let difference: Vec<f64> = coupled
         .iter()
         .zip(&independent)
@@ -564,18 +581,17 @@ fn on_one_pulse_each_replica_moves_as_the_independent_one() {
         );
     }
     eprintln!(
-        "W187: the draws spread it by {:.3e}, the transport's noise is {noise:.3e}; coupled \
-         less independent is {:+.3e} on average, {:.3e} about that",
+        "{PRODUCT}: the draws spread it by {:.3e}, the transport's noise is {noise:.3e}; \
+         coupled less independent is {:+.3e} on average, {:.3e} about that",
         sd(&independent),
         mean(&difference),
         sd(&difference)
     );
     // Draws taken apart from the independent ones would leave the
-    // differences spread by both sets of draws as well as the noise, about
-    // 3.5 times it here.
+    // differences spread by both sets of draws as well as the noise.
     assert!(
-        sd(&independent) > 2.0 * noise,
-        "the draws must move W187 well past the noise for this to test anything"
+        sd(&independent) > 3.0 * noise,
+        "the draws must move {PRODUCT} well past the noise for this to test anything"
     );
     // Twelve differences of variance `noise^2` have a standard deviation
     // under 1.6 of it with probability over 0.995 (chi-square, 11 degrees).
