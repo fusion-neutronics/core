@@ -101,6 +101,8 @@ pub(crate) fn extract_source_spatial_distribution(
         Ok(SourceSpatialDistribution::CylindricalRing(Box::new(
             cyl.inner.clone(),
         )))
+    } else if let Ok(m) = ob.extract::<crate::distribution::PyMeshDistribution>() {
+        Ok(SourceSpatialDistribution::Mesh(Box::new(m.inner)))
     } else if let Ok(xyz) = ob.extract::<[f64; 3]>() {
         yamc_source::distribution::spatial::check_position("position", xyz)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
@@ -109,7 +111,7 @@ pub(crate) fn extract_source_spatial_distribution(
         ))
     } else {
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "position must be a tuple/list of 3 floats (x, y, z), or a CylindricalRing distribution",
+            "position must be a tuple/list of 3 floats (x, y, z), a CylindricalRing or a MeshDistribution",
         ))
     }
 }
@@ -133,6 +135,10 @@ pub(crate) fn source_spatial_distribution_into_py(
             let obj = Py::new(py, crate::distribution::PyFluxShell { inner: *s })?;
             Ok(obj.into_any())
         }
+        SourceSpatialDistribution::Mesh(m) => {
+            let obj = Py::new(py, crate::distribution::PyMeshDistribution { inner: *m })?;
+            Ok(obj.into_any())
+        }
     }
 }
 
@@ -153,6 +159,11 @@ fn source_repr(name: &str, src: &Source, strength: f64) -> String {
         SourceSpatialDistribution::FluxShell(s) => {
             format!("FluxShell(rho=({}, {}))", s.rho[0], s.rho[1])
         }
+        SourceSpatialDistribution::Mesh(m) => format!(
+            "MeshDistribution({} of {} elements emitting)",
+            m.num_emitting(),
+            m.num_elements()
+        ),
     };
     let energy_str = match &src.energy {
         SourceEnergyDistribution::Discrete(d) => {
@@ -302,15 +313,15 @@ macro_rules! particle_source_pyclass {
             }
 
             /// Spatial distribution describing where particles are sampled.
-            /// Returns an ``(x, y, z)`` list for a fixed point, or a
-            /// ``CylindricalRing`` distribution.
+            /// Returns an ``(x, y, z)`` list for a fixed point, or the spatial
+            /// distribution object.
             #[getter]
             pub fn position(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
                 source_spatial_distribution_into_py(py, self.inner.source().space.clone())
             }
 
-            /// Set the birth location: an ``(x, y, z)`` point in cm, or a
-            /// ``CylindricalRing``.
+            /// Set the birth location: an ``(x, y, z)`` point in cm, a
+            /// ``CylindricalRing`` or a ``MeshDistribution``.
             ///
             /// Raises:
             ///     ValueError: If a point has a NaN or infinite coordinate.
@@ -380,7 +391,7 @@ particle_source_pyclass! {
     py_name = "NeutronSource",
     variant = Neutron,
     struct_doc = " A neutron particle source with spatial, energy, and angular distributions.",
-    new_doc = " Create a neutron source.\n\n Args:\n     position: Birth location. Pass a tuple/list ``(x, y, z)`` in cm for a fixed\n            point (recommended), or a spatial distribution object\n            (yamc.Point, yamc.CylindricalRing) for finer control.\n            Defaults to the origin (0, 0, 0).\n     energy: Birth energy. Pass a float in eV for a single energy (recommended),\n            or an energy distribution (yamc.Discrete, yamc.Uniform, yamc.Normal)\n            for a spectrum. Defaults to 14.06 MeV (D-T fusion).\n     direction: Angular distribution (e.g., yamc.Isotropic()).\n            Defaults to Isotropic.\n     strength: Source strength for multi-source weighting. Defaults to 1.0.\n\n Returns:\n     NeutronSource: A neutron source.\n\n Raises:\n     ValueError: If ``position`` has a NaN or infinite coordinate, ``energy``\n         is a NaN or infinite number, or ``strength`` is NaN, infinite or\n         negative. The message names the parameter and its value.",
+    new_doc = " Create a neutron source.\n\n Args:\n     position: Birth location. Pass a tuple/list ``(x, y, z)`` in cm for a fixed\n            point (recommended), or a spatial distribution object\n            (yamc.sources.CylindricalRing, yamc.sources.MeshDistribution) for finer control.\n            Defaults to the origin (0, 0, 0).\n     energy: Birth energy. Pass a float in eV for a single energy (recommended),\n            or an energy distribution (yamc.Discrete, yamc.Uniform, yamc.Normal)\n            for a spectrum. Defaults to 14.06 MeV (D-T fusion).\n     direction: Angular distribution (e.g., yamc.Isotropic()).\n            Defaults to Isotropic.\n     strength: Source strength for multi-source weighting. Defaults to 1.0.\n\n Returns:\n     NeutronSource: A neutron source.\n\n Raises:\n     ValueError: If ``position`` has a NaN or infinite coordinate, ``energy``\n         is a NaN or infinite number, or ``strength`` is NaN, infinite or\n         negative. The message names the parameter and its value.",
 }
 
 particle_source_pyclass! {
@@ -388,5 +399,5 @@ particle_source_pyclass! {
     py_name = "PhotonSource",
     variant = Photon,
     struct_doc = " A photon particle source with spatial, energy, and angular distributions.",
-    new_doc = " Create a photon source.\n\n Args:\n     position: Birth location. Pass a tuple/list ``(x, y, z)`` in cm for a fixed\n            point (recommended), or a spatial distribution object\n            (yamc.Point, yamc.CylindricalRing) for finer control.\n            Defaults to the origin (0, 0, 0).\n     energy: Birth energy. Pass a float in eV for a single energy (recommended),\n            or an energy distribution (yamc.Discrete, yamc.Uniform, yamc.Normal)\n            for a spectrum. Required: photons have no default birth energy, so\n            omitting this raises a ValueError.\n     direction: Angular distribution (e.g., yamc.Isotropic()).\n            Defaults to Isotropic.\n     strength: Source strength for multi-source weighting. Defaults to 1.0.\n\n Returns:\n     PhotonSource: A photon source.\n\n Raises:\n     ValueError: If ``energy`` is omitted, ``position`` has a NaN or infinite\n         coordinate, ``energy`` is a NaN or infinite number, or ``strength`` is\n         NaN, infinite or negative. The message names the parameter and its\n         value.",
+    new_doc = " Create a photon source.\n\n Args:\n     position: Birth location. Pass a tuple/list ``(x, y, z)`` in cm for a fixed\n            point (recommended), or a spatial distribution object\n            (yamc.sources.CylindricalRing, yamc.sources.MeshDistribution) for finer control.\n            Defaults to the origin (0, 0, 0).\n     energy: Birth energy. Pass a float in eV for a single energy (recommended),\n            or an energy distribution (yamc.Discrete, yamc.Uniform, yamc.Normal)\n            for a spectrum. Required: photons have no default birth energy, so\n            omitting this raises a ValueError.\n     direction: Angular distribution (e.g., yamc.Isotropic()).\n            Defaults to Isotropic.\n     strength: Source strength for multi-source weighting. Defaults to 1.0.\n\n Returns:\n     PhotonSource: A photon source.\n\n Raises:\n     ValueError: If ``energy`` is omitted, ``position`` has a NaN or infinite\n         coordinate, ``energy`` is a NaN or infinite number, or ``strength`` is\n         NaN, infinite or negative. The message names the parameter and its\n         value.",
 }

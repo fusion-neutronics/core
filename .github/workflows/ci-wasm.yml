@@ -157,6 +157,7 @@ jobs:
         with:
           name: yani-wasm-pkg
           path: crates/yani-wasm/pkg/
+          retention-days: 3
 
       - name: Attach the package to the release
         if: github.event_name == 'release' && github.event.action == 'published'

@@ -213,3 +213,4 @@ jobs:
           name: wheels-pyodide-${{ matrix.project }}
           path: packages/${{ matrix.project }}/dist/*.whl
           if-no-files-found: error
+          retention-days: 2
