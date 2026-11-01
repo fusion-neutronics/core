@@ -6655,6 +6655,10 @@ class TransmutationResults:
         - ``cross_section_points_floored``: with ``method="coupled"``, the
           cross-section grid values a replica's draw took below zero and that
           were floored at zero, over every replica.
+        - ``replica_weight_noise``: with the coupled method's replicas carried
+          as weights on one transport per step, per step the Monte Carlo noise
+          in the replicas' largest rate relative to that rate; it grows as the
+          weights spread. Empty otherwise.
         - ``half_lives_perturbed`` / ``no_half_life_uncertainty``: with the
           ``"half_life"`` source, which reachable unstable nuclides had their
           half-life sampled and which state no sigma to sample from.
