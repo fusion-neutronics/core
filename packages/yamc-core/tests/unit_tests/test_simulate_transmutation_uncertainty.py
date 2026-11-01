@@ -181,15 +181,8 @@ def test_each_rate_has_a_statistical_sigma():
     assert _run().get_reaction_rate_uncertainty(MAT_ID, 0) is None
 
 
-@pytest.mark.parametrize(
-    "request_",
-    [
-        yamc.DataUncertainty(seed=1, samples=4, sources=["cross_sections"]),
-        yamc.DataUncertainty(seed=1, samples=4, sources=["statistical"], attribution=True),
-    ],
-    ids=["cross_sections_alone", "attribution"],
-)
-def test_the_coupled_method_refuses_what_a_replica_cannot_carry(request_):
+def test_the_coupled_method_refuses_cross_sections_without_statistics():
+    request_ = yamc.DataUncertainty(seed=1, samples=4, sources=["cross_sections"])
     with pytest.raises(RuntimeError, match="coupled"):
         _run(method="coupled", data_uncertainty=request_)
 

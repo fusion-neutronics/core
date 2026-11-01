@@ -352,3 +352,68 @@ fn on_one_pulse_the_replicas_agree_with_the_per_history_covariance() {
         );
     }
 }
+
+/// Attribution reruns the ensemble with each source alone, as many replicas
+/// as the whole request and on the same streams, so each source's entry is
+/// bit for bit the variance of a coupled run asking for that source alone.
+#[test]
+fn attribution_is_each_source_alone() {
+    let (Some(path), Some(chain)) = (b10(), chain()) else {
+        eprintln!("skipping: B10 or chain fixture not fetched");
+        return;
+    };
+    let mut edited = (*chain).clone();
+    let h3 = edited.get_mut("H3").expect("H3 in the chain");
+    h3.half_life_uncertainty = Some(0.1 * h3.half_life.expect("H3 decays"));
+    let chain: Chain = Arc::new(edited);
+    let schedule = burnout();
+    let steps = 4;
+    let sources = vec![UqSource::Statistical, UqSource::HalfLife];
+    let whole = DataUncertainty {
+        attribution: true,
+        ..request(sources.clone(), 3)
+    };
+    let uq = transmute(
+        &mut model(&path),
+        "coupled",
+        &schedule,
+        &chain,
+        BASE_SEED,
+        Some(&whole),
+    );
+    let attribution = uq.uncertainty[&1]
+        .attribution
+        .as_ref()
+        .expect("attribution");
+    assert!(attribution.contributors.is_empty());
+    assert!(attribution.linearity.values().all(Option::is_none));
+    for source in sources {
+        let alone = transmute(
+            &mut model(&path),
+            "coupled",
+            &schedule,
+            &chain,
+            BASE_SEED,
+            Some(&request(vec![source], 3)),
+        );
+        for step in 0..steps {
+            let variances: HashMap<String, f64> = alone.uncertainty[&1]
+                .std_dev_at(step)
+                .into_iter()
+                .filter(|(_, s)| *s > 0.0)
+                .map(|(n, s)| (n, s * s))
+                .collect();
+            assert_eq!(
+                attribution.by_source[source.name()][step],
+                variances,
+                "{} at step {step}",
+                source.name()
+            );
+        }
+    }
+    let h3 = |name: &str| attribution.by_source[name][3].get("H3").copied();
+    assert!(
+        h3("half_life").is_some_and(|v| v > 0.0),
+        "H3 decays by its drawn half-life"
+    );
+}

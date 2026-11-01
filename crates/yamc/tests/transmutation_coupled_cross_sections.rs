@@ -611,6 +611,55 @@ fn on_one_pulse_each_replica_moves_as_the_independent_one() {
     );
 }
 
+/// With attribution, the cross sections' entry is the variance with them
+/// and the statistical source less the variance with the statistical source
+/// alone, the two ensembles on the same transport seeds, to the bit; and on
+/// Li7 at 14 MeV, where the draws move Li6 by far more than the noise, it is
+/// nearly all of the total.
+#[test]
+fn attribution_measures_the_cross_sections_beside_the_noise() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let (Some(dir), Some(chain)) = (with_covariance(tmp.path(), "Li7", LI7_ENDF), chain()) else {
+        eprintln!("skipping: Li7 or chain fixture not fetched");
+        return;
+    };
+    let schedule = schedule(1);
+    let run = |sources: Vec<UqSource>, attribution: bool| {
+        transmute(
+            &mut model_at(pure("Li7", &dir, 0.53), 1.406e7),
+            "coupled",
+            &schedule,
+            &chain,
+            BASE_SEED,
+            4000,
+            Some(&DataUncertainty {
+                attribution,
+                ..request(sources, 6)
+            }),
+        )
+    };
+    let whole = run(vec![UqSource::Statistical, UqSource::CrossSections], true);
+    let both = run(vec![UqSource::Statistical, UqSource::CrossSections], false);
+    let stat = run(vec![UqSource::Statistical], false);
+    let attribution = whole.uncertainty[&1]
+        .attribution
+        .as_ref()
+        .expect("attribution");
+    let variance = |r: &TransmutationResults| r.uncertainty[&1].std_dev_at(0)["Li6"].powi(2);
+    let xs = attribution.by_source["cross_sections"][0]["Li6"];
+    assert_eq!(xs, variance(&both) - variance(&stat));
+    assert_eq!(
+        attribution.by_source["statistical"][0]["Li6"],
+        variance(&stat)
+    );
+    assert_eq!(variance(&whole), variance(&both));
+    assert!(
+        xs > 0.9 * variance(&whole),
+        "the cross sections are most of Li6's variance: {xs:e} of {:e}",
+        variance(&whole)
+    );
+}
+
 /// What a coupled replica costs beside the nominal run, on this sphere:
 /// reading the data in full once, applying one replica's draw, and the
 /// coupled run with and without replicas. Prints, asserts nothing.
