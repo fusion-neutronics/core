@@ -3281,7 +3281,7 @@ fn damage_report(
 }
 
 /// Each step's per-nuclide variance in an ensemble.
-fn variances_of(ensemble: &Ensemble, n_steps: usize) -> Vec<HashMap<String, f64>> {
+pub(crate) fn variances_of(ensemble: &Ensemble, n_steps: usize) -> Vec<HashMap<String, f64>> {
     (0..n_steps)
         .map(|step| {
             ensemble

@@ -106,8 +106,8 @@ impl Model {
     ///   each on its own transport seed, decay data and, with the
     ///   cross-section source, its own nuclear data in every transport
     ///   ([`crate::coupled_xs`]) and, with the MF=40 source, its own
-    ///   isomer production curves, and refuse attribution, which a replica
-    ///   cannot carry yet. `None` is the default path, bit-identical to a build
+    ///   isomer production curves; attribution reruns the ensemble once per
+    ///   source. `None` is the default path, bit-identical to a build
     ///   without it, and so are the nominal results of either method with it.
     ///   With the cross-section source on in independent mode, the transport
     ///   carries a fixed number of replica weights
@@ -869,16 +869,24 @@ impl Model {
                 )?),
                 None => None,
             };
-            let ensembles = replicas.run(&chain, &initial_for_replicas, &nominal, |k, edited| {
-                println!("Coupled uncertainty: replica {}...", k + 1);
-                let replica_settings = crate::model::TransportSettings {
-                    seed: replicas.transport_seed(settings.seed, k),
-                    ..settings.clone()
-                };
-                let mut data = library.as_mut().map(|l| l.replica(k));
-                let branch = replicas.branch(&branch, k);
-                self.coupled_replica(&run, edited, &branch, &replica_settings, data.as_mut())
-            });
+            let ensembles = replicas.run(
+                &chain,
+                &initial_for_replicas,
+                &nominal,
+                |these, k, edited| {
+                    println!("Coupled uncertainty: replica {}...", k + 1);
+                    let replica_settings = crate::model::TransportSettings {
+                        seed: these.transport_seed(settings.seed, k),
+                        ..settings.clone()
+                    };
+                    let mut data = library
+                        .as_mut()
+                        .filter(|_| these.cross_sections())
+                        .map(|l| l.replica(k));
+                    let branch = these.branch(&branch, k);
+                    self.coupled_replica(&run, edited, &branch, &replica_settings, data.as_mut())
+                },
+            );
             self.geometry.materials_mut().clone_from_slice(&end);
             for (id, (ensemble, mut info)) in ensembles? {
                 if let Some(l) = &library {

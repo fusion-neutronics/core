@@ -3336,8 +3336,14 @@ class Model:
                 linearised, and costs the transport of every irradiation step
                 once per replica (at least 128 replicas unless ``samples`` is
                 set). An empty ``sources`` asks for every source and is carried.
-                ``attribution`` is not yet carried by a coupled replica, so
-                asking for it with the coupled method raises.
+                ``attribution`` reruns the ensemble once per applied source,
+                each drawing that source alone on the same streams, so it costs
+                one more coupled ensemble per source; ``"cross_sections"`` is
+                measured beside ``"statistical"`` and reported as the variance
+                with both less the variance with ``"statistical"`` alone, which
+                can come out negative where the cross sections move a nuclide by
+                less than the transport's noise. There are no first-order
+                contributors and no linearity check with the coupled method.
                 ``get_data_uncertainty_info``'s ``flux_response`` reads
                 ``"coupled_replicas"``. The rest of this entry describes the
                 independent method. The sources that apply there:
