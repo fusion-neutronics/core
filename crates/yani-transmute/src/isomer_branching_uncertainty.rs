@@ -1121,9 +1121,284 @@ pub(crate) fn cell_weights(
     w
 }
 
+/// The MF=40 draws of a coupled run's replicas (see
+/// [`crate::coupled_uncertainty`]): each chain parent's stated field, and
+/// which branching-table curve each of its states lies on.
+///
+/// A coupled replica tallies its isomeric partials in its own transports, so
+/// the draw cannot be applied to a fold afterwards. It is applied to the
+/// production curves themselves instead: replica `k`'s branching table has
+/// every stated state's curve multiplied by that replica's multiplier on each
+/// of the state's intervals, and every step of the replica tallies, folds and
+/// splits on that table by the nominal rule. A share list's shares are then
+/// each state's drawn production over the drawn sum; an absolute partial
+/// makes its product at its drawn production, scaled back to the reaction
+/// total above it as the rule scales any partial back. The multipliers are
+/// the ones an independent replica of the same index draws: the same field
+/// per parent, the same stream `(seed, replica, parent)`.
+pub(crate) struct CoupledIsomer {
+    covariance: IsomerCovariance,
+    /// Per parent with a field, its stream ordinal and sampler.
+    samplers: BTreeMap<String, (u32, RelativeLognormal)>,
+    /// Per parent, per state of its field in order: the reaction kind and the
+    /// index of the state's curve in the table's curves for that kind.
+    placed: BTreeMap<String, Vec<(String, usize)>>,
+}
+
+/// A curve's values just below and just above `e`, under
+/// [`curve_interp`]'s conventions: zero below its first point, flat above its
+/// last, and a repeated energy a step from its first value to its last.
+fn sides(energy: &[f64], values: &[f64], e: f64) -> (f64, f64) {
+    let lo = energy.partition_point(|&x| x < e);
+    let hi = energy.partition_point(|&x| x <= e);
+    if hi > lo {
+        let left = if lo == 0 { 0.0 } else { values[lo] };
+        return (left, values[hi - 1]);
+    }
+    let v = if lo == 0 {
+        0.0
+    } else if lo == energy.len() {
+        values[lo - 1]
+    } else {
+        curve_interp(energy, values, e)
+    };
+    (v, v)
+}
+
+/// The multiplier of the interval of `edges` just below and just above `e`,
+/// one outside them, from `deviates` (multipliers minus one, one per
+/// interval).
+fn multiplier_sides(edges: &[f64], deviates: &[f64], e: f64) -> (f64, f64) {
+    let below = edges.partition_point(|&x| x < e);
+    let above = edges.partition_point(|&x| x <= e);
+    let at = |i: usize| {
+        if i >= 1 && i < edges.len() {
+            1.0 + deviates[i - 1]
+        } else {
+            1.0
+        }
+    };
+    (at(below), at(above))
+}
+
+/// One stated state's move of a curve: its own part of the curve (the whole
+/// curve when `None`), its interval edges, and its multipliers minus one.
+type StateMove<'a> = (Option<&'a (Vec<f64>, Vec<f64>)>, &'a [f64], &'a [f64]);
+
+/// `(energy, values)` with each `(own, edges, deviates)` applied: its own
+/// part of the curve (the whole curve when `None`) multiplied, interval by
+/// interval, by one plus its deviate. The result is linear wherever the
+/// inputs are, with a step at every interval edge, so it folds exactly.
+fn moved_curve(energy: &[f64], values: &[f64], states: &[StateMove<'_>]) -> (Vec<f64>, Vec<f64>) {
+    let first = energy[0];
+    let mut points: Vec<f64> = energy.to_vec();
+    for (own, edges, _) in states {
+        points.extend(edges.iter().copied());
+        if let Some((e, _)) = own {
+            points.extend(e.iter().copied());
+        }
+    }
+    points.retain(|&e| e >= first);
+    points.sort_by(f64::total_cmp);
+    points.dedup();
+    let mut out = (
+        Vec::with_capacity(points.len()),
+        Vec::with_capacity(points.len()),
+    );
+    for (i, &e) in points.iter().enumerate() {
+        let (mut left, mut right) = sides(energy, values, e);
+        for (own, edges, deviates) in states {
+            let (ol, or) = match own {
+                Some((oe, ov)) => sides(oe, ov, e),
+                None => sides(energy, values, e),
+            };
+            let (ml, mr) = multiplier_sides(edges, deviates, e);
+            left += (ml - 1.0) * ol;
+            right += (mr - 1.0) * or;
+        }
+        // The curve starts at its first point; below it nothing is made.
+        if i > 0 && left != right {
+            out.0.push(e);
+            out.1.push(left);
+        }
+        out.0.push(e);
+        out.1.push(right);
+    }
+    out
+}
+
+impl CoupledIsomer {
+    /// The stated fields of `branch`'s parents in `chain`, each state placed
+    /// on its curve, and one sampler per parent.
+    pub(crate) fn new(
+        branch: &yani::BranchTable,
+        chain: &HashMap<String, yani::ChainNuclide>,
+    ) -> Result<Self, String> {
+        let lists = crate::branching_rule::build_lists(chain, branch)?;
+        let covariance = IsomerCovariance::from_table(branch, &lists)?;
+        let mut samplers = BTreeMap::new();
+        let mut placed = BTreeMap::new();
+        for (parent, field) in &covariance.fields {
+            let mut at = Vec::with_capacity(field.states.len());
+            for state in &field.states {
+                let rule = &lists[parent][state.list];
+                let curve: &yani::BranchCurve = &rule.curves[state.curve];
+                let index = branch.curves()[parent][&rule.kind]
+                    .iter()
+                    .position(|c| std::ptr::eq(c, curve))
+                    .ok_or_else(|| {
+                        format!(
+                            "{parent} {}: the MF=40 state {:?} lies on no curve of the \
+                             branching table",
+                            rule.kind, state.key
+                        )
+                    })?;
+                at.push((rule.kind.clone(), index));
+            }
+            placed.insert(parent.clone(), at);
+            let ordinal = crate::covariance_sample::name_ordinal(parent) ^ ISOMER_STREAM;
+            samplers.insert(
+                parent.clone(),
+                (ordinal, RelativeLognormal::new(&field.covariance)),
+            );
+        }
+        Ok(Self {
+            covariance,
+            samplers,
+            placed,
+        })
+    }
+
+    /// Whether any parent has a field to draw.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.samplers.is_empty()
+    }
+
+    /// `branch` with replica `replica`'s draw under `seed` applied to every
+    /// stated state's curve.
+    pub(crate) fn branch(
+        &self,
+        branch: &yani::BranchTable,
+        seed: u64,
+        replica: u64,
+    ) -> yani::BranchTable {
+        let mut out = branch.clone();
+        for (parent, field) in &self.covariance.fields {
+            let (ordinal, sampler) = &self.samplers[parent];
+            let draw = sampler.draw(*ordinal, seed, replica);
+            let deviates = &draw.0;
+            // The states on each curve, which move it together.
+            let mut on: BTreeMap<(String, usize), Vec<&State>> = BTreeMap::new();
+            for (state, at) in field.states.iter().zip(&self.placed[parent]) {
+                on.entry(at.clone()).or_default().push(state);
+            }
+            for ((kind, index), states) in on {
+                let curves = out
+                    .curves_mut()
+                    .get_mut(parent)
+                    .and_then(|k| k.get_mut(&kind))
+                    .expect("placed on the table's own curves");
+                let curve = &mut curves[index];
+                let moves: Vec<StateMove<'_>> = states
+                    .iter()
+                    .map(|s| {
+                        (
+                            s.own.as_ref(),
+                            s.edges.as_slice(),
+                            &deviates[s.first..s.first + s.cells()],
+                        )
+                    })
+                    .collect();
+                let (energy, values) = moved_curve(&curve.energy, &curve.values, &moves);
+                curve.energy = energy;
+                curve.values = values;
+            }
+        }
+        out
+    }
+
+    /// What the draw covers for a material that reaches `reachable`: the
+    /// `(parent, reaction)` pairs with a stated state, the blocks not used,
+    /// and each drawn parent's repair and lognormal limit.
+    pub(crate) fn report(&self, reachable: &BTreeSet<String>) -> IsomerReport {
+        let mut report = IsomerReport::default();
+        for (parent, at) in &self.placed {
+            if !reachable.contains(parent) {
+                continue;
+            }
+            for (kind, _) in at {
+                report.perturbed.insert((parent.clone(), kind.clone()));
+            }
+            let (_, sampler) = &self.samplers[parent];
+            if let Some(r) = sampler.repair() {
+                report.repaired.insert(parent.clone(), r);
+            }
+            if let Some(l) = sampler.lognormal_limit() {
+                report.lognormal_not_carried.insert(parent.clone(), l);
+            }
+        }
+        report.not_used = self
+            .covariance
+            .not_used
+            .iter()
+            .filter(|(p, _)| reachable.contains(*p))
+            .map(|(p, r)| (p.clone(), r.clone()))
+            .collect();
+        report
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A replica's curve is the nominal one with each interval's part moved
+    /// by its multiplier: linear within every interval, a step at each edge,
+    /// zero below the curve and flat above it, so the tally's moment fold of
+    /// it is exact. No draw leaves every value where it was.
+    #[test]
+    fn a_moved_curve_steps_at_each_edge() {
+        let energy = [1.0, 3.0, 5.0];
+        let values = [2.0, 4.0, 4.0];
+        let edges = [0.5, 2.0, 4.0, 8.0];
+        let deviates = [0.5, -0.25, 1.0];
+        let (e, v) = moved_curve(&energy, &values, &[(None, &edges, &deviates)]);
+        let at = |x: f64| sides(&e, &v, x);
+        // Inside the first interval, 1.5 times the curve.
+        assert_eq!(at(1.0).1, 3.0);
+        assert_eq!(at(1.5), (3.75, 3.75));
+        // A step at 2 eV from 1.5 to 0.75 times the curve's 3 barns.
+        assert_eq!(at(2.0), (4.5, 2.25));
+        assert_eq!(at(4.0), (3.0, 8.0));
+        // Flat above the last point, then the last interval ends.
+        assert_eq!(at(6.0), (8.0, 8.0));
+        assert_eq!(at(8.0), (8.0, 4.0));
+        assert_eq!(at(9.0), (4.0, 4.0));
+        assert_eq!(at(0.75), (0.0, 0.0));
+        let still = moved_curve(&energy, &values, &[(None, &edges, &[0.0; 3])]);
+        for x in [1.0, 1.5, 2.0, 3.0, 4.0, 4.5, 6.0, 9.0] {
+            assert_eq!(
+                sides(&still.0, &still.1, x),
+                sides(&energy, &values, x),
+                "{x}"
+            );
+        }
+    }
+
+    /// A state summed into a curve with another moves only its own part.
+    #[test]
+    fn a_summed_state_moves_its_own_part() {
+        let energy = [1.0, 3.0];
+        let values = [3.0, 3.0];
+        let own = (vec![1.0, 3.0], vec![1.0, 2.0]);
+        let edges = [1.0, 3.0];
+        let (e, v) = moved_curve(&energy, &values, &[(Some(&own), &edges, &[1.0])]);
+        // Doubled own part on top of the rest: 3 + 1 at 1 eV, 3 + 2 at 3 eV,
+        // back to the nominal above the interval.
+        assert_eq!(sides(&e, &v, 1.0).1, 4.0);
+        assert_eq!(sides(&e, &v, 2.0), (4.5, 4.5));
+        assert_eq!(sides(&e, &v, 3.0), (5.0, 3.0));
+    }
     use std::sync::Arc;
 
     use endf::mf::covariance::NiSubsection;

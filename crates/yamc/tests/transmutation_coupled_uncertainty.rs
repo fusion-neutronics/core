@@ -229,7 +229,8 @@ fn each_statistical_replica_is_a_whole_coupled_run() {
         .iter()
         .any(|s| s == "tallied-rate statistics"));
 
-    let replicas = CoupledReplicas::new(&request, &chain).expect("carried");
+    let replicas =
+        CoupledReplicas::new(&request, &chain, &yani::BranchTable::new()).expect("carried");
     for k in 0..3 {
         let seed = replicas.transport_seed(BASE_SEED, k as u64);
         assert_ne!(seed, BASE_SEED);
@@ -281,7 +282,8 @@ fn each_decay_data_replica_is_the_coupled_run_on_its_own_chain() {
         .iter()
         .any(|s| s == "tallied-rate statistics"));
 
-    let replicas = CoupledReplicas::new(&request, &chain).expect("carried");
+    let replicas =
+        CoupledReplicas::new(&request, &chain, &yani::BranchTable::new()).expect("carried");
     let half_lives = uq.uncertainty[&1].half_lives();
     for k in 0..2 {
         assert_eq!(replicas.transport_seed(BASE_SEED, k), BASE_SEED);

@@ -1665,15 +1665,18 @@ impl PyModel {
     ///         source is carried only beside ``"statistical"``: a replica on
     ///         its own cross sections follows its own histories, so its spread
     ///         holds the transport's noise too, and naming
-    ///         ``"cross_sections"`` alone raises.
+    ///         ``"cross_sections"`` alone raises. With
+    ///         ``"isomer_branching"`` every step of a replica tallies and
+    ///         splits its isomeric partials on production curves carrying that
+    ///         replica's MF=40 draw (again an independent replica's), split by
+    ///         the nominal rule at each collision energy.
     ///         ``"decay_energy"`` and ``"decay_photon_lines"`` move what is
     ///         evaluated from each inventory, as below. This is exact, nothing
     ///         linearised, and costs the transport of every irradiation step
     ///         once per replica (at least 128 replicas unless ``samples`` is
-    ///         set). ``"isomer_branching"`` is not yet carried by a coupled
-    ///         replica, and nor is ``attribution``, so asking for them with
-    ///         the coupled method raises; an empty ``sources`` asks for every
-    ///         source, so name the sources there.
+    ///         set). An empty ``sources`` asks for every source and is carried.
+    ///         ``attribution`` is not yet carried by a coupled replica, so
+    ///         asking for it with the coupled method raises.
     ///         ``get_data_uncertainty_info``'s ``flux_response`` reads
     ///         ``"coupled_replicas"``. The rest of this entry describes the
     ///         independent method. The sources that apply there:
