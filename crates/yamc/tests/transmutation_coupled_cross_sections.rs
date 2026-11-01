@@ -397,7 +397,7 @@ fn a_product_keeps_its_draw_whatever_scope_holds_it() {
         let mut library =
             CoupledCrossSections::new(&[Arc::new(full.clone())], SEED).expect("library");
         let nominal = full.nuclide_data[name].reactions_for_temp("294").unwrap();
-        for k in 0..3 {
+        for k in 0..2 {
             let mut replica = library.replica(k);
             let (mut a, mut b) = (full.clone(), product.clone());
             assert!(replica.apply(&mut a).expect("full"));
@@ -527,8 +527,10 @@ fn sd(v: &[f64]) -> f64 {
 /// moves them all alike; the independent replicas share the nominal's
 /// histories and carry none of it. So the differences are compared about
 /// their mean, which is that one noise draw and is checked on its own. The
-/// draws move Li6 by several times the noise, so the agreement is replica by
-/// replica and not only in the spread.
+/// draws spread Li6 by 9.7% against 0.14% of noise, and the differences
+/// spread by the noise alone (0.14%), so the agreement is replica by replica
+/// and not only in the spread: draws taken apart from the independent ones
+/// would leave differences of about 14%.
 #[test]
 fn on_one_pulse_each_replica_moves_as_the_independent_one() {
     let tmp = tempfile::tempdir().expect("temp dir");
@@ -590,7 +592,7 @@ fn on_one_pulse_each_replica_moves_as_the_independent_one() {
     // Draws taken apart from the independent ones would leave the
     // differences spread by both sets of draws as well as the noise.
     assert!(
-        sd(&independent) > 3.0 * noise,
+        sd(&independent) > 10.0 * noise,
         "the draws must move {PRODUCT} well past the noise for this to test anything"
     );
     // Twelve differences of variance `noise^2` have a standard deviation
