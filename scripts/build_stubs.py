@@ -63,6 +63,7 @@ SUBMODULES: dict[str, list[str]] = {
         "Isotropic",
         "Monodirectional",
         "CylindricalRing",
+        "MeshDistribution",
         "fusion_neutron_spectrum",
         "tokamak_source",
         "tokamak_ion_density",
@@ -190,6 +191,7 @@ SUBMOD_HEADER = (
 OMITTED: dict[str, set[str]] = {
     "yani": {
         "AngleDistribution",
+        "MeshDistribution",
         "Particle",
         "PhotonSource",
         "ReactionProduct",
@@ -441,8 +443,13 @@ PACKAGES = [
         core=ROOT / "packages" / "yani-core" / "python" / "yani" / "_core",
         crate="yani-python",
         features="stub-gen",
-        # No transport, so no `parallel`.
-        submodules={k: v for k, v in SUBMODULES.items() if k != "parallel"},
+        # No transport, so no `parallel`, and no meshes for a source to
+        # spread over: MeshDistribution stays top level for OMITTED to drop.
+        submodules={
+            k: [n for n in v if n != "MeshDistribution"]
+            for k, v in SUBMODULES.items()
+            if k != "parallel"
+        },
         submodule_extra=SUBMODULE_EXTRA,
         injected={},
     ),

@@ -25,6 +25,8 @@ pub enum SourceSpatialDistribution {
     CylindricalRing(Box<CylindricalRing>),
     /// A radial shell of a stellarator plasma
     FluxShell(Box<crate::stellarator::FluxShell>),
+    /// Spread over the elements of a mesh by per-element strength
+    Mesh(Box<crate::distribution::mesh::MeshDistribution>),
 }
 
 impl SourceEnergyDistribution {
@@ -44,6 +46,7 @@ impl SourceSpatialDistribution {
             SourceSpatialDistribution::Point(p) => p.sample(rng),
             SourceSpatialDistribution::CylindricalRing(c) => c.sample(rng),
             SourceSpatialDistribution::FluxShell(s) => s.sample(rng),
+            SourceSpatialDistribution::Mesh(m) => m.sample(rng),
         }
     }
 }
@@ -212,8 +215,19 @@ impl ParticleSource {
     }
 
     pub fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> yamc_particle::Particle {
+        let position = self.source().space.sample(rng);
+        self.sample_at(position, rng)
+    }
+
+    /// A particle born at `position`, with this source's direction, energy
+    /// and particle type: for a position drawn with knowledge of the
+    /// geometry, as a mesh source limited to some cells is.
+    pub fn sample_at<R: rand::Rng + ?Sized>(
+        &self,
+        sampled_space: [f64; 3],
+        rng: &mut R,
+    ) -> yamc_particle::Particle {
         let src = self.source();
-        let sampled_space = src.space.sample(rng);
         let sampled_angle = src.angle.sample(rng);
         let sampled_energy = src.energy.sample(rng);
         let mut particle =

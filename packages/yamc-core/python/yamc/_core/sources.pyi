@@ -18,6 +18,7 @@ __all__ = [
     "Isotropic",
     "Monodirectional",
     "CylindricalRing",
+    "MeshDistribution",
     "fusion_neutron_spectrum",
     "tokamak_source",
     "tokamak_ion_density",
@@ -414,6 +415,66 @@ class CylindricalRing:
         r"""
         Rich Jupyter display: the radial / azimuthal / axial distributions
         and the cylinder origin.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class MeshDistribution:
+    r"""
+    A source spread over the elements of a mesh.
+    
+    Each element emits in proportion to its strength, from a point uniform
+    within it. Pass it as ``position=`` to ``NeutronSource`` or ``PhotonSource``.
+    
+    Args:
+        mesh: A ``RegularRectangularMesh``, ``RegularCylindricalMesh`` or a
+            tet ``MeshGeometry``.
+        strengths: One non-negative strength per element (e.g. decay photons
+            per second in each voxel), in the order a tally on the mesh
+            numbers its bins, so a mesh tally's ``mean`` can be passed
+            directly. For a ``MeshGeometry`` this is one per tetrahedron.
+            Defaults to each element's volume: uniform over the mesh.
+        cells: A ``Cell`` or list of them. Each element then emits only from
+            its points in these cells, keeping its own strength: an R2S
+            voxel's decay photons are born in the activated cells under it,
+            not in the void beside them.
+        materials: A ``Material`` or list of them, as ``cells`` but for the
+            cells filled with them. Give ``cells`` or ``materials``, not both.
+            Both apply where the source meets a geometry, in a ``Model``;
+            ``sample()`` has no geometry and draws from the whole element.
+    
+    Raises:
+        ValueError: If ``strengths`` has the wrong length, a value that is
+            NaN, infinite or negative, or sums to zero; or both ``cells`` and
+            ``materials`` are given. A run refuses a source whose cells or
+            materials are not in the geometry, or with an emitting element
+            holding none of them.
+    
+    Examples:
+        >>> import yamc
+        >>> mesh = yamc.RegularRectangularMesh([0, 0, 0], [10, 10, 10], [2, 1, 1])
+        >>> space = yamc.sources.MeshDistribution(mesh, strengths=[3.0, 1.0])
+        >>> source = yamc.PhotonSource(position=space, energy=1e6)
+    """
+    @property
+    def total_strength(self) -> builtins.float:
+        r"""
+        Sum of the element strengths: the source rate when they are rates, to
+        scale per-source-particle tallies by.
+        """
+    @property
+    def num_elements(self) -> builtins.int:
+        r"""
+        Number of elements in the mesh.
+        """
+    def __new__(cls, mesh: typing.Any, strengths: typing.Optional[typing.Sequence[builtins.float]] = None, cells: typing.Optional[typing.Any] = None, materials: typing.Optional[typing.Any] = None) -> MeshDistribution: ...
+    def sample(self) -> builtins.list[builtins.float]:
+        r"""
+        Sample a position from the distribution, anywhere in the chosen
+        element: ``cells`` and ``materials`` need the geometry of a ``Model``.
+        
+        Returns:
+            List[float]: Position vector [x, y, z] in cm.
         """
     def __repr__(self) -> builtins.str: ...
 

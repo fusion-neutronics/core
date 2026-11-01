@@ -2,6 +2,7 @@
 
 pub mod angular;
 pub mod energy;
+pub mod mesh;
 pub mod spatial;
 
 /// Refuse a NaN or infinite `value` for the parameter `what`, saying which

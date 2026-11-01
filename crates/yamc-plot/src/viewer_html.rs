@@ -913,7 +913,31 @@ function _samplePosition(s, r) {
     const zv = _sampleUnivariate(c.z, r);
     return [c.origin[0] + rad * Math.cos(phi), c.origin[1] + rad * Math.sin(phi), c.origin[2] + zv];
   }
+  if (s.Mesh) return _sampleMesh(s.Mesh, r);
   return [0, 0, 0];
+}
+function _sampleMesh(m, r) {
+  const cum = m.cumulative, t = r() * cum[cum.length - 1];
+  let lo = 0, hi = cum.length - 1;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (cum[mid] <= t) lo = mid + 1; else hi = mid; }
+  const e = m.elements, i = m.bins[lo];
+  if (e.Rectangular) {
+    const { lower_left: ll, width: w, shape: n } = e.Rectangular;
+    const idx = [i % n[0], Math.floor(i / n[0]) % n[1], Math.floor(i / (n[0] * n[1]))];
+    return [0, 1, 2].map((k) => ll[k] + w[k] * (idx[k] + r()));
+  }
+  if (e.Cylindrical) {
+    const { origin: o, r: rg, phi: pg, z: zg } = e.Cylindrical;
+    const nr = rg.length - 1, np = pg.length - 1;
+    const ir = i % nr, ip = Math.floor(i / nr) % np, iz = Math.floor(i / (nr * np));
+    const rad = Math.sqrt(rg[ir] ** 2 + (rg[ir + 1] ** 2 - rg[ir] ** 2) * r());
+    const phi = pg[ip] + (pg[ip + 1] - pg[ip]) * r();
+    return [o[0] + rad * Math.cos(phi), o[1] + rad * Math.sin(phi), o[2] + zg[iz] + (zg[iz + 1] - zg[iz]) * r()];
+  }
+  const v = e.Tetrahedra[lo];
+  const u = [r(), r(), r()].sort((a, b) => a - b);
+  const b = [u[0], u[1] - u[0], u[2] - u[1], 1 - u[2]];
+  return [0, 1, 2].map((k) => b.reduce((acc, bj, j) => acc + bj * v[j][k], 0));
 }
 function _pickSource(sources, r) {
   if (sources.length === 1) return sources[0];
