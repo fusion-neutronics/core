@@ -126,6 +126,8 @@ pub enum GpuDispatchError {
     /// D1S run whose decay-photon data cannot be prepared, an unset
     /// transmutation source among the reasons.
     PhotonDataPrep(String),
+    /// A mesh source limited to cells or materials it cannot emit in.
+    InvalidSource(String),
     /// `Model::ensure_nuclear_data_loaded` or
     /// `Model::ensure_neutron_temperatures_for_gpu` failed -- a nuclide has no
     /// data source, or a material is labelled with a temperature its nuclide
@@ -255,6 +257,7 @@ impl std::fmt::Display for GpuDispatchError {
                  which is not present in the model's geometry"
             ),
             Self::PhotonDataPrep(msg) => write!(f, "{msg}"),
+            Self::InvalidSource(msg) => write!(f, "{msg}"),
             Self::NeutronDataPrep(msg) => write!(f, "{msg}"),
             Self::PhotonBankOverflow {
                 overflow,
@@ -694,6 +697,9 @@ fn run_on_gpu_dispatch(
     model
         .check_decay_photon_sources()
         .map_err(GpuDispatchError::PhotonDataPrep)?;
+    model
+        .validate_source_domains()
+        .map_err(GpuDispatchError::InvalidSource)?;
     // The neutron kernel supports survival biasing (implicit capture); any
     // other variance-reduction technique is rejected rather than silently
     // ignored. Iterate so an added variant (e.g. weight windows) fails fast

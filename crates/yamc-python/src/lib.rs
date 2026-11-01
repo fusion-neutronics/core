@@ -117,7 +117,12 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // transmutation results, all shared with the standalone `yani` wheel.
     yani_python::register_classes(_py, m, "yamc")?;
     // `yamc.sources.MeshDistribution` reads the mesh classes defined here.
-    let _ = yani_python::distribution::MESH_ELEMENTS_READER.set(geometry::read_mesh_elements);
+    let _ = yani_python::distribution::MESH_SOURCE_READERS.set(
+        yani_python::distribution::MeshSourceReaders {
+            elements: geometry::read_mesh_elements,
+            cell_ids: tally::cell_filter_ids,
+        },
+    );
 
     m.add_class::<geometry::PyGeometry>()?;
     m.add_class::<geometry::PyVolumeResult>()?;

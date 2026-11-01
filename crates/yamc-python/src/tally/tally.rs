@@ -38,7 +38,7 @@ pub struct PyTally {
 /// before its geometry sees `cell_id == None`. That is a user ordering mistake,
 /// not a bug, so it must surface as a normal Python exception rather than a
 /// panic crossing the FFI boundary.
-fn cell_filter_ids(cells: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
+pub fn cell_filter_ids(cells: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
     let py_cells: Vec<pyo3::PyRef<'_, PyCell>> =
         if let Ok(list) = cells.extract::<Vec<pyo3::PyRef<'_, PyCell>>>() {
             list

@@ -15,7 +15,8 @@ use std::sync::Mutex;
 use yamc_nuclide::config::ChainUse;
 use yamc_physics::gpu::flat::inelastic_flat::InelasticFlatCache;
 use yamc_physics::util::bank::ParticleBank;
-use yamc_source::source::{ParticleSource, SourceSelector};
+use yamc_source::distribution::mesh::{SourceDomain, MAX_DOMAIN_TRIES};
+use yamc_source::source::{ParticleSource, SourceSelector, SourceSpatialDistribution};
 use yamc_tallies::tally::Tally;
 use yani_transmute::TransmutationTallies;
 
@@ -775,7 +776,7 @@ impl Model {
         rng: &mut R,
     ) -> yamc_particle::particle::Particle {
         if self.sources.len() == 1 {
-            return self.sources[0].sample(rng);
+            return self.sample_one(&self.sources[0], rng);
         }
         self.sample_source_with(&SourceSelector::new(&self.sources), rng)
     }
@@ -795,10 +796,96 @@ impl Model {
         rng: &mut R,
     ) -> yamc_particle::particle::Particle {
         if self.sources.len() == 1 {
-            return self.sources[0].sample(rng);
+            return self.sample_one(&self.sources[0], rng);
         }
         let threshold = rng.random::<f64>() * selector.total();
-        self.sources[selector.index_for(threshold)].sample(rng)
+        self.sample_one(&self.sources[selector.index_for(threshold)], rng)
+    }
+
+    /// One particle from `source`, a mesh source limited to some cells or
+    /// materials born only where this model's geometry has them.
+    fn sample_one<R: rand::Rng + ?Sized>(
+        &self,
+        source: &ParticleSource,
+        rng: &mut R,
+    ) -> yamc_particle::particle::Particle {
+        let SourceSpatialDistribution::Mesh(mesh) = &source.source().space else {
+            return source.sample(rng);
+        };
+        let Some(domain) = mesh.domain() else {
+            return source.sample(rng);
+        };
+        let position = mesh
+            .sample_within(rng, |p| self.in_domain(domain, p))
+            .unwrap_or_else(|bin| {
+                panic!(
+                    "mesh source element {bin}: no point in its cells or materials found in \
+                     {MAX_DOMAIN_TRIES} draws (validate_source_domains should have refused it)"
+                )
+            });
+        source.sample_at(position, rng)
+    }
+
+    /// Whether `p` lies in a cell `domain` names, or one filled with a
+    /// material it names.
+    fn in_domain(&self, domain: &SourceDomain, p: [f64; 3]) -> bool {
+        let Some(c) = self.geometry.find_cell_index((p[0], p[1], p[2])) else {
+            return false;
+        };
+        let cell = &self.geometry.cells()[c];
+        match domain {
+            SourceDomain::Cells(ids) => cell.cell_id.is_some_and(|id| ids.contains(&id)),
+            SourceDomain::Materials(ids) => self
+                .geometry
+                .material_for(cell)
+                .and_then(|m| m.get_material_id())
+                .is_some_and(|id| ids.contains(&id)),
+        }
+    }
+
+    /// Refuse a mesh source limited to cells or materials the geometry does
+    /// not have, or with an emitting element holding none of them, whose
+    /// strength could never be emitted.
+    pub(crate) fn validate_source_domains(&self) -> Result<(), String> {
+        let cells = self.geometry.cells();
+        for (n, source) in self.sources.iter().enumerate() {
+            let SourceSpatialDistribution::Mesh(mesh) = &source.source().space else {
+                continue;
+            };
+            let Some(domain) = mesh.domain() else {
+                continue;
+            };
+            let (kind, ids, known): (&str, &Vec<u32>, Vec<u32>) = match domain {
+                SourceDomain::Cells(ids) => (
+                    "cell",
+                    ids,
+                    cells.iter().filter_map(|c| c.cell_id).collect(),
+                ),
+                SourceDomain::Materials(ids) => (
+                    "material",
+                    ids,
+                    cells
+                        .iter()
+                        .filter_map(|c| self.geometry.material_for(c)?.get_material_id())
+                        .collect(),
+                ),
+            };
+            if let Some(id) = ids.iter().find(|id| !known.contains(id)) {
+                return Err(format!(
+                    "source {n} is limited to {kind} id {id}, which no cell of the geometry \
+                     has"
+                ));
+            }
+            let mut rng = FastRng::new(0x5EED_D0A1);
+            if let Some(bin) = mesh.unreachable_bin(&mut rng, |p| self.in_domain(domain, p)) {
+                return Err(format!(
+                    "source {n}: mesh element {bin} has a strength but none of its {kind}s \
+                     inside it, so it could never emit; give it no strength or include the \
+                     {kind} it holds"
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Build the list of MT numbers needed for transport cross section calculation.
@@ -1857,6 +1944,7 @@ impl Model {
         self.validate_variance_reduction()?;
         self.validate_convergence_targets()?;
         self.check_decay_photon_sources()?;
+        self.validate_source_domains()?;
 
         // Mesh-filled cells require surface tracking: Woodcock/hybrid
         // flights cross cells against a global majorant and never see the

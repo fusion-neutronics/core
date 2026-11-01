@@ -117,6 +117,21 @@ fn cyl_indices(nr: usize, nphi: usize, i: usize) -> [usize; 3] {
     [i % nr, (i / nr) % nphi, i / (nr * nphi)]
 }
 
+/// Where in each element a mesh source may emit: only points in these cells,
+/// or in cells filled with these materials. Lets an element straddling void
+/// or several cells (an R2S voxel) emit only where its strength comes from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SourceDomain {
+    /// Cell ids.
+    Cells(Vec<u32>),
+    /// Material ids.
+    Materials(Vec<u32>),
+}
+
+/// Draws within one element before it is declared to have no point in the
+/// domain: enough for a part of 0.01% of it to be found with certainty.
+pub const MAX_DOMAIN_TRIES: usize = 100_000;
+
 /// Positions spread over a mesh: element `i` is chosen in proportion to its
 /// strength, then a point uniform within it.
 ///
@@ -133,6 +148,8 @@ pub struct MeshDistribution {
     bins: Vec<u32>,
     /// Cumulative strength through each emitting element.
     cumulative: Vec<f64>,
+    /// Where within its element a point may be born; anywhere when `None`.
+    domain: Option<SourceDomain>,
 }
 
 #[derive(Deserialize)]
@@ -141,6 +158,8 @@ struct MeshDistributionData {
     num_elements: usize,
     bins: Vec<u32>,
     cumulative: Vec<f64>,
+    #[serde(default)]
+    domain: Option<SourceDomain>,
 }
 
 impl TryFrom<MeshDistributionData> for MeshDistribution {
@@ -159,7 +178,8 @@ impl TryFrom<MeshDistributionData> for MeshDistribution {
                 .is_some_and(|&b| (b as usize) < d.num_elements)
             && d.cumulative.windows(2).all(|w| w[0] < w[1])
             && d.cumulative.first().is_some_and(|&c| c > 0.0)
-            && d.cumulative.last().is_some_and(|c| c.is_finite());
+            && d.cumulative.last().is_some_and(|c| c.is_finite())
+            && !d.domain.as_ref().is_some_and(SourceDomain::is_empty);
         if !ok {
             return Err("the mesh source in the model file is inconsistent".into());
         }
@@ -168,6 +188,7 @@ impl TryFrom<MeshDistributionData> for MeshDistribution {
             num_elements: d.num_elements,
             bins: d.bins,
             cumulative: d.cumulative,
+            domain: d.domain,
         })
     }
 }
@@ -220,6 +241,7 @@ impl MeshDistribution {
             num_elements: n,
             bins,
             cumulative,
+            domain: None,
         })
     }
 
@@ -243,17 +265,81 @@ impl MeshDistribution {
         &self.elements
     }
 
-    pub fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> [f64; 3] {
-        let t = rng.random::<f64>() * self.total();
-        let k = self
-            .cumulative
-            .partition_point(|&c| c <= t)
-            .min(self.bins.len() - 1);
-        let i = match self.elements {
+    /// Births limited to `domain` within each element, each element keeping
+    /// its strength. Refuses an empty cell or material list.
+    pub fn with_domain(mut self, domain: SourceDomain) -> Result<Self, String> {
+        if domain.is_empty() {
+            return Err("a mesh source's cells or materials must not be empty".into());
+        }
+        self.domain = Some(domain);
+        Ok(self)
+    }
+
+    /// Where within its element a point may be born; anywhere when `None`.
+    pub fn domain(&self) -> Option<&SourceDomain> {
+        self.domain.as_ref()
+    }
+
+    /// The `elements` index of the `k`th emitting element.
+    fn index(&self, k: usize) -> usize {
+        match self.elements {
             MeshElements::Tetrahedra(_) => k,
             _ => self.bins[k] as usize,
-        };
+        }
+    }
+
+    /// The `k` of an emitting element chosen by strength.
+    fn pick<R: Rng + ?Sized>(&self, rng: &mut R) -> usize {
+        let t = rng.random::<f64>() * self.total();
+        let k = self.cumulative.partition_point(|&c| c <= t);
+        k.min(self.bins.len() - 1)
+    }
+
+    /// A point anywhere in an element chosen by strength, ignoring the domain.
+    pub fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> [f64; 3] {
+        let i = self.index(self.pick(rng));
         self.elements.sample(i, rng)
+    }
+
+    /// A point in an element chosen by strength, redrawn within that element
+    /// until `inside` accepts it. Redrawing in the same element keeps each
+    /// element's strength its own. `Err` with the element's mesh bin after
+    /// [`MAX_DOMAIN_TRIES`] misses.
+    pub fn sample_within<R: Rng + ?Sized>(
+        &self,
+        rng: &mut R,
+        inside: impl Fn([f64; 3]) -> bool,
+    ) -> Result<[f64; 3], u32> {
+        let k = self.pick(rng);
+        let i = self.index(k);
+        (0..MAX_DOMAIN_TRIES)
+            .map(|_| self.elements.sample(i, rng))
+            .find(|&p| inside(p))
+            .ok_or(self.bins[k])
+    }
+
+    /// The mesh bin of the first emitting element with no point `inside`
+    /// accepts in [`MAX_DOMAIN_TRIES`] draws, if any: its strength could
+    /// never be emitted.
+    pub fn unreachable_bin<R: Rng + ?Sized>(
+        &self,
+        rng: &mut R,
+        inside: impl Fn([f64; 3]) -> bool,
+    ) -> Option<u32> {
+        (0..self.bins.len())
+            .find(|&k| {
+                let i = self.index(k);
+                !(0..MAX_DOMAIN_TRIES).any(|_| inside(self.elements.sample(i, rng)))
+            })
+            .map(|k| self.bins[k])
+    }
+}
+
+impl SourceDomain {
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Cells(v) | Self::Materials(v) => v.is_empty(),
+        }
     }
 }
 
@@ -358,6 +444,48 @@ mod tests {
     }
 
     #[test]
+    fn domain_redraws_within_the_chosen_element() {
+        // Two voxels, strengths 3:1; only x < 0.5 and 1.0 < x < 1.25 are
+        // inside, so each voxel keeps its share in its inside part.
+        let d = MeshDistribution::new(
+            MeshElements::Rectangular {
+                lower_left: [0.0; 3],
+                width: [1.0; 3],
+                shape: [2, 1, 1],
+            },
+            Some(&[3.0, 1.0]),
+        )
+        .unwrap()
+        .with_domain(SourceDomain::Materials(vec![1]))
+        .unwrap();
+        let inside = |p: [f64; 3]| p[0] < 0.5 || (1.0..1.25).contains(&p[0]);
+        let mut rng = StdRng::seed_from_u64(3);
+        let mut first = 0usize;
+        for _ in 0..N {
+            let p = d.sample_within(&mut rng, inside).unwrap();
+            assert!(inside(p));
+            first += usize::from(p[0] < 1.0);
+        }
+        assert!((first as f64 / N as f64 - 0.75).abs() < 0.005);
+        assert_eq!(d.unreachable_bin(&mut rng, inside), None);
+        // The second voxel has nothing inside x < 0.5.
+        let left = |p: [f64; 3]| p[0] < 0.5;
+        assert_eq!(d.unreachable_bin(&mut rng, left), Some(1));
+        assert!(MeshDistribution::new(
+            MeshElements::Tetrahedra(vec![[
+                [0.0; 3],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0]
+            ]]),
+            None
+        )
+        .unwrap()
+        .with_domain(SourceDomain::Cells(vec![]))
+        .is_err());
+    }
+
+    #[test]
     fn model_file_round_trip() {
         let d = MeshDistribution::new(
             MeshElements::Rectangular {
@@ -367,6 +495,8 @@ mod tests {
             },
             Some(&[0.0, 2.0, 1.0]),
         )
+        .unwrap()
+        .with_domain(SourceDomain::Cells(vec![4, 7]))
         .unwrap();
         let back: MeshDistribution =
             serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();

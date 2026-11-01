@@ -115,3 +115,56 @@ def test_source_hands_back_the_distribution():
     source = yamc.PhotonSource(position=MeshDistribution(mesh), energy=1e6)
     assert isinstance(source.position, MeshDistribution)
     assert "MeshDistribution(1 of 1 elements emitting)" in repr(source)
+
+
+def _iron_ball():
+    """An iron ball of radius 1 in void, inside a two-voxel mesh whose second
+    voxel holds only void."""
+    iron = yamc.Material(composition={"Fe56": 1.0}, density=7.874, temperature=294)
+    iron.read_nuclear_data({"Fe56": "tests/Fe56.arrow"})
+    ball, world = yamc.Sphere(radius=1.0), yamc.Sphere(radius=10.0, boundary="vacuum")
+    inner = yamc.Cell(region=ball.below, material=iron)
+    geometry = yamc.Geometry([inner, yamc.Cell(region=ball.above & world.below)])
+    mesh = yamc.RegularRectangularMesh([-2, -2, -2], [6, 2, 2], [2, 1, 1])
+    return geometry, inner, iron, mesh
+
+
+def _births(geometry, space, n=400):
+    model = yamc.Model(geometry=geometry, source=yamc.NeutronSource(position=space))
+    results = model.simulate_transport(total_particles=n, seed=3, capture_tracks=n)
+    births = [
+        (r["x"], r["y"], r["z"])
+        for r in results.tracks.to_dataframe_records()
+        if r["event_type"] == "source_birth"
+    ]
+    assert len(births) == n
+    return np.linalg.norm(births, axis=1)
+
+
+@pytest.mark.parametrize("by", ["cells", "materials"])
+def test_births_limited_to_cells_or_materials_in_the_voxel(by):
+    geometry, inner, iron, mesh = _iron_ball()
+    domain = {"cells": inner, "materials": [iron]}[by]
+    space = MeshDistribution(mesh, [1.0, 0.0], **{by: domain})
+    assert _births(geometry, space).max() < 1.0
+    # Unlimited, most of the voxel is void.
+    assert _births(geometry, MeshDistribution(mesh, [1.0, 0.0])).max() > 1.0
+
+
+def test_an_element_holding_none_of_its_cells_is_refused():
+    geometry, inner, _, mesh = _iron_ball()
+    with pytest.raises(ValueError, match="mesh element 1 has a strength but none"):
+        _births(geometry, MeshDistribution(mesh, [1.0, 1.0], cells=inner))
+
+
+def test_a_cell_not_in_the_geometry_is_refused():
+    geometry, _, _, mesh = _iron_ball()
+    stray = yamc.Cell(id=99, region=yamc.Sphere(radius=0.5).below)
+    with pytest.raises(ValueError, match="cell id 99, which no cell"):
+        _births(geometry, MeshDistribution(mesh, [1.0, 0.0], cells=stray))
+
+
+def test_cells_and_materials_together_are_refused():
+    _, inner, iron, mesh = _iron_ball()
+    with pytest.raises(ValueError, match="not both"):
+        MeshDistribution(mesh, cells=inner, materials=iron)
