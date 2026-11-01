@@ -471,16 +471,10 @@ pub(crate) fn handle_surface_crossing<T: Tracker>(
     boundary_hit: &BoundaryHit,
     end_position: [f64; 3],
     tracker: &mut T,
-    current_particle_id: u64,
-    current_parent_id: Option<u64>,
-    current_generation: u32,
 ) {
     if boundary_hit.boundary == BoundaryType::Vacuum {
         // Track leak event
         tracker.record_termination(
-            current_particle_id,
-            current_parent_id,
-            current_generation,
             end_position,
             particle.direction,
             particle.energy,
@@ -492,9 +486,6 @@ pub(crate) fn handle_surface_crossing<T: Tracker>(
     } else {
         // Track surface crossing
         tracker.record_surface_crossing(
-            current_particle_id,
-            current_parent_id,
-            current_generation,
             end_position,
             particle.direction,
             particle.energy,
@@ -538,9 +529,6 @@ pub(crate) fn transport_particle<T: Tracker>(
     tracker: &mut T,
     neighbor_lists: &mut NeighborLists,
     particle_bank: &mut ParticleBank,
-    current_particle_id: u64,
-    current_parent_id: Option<u64>,
-    current_generation: u32,
     particle_idx: usize,
     welford_worker: &mut yamc_tallies::welford::WelfordWorkerState,
 ) {
@@ -720,9 +708,6 @@ pub(crate) fn transport_particle<T: Tracker>(
                     &boundary_hit,
                     end_position,
                     tracker,
-                    current_particle_id,
-                    current_parent_id,
-                    current_generation,
                 );
             } else {
                 let segment = ctx.replica.and_then(|r| {
@@ -812,9 +797,6 @@ pub(crate) fn transport_particle<T: Tracker>(
 
                         // Record collision for tracking
                         tracker.record_collision(
-                            current_particle_id,
-                            current_parent_id,
-                            current_generation,
                             particle.position,
                             particle.direction,
                             incoming_energy,
@@ -843,9 +825,6 @@ pub(crate) fn transport_particle<T: Tracker>(
                                 rng,
                                 particle_bank,
                                 tracker,
-                                current_particle_id,
-                                current_parent_id,
-                                current_generation,
                             );
                         }
                     }
@@ -884,9 +863,6 @@ pub(crate) fn transport_particle<T: Tracker>(
                         pcg,
                         tracker,
                         particle_bank,
-                        current_particle_id,
-                        current_parent_id,
-                        current_generation,
                         particle_idx,
                     );
                 }
@@ -954,9 +930,6 @@ pub(crate) fn do_photon_collision<T: Tracker>(
     tracker: &mut T,
     tallies: &[&Tally],
     welford_worker: &mut yamc_tallies::welford::WelfordWorkerState,
-    current_particle_id: u64,
-    current_parent_id: Option<u64>,
-    current_generation: u32,
     weight_windows: &[&crate::variance_reduction::WeightWindowBounds],
     replica: Option<&replica::ReplicaContext>,
 ) {
@@ -1006,9 +979,6 @@ pub(crate) fn do_photon_collision<T: Tracker>(
         );
     }
     tracker.record_collision(
-        current_particle_id,
-        current_parent_id,
-        current_generation,
         particle.position,
         particle.direction,
         incoming_energy,
@@ -1025,17 +995,7 @@ pub(crate) fn do_photon_collision<T: Tracker>(
     // surface path and the neutron site. Only surviving (scattered) photons are
     // windowed; CPU-only.
     if particle.alive && !weight_windows.is_empty() {
-        apply_weight_window(
-            weight_windows,
-            particle,
-            cell,
-            rng,
-            particle_bank,
-            tracker,
-            current_particle_id,
-            current_parent_id,
-            current_generation,
-        );
+        apply_weight_window(weight_windows, particle, cell, rng, particle_bank, tracker);
     }
 }
 
@@ -1102,9 +1062,6 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
     tracker: &mut T,
     neighbor_lists: &mut NeighborLists,
     particle_bank: &mut ParticleBank,
-    current_particle_id: u64,
-    current_parent_id: Option<u64>,
-    current_generation: u32,
     particle_idx: usize,
     welford_worker: &mut yamc_tallies::welford::WelfordWorkerState,
 ) {
@@ -1282,9 +1239,6 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
                         &boundary_hit,
                         end_position,
                         tracker,
-                        current_particle_id,
-                        current_parent_id,
-                        current_generation,
                     );
                 }
                 Some(_) => {
@@ -1328,9 +1282,6 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
                             tracker,
                             ctx.tallies,
                             welford_worker,
-                            current_particle_id,
-                            current_parent_id,
-                            current_generation,
                             ctx.weight_windows,
                             ctx.replica,
                         );
@@ -1356,9 +1307,6 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
                             pcg,
                             tracker,
                             particle_bank,
-                            current_particle_id,
-                            current_parent_id,
-                            current_generation,
                             particle_idx,
                         );
                     }
@@ -1427,9 +1375,6 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
             // leak with the live weight (not the old silent
             // weight-zeroing kill).
             tracker.record_termination(
-                current_particle_id,
-                current_parent_id,
-                current_generation,
                 particle.position,
                 particle.direction,
                 particle.energy,
@@ -1592,9 +1537,6 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
                 tracker,
                 ctx.tallies,
                 welford_worker,
-                current_particle_id,
-                current_parent_id,
-                current_generation,
                 ctx.weight_windows,
                 ctx.replica,
             );
@@ -1726,9 +1668,6 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
             pcg,
             tracker,
             particle_bank,
-            current_particle_id,
-            current_parent_id,
-            current_generation,
             particle_idx,
         );
     }
@@ -1798,9 +1737,6 @@ pub(crate) fn apply_weight_window<T: Tracker>(
     rng: &mut FastRng,
     particle_bank: &mut ParticleBank,
     tracker: &mut T,
-    current_particle_id: u64,
-    current_parent_id: Option<u64>,
-    current_generation: u32,
 ) {
     let Some(&ww) = weight_windows
         .iter()
@@ -1815,9 +1751,6 @@ pub(crate) fn apply_weight_window<T: Tracker>(
     // Absolute weight floor: kill below it.
     if w < ww.weight_floor {
         tracker.record_termination(
-            current_particle_id,
-            current_parent_id,
-            current_generation,
             particle.position,
             particle.direction,
             particle.energy,
@@ -1861,9 +1794,6 @@ pub(crate) fn apply_weight_window<T: Tracker>(
             Some(surviving_weight) => particle.weight = surviving_weight,
             None => {
                 tracker.record_termination(
-                    current_particle_id,
-                    current_parent_id,
-                    current_generation,
                     particle.position,
                     particle.direction,
                     particle.energy,
@@ -1896,9 +1826,6 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
     pcg: &mut u64,
     tracker: &mut T,
     particle_bank: &mut ParticleBank,
-    current_particle_id: u64,
-    current_parent_id: Option<u64>,
-    current_generation: u32,
     particle_idx: usize,
 ) {
     use yamc_rng::next_xi;
@@ -2410,9 +2337,6 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
 
                     // Record absorption termination for tracking
                     tracker.record_termination(
-                        current_particle_id,
-                        current_parent_id,
-                        current_generation,
                         particle.position,
                         particle.direction,
                         particle.energy,
@@ -2429,9 +2353,6 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
             // Note: distribution tracking requires changes to reaction sampling to capture
             // which distribution was used - for now pass None
             tracker.record_collision(
-                current_particle_id,
-                current_parent_id,
-                current_generation,
                 particle.position,
                 particle.direction,
                 incoming_energy,
@@ -2482,9 +2403,6 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
                     Some(surviving_weight) => particle.weight = surviving_weight,
                     None => {
                         tracker.record_termination(
-                            current_particle_id,
-                            current_parent_id,
-                            current_generation,
                             particle.position,
                             particle.direction,
                             particle.energy,
@@ -2508,9 +2426,6 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
                     rng,
                     particle_bank,
                     tracker,
-                    current_particle_id,
-                    current_parent_id,
-                    current_generation,
                 );
             }
         } else {

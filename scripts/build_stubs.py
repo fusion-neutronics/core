@@ -134,6 +134,9 @@ INJECTED_METHODS: dict[str, list[tuple[str, str]]] = {
         "Render an interactive plot of this mesh geometry. See the docs for keyword arguments."))],
     "NeutronSource": [_VTKHDF],
     "PhotonSource": [_VTKHDF],
+    "Tracks": [("to_vtkhdf", _m(
+        "to_vtkhdf(self, filename: builtins.str) -> None",
+        "Write one polyline per particle track to a VTK-HDF PolyData file for ParaView. Requires h5py (pip install yamc[viz])."))],
     "Tally": [_VTKHDF, ("interactive_plot", _m(
         "interactive_plot(self, *args: typing.Any, **kwargs: typing.Any) -> InteractiveTallyPlot",
         "Render an interactive mesh-tally plot. See the docs for keyword arguments."))],

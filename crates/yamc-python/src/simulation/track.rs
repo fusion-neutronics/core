@@ -1,7 +1,42 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
-use yamc::track::{ParticleTrack, TrackEvent, TrackStorage};
+use yamc::track::{ParticleTrack, ParticleType, TrackEvent, TrackEventType, TrackStorage};
+
+fn particle_name(p: ParticleType) -> &'static str {
+    match p {
+        ParticleType::Neutron => "neutron",
+        ParticleType::Photon => "photon",
+    }
+}
+
+/// One event as a flat dict row (the `TrackEvent.to_dict()` layout).
+fn event_dict<'py>(py: Python<'py>, e: &TrackEvent) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("particle_id", e.particle_id)?;
+    d.set_item("parent_id", e.parent_id)?;
+    d.set_item("generation", e.generation)?;
+    d.set_item("particle_type", particle_name(e.particle_type))?;
+    d.set_item("batch", e.batch)?;
+    d.set_item("history", e.history)?;
+    d.set_item("event_type", e.event_type.to_string())?;
+    d.set_item("x", e.position[0])?;
+    d.set_item("y", e.position[1])?;
+    d.set_item("z", e.position[2])?;
+    d.set_item("u", e.direction[0])?;
+    d.set_item("v", e.direction[1])?;
+    d.set_item("w", e.direction[2])?;
+    d.set_item("energy_in", e.energy_in)?;
+    d.set_item("energy_out", e.energy_out)?;
+    d.set_item("weight", e.weight)?;
+    d.set_item("cell_id", e.cell_id)?;
+    d.set_item("reaction_mt", e.reaction_mt)?;
+    d.set_item("nuclide", e.nuclide.clone())?;
+    d.set_item("birth_reaction", e.birth_reaction.clone())?;
+    d.set_item("distribution", e.distribution.clone())?;
+    d.set_item("energy_dist", e.energy_dist.clone())?;
+    Ok(d)
+}
 
 /// A single step in a particle's recorded track -- e.g. its birth, a
 /// collision, or a surface crossing. Exposes the particle and parent IDs,
@@ -32,6 +67,12 @@ impl PyTrackEvent {
     #[getter]
     fn generation(&self) -> u32 {
         self.inner.generation
+    }
+
+    /// Particle species, "neutron" or "photon".
+    #[getter]
+    fn particle_type(&self) -> &'static str {
+        particle_name(self.inner.particle_type)
     }
 
     #[getter]
@@ -130,30 +171,8 @@ impl PyTrackEvent {
     }
 
     /// Convert to dict for DataFrame creation
-    fn to_dict(&self, py: Python<'_>) -> PyResult<pyo3::Py<pyo3::types::PyAny>> {
-        let dict = PyDict::new(py);
-        dict.set_item("particle_id", self.inner.particle_id)?;
-        dict.set_item("parent_id", self.inner.parent_id)?;
-        dict.set_item("generation", self.inner.generation)?;
-        dict.set_item("batch", self.inner.batch)?;
-        dict.set_item("history", self.inner.history)?;
-        dict.set_item("event_type", self.inner.event_type.to_string())?;
-        dict.set_item("x", self.inner.position[0])?;
-        dict.set_item("y", self.inner.position[1])?;
-        dict.set_item("z", self.inner.position[2])?;
-        dict.set_item("u", self.inner.direction[0])?;
-        dict.set_item("v", self.inner.direction[1])?;
-        dict.set_item("w", self.inner.direction[2])?;
-        dict.set_item("energy_in", self.inner.energy_in)?;
-        dict.set_item("energy_out", self.inner.energy_out)?;
-        dict.set_item("weight", self.inner.weight)?;
-        dict.set_item("cell_id", self.inner.cell_id)?;
-        dict.set_item("reaction_mt", self.inner.reaction_mt)?;
-        dict.set_item("nuclide", self.inner.nuclide.clone())?;
-        dict.set_item("birth_reaction", self.inner.birth_reaction.clone())?;
-        dict.set_item("distribution", self.inner.distribution.clone())?;
-        dict.set_item("energy_dist", self.inner.energy_dist.clone())?;
-        Ok(dict.into())
+    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        event_dict(py, &self.inner)
     }
 }
 
@@ -163,8 +182,10 @@ impl From<TrackEvent> for PyTrackEvent {
     }
 }
 
-/// One particle's full history: the ordered list of `TrackEvent` steps it
-/// went through, with its particle ID, parent ID, and generation. Access
+/// One particle's track: the ordered list of `TrackEvent` steps it went
+/// through from its birth, with its particle type ("neutron" or "photon"),
+/// history, particle ID (unique within the history; 0 is the source
+/// particle), parent ID, and generation. Access
 /// the steps via `track.events`; `len(track)` is the number of events.
 #[gen_stub_pyclass]
 #[pyclass(module = "yamc._core", name = "ParticleTrack", from_py_object)]
@@ -191,6 +212,18 @@ impl PyParticleTrack {
         self.inner.generation
     }
 
+    /// Particle species, "neutron" or "photon".
+    #[getter]
+    fn particle_type(&self) -> &'static str {
+        particle_name(self.inner.particle_type)
+    }
+
+    /// Global index of the source history this particle belongs to.
+    #[getter]
+    fn history(&self) -> usize {
+        self.inner.history
+    }
+
     #[getter]
     fn events(&self) -> Vec<PyTrackEvent> {
         self.inner
@@ -207,8 +240,10 @@ impl PyParticleTrack {
 
     fn __repr__(&self) -> String {
         format!(
-            "ParticleTrack(particle_id={}, generation={}, events={})",
+            "ParticleTrack(history={}, particle_id={}, particle_type={}, generation={}, events={})",
+            self.inner.history,
             self.inner.particle_id,
+            particle_name(self.inner.particle_type),
             self.inner.generation,
             self.inner.events.len()
         )
@@ -221,10 +256,12 @@ impl From<ParticleTrack> for PyParticleTrack {
     }
 }
 
-/// All particle tracks recorded by a simulation. Access the per-particle
-/// tracks via `.tracks`, the total step count via `total_events()`, and
+/// All particle tracks recorded by a simulation, one per transported
+/// particle (source and secondaries alike), ordered by history then particle
+/// ID. Access them via `.tracks`, the total step count via `total_events()`,
 /// `to_dataframe_records()` to flatten every event into dict rows for a
-/// pandas DataFrame. `len(tracks)` is the number of histories.
+/// pandas DataFrame, and `to_vtkhdf()` to view them in ParaView.
+/// `len(tracks)` is the number of particle tracks.
 #[gen_stub_pyclass]
 #[pyclass(module = "yamc._core", name = "Tracks", from_py_object)]
 #[derive(Clone)]
@@ -257,7 +294,7 @@ impl PyTracks {
 
     fn __repr__(&self) -> String {
         format!(
-            "Tracks(histories={}, total_events={})",
+            "Tracks(particles={}, total_events={})",
             self.inner.tracks.len(),
             self.inner.total_events()
         )
@@ -267,36 +304,46 @@ impl PyTracks {
     ///
     /// Examples:
     ///     df = pd.DataFrame(tracks.to_dataframe_records())
-    fn to_dataframe_records(&self, py: Python<'_>) -> PyResult<pyo3::Py<pyo3::types::PyAny>> {
+    ///     photons = df[df.particle_type == "photon"]
+    fn to_dataframe_records<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let list = PyList::empty(py);
-        for track in &self.inner.tracks {
-            for event in &track.events {
-                let dict = PyDict::new(py);
-                dict.set_item("particle_id", event.particle_id)?;
-                dict.set_item("parent_id", event.parent_id)?;
-                dict.set_item("generation", event.generation)?;
-                dict.set_item("batch", event.batch)?;
-                dict.set_item("history", event.history)?;
-                dict.set_item("event_type", event.event_type.to_string())?;
-                dict.set_item("x", event.position[0])?;
-                dict.set_item("y", event.position[1])?;
-                dict.set_item("z", event.position[2])?;
-                dict.set_item("u", event.direction[0])?;
-                dict.set_item("v", event.direction[1])?;
-                dict.set_item("w", event.direction[2])?;
-                dict.set_item("energy_in", event.energy_in)?;
-                dict.set_item("energy_out", event.energy_out)?;
-                dict.set_item("weight", event.weight)?;
-                dict.set_item("cell_id", event.cell_id)?;
-                dict.set_item("reaction_mt", event.reaction_mt)?;
-                dict.set_item("nuclide", event.nuclide.clone())?;
-                dict.set_item("birth_reaction", event.birth_reaction.clone())?;
-                dict.set_item("distribution", event.distribution.clone())?;
-                dict.set_item("energy_dist", event.energy_dist.clone())?;
-                list.append(dict)?;
-            }
+        for e in self.inner.tracks.iter().flat_map(|t| &t.events) {
+            list.append(event_dict(py, e)?)?;
         }
-        Ok(list.into())
+        Ok(list)
+    }
+
+    /// Flatten the tracks into polylines, one per particle track.
+    ///
+    /// Returns a dict of flat lists: ``points`` (``[x, y, z]`` per event, cm)
+    /// and ``offsets`` (start of each line in ``points`` plus the total, so
+    /// line ``j`` is ``points[offsets[j]:offsets[j + 1]]``); per point
+    /// ``energy`` (eV, after the event), ``weight``, ``event_type`` and
+    /// ``cell_id`` (-1 if unknown); per line ``particle_type``,
+    /// ``particle_id``, ``parent_id`` (-1 for source particles),
+    /// ``generation`` and ``history``. ``event_type`` and ``particle_type``
+    /// are integer codes indexing ``event_type_names`` and
+    /// ``particle_type_names``.
+    fn polylines<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let p = self.inner.polylines();
+        let d = PyDict::new(py);
+        d.set_item("points", p.points)?;
+        d.set_item("offsets", p.offsets)?;
+        d.set_item("energy", p.energy)?;
+        d.set_item("weight", p.weight)?;
+        d.set_item("event_type", p.event_type)?;
+        d.set_item("cell_id", p.cell_id)?;
+        d.set_item("particle_type", p.particle_type)?;
+        d.set_item("particle_id", p.particle_id)?;
+        d.set_item("parent_id", p.parent_id)?;
+        d.set_item("generation", p.generation)?;
+        d.set_item("history", p.history)?;
+        d.set_item(
+            "event_type_names",
+            TrackEventType::ALL.map(|t| t.to_string()),
+        )?;
+        d.set_item("particle_type_names", ["neutron", "photon"])?;
+        Ok(d)
     }
 }
 

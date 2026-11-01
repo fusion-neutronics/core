@@ -7,6 +7,7 @@ This script demonstrates how to:
 2. Convert tracks to a pandas DataFrame for analysis
 3. Filter events by type, energy, distribution, etc.
 4. Trace a particle's history through the geometry
+5. Export the tracks to VTK-HDF for ParaView
 """
 
 import yamc
@@ -52,7 +53,7 @@ tracks = results.tracks
 # tracks = model.simulate_transport(total_particles=100, capture_tracks='all').tracks
 
 
-print(f"Tracked {len(tracks)} particle histories")
+print(f"Tracked {len(tracks)} particles")
 print(f"Total events: {tracks.total_events()}")
 
 # =============================================================================
@@ -62,6 +63,7 @@ print(f"Total events: {tracks.total_events()}")
 df = pd.DataFrame(tracks.to_dataframe_records())
 print(f"\nDataFrame shape: {df.shape}")
 print(f"\nEvent types:\n{df['event_type'].value_counts()}")
+print(f"\nEvents per particle type:\n{df['particle_type'].value_counts()}")
 
 # =============================================================================
 # Example 1: Find particles that end up at a specific energy
@@ -80,23 +82,23 @@ suspicious = df[
 print("\n=== Collisions resulting in ~500 keV ===")
 print(f"Found {len(suspicious)} events")
 if len(suspicious) > 0:
-    print(suspicious[['particle_id', 'nuclide', 'reaction_mt', 'distribution',
+    print(suspicious[['history', 'particle_id', 'nuclide', 'reaction_mt', 'distribution',
                       'energy_dist', 'energy_in', 'energy_out']].head(10))
 
 # =============================================================================
 # Example 2: Trace a specific particle's history
 # =============================================================================
 
-# Get a particle that had multiple collisions
-collision_counts = df[df['event_type'] == 'collision'].groupby('particle_id').size()
+# Particle IDs are unique within a history, so (history, particle_id) is the key.
+collision_counts = df[df['event_type'] == 'collision'].groupby(['history', 'particle_id']).size()
 if len(collision_counts) > 0:
     # Find particle with most collisions
-    particle_id = collision_counts.idxmax()
+    key = collision_counts.idxmax()
 
     # Get all events for this particle
-    history = df[df['particle_id'] == particle_id].sort_index()
+    history = df[(df['history'] == key[0]) & (df['particle_id'] == key[1])]
 
-    print(f"\n=== Full history for particle {particle_id} ({len(history)} events) ===")
+    print(f"\n=== Full history for particle {key} ({len(history)} events) ===")
     for _, event in history.iterrows():
         print(f"  {event['event_type']:20s} E={event['energy_in']:.4e} -> {event['energy_out']:.4e} eV "
               f"at ({event['x']:.3f}, {event['y']:.3f}, {event['z']:.3f})")
@@ -127,7 +129,7 @@ if len(collisions) > 0:
 # Find secondary particles (generation > 0)
 secondaries = df[df['generation'] > 0]
 print("\n=== Secondary particles ===")
-print(f"Found {secondaries['particle_id'].nunique()} secondary particles")
+print(f"Found {len(secondaries.groupby(['history', 'particle_id']))} secondary particles")
 
 if len(secondaries) > 0:
     births = secondaries[secondaries['event_type'].str.contains('birth')]
@@ -156,5 +158,14 @@ if len(collisions) > 0:
             print(f"\n{nuclide}:")
             print(f"  Total collisions: {len(nuc_collisions)}")
             print(f"  MT numbers: {nuc_collisions['reaction_mt'].value_counts().to_dict()}")
+
+# =============================================================================
+# Example 7: View the tracks in ParaView (requires h5py: pip install yamc[viz])
+# =============================================================================
+
+# One polyline per particle, colourable by particle type, energy, event type, ...
+# Open both files in ParaView to overlay the tracks on the geometry.
+tracks.to_vtkhdf("tracks.vtkhdf")
+model.to_vtkhdf("model.vtkhdf")
 
 print("\nDone!")

@@ -559,12 +559,10 @@ fn run_case(label: &str, case: &SphereCase, energy_ev: f64, n: usize) -> CaseRep
         .run_with_tracking(&settings, HistorySelection::first(n as u64))
         .expect("CPU tracked run");
     let mut cpu: Vec<Vec<Col>> = vec![Vec::new(); n];
+    // Every particle's track, in pop order (tracks are sorted by
+    // (history, particle_id) and IDs are assigned at pop), is the
+    // history's whole collision sequence.
     for track in &storage.tracks {
-        // Primary (source) walk only; (n,2n) secondaries are a separate
-        // generation that the single-walk twin handles via weight, not banking.
-        if track.generation != 0 {
-            continue;
-        }
         for ev in &track.events {
             if ev.event_type == TrackEventType::Collision && ev.history < n {
                 cpu[ev.history].push(Col {

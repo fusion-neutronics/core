@@ -2644,8 +2644,8 @@ impl Model {
                                     dep_tallies.begin_history(global_particle_index);
                                 }
 
-                                // Get unique particle ID for tracking
-                                let source_particle_id = global_particle_id
+                                // Count the history (progress heartbeat).
+                                global_particle_id
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                                 // A replay's history is every decay photon its
@@ -2659,7 +2659,7 @@ impl Model {
                                     );
                                 }
                                 // Otherwise start with the source particle.
-                                let source = replay.is_none().then(|| {
+                                if replay.is_none() {
                                     let mut particle = match cell_source {
                                         Some(c) => c.sample(rng, &replay_ids),
                                         None => self.sample_source_with(&source_selector, rng),
@@ -2670,43 +2670,18 @@ impl Model {
                                     if let Some(r) = replica_ctx.as_ref() {
                                         particle.replica = Some(r.source_state());
                                     }
-                                    particle_bank
-                                        .add_source_particle(particle.clone(), source_seed);
-                                    particle
-                                });
-
-                                // Find initial cell for source birth tracking
-                                if let Some(particle) = &source {
-                                let initial_cell_id = self
-                                    .geometry
-                                    .find_cell_index_along(
-                                        (
-                                            particle.position[0],
-                                            particle.position[1],
-                                            particle.position[2],
-                                        ),
-                                        particle.direction,
-                                    )
-                                    .and_then(|idx| self.geometry.cells()[idx].cell_id);
-
-                                // Record source birth
-                                tracker.record_birth(
-                                    source_particle_id,
-                                    None, // No parent for source particles
-                                    0,    // Generation 0
-                                    particle.position,
-                                    particle.direction,
-                                    particle.energy,
-                                    particle.weight,
-                                    initial_cell_id,
-                                    "source",
-                                );
+                                    particle_bank.add_source_particle(particle, source_seed);
                                 }
 
-                                // Track particle metadata for genealogy
-                                let current_particle_id = source_particle_id;
-                                let current_parent_id: Option<u64> = None;
-                                let current_generation: u32 = 0;
+                                // Tracked histories only: the (id, generation)
+                                // of the particle that banked each entry, kept
+                                // parallel to the bank. Everything in the bank
+                                // now (the source, or a replay's decay photons)
+                                // is generation 0.
+                                let mut lineage: Vec<Option<(u64, u32)>> = Vec::new();
+                                if tracker.should_track() {
+                                    lineage.resize(particle_bank.len(), None);
+                                }
 
                                 // Lock this thread's welford worker slot for the
                                 // duration of this source history. No contention --
@@ -2782,6 +2757,10 @@ impl Model {
                                         );
                                     }
 
+                                    // Tracked histories: who banked this particle.
+                                    let parent =
+                                        tracker.should_track().then(|| lineage.pop().flatten());
+
                                     // A capture records each decay photon at
                                     // birth and leaves it untracked.
                                     if let (Some(pool), Some(parent)) =
@@ -2811,6 +2790,32 @@ impl Model {
                                         continue;
                                     }
 
+                                    // Every walk opens its own track.
+                                    let me = parent.map(|parent| {
+                                        let id = tracker.next_particle_id();
+                                        let generation = parent.map_or(0, |(_, g)| g + 1);
+                                        let p = &particle;
+                                        let cell = self
+                                            .geometry
+                                            .find_cell_index_along(
+                                                (p.position[0], p.position[1], p.position[2]),
+                                                p.direction,
+                                            )
+                                            .and_then(|i| self.geometry.cells()[i].cell_id);
+                                        tracker.record_birth(
+                                            id,
+                                            parent.map(|(pid, _)| pid),
+                                            generation,
+                                            p.particle_type,
+                                            p.position,
+                                            p.direction,
+                                            p.energy,
+                                            p.weight,
+                                            cell,
+                                        );
+                                        (id, generation)
+                                    });
+
                                     match tracking_mode {
                                         TrackingMode::Surface => {
                                             transport_particle(
@@ -2821,9 +2826,6 @@ impl Model {
                                                 tracker,
                                                 neighbor_lists,
                                                 &mut particle_bank,
-                                                current_particle_id,
-                                                current_parent_id,
-                                                current_generation,
                                                 particle_idx,
                                                 &mut welford_worker,
                                             );
@@ -2849,13 +2851,14 @@ impl Model {
                                                 tracker,
                                                 neighbor_lists,
                                                 &mut particle_bank,
-                                                current_particle_id,
-                                                current_parent_id,
-                                                current_generation,
                                                 particle_idx,
                                                 &mut welford_worker,
                                             );
                                         }
+                                    }
+                                    // Whatever this walk banked descends from it.
+                                    if let Some(me) = me {
+                                        lineage.resize(particle_bank.len(), Some(me));
                                     }
                                 } // end of particle queue processing while loop
 
@@ -3373,12 +3376,17 @@ impl Model {
         for storage in all_storages {
             merged.tracks.extend(storage.tracks);
         }
+        merged.sort();
 
         // Print tracking summary if enabled
         if print_tracking_summary && is_root && !merged.tracks.is_empty() {
             println!(
-                "Tracked {} histories with {} total events",
+                "Tracked {} particles from {} histories with {} total events",
                 merged.tracks.len(),
+                merged
+                    .tracks
+                    .chunk_by(|a, b| a.history == b.history)
+                    .count(),
                 merged.total_events()
             );
         }

@@ -40,6 +40,7 @@ from yamc._core import (  # noqa: F811
     PhotonSource as PhotonSource,
     Region as Region,
     Tally as Tally,
+    Tracks as Tracks,
     get_transmutation_decay_data as _get_transmutation_decay_data,
     get_transmutation_reactions as _get_transmutation_reactions,
     get_transmutation_fission_yields as _get_transmutation_fission_yields,
@@ -214,6 +215,22 @@ def _tally_to_vtkhdf(self, filename, **kwargs):
     mesh_tally_to_vtkhdf(filename, self, **kwargs)
 
 
+def _tracks_to_vtkhdf(self, filename):
+    """Write particle tracks to a VTK-HDF PolyData file, one polyline per track.
+
+    Opens in ParaView alongside ``model.to_vtkhdf(...)`` output. Per-point
+    data: energy, weight, event type, cell ID; per-line data: particle type,
+    particle ID, parent ID, generation, history.
+
+    Requires ``h5py`` (install with ``pip install yamc[viz]``).
+
+    Args:
+        filename (str): Output file path (recommended: ``.vtkhdf``).
+    """
+    from yamc.vtkhdf import tracks_to_vtkhdf
+    tracks_to_vtkhdf(filename, self)
+
+
 Geometry.to_vtkhdf = _geometry_to_vtkhdf
 Cell.to_vtkhdf = _cell_to_vtkhdf
 Region.to_vtkhdf = _region_to_vtkhdf
@@ -222,6 +239,7 @@ Model.to_vtkhdf = _model_to_vtkhdf
 NeutronSource.to_vtkhdf = _source_to_vtkhdf
 PhotonSource.to_vtkhdf = _source_to_vtkhdf
 Tally.to_vtkhdf = _tally_to_vtkhdf
+Tracks.to_vtkhdf = _tracks_to_vtkhdf
 
 # Browser-runnable HTML export -- defined in pure Python so it can build
 # the wasm bundle + optional cross-section embedding from the templates
