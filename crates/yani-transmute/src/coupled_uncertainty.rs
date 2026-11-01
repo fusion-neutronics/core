@@ -37,8 +37,9 @@
 //! tallied, not what is transported, so this source needs no seed of its
 //! own, as the decay data need none.
 //!
-//! What a replica cannot yet carry is refused rather than held at nominal:
-//! `attribution`, which would need one coupled ensemble per source.
+//! Attribution reruns the ensemble once per source, each drawing that source
+//! alone on the same streams, so a source's share is measured as the total
+//! is, at the cost of one more coupled ensemble per source.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -48,8 +49,8 @@ use yani::ChainNuclide;
 
 use crate::material_transmute::{decay_energy_candidates, decay_photon_candidates};
 use crate::uncertainty::{
-    check_convergence, DataUncertainty, Ensemble, FluxResponseReport, Info, Source, BLOCK,
-    MAX_SAMPLES,
+    check_convergence, Attribution, DataUncertainty, Ensemble, FluxResponseReport, Info, Linearity,
+    Source, BLOCK, MAX_SAMPLES,
 };
 
 /// Keeps the replicas' transport seeds clear of every per-nuclide stream.
@@ -71,6 +72,7 @@ pub struct Drawn {
 }
 
 /// What a coupled run's replicas draw, and how many of them to run.
+#[derive(Clone)]
 pub struct CoupledReplicas {
     request: DataUncertainty,
     statistical: bool,
@@ -78,7 +80,7 @@ pub struct CoupledReplicas {
     half_lives: Vec<crate::uncertainty::HalfLifeSigma>,
     decay_branchings: Option<crate::decay_branching_uncertainty::Candidates>,
     fission_yields: Option<crate::fission_yield_uncertainty::Candidates>,
-    isomer: Option<crate::isomer_branching_uncertainty::CoupledIsomer>,
+    isomer: Option<Arc<crate::isomer_branching_uncertainty::CoupledIsomer>>,
 }
 
 impl CoupledReplicas {
@@ -105,14 +107,6 @@ impl CoupledReplicas {
                     .to_string(),
             );
         }
-        if request.attribution {
-            return Err(
-                "data_uncertainty with method=\"coupled\" does not yet attribute \
-                        the uncertainty by source, which would take one coupled ensemble per \
-                        source; run one source at a time to measure each"
-                    .to_string(),
-            );
-        }
         let half_lives = if request.wants(Source::HalfLife) {
             crate::uncertainty::half_life_candidates(chain).0
         } else {
@@ -130,9 +124,9 @@ impl CoupledReplicas {
                 .wants(Source::FissionYield)
                 .then(|| crate::fission_yield_uncertainty::candidates(chain, chain)),
             isomer: if request.wants(Source::IsomerBranching) {
-                Some(crate::isomer_branching_uncertainty::CoupledIsomer::new(
-                    branch, chain,
-                )?)
+                Some(Arc::new(
+                    crate::isomer_branching_uncertainty::CoupledIsomer::new(branch, chain)?,
+                ))
             } else {
                 None
             },
@@ -235,8 +229,13 @@ impl CoupledReplicas {
     /// meet the request's convergence, or `samples` of them when it is set,
     /// and report each material's ensemble.
     ///
-    /// `solve(replica, chain)` is replica `replica` of the coupled run with
-    /// that decay data, returning each material's per-step inventories.
+    /// `solve(replicas, replica, chain)` is replica `replica` of `replicas`'
+    /// coupled run with that decay data, returning each material's per-step
+    /// inventories; `replicas` is these or, for an attribution, these with
+    /// one source alone, and says the transport seed, the cross sections and
+    /// the branching table to run with. With `attribution`, each material's
+    /// ensemble carries where its uncertainty comes from (see
+    /// `attribute`).
     /// `initial` is each material's starting composition with its nuclear
     /// data, which says what the material reaches. `nominal` is each
     /// material's nominal per-step inventories: when nothing a replica draws
@@ -249,10 +248,174 @@ impl CoupledReplicas {
         initial: &HashMap<u32, Material>,
         nominal: &HashMap<u32, Inventories>,
         mut solve: impl FnMut(
+            &CoupledReplicas,
             u64,
             &Arc<HashMap<String, ChainNuclide>>,
         ) -> Result<HashMap<u32, Inventories>, E>,
     ) -> Result<HashMap<u32, (Ensemble, Info)>, E> {
+        let mut reports = self.ensembles(chain, initial, nominal, &mut solve)?;
+        if self.request.attribution {
+            self.attribute(chain, initial, nominal, &mut solve, &mut reports)?;
+        }
+        Ok(reports.into_iter().collect())
+    }
+
+    /// The sources the request applies, in [`Source::IMPLEMENTED`] order:
+    /// every one it names but the flux spectrum, which a transport tallies
+    /// rather than draws.
+    fn applied(&self) -> Vec<Source> {
+        Source::IMPLEMENTED
+            .iter()
+            .copied()
+            .filter(|s| *s != Source::FluxSpectrum && self.request.wants(*s))
+            .collect()
+    }
+
+    /// These replicas with `source` alone drawn, `samples` of them, on the
+    /// same streams: replica `k` of each draws what replica `k` of the whole
+    /// request draws of that source. The cross sections keep the statistical
+    /// source beside them, as a replica cannot carry them without it.
+    fn alone(&self, source: Source, samples: usize) -> Self {
+        let mut sources = vec![source];
+        if source == Source::CrossSections {
+            sources.insert(0, Source::Statistical);
+        }
+        let mut out = self.clone();
+        out.request = DataUncertainty {
+            sources,
+            samples: Some(samples),
+            attribution: false,
+            ..self.request.clone()
+        };
+        out.statistical = out.request.wants(Source::Statistical);
+        out.cross_sections = out.request.wants(Source::CrossSections);
+        if !out.request.wants(Source::HalfLife) {
+            out.half_lives.clear();
+        }
+        if !out.request.wants(Source::DecayBranching) {
+            out.decay_branchings = None;
+        }
+        if !out.request.wants(Source::FissionYield) {
+            out.fission_yields = None;
+        }
+        if !out.request.wants(Source::IsomerBranching) {
+            out.isomer = None;
+        }
+        out
+    }
+
+    /// Where each material's uncertainty comes from: each applied source's
+    /// variance from an ensemble of coupled runs drawing that source alone,
+    /// as many replicas as the whole request ran and on the same streams.
+    ///
+    /// The cross sections are measured beside the statistical source, so
+    /// their entry is the variance with both less the variance with the
+    /// statistical source alone. The two ensembles share their transport
+    /// seeds replica by replica, which keeps the difference's noise down; it
+    /// is still the difference of two estimates, and where the cross
+    /// sections move a nuclide by less than the transport's noise it can come
+    /// out negative, and is reported so rather than hidden. A single applied
+    /// source is the whole ensemble. There are no first-order contributors:
+    /// a coupled replica's sensitivity is a coupled run of its own, and
+    /// `linearity` is `None` throughout.
+    fn attribute<E>(
+        &self,
+        chain: &Arc<HashMap<String, ChainNuclide>>,
+        initial: &HashMap<u32, Material>,
+        nominal: &HashMap<u32, Inventories>,
+        solve: &mut impl FnMut(
+            &CoupledReplicas,
+            u64,
+            &Arc<HashMap<String, ChainNuclide>>,
+        ) -> Result<HashMap<u32, Inventories>, E>,
+        reports: &mut BTreeMap<u32, (Ensemble, Info)>,
+    ) -> Result<(), E> {
+        type Variances = Vec<HashMap<String, f64>>;
+        let variances = |r: &BTreeMap<u32, (Ensemble, Info)>| -> BTreeMap<u32, Variances> {
+            r.iter()
+                .map(|(id, (e, _))| {
+                    let steps = nominal.get(id).map_or(0, Vec::len);
+                    (*id, crate::material_transmute::variances_of(e, steps))
+                })
+                .collect()
+        };
+        let applied = self.applied();
+        let samples = reports
+            .values()
+            .map(|(e, _)| e.replicas())
+            .max()
+            .unwrap_or(0);
+        let mut by_source: BTreeMap<String, BTreeMap<u32, Variances>> = BTreeMap::new();
+        if applied.len() == 1 {
+            by_source.insert(applied[0].name().to_string(), variances(reports));
+        } else {
+            let mut statistical: Option<BTreeMap<u32, Variances>> = None;
+            for &source in &applied {
+                let v = variances(
+                    &self
+                        .alone(source, samples)
+                        .ensembles(chain, initial, nominal, solve)?,
+                );
+                if source == Source::Statistical {
+                    statistical = Some(v.clone());
+                }
+                by_source.insert(source.name().to_string(), v);
+            }
+            if let Some(both) = by_source.get_mut(Source::CrossSections.name()) {
+                let stat = match statistical {
+                    Some(s) => s,
+                    None => variances(
+                        &self
+                            .alone(Source::Statistical, samples)
+                            .ensembles(chain, initial, nominal, solve)?,
+                    ),
+                };
+                for (id, steps) in both.iter_mut() {
+                    for (step, per) in steps.iter_mut().enumerate() {
+                        let alone = stat.get(id).and_then(|s| s.get(step));
+                        let names: BTreeSet<String> = per
+                            .keys()
+                            .chain(alone.into_iter().flat_map(|a| a.keys()))
+                            .cloned()
+                            .collect();
+                        for name in names {
+                            let s = alone.and_then(|a| a.get(&name)).copied().unwrap_or(0.0);
+                            *per.entry(name).or_insert(0.0) -= s;
+                        }
+                    }
+                }
+            }
+        }
+        let mut linearity: BTreeMap<String, Option<Vec<HashMap<String, Linearity>>>> = applied
+            .iter()
+            .map(|s| (s.name().to_string(), None))
+            .collect();
+        linearity.insert("all".to_string(), None);
+        for (id, (ensemble, _)) in reports.iter_mut() {
+            ensemble.attribution = Some(Attribution {
+                by_source: by_source
+                    .iter()
+                    .map(|(s, v)| (s.clone(), v.get(id).cloned().unwrap_or_default()))
+                    .collect(),
+                contributors: Vec::new(),
+                linearity: linearity.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    /// One ensemble per material of these replicas, run through `solve`.
+    fn ensembles<E>(
+        &self,
+        chain: &Arc<HashMap<String, ChainNuclide>>,
+        initial: &HashMap<u32, Material>,
+        nominal: &HashMap<u32, Inventories>,
+        solve: &mut impl FnMut(
+            &CoupledReplicas,
+            u64,
+            &Arc<HashMap<String, ChainNuclide>>,
+        ) -> Result<HashMap<u32, Inventories>, E>,
+    ) -> Result<BTreeMap<u32, (Ensemble, Info)>, E> {
         let request = &self.request;
         let moves = self.moves_inventory();
         let mut reports: BTreeMap<u32, (Ensemble, Info)> = initial
@@ -270,7 +433,7 @@ impl CoupledReplicas {
                 info.converged = true;
                 info.convergence = request.convergence;
             }
-            return Ok(reports.into_iter().collect());
+            return Ok(reports);
         }
         let cap = request.samples.unwrap_or(MAX_SAMPLES);
         let mut replica: u64 = 0;
@@ -279,7 +442,7 @@ impl CoupledReplicas {
             while replica < end {
                 let (inventories, drawn) = if moves {
                     let (edited, drawn) = self.chain(chain, replica);
-                    (solve(replica, &edited)?, drawn)
+                    (solve(self, replica, &edited)?, drawn)
                 } else {
                     (nominal.clone(), Drawn::default())
                 };
@@ -315,7 +478,7 @@ impl CoupledReplicas {
             ensemble.fold_absences();
             info.conclude(ensemble, chain, request);
         }
-        Ok(reports.into_iter().collect())
+        Ok(reports)
     }
 
     /// What a replica of `initial` perturbs and what it holds, before any
@@ -456,9 +619,8 @@ mod tests {
         }
     }
 
-    /// Every source is carried, the default request included, which asks
-    /// for every source; the cross sections only beside the statistical
-    /// source, and attribution not at all.
+    /// Every source is carried, the default request and attribution
+    /// included; the cross sections only beside the statistical source.
     #[test]
     fn what_a_replica_carries() {
         let chain = HashMap::new();
@@ -480,14 +642,42 @@ mod tests {
         assert!(err.contains("\"statistical\""), "{err}");
         let attribution = DataUncertainty {
             attribution: true,
-            ..request(vec![Source::Statistical])
+            ..request(vec![Source::Statistical, Source::CrossSections])
         };
-        let err = new(&attribution).err().expect("refused");
-        assert!(err.contains("method=\"coupled\""), "{err}");
+        assert!(new(&attribution).is_ok());
         let isomer = new(&request(vec![Source::IsomerBranching])).unwrap();
         assert!(
             !isomer.moves_inventory(),
             "no MF=40 to draw in an empty table"
+        );
+    }
+
+    /// A source alone keeps the streams of the whole request and draws
+    /// nothing else; the cross sections keep the statistical source.
+    #[test]
+    fn a_source_alone() {
+        let chain = HashMap::new();
+        let branch = yani::BranchTable::new();
+        let all = CoupledReplicas::new(&request(vec![]), &chain, &branch).unwrap();
+        let xs = all.alone(Source::CrossSections, 8);
+        assert!(xs.statistical && xs.cross_sections);
+        assert_eq!(xs.request.samples, Some(8));
+        assert!(!xs.request.attribution);
+        let stat = all.alone(Source::Statistical, 8);
+        assert!(stat.statistical && !stat.cross_sections);
+        for k in 0..8 {
+            assert_eq!(xs.transport_seed(3, k), stat.transport_seed(3, k));
+            assert_eq!(xs.transport_seed(3, k), all.transport_seed(3, k));
+        }
+        let half = all.alone(Source::HalfLife, 8);
+        assert!(!half.statistical && !half.cross_sections && half.isomer.is_none());
+        assert_eq!(
+            all.applied(),
+            Source::IMPLEMENTED
+                .iter()
+                .copied()
+                .filter(|s| *s != Source::FluxSpectrum)
+                .collect::<Vec<_>>()
         );
     }
 
