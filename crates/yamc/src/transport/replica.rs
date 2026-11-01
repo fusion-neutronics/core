@@ -249,7 +249,7 @@ struct ResonanceReaction {
 /// replica's change to each reaction its ranges give, on the stretch of the
 /// nuclide's grid that their reach covers (and one point either side, so
 /// interpolation inside the reach never leaves it).
-struct ResonanceTables {
+pub(crate) struct ResonanceTables {
     /// Grid index of the stretch's first point.
     first: usize,
     /// Points in the stretch.
@@ -393,6 +393,11 @@ impl ResonanceTables {
 /// [`ReplicaContext::new`]).
 type Compositions = crate::model::ReplicaCompositions;
 
+/// What identifies one nuclide's resonance tables: its name, its data (by
+/// address), the temperature index, the seed, the replica count and the
+/// score MTs they are read for.
+pub(crate) type ResonanceKey = (String, usize, usize, u64, usize, Vec<i32>);
+
 /// One nuclide of one material, as the replicas read it.
 struct ReplicaNuclide {
     /// Atoms per barn-cm.
@@ -418,7 +423,7 @@ struct ReplicaNuclide {
     /// tables to draw a band from.
     urr: Option<(Arc<Nuclide>, usize)>,
     /// Its sampled resonance parameters' changes, where they are sampled.
-    resonance: Option<ResonanceTables>,
+    resonance: Option<Arc<ResonanceTables>>,
     /// Per summed MT (held as a redundant row, or not held but with held
     /// components), its row where held and the partials it sums: what a
     /// photon produced by the sum, or a D1S channel keyed on it, reads its
@@ -897,7 +902,7 @@ impl ReplicaContext {
                 .and_then(|(t, id)| t.layout(id));
             let composition = compositions
                 .zip(material.get_material_id())
-                .and_then(|(c, id)| c.get(&id))
+                .and_then(|(c, id)| c.densities.get(&id))
                 .map(Vec::as_slice);
             let tables = Self::material(
                 material,
@@ -909,6 +914,8 @@ impl ReplicaContext {
                 &cross,
                 &partners,
                 composition,
+                compositions.is_none_or(|c| c.cross_sections),
+                compositions.map(|c| c.cache.as_ref()),
             )?;
             if let (Some(id), Some(_)) = (material.get_material_id(), tables.as_ref().and(layout)) {
                 transmutation_slots.entry(id).or_insert(slot);
@@ -964,6 +971,8 @@ impl ReplicaContext {
         cross: &CrossMaterial,
         partners: &BTreeMap<String, CellField>,
         composition: Option<&[HashMap<String, f64>]>,
+        draws: bool,
+        cache: Option<&crate::model::ReplicaTableCache>,
     ) -> Result<Option<ReplicaMaterial>, String> {
         if composition.is_some_and(|c| c.len() != replicas) {
             return Err(format!(
@@ -971,7 +980,13 @@ impl ReplicaContext {
                 composition.map_or(0, <[_]>::len)
             ));
         }
-        let sampling = resonance_sampling(material);
+        // Without draws every replica reads the nominal cross sections and
+        // differs by its composition alone.
+        let sampling = if draws {
+            resonance_sampling(material)
+        } else {
+            BTreeMap::new()
+        };
         let mut score_mts = score_mts.clone();
         let mut names: Vec<&String> = material.nuclides.keys().collect();
         let mut product_names: Vec<&String> = Vec::new();
@@ -986,12 +1001,16 @@ impl ReplicaContext {
         }
         let score_mts = &score_mts;
         names.sort();
-        let (fields, _) = transport_fields_of(
-            material,
-            &names,
-            layout.map_or(&[][..], |(_, mts)| mts),
-            &sampled_names(&sampling),
-        );
+        let (fields, _) = if draws {
+            transport_fields_of(
+                material,
+                &names,
+                layout.map_or(&[][..], |(_, mts)| mts),
+                &sampled_names(&sampling),
+            )
+        } else {
+            Default::default()
+        };
         let cell_fields = fields
             .iter()
             .filter_map(|(n, t)| t.field.clone().map(|f| (n.clone(), f)))
@@ -1043,6 +1062,7 @@ impl ReplicaContext {
                 densities.get(name).copied().unwrap_or(0.0),
                 registry.by_name.get(name),
                 resonance.map(|r| (r, seed)),
+                cache,
             )?
             else {
                 continue;
@@ -1092,6 +1112,7 @@ impl ReplicaContext {
                 0.0,
                 None,
                 None,
+                cache,
             )?
             else {
                 continue;
@@ -1135,6 +1156,7 @@ impl ReplicaContext {
         density: f64,
         modes: Option<&RegisteredModes>,
         resonance: Option<(&TransportResonance, u64)>,
+        cache: Option<&crate::model::ReplicaTableCache>,
     ) -> Result<Option<ReplicaNuclide>, String> {
         let t = temperature_index(&nuclide, temperature)?;
         let label = &nuclide.loaded_temperatures[t];
@@ -1358,15 +1380,50 @@ impl ReplicaContext {
             .map(|t| (Arc::clone(&nuclide), t));
 
         let resonance = match resonance {
-            Some((r, seed)) => Some(ResonanceTables::new(
-                r,
-                &grid,
-                &held,
-                score_mts,
-                &deposits,
-                relative.len(),
-                seed,
-            )?),
+            Some((r, seed)) => {
+                let build = || -> Result<Arc<ResonanceTables>, String> {
+                    Ok(Arc::new(ResonanceTables::new(
+                        r,
+                        &grid,
+                        &held,
+                        score_mts,
+                        &deposits,
+                        relative.len(),
+                        seed,
+                    )?))
+                };
+                Some(match cache {
+                    Some(cache) => {
+                        let key = (
+                            nuclide.name.clone().unwrap_or_default(),
+                            Arc::as_ptr(&nuclide) as usize,
+                            t,
+                            seed,
+                            relative.len(),
+                            score_mts.iter().copied().collect(),
+                        );
+                        let held = cache
+                            .resonance
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .get(&key)
+                            .cloned();
+                        match held {
+                            Some(tables) => tables,
+                            None => {
+                                let tables = build()?;
+                                cache
+                                    .resonance
+                                    .lock()
+                                    .unwrap_or_else(|p| p.into_inner())
+                                    .insert(key, Arc::clone(&tables));
+                                tables
+                            }
+                        }
+                    }
+                    None => build()?,
+                })
+            }
             None => None,
         };
 

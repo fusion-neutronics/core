@@ -345,8 +345,43 @@ pub struct TransportSettings {
     pub data_uncertainty: Option<TransportDataUncertainty>,
 }
 
-/// Per material id, per replica, each nuclide's atom density [atoms/b-cm].
-pub type ReplicaCompositions = HashMap<u32, Vec<HashMap<String, f64>>>;
+/// What a run's replica weights tabulate that does not change from one
+/// transport to the next of a coupled run: each sampled resonance range's
+/// per-replica changes, keyed by nuclide, its data, temperature, seed,
+/// replica count and the scores it is read for. Rebuilding those every step
+/// would repeat the resonance reconstruction of every replica every step.
+#[derive(Default)]
+pub struct ReplicaTableCache {
+    pub(crate) resonance: std::sync::Mutex<
+        HashMap<
+            crate::transport::replica::ResonanceKey,
+            Arc<crate::transport::replica::ResonanceTables>,
+        >,
+    >,
+}
+
+impl std::fmt::Debug for ReplicaTableCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ReplicaTableCache")
+    }
+}
+
+/// The compositions a coupled run's replicas have reached, which one
+/// transport with replica weights carries as likelihood ratios on the
+/// nominal composition.
+#[derive(Debug, Clone, Default)]
+pub struct ReplicaCompositions {
+    /// Per material id, per replica, each nuclide's atom density
+    /// [atoms/b-cm]. A material not listed has the nominal composition in
+    /// every replica.
+    pub densities: HashMap<u32, Vec<HashMap<String, f64>>>,
+    /// Whether each replica also draws its own cross sections, as replica
+    /// weights do without compositions; off, the ratios carry the densities
+    /// alone and every replica reads the nominal cross sections.
+    pub cross_sections: bool,
+    /// The tables kept from one transport of the run to the next.
+    pub cache: Arc<ReplicaTableCache>,
+}
 
 /// Nuclear-data uncertainty for one transport run.
 ///

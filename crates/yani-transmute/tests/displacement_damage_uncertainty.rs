@@ -76,6 +76,7 @@ fn run(sources: Vec<Source>, flux_error: Option<Vec<f64>>) -> TransmutationResul
             sources,
             attribution: false,
             convergence: DEFAULT_CONVERGENCE,
+            coupled_replica_weights: false,
         }),
         Some(&DamageRequest::default()),
     )

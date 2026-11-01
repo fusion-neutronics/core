@@ -77,6 +77,9 @@ pub struct CoupledReplicas {
     request: DataUncertainty,
     statistical: bool,
     cross_sections: bool,
+    /// Every replica rides one transport per step as a likelihood-ratio
+    /// weight ([`DataUncertainty::coupled_replica_weights`]).
+    weights: bool,
     half_lives: Vec<crate::uncertainty::HalfLifeSigma>,
     decay_branchings: Option<crate::decay_branching_uncertainty::Candidates>,
     fission_yields: Option<crate::fission_yield_uncertainty::Candidates>,
@@ -95,7 +98,33 @@ impl CoupledReplicas {
         check_convergence(request.convergence)?;
         let cross_sections = request.wants(Source::CrossSections);
         let statistical = request.wants(Source::Statistical);
-        if cross_sections && !statistical {
+        if request.coupled_replica_weights {
+            let refuse = |what: &str, why: &str| -> Result<Self, String> {
+                Err(format!(
+                    "data_uncertainty with method=\"coupled\" and coupled_replica_weights \
+                     does not carry {what}: {why}; leave it out, or turn \
+                     coupled_replica_weights off to rerun the whole coupled calculation \
+                     per replica"
+                ))
+            };
+            if statistical {
+                return refuse(
+                    "\"statistical\"",
+                    "every replica rides the nominal transport's histories, so none has \
+                     a Monte Carlo realisation of its own to spread by",
+                );
+            }
+            if request.wants(Source::IsomerBranching) {
+                return refuse(
+                    "\"isomer_branching\"",
+                    "the weighted transport tallies every replica on the nominal \
+                     production curves",
+                );
+            }
+            if request.attribution {
+                return refuse("attribution", "it needs one ensemble per source");
+            }
+        } else if cross_sections && !statistical {
             return Err(
                 "data_uncertainty with method=\"coupled\" carries \"cross_sections\" only \
                  with \"statistical\": a replica transported on its own cross sections \
@@ -116,6 +145,7 @@ impl CoupledReplicas {
             request: request.clone(),
             statistical,
             cross_sections,
+            weights: request.coupled_replica_weights,
             half_lives,
             decay_branchings: request
                 .wants(Source::DecayBranching)
@@ -140,6 +170,45 @@ impl CoupledReplicas {
             Some(i) => Arc::new(i.branch(branch, self.request.seed, replica)),
             None => Arc::clone(branch),
         }
+    }
+
+    /// How many replicas each step's one transport carries as weights, or
+    /// `None` when each replica is a coupled run of its own.
+    pub fn replica_weights(&self) -> Option<usize> {
+        self.weights
+            .then(|| crate::uncertainty::transport_replicas_for(&self.request))
+    }
+
+    /// Each material's ensemble of the replicas a weighted coupled run
+    /// stepped, `per_replica[k]` replica `k`'s per-step inventories and
+    /// `drawn[k]` what it drew of the decay data.
+    pub fn collect(
+        &self,
+        chain: &Arc<HashMap<String, ChainNuclide>>,
+        initial: &HashMap<u32, Material>,
+        nominal: &HashMap<u32, Inventories>,
+        per_replica: &[HashMap<u32, Inventories>],
+        drawn: &[Drawn],
+    ) -> HashMap<u32, (Ensemble, Info)> {
+        let mut reports: BTreeMap<u32, (Ensemble, Info)> = initial
+            .iter()
+            .map(|(&id, material)| {
+                let steps = nominal.get(&id).map_or(0, Vec::len);
+                let (e, mut info) = self.report(material, chain, Ensemble::new(steps));
+                info.flux_response = FluxResponseReport::CoupledReplicaWeights {
+                    replicas: per_replica.len(),
+                };
+                (id, (e, info))
+            })
+            .collect();
+        for (inventories, drawn) in per_replica.iter().zip(drawn) {
+            push(&mut reports, inventories, drawn);
+        }
+        for (ensemble, info) in reports.values_mut() {
+            ensemble.fold_absences();
+            info.conclude(ensemble, chain, &self.request);
+        }
+        reports.into_iter().collect()
     }
 
     /// Whether each replica's transports read its own cross sections.
@@ -446,24 +515,7 @@ impl CoupledReplicas {
                 } else {
                     (nominal.clone(), Drawn::default())
                 };
-                for (id, (ensemble, info)) in reports.iter_mut() {
-                    // Counted over what this material reaches, as independent
-                    // mode counts them; the draw covers the whole chain.
-                    let half_lives: HashMap<String, f64> = drawn
-                        .half_lives
-                        .iter()
-                        .filter(|(n, _)| info.half_lives_perturbed.contains(*n))
-                        .map(|(n, t)| (n.clone(), *t))
-                        .collect();
-                    let mine = |set: &BTreeSet<String>| {
-                        set.intersection(&info.decay_branchings_perturbed).count()
-                    };
-                    info.half_lives_sampled += half_lives.len();
-                    info.decay_branchings_sampled += mine(&drawn.decay_branchings);
-                    info.decay_branchings_floored += mine(&drawn.floored);
-                    let per_step = inventories.get(id).cloned().unwrap_or_default();
-                    ensemble.push_with_half_lives(per_step, half_lives);
-                }
+                push(&mut reports, &inventories, &drawn);
                 replica += 1;
             }
             if request.samples.is_none()
@@ -608,6 +660,32 @@ impl CoupledReplicas {
     }
 }
 
+/// One replica's per-step inventories and decay-data draw, into every
+/// material's ensemble and report.
+fn push(
+    reports: &mut BTreeMap<u32, (Ensemble, Info)>,
+    inventories: &HashMap<u32, Inventories>,
+    drawn: &Drawn,
+) {
+    for (id, (ensemble, info)) in reports.iter_mut() {
+        // Counted over what this material reaches, as independent mode
+        // counts them; the draw covers the whole chain.
+        let half_lives: HashMap<String, f64> = drawn
+            .half_lives
+            .iter()
+            .filter(|(n, _)| info.half_lives_perturbed.contains(*n))
+            .map(|(n, t)| (n.clone(), *t))
+            .collect();
+        let mine =
+            |set: &BTreeSet<String>| set.intersection(&info.decay_branchings_perturbed).count();
+        info.half_lives_sampled += half_lives.len();
+        info.decay_branchings_sampled += mine(&drawn.decay_branchings);
+        info.decay_branchings_floored += mine(&drawn.floored);
+        let per_step = inventories.get(id).cloned().unwrap_or_default();
+        ensemble.push_with_half_lives(per_step, half_lives);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,6 +728,52 @@ mod tests {
             !isomer.moves_inventory(),
             "no MF=40 to draw in an empty table"
         );
+    }
+
+    /// With the replicas riding one transport as weights, the sources a
+    /// shared transport cannot carry are refused by name, the cross sections
+    /// are carried without the statistical source, and every step's
+    /// transport carries the request's replica count.
+    #[test]
+    fn what_weighted_replicas_carry() {
+        let chain = HashMap::new();
+        let branch = yani::BranchTable::new();
+        let weighted = |sources: Vec<Source>| DataUncertainty {
+            samples: Some(16),
+            coupled_replica_weights: true,
+            ..request(sources)
+        };
+        for (sources, named) in [
+            (
+                vec![Source::Statistical, Source::CrossSections],
+                "\"statistical\"",
+            ),
+            (vec![Source::IsomerBranching], "\"isomer_branching\""),
+            (vec![], "\"statistical\""),
+        ] {
+            let err = CoupledReplicas::new(&weighted(sources), &chain, &branch)
+                .err()
+                .expect("refused");
+            assert!(
+                err.contains(named) && err.contains("coupled_replica_weights"),
+                "{err}"
+            );
+        }
+        let attribution = DataUncertainty {
+            attribution: true,
+            ..weighted(vec![Source::CrossSections])
+        };
+        assert!(CoupledReplicas::new(&attribution, &chain, &branch).is_err());
+        let xs = CoupledReplicas::new(&weighted(vec![Source::CrossSections]), &chain, &branch)
+            .expect("carried");
+        assert_eq!(xs.replica_weights(), Some(16));
+        let reruns = CoupledReplicas::new(
+            &request(vec![Source::Statistical, Source::CrossSections]),
+            &chain,
+            &branch,
+        )
+        .unwrap();
+        assert_eq!(reruns.replica_weights(), None);
     }
 
     /// A source alone keeps the streams of the whole request and draws

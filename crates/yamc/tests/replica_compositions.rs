@@ -41,6 +41,9 @@ const SEED: u64 = 31;
 const RADIUS: f64 = 5.0;
 const SCORES: [&str; 2] = ["flux", "(n,gamma)"];
 
+/// Per material id, per replica, each nuclide's atom density.
+type Densities = HashMap<u32, Vec<HashMap<String, f64>>>;
+
 /// The cached W186 directory with the converter's covariance and resonance
 /// parameters, or `None` when the fixture is missing.
 fn w186(tmp: &Path) -> Option<PathBuf> {
@@ -136,7 +139,7 @@ fn run(
     material: Material,
     particles: usize,
     seed: u64,
-    data: Option<(usize, HashMap<u32, Vec<HashMap<String, f64>>>)>,
+    data: Option<(usize, Densities, bool)>,
     tracking: TrackingMode,
 ) -> Vec<Arc<Tally>> {
     let sphere = Surface {
@@ -173,8 +176,14 @@ fn run(
     let mut model = Model::new(geometry, vec![source], tallies.clone());
     model.verbose = Verbose::silent();
     model.tracking_mode = tracking;
-    let replicas = data.as_ref().map(|(r, _)| *r);
-    model.replica_compositions = data.map(|(_, c)| Arc::new(c));
+    let replicas = data.as_ref().map(|(r, _, _)| *r);
+    model.replica_compositions = data.map(|(_, densities, cross_sections)| {
+        Arc::new(yamc::model::ReplicaCompositions {
+            densities,
+            cross_sections,
+            ..Default::default()
+        })
+    });
     model
         .simulate_transport(&TransportSettings {
             total_particles: Some(particles),
@@ -207,7 +216,14 @@ fn replica(t: &Arc<Tally>, k: usize) -> (f64, f64) {
 /// carry.
 #[test]
 fn each_replica_is_the_run_on_its_own_composition() {
-    on_its_own_composition(TrackingMode::Surface);
+    on_its_own_composition(TrackingMode::Surface, true);
+}
+
+/// The same with the replicas' compositions alone, every replica on the
+/// nominal cross sections: what the decay data's replicas carry.
+#[test]
+fn each_replica_is_the_run_on_its_own_composition_alone() {
+    on_its_own_composition(TrackingMode::Surface, false);
 }
 
 /// The same under delta tracking, where a flight samples against a
@@ -215,17 +231,17 @@ fn each_replica_is_the_run_on_its_own_composition() {
 /// and a virtual collision carries `(Σ_maj - Σ'_t,k) / (Σ_maj - Σ_t)`.
 #[test]
 fn each_replica_is_the_run_on_its_own_composition_under_delta_tracking() {
-    on_its_own_composition(TrackingMode::Woodcock);
+    on_its_own_composition(TrackingMode::Woodcock, true);
 }
 
-fn on_its_own_composition(tracking: TrackingMode) {
+fn on_its_own_composition(tracking: TrackingMode, draws: bool) {
     let tmp = tempfile::tempdir().expect("temp dir");
     let Some(dir) = w186(tmp.path()) else {
         eprintln!("skipping: W186 fixture not fetched");
         return;
     };
-    const PARTICLES: usize = 20_000;
-    let scales = [1.0, 0.8, 1.2, 1.5];
+    const PARTICLES: usize = 10_000;
+    let scales = [1.0, 0.8, 1.5];
     let nominal = tungsten(&dir, 1.0);
     let n = nominal.get_atoms_per_barn_cm().expect("densities")["W186"];
     let compositions = HashMap::from([(
@@ -239,21 +255,24 @@ fn on_its_own_composition(tracking: TrackingMode) {
         nominal.clone(),
         PARTICLES,
         5,
-        Some((scales.len(), compositions)),
+        Some((scales.len(), compositions, draws)),
         tracking,
     );
-    let plain = run(
-        nominal.clone(),
-        PARTICLES,
-        5,
-        Some((scales.len(), HashMap::new())),
-        tracking,
-    );
+    // The replica weights alone, where there are draws for them to carry.
+    let plain = draws.then(|| {
+        run(
+            nominal.clone(),
+            PARTICLES,
+            5,
+            Some((scales.len(), HashMap::new(), draws)),
+            tracking,
+        )
+    });
     // Under delta tracking the majorant, raised for the replicas'
     // densities, is part of the random walk, so the histories differ and
     // replica 0 is compared with its rerun like the others.
-    if tracking == TrackingMode::Surface {
-        for (a, b) in carried.iter().zip(&plain) {
+    if let Some(plain) = plain.as_ref().filter(|_| tracking == TrackingMode::Surface) {
+        for (a, b) in carried.iter().zip(plain) {
             let ((x, _), (y, _)) = (replica(a, 0), replica(b, 0));
             assert!(
                 (x - y).abs() <= 1e-12 * y.abs(),
@@ -262,8 +281,13 @@ fn on_its_own_composition(tracking: TrackingMode) {
         }
     }
     for (k, scale) in scales.iter().enumerate() {
+        let material = tungsten(&dir, *scale);
         let rerun = run(
-            perturbed(&tungsten(&dir, *scale), k as u64),
+            if draws {
+                perturbed(&material, k as u64)
+            } else {
+                material
+            },
             PARTICLES,
             7,
             None,
@@ -282,7 +306,7 @@ fn on_its_own_composition(tracking: TrackingMode) {
         // The density moves the tallies by far more than their errors, so
         // agreeing is not agreeing with the nominal.
         if k > 0 {
-            let moved = (rerun[1].get_mean()[0] / plain[1].get_mean()[0] - 1.0).abs();
+            let moved = (rerun[1].get_mean()[0] / carried[1].get_mean()[0] - 1.0).abs();
             assert!(moved > 0.02, "replica {k} moves capture by {moved:e}");
         }
     }

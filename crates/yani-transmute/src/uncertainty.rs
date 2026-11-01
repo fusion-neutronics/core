@@ -245,6 +245,12 @@ pub struct DataUncertainty {
     /// target much below 2.2% (the Gaussian figure at the cap) cannot be met.
     /// What is tracked is listed on [`Ensemble::unconverged`].
     pub convergence: f64,
+    /// With the coupled method, run one transport per step carrying every
+    /// replica as a likelihood-ratio weight, each replica's composition and
+    /// cross sections in its ratios, rather than the whole coupled run once
+    /// per replica (see `yani_transmute::coupled_uncertainty`). Experimental:
+    /// off by default, which is the exact reference this is checked against.
+    pub coupled_replica_weights: bool,
 }
 
 impl Default for DataUncertainty {
@@ -255,6 +261,7 @@ impl Default for DataUncertainty {
             sources: Source::IMPLEMENTED.to_vec(),
             attribution: false,
             convergence: DEFAULT_CONVERGENCE,
+            coupled_replica_weights: false,
         }
     }
 }
@@ -280,9 +287,16 @@ pub enum FluxResponseReport {
     Unperturbed,
     /// A coupled transport run, each replica the whole coupled calculation
     /// again: every step's transport ran on that replica's own compositions,
-    /// so the flux answers how its earlier steps' noise and decay data moved
-    /// them. Its cross sections are the nominal ones.
+    /// and its own cross sections with that source on, so the flux answers
+    /// how its earlier steps' noise and data moved them.
     CoupledReplicas,
+    /// A coupled transport run whose replicas rode one transport per step as
+    /// likelihood-ratio weights, each carrying its own composition and
+    /// cross sections, `replicas` of them.
+    CoupledReplicaWeights {
+        /// Replicas each step's transport carried.
+        replicas: usize,
+    },
 }
 
 impl FluxResponseReport {
@@ -293,6 +307,7 @@ impl FluxResponseReport {
             FluxResponseReport::ReplicaWeights { .. } => "replica_weights",
             FluxResponseReport::Unperturbed => "unperturbed",
             FluxResponseReport::CoupledReplicas => "coupled_replicas",
+            FluxResponseReport::CoupledReplicaWeights { .. } => "coupled_replica_weights",
         }
     }
 }
@@ -773,6 +788,13 @@ pub struct Info {
     /// its transports read. Zero outside the coupled method, whose replicas
     /// draw rates rather than whole cross sections.
     pub cross_section_points_floored: usize,
+    /// With `coupled_replica_weights`, per step, the Monte Carlo noise in
+    /// the replicas' largest reaction rate relative to that rate: the spread
+    /// over replicas of the even half of the histories' rate less the
+    /// whole's, scaled to the whole. It grows as the replicas' weights
+    /// spread, so it is the measure of how far each replica can be trusted;
+    /// zero for a cooldown and empty for every other method.
+    pub replica_weight_noise: Vec<f64>,
     /// Spectra that carried a per-bin flux sigma, and those that did not.
     ///
     /// A spectrum taken from a published reference set has no stated error, so

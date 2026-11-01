@@ -3177,6 +3177,7 @@ fn run_replicas(
                     sources: vec![source],
                     attribution: false,
                     convergence: request.convergence,
+                    coupled_replica_weights: false,
                 };
                 let (sub, _) = run_replicas(
                     initial,

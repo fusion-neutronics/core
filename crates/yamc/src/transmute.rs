@@ -187,6 +187,15 @@ impl Model {
             .map(|u| crate::model::TransportDataUncertainty {
                 seed: u.seed,
                 replicas: yani_transmute::uncertainty::transport_replicas_for(u),
+            })
+            .or_else(|| {
+                // A weighted coupled run: every step's one transport carries
+                // every replica, its composition and its cross sections.
+                let r = coupled_replicas.as_ref()?.replica_weights()?;
+                Some(crate::model::TransportDataUncertainty {
+                    seed: uncertainty?.seed,
+                    replicas: r,
+                })
             });
         if let Some(data) = &replica_weights {
             // Refused before anything runs rather than after the scouting
@@ -648,9 +657,21 @@ impl Model {
         let transmutation_loop_start = std::time::Instant::now();
 
         // The geometry every coupled replica starts from: the one the nominal
-        // loop below starts from.
+        // loop below starts from. A weighted coupled run steps its replicas
+        // inside the nominal loop instead.
+        let mut weighted = match (&coupled_replicas, &replica_weights) {
+            (Some(r), Some(data)) if !is_independent => Some(WeightedReplicas::new(
+                r,
+                &chain,
+                &initial_for_replicas,
+                data.replicas,
+                want_cross_sections,
+            )),
+            _ => None,
+        };
         let replica_start = coupled_replicas
             .as_ref()
+            .filter(|_| weighted.is_none())
             .map(|_| self.geometry.materials().to_vec());
 
         // Transmutation loop
@@ -690,12 +711,23 @@ impl Model {
                     #[cfg(feature = "debug_timing")]
                     let transport_start = std::time::Instant::now();
 
-                    self.run_internal::<NoOpTracker>(
-                        settings,
+                    // A weighted coupled run's transport carries every
+                    // replica, each at the composition it has reached.
+                    let weighted_settings = weighted.as_ref().map(|w| {
+                        self.replica_compositions = Some(Arc::new(w.compositions()));
+                        crate::model::TransportSettings {
+                            data_uncertainty: replica_weights,
+                            ..settings.clone()
+                        }
+                    });
+                    let ran = self.run_internal::<NoOpTracker>(
+                        weighted_settings.as_ref().unwrap_or(settings),
                         None,
                         Some(Arc::clone(&dep_tallies)),
                         false,
-                    )?;
+                    );
+                    self.replica_compositions = None;
+                    ran?;
 
                     #[cfg(feature = "debug_timing")]
                     eprintln!(
@@ -731,6 +763,32 @@ impl Model {
             } else {
                 Default::default()
             };
+
+            // A weighted coupled run's replicas take this step on the rates
+            // they tallied under their own weights.
+            if let Some(w) = weighted.as_mut() {
+                let tallied: HashMap<u32, (yani_transmute::ReplicaTallied, _)> =
+                    if source_rate > 0.0 {
+                        transmutable_cells
+                            .iter()
+                            .filter_map(|(&id, cells)| {
+                                let slot = self.geometry.cells()[cells[0]].material_idx?;
+                                let material = self.geometry.materials()[slot as usize].as_ref();
+                                let volume = material.volume.unwrap_or(1.0);
+                                let t = dep_tallies.replica_tallied(id, volume)?;
+                                let diagnostics = dep_tallies
+                                    .get_branching_diagnostics(id, volume, source_rate)
+                                    .with_material(material);
+                                Some((id, (t, diagnostics)))
+                            })
+                            .collect()
+                    } else {
+                        HashMap::new()
+                    };
+                w.step(&tallied, &branch, source_rate, dt, parts).map_err(
+                    |e| -> Box<dyn std::error::Error> { format!("step {}: {e}", step + 1).into() },
+                )?;
+            }
 
             // Transmute all materials in parallel (each material is independent)
             #[cfg(feature = "debug_timing")]
@@ -826,6 +884,41 @@ impl Model {
             "[TIMING] Total transmutation loop: {:.3}s",
             transmutation_loop_start.elapsed().as_secs_f64()
         );
+
+        if let (Some(replicas), Some(w)) = (&coupled_replicas, weighted) {
+            let nominal: HashMap<u32, yani_transmute::coupled_uncertainty::Inventories> =
+                transmutable_cells
+                    .keys()
+                    .map(|&id| {
+                        let per_step = (1..=timesteps.len())
+                            .map(|i| {
+                                results
+                                    .get_material(id, i)
+                                    .map(|m| m.nuclides.clone())
+                                    .unwrap_or_default()
+                            })
+                            .collect();
+                        (id, per_step)
+                    })
+                    .collect();
+            let ensembles = replicas.collect(
+                &chain,
+                &initial_for_replicas,
+                &nominal,
+                &w.inventories,
+                &w.drawn,
+            );
+            for (id, (ensemble, mut info)) in ensembles {
+                info.not_perturbed.push(
+                    "Monte Carlo noise of each replica's rates on the shared histories \
+                     (in the spread, not removed)"
+                        .to_string(),
+                );
+                info.replica_weight_noise = w.noise.get(&id).cloned().unwrap_or_default();
+                results.uncertainty.insert(id, ensemble);
+                results.uncertainty_info.insert(id, info);
+            }
+        }
 
         // Coupled uncertainty: the whole coupled run again per replica, from
         // the geometry the nominal loop started from, after which the model
@@ -937,6 +1030,192 @@ impl Model {
         results.data_releases = yamc_nuclide::url_cache::data_releases();
         Ok(results)
     }
+}
+
+/// The replicas of a weighted coupled run, stepped beside the nominal loop:
+/// each one's decay data, its compositions, and what each step made of it.
+struct WeightedReplicas {
+    /// Per replica, its chain with its decay-data draw, and what it drew.
+    chains: Vec<Arc<HashMap<String, ChainNuclide>>>,
+    drawn: Vec<yani_transmute::coupled_uncertainty::Drawn>,
+    /// Per replica, each material's composition, sum mode.
+    states: Vec<HashMap<u32, Material>>,
+    /// Per replica, each material's inventory after every step so far.
+    inventories: Vec<HashMap<u32, yani_transmute::coupled_uncertainty::Inventories>>,
+    /// Whether the transport draws each replica's cross sections as well as
+    /// carrying its composition.
+    cross_sections: bool,
+    /// Per material, per step, the Monte Carlo noise in the replicas' rates
+    /// relative to the rates themselves (see [`WeightedReplicas::step`]).
+    noise: HashMap<u32, Vec<f64>>,
+    /// The replica tables every step's transport shares.
+    cache: Arc<crate::model::ReplicaTableCache>,
+}
+
+impl WeightedReplicas {
+    fn new(
+        replicas: &yani_transmute::coupled_uncertainty::CoupledReplicas,
+        chain: &Arc<HashMap<String, ChainNuclide>>,
+        initial: &HashMap<u32, Material>,
+        count: usize,
+        cross_sections: bool,
+    ) -> Self {
+        let (chains, drawn) = (0..count as u64).map(|k| replicas.chain(chain, k)).unzip();
+        Self {
+            chains,
+            drawn,
+            states: vec![initial.clone(); count],
+            inventories: vec![initial.keys().map(|&id| (id, Vec::new())).collect(); count],
+            cross_sections,
+            noise: HashMap::new(),
+            cache: Default::default(),
+        }
+    }
+
+    /// Every replica's atom densities, for the next transport's ratios.
+    fn compositions(&self) -> crate::model::ReplicaCompositions {
+        let mut densities: HashMap<u32, Vec<HashMap<String, f64>>> = HashMap::new();
+        for state in &self.states {
+            for (&id, m) in state {
+                densities.entry(id).or_default().push(m.nuclides.clone());
+            }
+        }
+        crate::model::ReplicaCompositions {
+            densities,
+            cross_sections: self.cross_sections,
+            cache: Arc::clone(&self.cache),
+        }
+    }
+
+    /// Step every replica of every material over `dt` at `source_rate`, on
+    /// the rates `tallied` under its own weight (scaled from unit source
+    /// rate), its own isomeric partials and fission-yield fold, and its own
+    /// decay data; decay alone where `tallied` has nothing.
+    ///
+    /// Each replica's rates also come from the even half of the histories,
+    /// and the spread over replicas of the even half's departure from the
+    /// whole is the Monte Carlo noise in a replica's rate, with the draws and
+    /// the nominal's own error cancelled from it: for each material, the
+    /// noise of its largest rate, relative to that rate, is recorded per step.
+    fn step(
+        &mut self,
+        tallied: &HashMap<
+            u32,
+            (
+                yani_transmute::ReplicaTallied,
+                yani_transmute::CoupledDiagnostics,
+            ),
+        >,
+        branch: &Arc<yani::BranchTable>,
+        source_rate: f64,
+        dt: f64,
+        parts: yani::ChainParts,
+    ) -> Result<(), String> {
+        let scaled = |rates: &ReactionRates| -> ReactionRates {
+            rates
+                .iter()
+                .map(|(n, r)| {
+                    let r = r
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v * source_rate))
+                        .collect();
+                    (n.clone(), r)
+                })
+                .collect()
+        };
+        for (&id, (t, _)) in tallied {
+            let noise = noise_of(t);
+            self.noise.entry(id).or_default().push(noise);
+        }
+        for (k, state) in self.states.iter_mut().enumerate() {
+            let chain = &self.chains[k];
+            for (&id, material) in state.iter_mut() {
+                let (mut rates, fy, folded) = match tallied.get(&id) {
+                    Some((t, diagnostics)) => {
+                        let mut rates = scaled(&t.rates[k]);
+                        let partials: yani_transmute::PartialRates = t.partials[k]
+                            .iter()
+                            .map(|(p, kinds)| {
+                                let kinds = kinds
+                                    .iter()
+                                    .map(|(kind, v)| {
+                                        let v = v.iter().map(|(n, x)| (n.clone(), x * source_rate));
+                                        (kind.clone(), v.collect())
+                                    })
+                                    .collect();
+                                (p.clone(), kinds)
+                            })
+                            .collect();
+                        let folded = if partials.is_empty() {
+                            Arc::clone(chain)
+                        } else {
+                            apply_coupled_branching(
+                                chain,
+                                branch,
+                                &partials,
+                                &mut rates,
+                                Some(diagnostics),
+                            )?
+                            .0
+                        };
+                        (rates, t.fy_weights[k].clone(), folded)
+                    }
+                    None => (
+                        HashMap::new(),
+                        FissionYieldWeights::default(),
+                        Arc::clone(chain),
+                    ),
+                };
+                let next = ForwardEulerStepper
+                    .step(material, &folded, &rates, &fy, parts, dt)
+                    .map_err(|e| format!("replica {k}, material {id}: {e}"))?;
+                rates.clear();
+                self.inventories[k]
+                    .entry(id)
+                    .or_default()
+                    .push(next.nuclides.clone());
+                *material = next;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The Monte Carlo noise in the replicas' largest rate on `t`, relative to
+/// that rate: the spread over replicas of the even half's rate less the
+/// whole's, times `sqrt(n_e / n_o)` (see
+/// [`yani_transmute::ReplicaTallied::even`]). Zero where the halves were not
+/// kept.
+fn noise_of(t: &yani_transmute::ReplicaTallied) -> f64 {
+    let (Some(even), Some(scale)) = (t.even.as_ref(), t.noise_scale()) else {
+        return 0.0;
+    };
+    let Some(first) = t.rates.first() else {
+        return 0.0;
+    };
+    let Some((nuclide, reaction, rate)) = first
+        .iter()
+        .flat_map(|(n, r)| r.iter().map(move |(k, v)| (n, k, *v)))
+        .max_by(|a, b| a.2.total_cmp(&b.2))
+    else {
+        return 0.0;
+    };
+    if rate <= 0.0 {
+        return 0.0;
+    }
+    let at = |rates: &ReactionRates| rates.get(nuclide).and_then(|r| r.get(reaction)).copied();
+    let d: Vec<f64> = t
+        .rates
+        .iter()
+        .zip(&even.rates)
+        .filter_map(|(f, e)| Some((at(e)? - at(f)?) / rate))
+        .collect();
+    if d.len() < 2 {
+        return 0.0;
+    }
+    let mean = d.iter().sum::<f64>() / d.len() as f64;
+    let var = d.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (d.len() - 1) as f64;
+    (var * scale).sqrt()
 }
 
 /// What every replica of a coupled run shares with the nominal one.
