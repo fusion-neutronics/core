@@ -284,10 +284,10 @@ fn run_case_with(
         .run_with_tracking(&settings, HistorySelection::first(n as u64))
         .expect("CPU tracked run");
     let mut cpu: Vec<Vec<Col>> = vec![Vec::new(); n];
+    // Every particle's track, in pop order (tracks are sorted by
+    // (history, particle_id) and IDs are assigned at pop), is the
+    // history's whole collision sequence.
     for track in &storage.tracks {
-        if track.generation != 0 {
-            continue;
-        }
         for ev in &track.events {
             if ev.event_type == TrackEventType::Collision && ev.history < n {
                 cpu[ev.history].push(Col {

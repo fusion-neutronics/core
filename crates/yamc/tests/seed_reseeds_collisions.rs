@@ -133,10 +133,10 @@ fn collision_trace(model: &mut Model, seed: u64) -> Vec<Vec<Col>> {
         .run_with_tracking(&settings, HistorySelection::first(HISTORIES as u64))
         .expect("tracked run");
     let mut trace: Vec<Vec<Col>> = vec![Vec::new(); HISTORIES];
+    // Every particle's track, in pop order (tracks are sorted by
+    // (history, particle_id) and IDs are assigned at pop), is the
+    // history's whole collision sequence.
     for track in &storage.tracks {
-        if track.generation != 0 {
-            continue;
-        }
         for ev in &track.events {
             if ev.event_type == TrackEventType::Collision && ev.history < HISTORIES {
                 trace[ev.history].push((ev.energy_in.to_bits(), ev.energy_out.to_bits()));
