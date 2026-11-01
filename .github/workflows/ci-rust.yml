@@ -250,6 +250,7 @@ jobs:
             coverage.lcov
             coverage-summary.txt
             target/llvm-cov/html
+          retention-days: 7
 
   # The live origin must serve, for every library keyword, a latest.json whose
   # format_version this build reads, naming a manifest whose size and sha256

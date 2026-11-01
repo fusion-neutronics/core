@@ -454,6 +454,7 @@ jobs:
         with:
           name: wheels-linux-${{ matrix.target }}
           path: packages/yamc-core/dist
+          retention-days: 2
 
   # Build the standalone transmutation wheel. One target is
   # enough: it is the same abi3 wheel machinery as yamc's, over a strict subset
@@ -577,6 +578,7 @@ jobs:
         with:
           name: wheels-yani-${{ matrix.name }}
           path: packages/yani-core/dist
+          retention-days: 2
 
   # Build wheels for Windows
   windows:
@@ -644,6 +646,7 @@ jobs:
         with:
           name: wheels-windows-${{ matrix.target }}
           path: packages/yamc-core/dist
+          retention-days: 2
 
   # Build wheels for macOS (Apple Silicon only)
   macos:
@@ -703,6 +706,7 @@ jobs:
         with:
           name: wheels-macos-aarch64
           path: packages/yamc-core/dist
+          retention-days: 2
 
   # The Pyodide (Emscripten) wheels, which yamc-core and yani-core publish
   # alongside the native ones: `micropip.install("yani-core")` in a browser
@@ -1404,11 +1408,13 @@ jobs:
         with:
           name: dist-yamc
           path: dist-yamc/
+          retention-days: 2
       - uses: actions/upload-artifact@v7
         if: needs.plan.outputs.build_yani == 'true'
         with:
           name: dist-yani
           path: dist-yani/
+          retention-days: 2
 
   # One publish job per PyPI project, each in its OWN environment.
   #
