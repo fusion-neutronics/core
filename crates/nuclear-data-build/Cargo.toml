@@ -19,18 +19,19 @@ endf = { path = "../endf" }
 # download path does not compile without the arrow reader, and the gates that
 # read each converted file back will need that reader anyway.
 yamc-nuclide = { path = "../yamc-nuclide", features = ["download-tls"] }
-# The OS's own Downloads folder, where a web browser saves the archives some
-# hosts only serve to a browser. It reads XDG_DOWNLOAD_DIR on Linux (which
-# desktops translate, ~/Téléchargements), and the Downloads known folder on
-# Windows (which users can move to another drive), so guessing ~/Downloads
-# would miss both.
-dirs = "7"
+# The home folder, for the OS Downloads folder (see src/os_downloads.rs).
+etcetera = "0.11"
 # Pure-Rust extraction of the source archives: .tar.gz and .tgz through
 # flate2's default miniz_oxide backend, and .zip through flate2 as well.
 flate2 = "1"
 tar = { version = "0.4", default-features = false }
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 sha2 = "0.10"
+
+# The Downloads known folder on Windows. The same crate and features etcetera
+# already uses, so this adds nothing to the dependency tree.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell"] }
 
 [dev-dependencies]
 lzma-rust2 = "0.21"

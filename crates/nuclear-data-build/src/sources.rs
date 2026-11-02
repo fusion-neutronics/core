@@ -48,7 +48,7 @@ impl Search {
     pub fn new(downloads: Option<&Path>) -> Self {
         Search {
             downloads: downloads.map(Path::to_path_buf),
-            os_downloads: dirs::download_dir(),
+            os_downloads: crate::os_downloads::download_dir(),
         }
     }
 }

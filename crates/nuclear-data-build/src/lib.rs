@@ -12,6 +12,7 @@
 
 pub mod extract;
 pub mod identify;
+pub mod os_downloads;
 pub mod recipe;
 pub mod sources;
 
