@@ -107,7 +107,8 @@ pub fn identify(folders: &[(Sublibrary, PathBuf)]) -> Result<Vec<Material>, Stri
 /// The files of a sublibrary folder, sorted, without its marker.
 fn files(dir: &Path) -> Result<Vec<PathBuf>, String> {
     let mut out = Vec::new();
-    let entries = fs::read_dir(dir).map_err(|e| format!("could not list {}: {e}", dir.display()))?;
+    let entries =
+        fs::read_dir(dir).map_err(|e| format!("could not list {}: {e}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("could not list {}: {e}", dir.display()))?;
         if entry.file_name() == MARKER || !entry.path().is_file() {

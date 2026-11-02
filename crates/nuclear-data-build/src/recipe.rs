@@ -118,19 +118,24 @@ impl Recipe {
 
     /// The sources of one sublibrary, in the order they are applied.
     pub fn sources_of(&self, sublibrary: Sublibrary) -> impl Iterator<Item = &Source> {
-        self.sources.iter().filter(move |s| s.sublibrary == sublibrary)
+        self.sources
+            .iter()
+            .filter(move |s| s.sublibrary == sublibrary)
     }
 }
 
 /// The recipe for a library keyword.
 pub fn recipe(keyword: &str) -> Result<&'static Recipe, String> {
-    RECIPES.iter().find(|r| r.keyword == keyword).ok_or_else(|| {
-        let known: Vec<&str> = RECIPES.iter().map(|r| r.keyword).collect();
-        format!(
-            "{keyword:?} is not a library this can build; the libraries are {}",
-            known.join(", ")
-        )
-    })
+    RECIPES
+        .iter()
+        .find(|r| r.keyword == keyword)
+        .ok_or_else(|| {
+            let known: Vec<&str> = RECIPES.iter().map(|r| r.keyword).collect();
+            format!(
+                "{keyword:?} is not a library this can build; the libraries are {}",
+                known.join(", ")
+            )
+        })
 }
 
 /// Every keyword with a recipe.
@@ -146,8 +151,7 @@ fn named(name: &str, prefix: &str, suffix: &str) -> bool {
 /// `_act` and `_u20` variants some JENDL update archives carry beside the
 /// main files, which belong to other sublibraries.
 fn jendl_stem(name: &str, prefix: &str, suffix: &str) -> bool {
-    named(name, prefix, suffix)
-        && !name[prefix.len()..name.len() - suffix.len()].contains('_')
+    named(name, prefix, suffix) && !name[prefix.len()..name.len() - suffix.len()].contains('_')
 }
 
 /// The sources tables. `pin: None` marks a file not pinned yet.
@@ -293,15 +297,42 @@ static JEFF_4_0: &[Source] = &[
 /// updates are needed. Spontaneous fission yields (`_sf`) are left out, as
 /// for JEFF.
 static JENDL_5_0: &[Source] = &[
-    jendl_neutron("jendl5-n.tar.gz", "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-n.tar.gz"),
-    jendl_neutron("jendl5-n_upd1.tar.gz", "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-n_upd1.tar.gz"),
-    jendl_neutron("jendl5-n_upd6.tar.gz", "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-n_upd6.tar.gz"),
-    jendl_neutron("jendl5-n_upd7.tar.gz", "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-n_upd7.tar.gz"),
-    jendl_neutron("jendl5-n_upd10.tar.gz", "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-n_upd10.tar.gz"),
-    jendl_neutron("jendl5-n_upd11.tar.gz", "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-n_upd11.tar.gz"),
-    jendl_neutron("jendl5-n_upd12.tar.gz", "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-n_upd12.tar.gz"),
-    jendl_neutron("jendl5-n_upd14.tar.gz", "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-n_upd14.tar.gz"),
-    jendl_neutron("jendl5-n_upd17.tar.gz", "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-n_upd17.tar.gz"),
+    jendl_neutron(
+        "jendl5-n.tar.gz",
+        "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-n.tar.gz",
+    ),
+    jendl_neutron(
+        "jendl5-n_upd1.tar.gz",
+        "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-n_upd1.tar.gz",
+    ),
+    jendl_neutron(
+        "jendl5-n_upd6.tar.gz",
+        "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-n_upd6.tar.gz",
+    ),
+    jendl_neutron(
+        "jendl5-n_upd7.tar.gz",
+        "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-n_upd7.tar.gz",
+    ),
+    jendl_neutron(
+        "jendl5-n_upd10.tar.gz",
+        "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-n_upd10.tar.gz",
+    ),
+    jendl_neutron(
+        "jendl5-n_upd11.tar.gz",
+        "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-n_upd11.tar.gz",
+    ),
+    jendl_neutron(
+        "jendl5-n_upd12.tar.gz",
+        "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-n_upd12.tar.gz",
+    ),
+    jendl_neutron(
+        "jendl5-n_upd14.tar.gz",
+        "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-n_upd14.tar.gz",
+    ),
+    jendl_neutron(
+        "jendl5-n_upd17.tar.gz",
+        "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-n_upd17.tar.gz",
+    ),
     Source {
         name: "jendl5-pa.tar.gz",
         url: "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-pa.tar.gz",
@@ -316,13 +347,34 @@ static JENDL_5_0: &[Source] = &[
         sublibrary: Sublibrary::AtomicRelaxation,
         keep: |n| jendl_stem(n, "ar_", ".dat"),
     },
-    jendl_decay("jendl5-dec.tar.gz", "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-dec.tar.gz"),
-    jendl_decay("jendl5-dec_upd3.tar.gz", "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-dec_upd3.tar.gz"),
-    jendl_decay("jendl5-dec_upd5.tar.gz", "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-dec_upd5.tar.gz"),
-    jendl_decay("jendl5-dec_upd15.tar.gz", "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-dec_upd15.tar.gz"),
-    jendl_yields("jendl5-fpy.tar.gz", "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-fpy.tar.gz"),
-    jendl_yields("jendl5-fpy_upd2.tar.gz", "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-fpy_upd2.tar.gz"),
-    jendl_yields("jendl5-fpy_upd8.tar.gz", "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-fpy_upd8.tar.gz"),
+    jendl_decay(
+        "jendl5-dec.tar.gz",
+        "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-dec.tar.gz",
+    ),
+    jendl_decay(
+        "jendl5-dec_upd3.tar.gz",
+        "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-dec_upd3.tar.gz",
+    ),
+    jendl_decay(
+        "jendl5-dec_upd5.tar.gz",
+        "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-dec_upd5.tar.gz",
+    ),
+    jendl_decay(
+        "jendl5-dec_upd15.tar.gz",
+        "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-dec_upd15.tar.gz",
+    ),
+    jendl_yields(
+        "jendl5-fpy.tar.gz",
+        "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-fpy.tar.gz",
+    ),
+    jendl_yields(
+        "jendl5-fpy_upd2.tar.gz",
+        "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-fpy_upd2.tar.gz",
+    ),
+    jendl_yields(
+        "jendl5-fpy_upd8.tar.gz",
+        "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-fpy_upd8.tar.gz",
+    ),
 ];
 
 const fn jendl_neutron(name: &'static str, url: &'static str) -> Source {
@@ -480,7 +532,9 @@ mod tests {
                     assert!(pin.bytes > 0, "{}", s.name);
                     assert_eq!(pin.sha256.len(), 64, "{} {}", r.keyword, s.name);
                     assert!(
-                        pin.sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                        pin.sha256
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
                         "{}",
                         s.name
                     );
@@ -539,9 +593,18 @@ mod tests {
                 .unwrap()
                 .format()
         };
-        assert_eq!(format("jeff-4.0", "JEFF40-Evaluations-Neutron-593.zip"), Format::Zip);
-        assert_eq!(format("jeff-4.0", "Radioactive_Decay_Data_JEFF-40.txt"), Format::Plain);
+        assert_eq!(
+            format("jeff-4.0", "JEFF40-Evaluations-Neutron-593.zip"),
+            Format::Zip
+        );
+        assert_eq!(
+            format("jeff-4.0", "Radioactive_Decay_Data_JEFF-40.txt"),
+            Format::Plain
+        );
         assert_eq!(format("tendl-2025", "TENDL-n.tgz"), Format::TarGz);
-        assert_eq!(format("endf-b8.1", "decay-version.VIII.1.tar.gz"), Format::TarGz);
+        assert_eq!(
+            format("endf-b8.1", "decay-version.VIII.1.tar.gz"),
+            Format::TarGz
+        );
     }
 }

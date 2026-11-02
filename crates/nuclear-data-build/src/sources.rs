@@ -134,7 +134,13 @@ pub fn fetch(recipe: &Recipe, root: &Path, search: &Search) -> Result<Vec<Fetche
     if browser.is_empty() && failed.is_empty() {
         return Ok(fetched);
     }
-    Err(missing_message(recipe.keyword, root, search, &browser, &failed))
+    Err(missing_message(
+        recipe.keyword,
+        root,
+        search,
+        &browser,
+        &failed,
+    ))
 }
 
 /// The sha256 of a file, read in pieces.
@@ -276,7 +282,11 @@ fn missing_message(
         folders.push(downloads_dir(root).display().to_string());
         out.push_str(&format!(
             "Open each link in a web browser. {} found by its contents, under any name, in {}.\n",
-            if browser.len() == 1 { "The file is" } else { "Each file is" },
+            if browser.len() == 1 {
+                "The file is"
+            } else {
+                "Each file is"
+            },
             or_list(&folders)
         ));
         if search.os_downloads.is_none() {
@@ -297,7 +307,9 @@ fn missing_message(
         if !out.is_empty() {
             out.push('\n');
         }
-        out.push_str(&format!("{keyword}: these source files could not be downloaded:\n"));
+        out.push_str(&format!(
+            "{keyword}: these source files could not be downloaded:\n"
+        ));
         for f in failed {
             out.push_str(&format!("  - {f}\n"));
         }

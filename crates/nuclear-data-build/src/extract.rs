@@ -151,8 +151,8 @@ fn unpack_tar_gz(keep: fn(&str) -> bool, path: &Path, dir: &Path) -> Result<usiz
 
 fn unpack_zip(keep: fn(&str) -> bool, path: &Path, dir: &Path) -> Result<usize, String> {
     let file = fs::File::open(path).map_err(|e| format!("could not open: {e}"))?;
-    let mut archive =
-        zip::ZipArchive::new(BufReader::new(file)).map_err(|e| format!("not a zip archive: {e}"))?;
+    let mut archive = zip::ZipArchive::new(BufReader::new(file))
+        .map_err(|e| format!("not a zip archive: {e}"))?;
     let mut seen = HashSet::new();
     for i in 0..archive.len() {
         let mut entry = archive

@@ -130,11 +130,16 @@ impl Origin {
                         .trim_start_matches('/')
                         .to_string();
                     *hits.lock().unwrap().entry(path.clone()).or_default() += 1;
-                    let reply = replies.lock().unwrap().get(&path).cloned().unwrap_or(Reply {
-                        status: "404 Not Found",
-                        headers: "Content-Type: text/plain\r\n",
-                        body: Vec::new(),
-                    });
+                    let reply = replies
+                        .lock()
+                        .unwrap()
+                        .get(&path)
+                        .cloned()
+                        .unwrap_or(Reply {
+                            status: "404 Not Found",
+                            headers: "Content-Type: text/plain\r\n",
+                            body: Vec::new(),
+                        });
                     let head = format!(
                         "HTTP/1.1 {}\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n",
                         reply.status,

@@ -113,7 +113,9 @@ pub fn download_file(
         return Err(format!("{} is not a path to a file", dest.display()).into());
     };
     if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(format!("the sha256 given for {name}, {sha256:?}, is not 64 hex digits").into());
+        return Err(
+            format!("the sha256 given for {name}, {sha256:?}, is not 64 hex digits").into(),
+        );
     }
     let sha256 = sha256.to_ascii_lowercase();
 

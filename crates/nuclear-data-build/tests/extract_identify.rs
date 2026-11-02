@@ -90,7 +90,12 @@ fn updates_replace_earlier_files_and_only_kept_members_are_written() {
     );
     let got = vec![
         fetched(&base, "jendl5-n.tar.gz", Sublibrary::Neutron, evaluations),
-        fetched(&upd, "jendl5-n_upd7.tar.gz", Sublibrary::Neutron, evaluations),
+        fetched(
+            &upd,
+            "jendl5-n_upd7.tar.gz",
+            Sublibrary::Neutron,
+            evaluations,
+        ),
     ];
     let r = recipe("jendl-5.0", got.iter().map(|f| f.source).collect());
     let root = scratch.dir("lib");
@@ -148,7 +153,10 @@ fn an_interrupted_unpack_is_redone() {
 fn two_members_with_one_name_in_an_archive_are_refused() {
     let scratch = Scratch::new("duplicate");
     let a = scratch.0.join("a.tar.gz");
-    tar_gz(&a, &[("x/n-Fe056.endf", b"one"), ("y/n-Fe056.endf", b"two")]);
+    tar_gz(
+        &a,
+        &[("x/n-Fe056.endf", b"one"), ("y/n-Fe056.endf", b"two")],
+    );
     let f = fetched(&a, "a.tar.gz", Sublibrary::Neutron, evaluations);
     let r = recipe("endf-b8.1", vec![f.source]);
     let err = extract(&r, &[f], &scratch.dir("lib")).unwrap_err();
@@ -186,8 +194,14 @@ fn decay_tape_and_neutron_archive(scratch: &Scratch) -> (PathBuf, Vec<(Sublibrar
     // One TPID, both materials, one TEND, as a tape of many materials has.
     let inner = |text: &str| {
         let lines: Vec<&str> = text.lines().collect();
-        let tend = lines.iter().rposition(|l| l.len() >= 70 && l[66..70].trim() == "-1").unwrap();
-        lines[1..tend].iter().map(|l| format!("{l}\n")).collect::<String>()
+        let tend = lines
+            .iter()
+            .rposition(|l| l.len() >= 70 && l[66..70].trim() == "-1")
+            .unwrap();
+        lines[1..tend]
+            .iter()
+            .map(|l| format!("{l}\n"))
+            .collect::<String>()
     };
     let mut joined = cs.lines().next().unwrap().to_string() + "\n";
     joined += &inner(&cs);
@@ -198,12 +212,25 @@ fn decay_tape_and_neutron_archive(scratch: &Scratch) -> (PathBuf, Vec<(Sublibrar
     let zip = scratch.0.join("JEFF40-Evaluations-Neutron-593.zip");
     zip_file(
         &zip,
-        &[("n_26-Fe-056g.jeff", &unxz(FE56)), ("n_3-Li-006g.jeff", &unxz(LI6))],
+        &[
+            ("n_26-Fe-056g.jeff", &unxz(FE56)),
+            ("n_3-Li-006g.jeff", &unxz(LI6)),
+        ],
     );
     let jeff = |n: &str| n.ends_with(".jeff");
     let got = vec![
-        fetched(&zip, "JEFF40-Evaluations-Neutron-593.zip", Sublibrary::Neutron, jeff),
-        fetched(&tape, "Radioactive_Decay_Data_JEFF-40.txt", Sublibrary::Decay, |_| true),
+        fetched(
+            &zip,
+            "JEFF40-Evaluations-Neutron-593.zip",
+            Sublibrary::Neutron,
+            jeff,
+        ),
+        fetched(
+            &tape,
+            "Radioactive_Decay_Data_JEFF-40.txt",
+            Sublibrary::Decay,
+            |_| true,
+        ),
     ];
     let r = recipe("jeff-4.0", got.iter().map(|f| f.source).collect());
     let root = scratch.dir("lib");
@@ -235,13 +262,23 @@ fn every_material_is_named_from_its_header() {
 fn a_material_of_another_sublibrary_or_twice_is_reported_with_the_rest() {
     let scratch = Scratch::new("identify-wrong");
     let (_, folders) = decay_tape_and_neutron_archive(&scratch);
-    let neutron = &folders.iter().find(|(s, _)| *s == Sublibrary::Neutron).unwrap().1;
+    let neutron = &folders
+        .iter()
+        .find(|(s, _)| *s == Sublibrary::Neutron)
+        .unwrap()
+        .1;
     std::fs::write(neutron.join("dec-055_Cs_137.endf"), unxz(CS137)).unwrap();
     std::fs::write(neutron.join("n-026_Fe_056.copy"), unxz(FE56)).unwrap();
     std::fs::write(neutron.join("broken.endf"), b"not an ENDF file\n").unwrap();
     let err = identify(&folders).unwrap_err();
-    assert!(err.starts_with("3 problems in the unpacked sources"), "{err}");
-    assert!(err.contains("is NSUB 4, not the neutron sublibrary (NSUB 10)"), "{err}");
+    assert!(
+        err.starts_with("3 problems in the unpacked sources"),
+        "{err}"
+    );
+    assert!(
+        err.contains("is NSUB 4, not the neutron sublibrary (NSUB 10)"),
+        "{err}"
+    );
     assert!(err.contains("Fe56 (neutron) is in both"), "{err}");
     assert!(err.contains("broken.endf"), "{err}");
 }
