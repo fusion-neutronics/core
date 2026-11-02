@@ -36,6 +36,34 @@ pub enum Outcome {
     Downloaded,
 }
 
+/// Why [`download_file`] did not leave the pinned file at `dest`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadError {
+    /// The host refused a scripted download in a way a web browser gets
+    /// past: HTTP 403, a Cloudflare challenge, or an HTML page in place of
+    /// the file. A copy saved by a browser is what this file then needs.
+    pub needs_browser: bool,
+    /// What went wrong, naming the URL, the file and how to supply it.
+    pub message: String,
+}
+
+impl std::fmt::Display for DownloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for DownloadError {}
+
+impl From<String> for DownloadError {
+    fn from(message: String) -> Self {
+        DownloadError {
+            needs_browser: false,
+            message,
+        }
+    }
+}
+
 /// How much of a body is read before the rest, to tell an HTML page from the
 /// file when the body is not the file.
 const HEAD: u64 = 1024;
@@ -66,18 +94,26 @@ const HTML_PAGE: &str =
 /// matches. A `.part` file that cannot be written (a full disk, a quota, no
 /// permission) is reported as that, at once.
 ///
+/// [`DownloadError::needs_browser`] is set when the host refused in a way a
+/// web browser gets past: HTTP 403, a Cloudflare challenge (answered with a
+/// `cf-mitigated: challenge` header, which is not retried even on a 503), or
+/// an HTML page in place of the file.
+///
 /// Concurrent calls for one `dest` in a process take turns, so the later ones
 /// find the file in place. Separate processes must not download one `dest`
 /// at once; the library builder locks its folder for that.
-pub fn download_file(url: &str, dest: &Path, bytes: u64, sha256: &str) -> Result<Outcome, String> {
+pub fn download_file(
+    url: &str,
+    dest: &Path,
+    bytes: u64,
+    sha256: &str,
+) -> Result<Outcome, DownloadError> {
     let dest = std::path::absolute(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
     let Some(name) = dest.file_name().map(|n| n.to_string_lossy().into_owned()) else {
-        return Err(format!("{} is not a path to a file", dest.display()));
+        return Err(format!("{} is not a path to a file", dest.display()).into());
     };
     if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(format!(
-            "the sha256 given for {name}, {sha256:?}, is not 64 hex digits"
-        ));
+        return Err(format!("the sha256 given for {name}, {sha256:?}, is not 64 hex digits").into());
     }
     let sha256 = sha256.to_ascii_lowercase();
 
@@ -115,20 +151,24 @@ pub fn download_file(url: &str, dest: &Path, bytes: u64, sha256: &str) -> Result
                             part.display(),
                             dest.display()
                         )
+                        .into()
                     });
             }
             Err(Failure::Transient(why)) => last = why,
-            Err(Failure::Refused(why)) => {
-                return Err(failed(url, &dest, bytes, &sha256, &why, found.as_deref()));
+            Err(Failure::Refused { why, needs_browser }) => {
+                return Err(DownloadError {
+                    needs_browser,
+                    message: failed(url, &dest, bytes, &sha256, &why, found.as_deref()),
+                });
             }
-            Err(Failure::Local(why)) => return Err(why),
+            Err(Failure::Local(why)) => return Err(why.into()),
         }
     }
     let why = format!(
         "{} attempts failed, the last with: {last}",
         RETRY_DELAYS_MS.len() + 1
     );
-    Err(failed(url, &dest, bytes, &sha256, &why, found.as_deref()))
+    Err(failed(url, &dest, bytes, &sha256, &why, found.as_deref()).into())
 }
 
 /// What `dest` holds before a download.
@@ -168,8 +208,9 @@ fn existing(dest: &Path, bytes: u64, sha256: &str) -> Result<Existing, String> {
 
 /// Why an attempt did not leave the pinned file in `<dest>.part`.
 enum Failure {
-    /// The host's answer, which asking again would not change.
-    Refused(String),
+    /// The host's answer, which asking again would not change, and whether a
+    /// web browser would get past it.
+    Refused { why: String, needs_browser: bool },
     /// A transport failure, a body cut short or a 5xx: worth another attempt.
     Transient(String),
     /// The `.part` file could not be written, which no host can fix.
@@ -188,12 +229,27 @@ fn attempt(
         // An address reqwest cannot request at all (a scheme it does not
         // speak) fails the same way every time.
         if e.is_builder() {
-            Failure::Refused(describe(&e))
+            Failure::Refused {
+                why: describe(&e),
+                needs_browser: false,
+            }
         } else {
             Failure::Transient(describe(&e))
         }
     })?;
     let status = response.status();
+    // Cloudflare marks the page it sends in place of the file this way, with
+    // a 403 or a 503. Asking again from a script gets the same page.
+    if response
+        .headers()
+        .get("cf-mitigated")
+        .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"challenge"))
+    {
+        return Err(Failure::Refused {
+            why: format!("the host answered HTTP {status} with a Cloudflare bot check"),
+            needs_browser: true,
+        });
+    }
     if status.is_server_error() {
         return Err(Failure::Transient(format!("HTTP {status}")));
     }
@@ -203,9 +259,10 @@ fn attempt(
         } else {
             ""
         };
-        return Err(Failure::Refused(format!(
-            "the host answered HTTP {status}{why}"
-        )));
+        return Err(Failure::Refused {
+            why: format!("the host answered HTTP {status}{why}"),
+            needs_browser: status == StatusCode::FORBIDDEN,
+        });
     }
     let announced = response.content_length();
     let reading = |e: std::io::Error| Failure::Transient(format!("reading the response body: {e}"));
@@ -218,11 +275,14 @@ fn attempt(
     if let Some(n) = announced
         && n != bytes
     {
-        return Err(Failure::Refused(if page {
-            HTML_PAGE.to_string()
-        } else {
-            format!("the host announced {n} bytes, not the expected {bytes}")
-        }));
+        return Err(Failure::Refused {
+            why: if page {
+                HTML_PAGE.to_string()
+            } else {
+                format!("the host announced {n} bytes, not the expected {bytes}")
+            },
+            needs_browser: page,
+        });
     }
     let mut body = (&head[..])
         .chain(&mut response)
@@ -243,15 +303,18 @@ fn attempt(
             Failure::Local(format!("could not write {}: {e}", part.display()))
         }
         Err(e) => reading(e),
-        Ok((n, got)) => Failure::Refused(if page {
-            HTML_PAGE.to_string()
-        } else if n > bytes {
-            format!("the host sent more than the expected {bytes} bytes")
-        } else if n < bytes {
-            format!("the host sent {n} bytes, not the expected {bytes}")
-        } else {
-            format!("the host sent a different file, with sha256 {got}")
-        }),
+        Ok((n, got)) => Failure::Refused {
+            why: if page {
+                HTML_PAGE.to_string()
+            } else if n > bytes {
+                format!("the host sent more than the expected {bytes} bytes")
+            } else if n < bytes {
+                format!("the host sent {n} bytes, not the expected {bytes}")
+            } else {
+                format!("the host sent a different file, with sha256 {got}")
+            },
+            needs_browser: page,
+        },
     })
 }
 

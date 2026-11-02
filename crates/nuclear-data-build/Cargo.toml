@@ -1,0 +1,36 @@
+[package]
+name = "nuclear-data-build"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Build a whole nuclear data library locally from its evaluated source archives"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "nuclear_data_build"
+path = "src/lib.rs"
+
+# Native only: nothing in a browser builds a library, and the download helper
+# it uses (yamc-nuclide's `storage::fetch`) is not compiled for emscripten.
+[dependencies]
+endf = { path = "../endf" }
+# For `storage::fetch::download_file`, the size- and sha256-checked download
+# the published releases also stream through. Default features stay on: its
+# download path does not compile without the arrow reader, and the gates that
+# read each converted file back will need that reader anyway.
+yamc-nuclide = { path = "../yamc-nuclide", features = ["download-tls"] }
+# The OS's own Downloads folder, where a web browser saves the archives some
+# hosts only serve to a browser. It reads XDG_DOWNLOAD_DIR on Linux (which
+# desktops translate, ~/Téléchargements), and the Downloads known folder on
+# Windows (which users can move to another drive), so guessing ~/Downloads
+# would miss both.
+dirs = "7"
+# Pure-Rust extraction of the source archives: .tar.gz and .tgz through
+# flate2's default miniz_oxide backend, and .zip through flate2 as well.
+flate2 = "1"
+tar = { version = "0.4", default-features = false }
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+sha2 = "0.10"
+
+[dev-dependencies]
+lzma-rust2 = "0.21"
