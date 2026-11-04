@@ -24,7 +24,7 @@ from ._scene_extract import TopTools_IndexedMapOfShape, face_edge_ids
 
 
 # BRepMesh runs in parallel on this many threads, whatever the machine. The
-# triangulation does not depend on the count (a 64-solid stellarator gave the
+# triangulation does not depend on the count (a 64-solid imported model gave the
 # same 1.4 to 2.2 million triangles, bit for bit, on 1, 4, 8 and 22 threads,
 # imprinted or not), but the peak memory grows with it: meshing that model
 # without imprinting peaked at 11.4GB on 22 threads, 8.5GB on 8, 4.4GB on 4
