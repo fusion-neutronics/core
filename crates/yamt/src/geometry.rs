@@ -91,7 +91,30 @@ impl SurfaceBvhData {
         let n = intersect::cross(self.precomputed.edge1[i], self.precomputed.edge2[i]);
         f64::from(sign) * intersect::dot(direction, n) > 0.0
     }
+
+    /// True when a ray along `direction` crossing primitive `i` clearly
+    /// ENTERS this BVH's volume there: it meets the facet from outside, more
+    /// than [`GRAZING`] off its plane. A ray grazing the facet does not
+    /// count, and neither does a graveyard facet (sign 0).
+    #[inline]
+    fn enters(&self, i: usize, direction: [f64; 3]) -> bool {
+        let sign = self.exit_sign[i];
+        if sign == 0 {
+            return false;
+        }
+        let n = intersect::cross(self.precomputed.edge1[i], self.precomputed.edge2[i]);
+        f64::from(sign) * intersect::dot(direction, n) < -GRAZING * intersect::dot(n, n).sqrt()
+    }
 }
+
+/// How far (cm) short of a facet [`MeshGeometry::ray_fire_leaving`] checks
+/// that a particle is still inside its volume: well clear of round-off in the
+/// hit point, well inside any fold of a mesh fine enough to transport.
+const SHORT_OF_FACET: f64 = 1e-6;
+
+/// Cosine of the angle between a ray and a facet's normal below which the ray
+/// grazes the facet, too close to its plane to say from which side it meets it.
+const GRAZING: f64 = 1e-6;
 
 /// What lies across a crossing found by [`MeshGeometry::next_crossing`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -713,6 +736,78 @@ impl MeshGeometry {
             history,
         )
         .map(|r| (r.distance, r.surface_id))
+    }
+
+    /// Next crossing for conformal tracking: as [`MeshGeometry::ray_fire`],
+    /// plus whether the ray really leaves `volume` there.
+    ///
+    /// From a point inside a closed, outward-wound volume, the nearest of its
+    /// facets ahead is one the ray leaves through. When it is one the ray
+    /// enters through instead, one of two things happened:
+    ///
+    /// - the surface folds there, and the facet ahead is a folded one wound
+    ///   the wrong way round. The particle is still inside the volume just
+    ///   short of it, and this is where it leaves, as before;
+    /// - the particle is not inside the volume any more: it slipped out
+    ///   through a crack, and the facet ahead is the volume's far side seen
+    ///   from outside. Crossing it would put the particle on the wrong side,
+    ///   in a cell it is not in, with no foreign surface on the way to give
+    ///   it away.
+    ///
+    /// Point location tells the two apart, just short of the facet, and only
+    /// on this path, which a sound mesh never takes. In the second case the
+    /// third element is `false` and the caller should count the particle as
+    /// lost.
+    ///
+    /// Where a leaving and an entering facet are both hit at the crossing
+    /// (a ray through the edge they share, at a fold), the leaving one is
+    /// taken.
+    pub fn ray_fire_leaving(
+        &self,
+        volume: VolumeId,
+        origin: [f64; 3],
+        direction: [f64; 3],
+    ) -> Option<(f64, SurfaceId, bool)> {
+        let sd = self.surface_bvhs.get(volume as usize)?;
+        let pre = &sd.precomputed;
+        let (prim, t) = sd.bvh.ray_traverse_tris(
+            origin,
+            direction,
+            &pre.v0,
+            &pre.edge1,
+            &pre.edge2,
+            RAY_FIRE_MIN_T,
+            |_, _| true,
+        )?;
+        if !sd.enters(prim as usize, direction) {
+            return Some((t, sd.surf_ids[prim as usize], true));
+        }
+        let tied = sd.bvh.ray_traverse_tris(
+            origin,
+            direction,
+            &pre.v0,
+            &pre.edge1,
+            &pre.edge2,
+            RAY_FIRE_MIN_T,
+            |p, tp| tp <= t + LOOKBACK && !sd.enters(p as usize, direction),
+        );
+        if let Some((p, tp)) = tied {
+            return Some((tp, sd.surf_ids[p as usize], true));
+        }
+        let back = (0.5 * t).min(SHORT_OF_FACET);
+        let short = [
+            origin[0] + (t - back) * direction[0],
+            origin[1] + (t - back) * direction[1],
+            origin[2] + (t - back) * direction[2],
+        ];
+        // The implicit complement is unbounded, so its own parity does not
+        // say whether a point is in it; being in no volume does.
+        let inside = if volume == self.topology.implicit_complement {
+            self.find_volume(short) == volume
+        } else {
+            self.point_in_volume(volume, short)
+        };
+        Some((t, sd.surf_ids[prim as usize], inside))
     }
 
     /// Fire a ray and also return the hit triangle ID (for ray history).
