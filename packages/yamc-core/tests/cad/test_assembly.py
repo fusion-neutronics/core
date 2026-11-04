@@ -86,6 +86,21 @@ def test_imprint_threads_are_scoped_and_topology_is_preserved(
     assert len(result.shared_faces) == 1
 
 
+def test_imprint_uses_a_bounded_pool_by_default(imprint_pool, monkeypatch):
+    from yamc.cad import assembly_processor
+
+    original_imprint = cq.occ_impl.assembly.imprint
+    calls = []
+
+    def imprint(assembly):
+        calls.append(imprint_pool.NbThreads())
+        return original_imprint(assembly)
+
+    monkeypatch.setattr(cq.occ_impl.assembly, "imprint", imprint)
+    process_assembly(make_two_touching_boxes(), ["steel", "aluminum"])
+    assert calls == [assembly_processor.IMPRINT_THREADS] == [4]
+
+
 def test_imprint_threads_are_restored_on_error(imprint_pool, monkeypatch):
     def fail(assembly):
         assert imprint_pool.NbThreads() == 1

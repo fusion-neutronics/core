@@ -16,7 +16,7 @@ import numbers
 import os
 import warnings
 
-from .assembly_processor import process_assembly, release_freed_memory
+from .assembly_processor import IMPRINT_THREADS, process_assembly, release_freed_memory
 from . import cad_mesh_labels as _cad_mesh_labels
 from . import cad_mesh_to_arrow as _cad_mesh_to_arrow
 from . import weld_mesh as _weld_mesh
@@ -391,7 +391,7 @@ class CadToYamc:
         contact_tolerance: float | None = None,
         overlaps: str = "error",
         *,
-        imprint_threads: int | Literal["all"] = "all",
+        imprint_threads: int | Literal["all"] = IMPRINT_THREADS,
     ) -> SurfaceMesh:
         """Mesh the assembly: surfaces + optional tet volumes.
 
@@ -435,10 +435,11 @@ class CadToYamc:
                 faceted surfaces that may overlap or leave a thin gap, and
                 :class:`yamc.MeshGeometry` tracks the exported mesh
                 discontinuously to suit. Default True.
-            imprint_threads: ``"all"`` (default) uses all logical processors
-                for imprinting, or pass a positive integer to limit its threads
-                and reduce peak RAM. Does not change subsequent meshing. The
-                prior OCC thread settings are restored even if imprinting fails.
+            imprint_threads: Threads for imprinting, default 4. Each thread
+                adds to the peak RAM, so more than four rarely pays on a large
+                assembly; ``"all"`` uses all logical processors. Does not
+                change subsequent meshing. The prior OCC thread settings are
+                restored even if imprinting fails.
                 Validated but unused when imprinting is skipped.
             contact_tolerance: Only with ``imprint=False``: the distance
                 (3D units) within which two solids count as touching, one for
@@ -507,7 +508,7 @@ class CadToYamc:
         contact_tolerance: float | None = None,
         overlaps: str = "error",
         *,
-        imprint_threads: int | Literal["all"] = "all",
+        imprint_threads: int | Literal["all"] = IMPRINT_THREADS,
     ) -> SurfaceMesh:
         """Mesh all surfaces of the assembly.
 
@@ -587,7 +588,7 @@ class CadToYamc:
         imprint=True,
         contact_tolerance=None,
         overlaps="error",
-        imprint_threads="all",
+        imprint_threads=IMPRINT_THREADS,
     ):
         """Mesh surfaces with a hybrid backend, mirroring cad-to-dagmc-mesher.
 

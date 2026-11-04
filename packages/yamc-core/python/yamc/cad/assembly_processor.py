@@ -182,6 +182,13 @@ def _bake_mirrored_parts(assembly):
     return parts
 
 
+# Imprint threads when the caller does not say. Each OCC imprint thread holds
+# its own working set: on a 108-solid assembly the peak was 4.2, 7.0, 13.2 and
+# 25.0 GB on 1, 2, 4 and 8 threads, for 945, 410, 180 and 159 s. Four is where
+# more threads stop paying for their memory.
+IMPRINT_THREADS = 4
+
+
 def _resolve_imprint_threads(imprint_threads: int | Literal["all"]) -> int:
     if isinstance(imprint_threads, str) and imprint_threads == "all":
         return max(1, OSD_Parallel.NbLogicalProcessors_s())
@@ -192,7 +199,7 @@ def _resolve_imprint_threads(imprint_threads: int | Literal["all"]) -> int:
     )
 
 
-def _imprint_assembly(assembly, imprint_threads: int | Literal["all"] = "all"):
+def _imprint_assembly(assembly, imprint_threads: int | Literal["all"] = IMPRINT_THREADS):
     """Imprint a CadQuery assembly into a connected compound.
 
     Uses the BOPAlgo_Builder based imprint with glue="partial" when the
@@ -395,7 +402,7 @@ def process_assembly(
     material_tags: list[str],
     imprint: bool = True,
     *,
-    imprint_threads: int | Literal["all"] = "all",
+    imprint_threads: int | Literal["all"] = IMPRINT_THREADS,
 ) -> ProcessedAssembly:
     """Process a CadQuery assembly for meshing.
 
@@ -410,8 +417,9 @@ def process_assembly(
             they meet. ``False`` skips the imprint (the expensive step on a
             large assembly) and keeps every solid whole, so each solid is
             meshed on its own.
-        imprint_threads: ``"all"`` uses all logical processors, or a positive
-            integer limits only imprinting. The prior OCC pool size and default
+        imprint_threads: Threads for imprinting, default
+            :data:`IMPRINT_THREADS` (4); ``"all"`` uses all logical
+            processors. Peak RAM grows with each thread. The prior OCC pool size and default
             launch count are restored afterward, including on failure. The
             value is validated even when no imprint operation is needed.
 

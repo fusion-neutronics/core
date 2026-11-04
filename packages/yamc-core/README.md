@@ -60,8 +60,10 @@ mesher.add_cadquery_object(assembly, ["steel", "aluminum"])
 mesh = mesher.mesh_surfaces(imprint_threads=2)
 ```
 
-Both `mesh()` and `mesh_surfaces()` accept `imprint_threads="all"` (the
-default) or a positive integer. Only imprinting uses this setting: the prior
+Both `mesh()` and `mesh_surfaces()` accept `imprint_threads` as a positive
+integer (default 4) or `"all"`. Each imprint thread adds to the peak memory, so
+`"all"` on a many-core machine can need several times the RAM of the default
+for little gain on a large assembly. Only imprinting uses this setting: the prior
 OCC thread-pool size and default launch count are restored before meshing,
 including when imprinting fails. Skipped and single-solid imprints do not
 change the thread pool. Glue behavior is unchanged.
