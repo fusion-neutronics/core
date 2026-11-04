@@ -515,38 +515,45 @@ impl MeshGeometry {
                 },
             )
         } else {
-            self.mesh
-                .ray_fire(vol_id, position, direction, None)
-                .map(|(distance, surface_id)| {
-                    let bc = self.mesh.boundary_condition(surface_id);
-                    let boundary = match bc {
-                        yamt::BoundaryCondition::Vacuum => BoundaryType::Vacuum,
-                        _ => BoundaryType::Transmission,
-                    };
+            let ahead = self.mesh.ray_fire_leaving(vol_id, position, direction);
+            if let Some((_, _, false)) = ahead {
+                // The nearest facet ahead is one the ray would enter this
+                // volume through, and the particle is not inside it short of
+                // that facet: it left through a crack. Crossing would put it
+                // in a cell it is not in, so it is reported as lost (as no
+                // surface ahead is), rather than tracked on silently.
+                return None;
+            }
+            ahead.map(|(distance, surface_id, _)| {
+                let bc = self.mesh.boundary_condition(surface_id);
+                let boundary = match bc {
+                    yamt::BoundaryCondition::Vacuum => BoundaryType::Vacuum,
+                    _ => BoundaryType::Transmission,
+                };
 
-                    // Use topology to determine the next cell (O(1) lookup).
-                    let next_cell_index = if boundary == BoundaryType::Vacuum {
-                        None // Particle dies at vacuum boundary
-                    } else {
-                        self.mesh.next_volume(surface_id, vol_id).map(|next_vol| {
-                            if next_vol == self.mesh.topology.implicit_complement {
-                                // Entering the implicit complement -- particle
-                                // free-streams (void) or scatters (if material set).
-                                ic_cell_index
-                            } else {
-                                next_vol as usize
-                            }
-                        })
-                    };
+                // Use topology to determine the next cell (O(1) lookup).
+                let next_cell_index = if boundary == BoundaryType::Vacuum {
+                    None // Particle dies at vacuum boundary
+                } else {
+                    self.mesh.next_volume(surface_id, vol_id).map(|next_vol| {
+                        if next_vol == self.mesh.topology.implicit_complement {
+                            // Entering the implicit complement -- particle
+                            // free-streams (void) or scatters (if material set).
+                            ic_cell_index
+                        } else {
+                            next_vol as usize
+                        }
+                    })
+                };
 
-                    BoundaryHit {
-                        distance,
-                        boundary,
-                        next_cell_index,
-                        surface_id: None, // Mesh surfaces don't have user-facing IDs
-                        relocate_triangle: None,
-                    }
-                })
+                BoundaryHit {
+                    distance,
+                    boundary,
+                    next_cell_index,
+                    surface_id: None, // Mesh surfaces don't have user-facing IDs
+                    relocate_triangle: None,
+                }
+            })
         };
         // The added vacuum box bounds the implicit complement: its first
         // crossing ahead ends the particle unless a mesh surface is nearer.
