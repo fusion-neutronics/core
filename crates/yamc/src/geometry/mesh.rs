@@ -422,27 +422,34 @@ impl MeshGeometry {
 
     /// Find the cell containing a point.
     ///
-    /// Delegates to [`yamt::MeshGeometry::find_volume`] and maps the result
-    /// to a cell index. Points in the implicit complement return the
-    /// complement cell (last cell).
+    /// Delegates to [`yamt::MeshGeometry::try_find_volume_from`] and maps the
+    /// result to a cell index. Points in the implicit complement return the
+    /// complement cell (last cell). `None` for a point the mesh cannot place
+    /// (see [`MeshGeometry::locate_cell`]).
     pub fn find_cell_index(&self, point: (f64, f64, f64)) -> Option<usize> {
-        let vol = self.mesh.find_volume([point.0, point.1, point.2]);
-        Some(self.cell_of_volume(vol))
+        self.locate_cell(point, usize::MAX)
     }
 
     /// The cell containing `point`, asking `hint` (the cell the particle was
     /// last in) first. A point in no volume, inside the mesh's bounding box or
-    /// outside it, is in the implicit complement, as for
-    /// [`MeshGeometry::find_cell_index`]: leaving the geometry is found along
-    /// the flight ([`MeshGeometry::distance_to_exit`]). `None` only for a
-    /// point that is not a number.
+    /// outside it, is in the implicit complement: leaving the geometry is
+    /// found along the flight ([`MeshGeometry::distance_to_exit`]).
+    ///
+    /// `None` for a point that is not a number, and for one the mesh cannot
+    /// place: no volume is known to contain it and one that might cannot say,
+    /// because a crack, fold or flipped facet near it breaks every ray it is
+    /// tested along. Putting that point in the implicit complement would
+    /// carry the particle on as void from inside a solid, to leave the
+    /// geometry later as an ordinary leak; `None` makes it a lost particle.
     pub fn locate_cell(&self, point: (f64, f64, f64), hint: usize) -> Option<usize> {
         let p = [point.0, point.1, point.2];
         if !p.iter().all(|v| v.is_finite()) {
             return None;
         }
         let hint = self.volume_ids.get(hint).copied().unwrap_or(u32::MAX);
-        Some(self.cell_of_volume(self.mesh.find_volume_from(hint, p)))
+        self.mesh
+            .try_find_volume_from(hint, p)
+            .map(|vol| self.cell_of_volume(vol))
     }
 
     /// Distance along a flight to where it leaves the geometry, if that is
