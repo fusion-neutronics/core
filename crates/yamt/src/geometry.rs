@@ -855,6 +855,35 @@ impl MeshGeometry {
         self.find_volume(point)
     }
 
+    /// Whether a point is inside a volume, `None` when the mesh cannot say;
+    /// see [`point_in_volume::point_in_volume_checked`].
+    pub fn point_in_volume_checked(&self, volume: VolumeId, point: [f64; 3]) -> Option<bool> {
+        let sd = self.surface_bvhs.get(volume as usize)?;
+        point_in_volume::point_in_volume_checked(
+            &sd.bvh,
+            &sd.precomputed.v0,
+            &sd.precomputed.edge1,
+            &sd.precomputed.edge2,
+            &sd.exit_sign,
+            point,
+        )
+    }
+
+    /// Which volume contains `point`, asking `hint` first, as
+    /// [`MeshGeometry::find_volume_from`], but `None` when the point cannot
+    /// be placed: no volume is known to contain it and one that might cannot
+    /// say (a crack, fold or flipped facet near the point breaks every ray
+    /// it is tested along). [`MeshGeometry::find_volume`] puts such a point
+    /// in the implicit complement.
+    pub fn try_find_volume_from(&self, hint: VolumeId, point: [f64; 3]) -> Option<VolumeId> {
+        if hint < self.topology.num_volumes
+            && self.point_in_volume_checked(hint, point) == Some(true)
+        {
+            return Some(hint);
+        }
+        point_in_volume::try_find_volume(&self.topology, &self.surface_bvhs, point, &self.ranks)
+    }
+
     /// Distance from `origin` along `direction` to the first triangle of a
     /// vacuum-boundary surface, if one lies within `max_distance`.
     ///
