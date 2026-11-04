@@ -5,9 +5,10 @@ which only changes time and memory if the triangulation does not depend on the
 thread count. These mesh assemblies whose solids share curved faces and edges,
 imprinted and not, on 1, 2, 4 and 8 threads, and require identical meshes.
 """
-import cadquery as cq
 import pytest
-from yamc.cad import CadToYamc, _brepmesh
+
+cq = pytest.importorskip("cadquery")
+from yamc.cad import CadToYamc, _brepmesh  # noqa: E402
 
 
 def _assembly():
