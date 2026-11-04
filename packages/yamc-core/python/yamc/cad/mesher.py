@@ -16,7 +16,7 @@ import numbers
 import os
 import warnings
 
-from .assembly_processor import process_assembly
+from .assembly_processor import process_assembly, release_freed_memory
 from . import cad_mesh_labels as _cad_mesh_labels
 from . import cad_mesh_to_arrow as _cad_mesh_to_arrow
 from . import weld_mesh as _weld_mesh
@@ -681,9 +681,10 @@ class CadToYamc:
 
         per_face = {}
         per_face.update(
-            brepmesh_face_meshes(pa, brep_fids, face_tolerances, parallel=not imprint)
+            brepmesh_face_meshes(pa, brep_fids, face_tolerances)
         )
         per_face.update(scene_face_meshes(pa, face_tolerances, scene_fids))
+        release_freed_memory()
 
         (vertices, triangles, triangle_face_ids, triangle_surface_ids,
          face_to_surface_id) = assemble_surface_mesh(pa, per_face)
