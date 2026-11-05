@@ -7236,6 +7236,7 @@ dependencies = [
  "pyo3",
  "pyo3-stub-gen",
  "rand 0.10.1",
+ "rayon",
  "serde_json",
  "yamc",
  "yamc-element",

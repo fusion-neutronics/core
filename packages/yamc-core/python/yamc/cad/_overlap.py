@@ -80,11 +80,12 @@ def _name(mesh, sid):
     return f"solid {sid}"
 
 
-def find_overlaps(mesh, depth_tolerance):
+def find_overlaps(mesh, depth_tolerance, threads=None):
     """Solid pairs of *mesh* overlapping deeper than *depth_tolerance*, as
-    ``[(solid_a, solid_b, max_depth, exposure), ...]``."""
+    ``[(solid_a, solid_b, max_depth, exposure), ...]``, found on *threads*
+    threads (``None``: rayon's global pool)."""
     solids = sorted(_solid_triangles(mesh).items())
-    return solid_overlaps(mesh.vertices, solids, depth_tolerance)
+    return solid_overlaps(mesh.vertices, solids, depth_tolerance, threads)
 
 
 def describe(mesh, found, deflection=None):
@@ -100,8 +101,9 @@ def describe(mesh, found, deflection=None):
     ]
 
 
-def resolve_smaller_wins(mesh, found, contact_tolerance, samples=200_000):
-    """Rank each overlapping pair so the smaller solid takes the shared region.
+def resolve_smaller_wins(mesh, found, contact_tolerance, samples=200_000, threads=None):
+    """Rank each overlapping pair so the smaller solid takes the shared region,
+    sampling on *threads* threads (``None``: rayon's global pool).
 
     Returns ``(pairs, volume_measures, lines)``: ``(low, high)`` 1-based solid
     pairs (``high`` takes the overlap), the volume of every solid in solid
@@ -132,6 +134,7 @@ def resolve_smaller_wins(mesh, found, contact_tolerance, samples=200_000):
             [[i + n for i in tri] for tri in tris_high],
             contact_tolerance,
             samples,
+            threads=threads,
         )
         if embedded is not None:
             inner = (low, high)[embedded]
