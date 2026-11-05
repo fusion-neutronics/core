@@ -21,6 +21,12 @@ integrates from the CAD (see _occ_face_area and _occ_signed_volume):
 
 Tolerances scale with the requested deflection so legitimately coarse
 meshes of small parts do not trip the gate.
+
+A third check needs no CAD: every solid's closed boundary must not cross
+itself (see check_self_crossing). A wall thinner than the faceting, meshed at
+a loose angular tolerance, can have its two faces cut through each other over
+a strip, which barely moves the volume but puts the solid's boundary in the
+wrong order there, so particles crossing the strip are lost or mis-tracked.
 """
 
 from OCP.Bnd import Bnd_Box
@@ -39,6 +45,10 @@ from OCP.TopAbs import TopAbs_FACE, TopAbs_FORWARD, TopAbs_REVERSED
 from OCP.TopExp import TopExp_Explorer
 from OCP.TopoDS import TopoDS
 from OCP.gp import gp_Pnt
+
+from yamc._core import solid_self_intersections
+
+from ._overlap import _name, _solid_triangles
 
 # OCC's default integration is a fixed Gauss rule, which misses dense spline
 # faces badly (a stellarator coil casing came out 31% low in volume), so every
@@ -256,3 +266,27 @@ def check_mesh_fidelity(mesh, pa, tolerance):
             )
 
     return problems
+
+
+def check_self_crossing(mesh, angular_tolerance):
+    """Solids of *mesh* (SurfaceMesh) whose surface crosses itself.
+
+    Args:
+        mesh: SurfaceMesh from the assembler.
+        angular_tolerance: ``{solid_id: angle}``, the angular deflection
+            each solid was meshed at (radians), quoted in the problem.
+
+    Returns:
+        List of human-readable problem strings (empty when no solid's facets
+        cross each other).
+    """
+    solids = sorted(_solid_triangles(mesh).items())
+    return [
+        f"{_name(mesh, sid)}: its surface crosses itself ({pairs} pairs of "
+        f"facets, up to {depth:.3g} deep, near "
+        f"({points[0][0]:.4g}, {points[0][1]:.4g}, {points[0][2]:.4g})): a wall "
+        "thinner than the faceting has had its faces meshed through each other; "
+        "mesh it at an angular_tolerance tighter than "
+        f"{angular_tolerance[sid]:g}"
+        for sid, pairs, depth, points in solid_self_intersections(mesh.vertices, solids)
+    ]

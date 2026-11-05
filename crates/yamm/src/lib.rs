@@ -31,6 +31,7 @@ pub mod mesh3d;
 pub mod meshadapt;
 pub mod mesher;
 pub mod overlap;
+pub mod self_intersection;
 pub mod size_field;
 pub mod surfaces;
 pub mod utils;

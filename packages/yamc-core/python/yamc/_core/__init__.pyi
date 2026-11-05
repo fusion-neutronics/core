@@ -26,6 +26,7 @@ __all__ = [
     "Enriched",
     "Estimate",
     "FaceOutput",
+    "FaceVolumeMesh",
     "Geometry",
     "GeometrySliceData",
     "Halfspace",
@@ -115,6 +116,7 @@ __all__ = [
     "simulate_shutdown_dose",
     "solid_contact_samples",
     "solid_overlaps",
+    "solid_self_intersections",
     "solid_shared_volume",
     "transmute",
     "verify_library",
@@ -1204,6 +1206,96 @@ class FaceOutput:
     @property
     def num_boundary_vertices(self) -> builtins.int: ...
     def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class FaceVolumeMesh:
+    r"""
+    A welded surface mesh being corrected so each curved CAD face encloses its
+    CAD volume (the compiled core of :mod:`yamc.cad._face_volumes`).
+    
+    It holds the mesh and its adjacency and does the volume sums, the root
+    finding and the vertex moves; the caller evaluates the CAD (curve points
+    and normals, a face's exact volume) and hands it in.
+    
+    Args:
+        vertices: List of ``[x, y, z]`` coordinates.
+        triangles: List of ``[i, j, k]`` vertex indices.
+        face_ids: The CAD face of each triangle.
+    
+    Raises:
+        ValueError: If ``face_ids`` is not one per triangle or a triangle
+            indexes past the vertices.
+    """
+    def __new__(cls, vertices: typing.Sequence[typing.Sequence[builtins.float]], triangles: typing.Sequence[typing.Sequence[builtins.int]], face_ids: typing.Sequence[builtins.int]) -> FaceVolumeMesh: ...
+    def faces(self) -> builtins.list[builtins.int]:
+        r"""
+        The face ids, in order of first appearance among the triangles.
+        """
+    def vertices(self) -> builtins.list[builtins.list[builtins.float]]:
+        r"""
+        The vertices, as moved so far.
+        """
+    def neighbours(self, faces: typing.Sequence[builtins.int]) -> builtins.list[builtins.int]:
+        r"""
+        ``faces`` and every face sharing a mesh edge of their boundaries,
+        sorted.
+        """
+    def boundary_points(self, faces: typing.Sequence[builtins.int], lo: typing.Sequence[builtins.float], hi: typing.Sequence[builtins.float]) -> builtins.list[tuple[builtins.int, builtins.list[builtins.float]]]:
+        r"""
+        ``[(vertex, [x, y, z]), ...]``: the vertices on the boundaries of
+        ``faces`` inside the box from ``lo`` to ``hi`` (bounds included), by
+        vertex index.
+        """
+    def is_chain(self, chain: typing.Sequence[builtins.int]) -> builtins.bool:
+        r"""
+        Whether every two consecutive vertices of ``chain`` share a mesh edge.
+        """
+    def add_edge(self, chain: typing.Sequence[builtins.int], arcs: typing.Sequence[typing.Sequence[typing.Sequence[builtins.float]]]) -> builtins.int:
+        r"""
+        Record a matched CAD edge: its mesh vertices ``chain`` in curve order
+        and ``arcs``, per segment, points of the edge from the segment's first
+        vertex to its second, ends included. Returns the edge's index.
+        
+        Raises:
+            ValueError: If there is not one arc of at least two points per
+                segment, or a vertex is not in the mesh.
+        """
+    def move_edge(self, edge: builtins.int, faces: typing.Sequence[builtins.int], outward: typing.Sequence[typing.Optional[typing.Sequence[builtins.float]]], cap: builtins.float) -> typing.Optional[builtins.bool]:
+        r"""
+        Move the vertices inside edge ``edge`` along ``outward`` (per interior
+        vertex of its chain, the unit vector away from the centre of
+        curvature, or None), all by one distance of at most ``cap``, so the
+        polyline cuts off the arc's area. Only vertices on no face but
+        ``faces`` move. Returns whether the move hit the cap, or None when
+        nothing moved.
+        
+        Raises:
+            ValueError: If there is no such edge or ``outward`` is not one per
+                interior vertex.
+        """
+    def face_apex(self, face_id: builtins.int) -> typing.Optional[builtins.list[builtins.float]]:
+        r"""
+        Start correcting face ``face_id``: the point to take the CAD face's
+        volume from, or None (with the reason counted) when the face has no
+        vertex it may move or its boundary is not matched to added edges.
+        
+        Raises:
+            ValueError: If the mesh has no such face.
+        """
+    def move_face(self, cad_volume: builtins.float, cap: builtins.float) -> builtins.bool:
+        r"""
+        Finish the face ``face_apex`` started: move its own vertices along
+        their normals, all by one distance of at most ``cap``, so its
+        triangles enclose ``cad_volume`` (the CAD face's volume from the apex)
+        once closed to the CAD edges. Returns whether the move hit the cap.
+        
+        Raises:
+            ValueError: If no face was started since the last move.
+        """
+    def stats(self) -> builtins.list[tuple[builtins.str, builtins.int]]:
+        r"""
+        Counts of what the moves did: ``[(name, count), ...]``.
+        """
 
 @typing.final
 class Geometry:
@@ -8647,6 +8739,36 @@ def solid_overlaps(vertices: typing.Sequence[typing.Sequence[builtins.float]], s
         overlapping pair, ``max_depth`` the deepest penetration found and
         ``exposure`` an order-of-magnitude estimate of the fraction of
         isotropic tracks through the model that cross the overlap.
+    """
+
+def solid_self_intersections(vertices: typing.Sequence[typing.Sequence[builtins.float]], solids: typing.Sequence[tuple[builtins.int, typing.Sequence[typing.Sequence[builtins.int]]]], rel_tol: builtins.float = 1e-06, samples: builtins.int = 4) -> builtins.list[tuple[builtins.int, builtins.int, builtins.float, builtins.list[builtins.list[builtins.float]]]]:
+    r"""
+    Solids whose surface mesh crosses itself.
+    
+    Every pair of a solid's triangles that share no vertex (by index, or by
+    position within the tolerance) is tested exactly for a crossing: a wall
+    thinner than the faceting whose two faces have been meshed through each
+    other. Triangles that touch, along an edge, at a point or within the
+    tolerance, do not count, and degenerate ones are skipped.
+    
+    Args:
+        vertices: Global ``[x, y, z]`` vertex array.
+        solids: ``(solid_id, triangles)`` per solid, each its full closed
+            boundary as ``[i, j, k]`` indices into ``vertices``.
+        rel_tol: The contact tolerance as a fraction of the diagonal of the
+            box around the solids' vertices; the default is the tolerance
+            the surface assembler welds vertices at.
+        samples: Crossing points to return per solid at most, deepest first.
+    
+    Returns:
+        ``[(solid_id, pairs, max_depth, [[x, y, z], ...]), ...]`` for every
+        solid that crosses itself: the number of crossing triangle pairs, how
+        far the deepest pair passes through each other, and the deepest
+        crossing points.
+    
+    Raises:
+        ValueError: If a triangle indexes past ``vertices``, a vertex is not
+            finite, or ``rel_tol`` is negative.
     """
 
 def solid_shared_volume(vertices: typing.Sequence[typing.Sequence[builtins.float]], triangles_a: typing.Sequence[typing.Sequence[builtins.int]], triangles_b: typing.Sequence[typing.Sequence[builtins.int]], tolerance: builtins.float, samples: builtins.int = 200000, seed: builtins.int = 1) -> tuple[builtins.float, builtins.float, typing.Optional[builtins.int]]:

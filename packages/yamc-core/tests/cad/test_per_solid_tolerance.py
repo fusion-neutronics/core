@@ -672,9 +672,13 @@ def _two_spheres():
     )
 
 
-def test_the_fidelity_gate_holds_each_solid_to_its_own_tolerance():
+def test_the_fidelity_gate_holds_each_solid_to_its_own_tolerance(monkeypatch):
     """A coarse solid is not refused for missing a finer solid's tolerance,
     and a fine solid is not let off by a coarser one's."""
+    # The coarse sphere's shortfall in volume is what the gate is probed
+    # with, so its faces are left inscribed rather than meshed to the CAD
+    # volume.
+    monkeypatch.setattr(mesher_module, "_PRESERVE_FACE_VOLUMES", False)
     c2y = _mesher(_two_spheres())
     tolerance = {"fine": FINE, "coarse": 1.0}
     mesh = c2y.mesh(tolerance=tolerance, angular_tolerance={"fine": FINE_ANGLE, "coarse": 0.8})
