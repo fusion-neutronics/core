@@ -1530,15 +1530,25 @@ impl PyModel {
             #[cfg(feature = "mesh")]
             yamc::geometry::backend::GeometryKind::Mesh(_) => false,
         };
+        // So does a surface kind the browser cannot evaluate (e.g. a flux
+        // surface): `viewer.js` keeps the raster rather than re-sample.
+        let browser_can_sample = match &self.inner.geometry {
+            yamc::geometry::backend::GeometryKind::Csg(g) => {
+                yamc_plot::browser_can_sample(&yamc::geometry::conversion::geometry_to_csg(g))
+            }
+            #[cfg(feature = "mesh")]
+            yamc::geometry::backend::GeometryKind::Mesh(_) => true,
+        };
         // Otherwise embed the pre-sample only for mesh geometries -- mesh still
         // hides WASM compile + first-sample latency behind the pre-sample. For
         // plain CSG the browser sampler is fast enough to render directly and the
         // ~3-4 MB base64 grid was pure file-size bloat.
-        let presampled_for_html = if geometry_kind == "mesh" || has_mesh_fills {
-            Some(&presampled)
-        } else {
-            None
-        };
+        let presampled_for_html =
+            if geometry_kind == "mesh" || has_mesh_fills || !browser_can_sample {
+                Some(&presampled)
+            } else {
+                None
+            };
         // Surface name + identity table for hover tooltips. CSG-only;
         // mesh geometries don't have a CsgGeometry to walk.
         let surface_table = match &self.inner.geometry {

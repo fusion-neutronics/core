@@ -143,7 +143,7 @@ function renderGrid(data, ph, pv) {
   fitCanvas();
   updateLegend(data, ph, pv);
   updateAxisLabels();
-  status.textContent = '';
+  status.textContent = RESAMPLE_NOTICE;
   document.getElementById('pixel-dims').textContent = 'Grid: ' + ph + ' \u00d7 ' + pv + ' px (PNG size)';
 }
 
@@ -413,6 +413,12 @@ async function sample() {
       'This model has mesh-filled cells, which the in-browser sampler cannot ' +
       'resolve. Showing the view rendered by yamc; re-run model.plot(...) with ' +
       'the origin / width / basis you want.';
+    return;
+  }
+  // A surface kind `surfaceEval` cannot evaluate: keep the image yamc rendered,
+  // at the view it shows (RESAMPLE_NOTICE says why).
+  if (RESAMPLE_NOTICE) {
+    restorePresampledView();
     return;
   }
   if (!plotter) return;
@@ -980,6 +986,20 @@ function renderPresampled() {
   }
 }
 
+// Put the view back to the one the pre-rendered image shows, so the axes,
+// controls and tooltip match it, and draw that image.
+function restorePresampledView() {
+  for (const k of ['basis', 'originX', 'originY', 'originZ', 'widthH', 'widthV', 'totalPixels']) {
+    state[k] = INITIAL[k];
+  }
+  writeControls();
+  document.querySelectorAll('#basis-btns button').forEach(b => {
+    b.classList.toggle('active', b.dataset.val === state.basis);
+  });
+  syncSnap();
+  renderPresampled();
+}
+
 // Load WASM (mesh only) and initialize
 async function init() {
   // Render pre-sampled data immediately (before WASM loads)
@@ -997,6 +1017,8 @@ async function init() {
     status.textContent = '';
     return;
   }
+  // Nor when `sample()` keeps the pre-rendered image (RESAMPLE_NOTICE).
+  if (RESAMPLE_NOTICE) return;
   if (GEOMETRY_KIND === 'csg') {
     plotter = new JsCsgPlotter(geo);
   } else {
@@ -1124,20 +1146,33 @@ function regionContains(region, x, y, z) {
   return evalExpr(region.expr, x, y, z);
 }
 
+// true (inside), false (outside) or null (unknown: a surface `surfaceEval`
+// cannot evaluate decides it). null is falsy, so the samplers never fill a
+// cell they cannot place.
 function evalExpr(expr, x, y, z) {
   if (expr.Halfspace) {
     const hs = expr.Halfspace;
-    if (hs.Above) return surfaceEval(hs.Above, x, y, z) > 0;
-    if (hs.Below) return surfaceEval(hs.Below, x, y, z) < 0;
+    const f = surfaceEval(hs.Above || hs.Below, x, y, z);
+    if (Number.isNaN(f)) return null;
+    return hs.Above ? f > 0 : f < 0;
   }
   if (expr.Intersection) {
-    return evalExpr(expr.Intersection[0], x, y, z) && evalExpr(expr.Intersection[1], x, y, z);
+    const a = evalExpr(expr.Intersection[0], x, y, z);
+    if (a === false) return false;
+    const b = evalExpr(expr.Intersection[1], x, y, z);
+    if (b === false) return false;
+    return a === null || b === null ? null : true;
   }
   if (expr.Union) {
-    return evalExpr(expr.Union[0], x, y, z) || evalExpr(expr.Union[1], x, y, z);
+    const a = evalExpr(expr.Union[0], x, y, z);
+    if (a === true) return true;
+    const b = evalExpr(expr.Union[1], x, y, z);
+    if (b === true) return true;
+    return a === null || b === null ? null : false;
   }
   if (expr.Complement) {
-    return !evalExpr(expr.Complement, x, y, z);
+    const a = evalExpr(expr.Complement, x, y, z);
+    return a === null ? null : !a;
   }
   return false;
 }
@@ -1150,13 +1185,16 @@ function surfacesAtPoint(x, y, z, tol) {
   const hits = [];
   for (let i = 0; i < SURFACE_TABLE.length; i++) {
     const entry = SURFACE_TABLE[i];
-    if (Math.abs(surfaceEval(entry.surface, x, y, z)) <= tol) {
+    const f = surfaceEval(entry.surface, x, y, z);
+    if (!Number.isNaN(f) && Math.abs(f) <= tol) {
       hits.push(entry.name);
     }
   }
   return hits;
 }
 
+// Implicit function of the surface at (x, y, z), or NaN for a kind this
+// cannot evaluate (e.g. Flux).
 function surfaceEval(surface, x, y, z) {
   const k = surface.kind;
   if (k.Plane) {
@@ -1179,6 +1217,33 @@ function surfaceEval(surface, x, y, z) {
     const rho = Math.sqrt(dx*dx + dy*dy);
     return (rho - t.a) * (rho - t.a) / (t.c * t.c) + dz * dz / (t.b * t.b) - 1.0;
   }
-  return 0;
+  return NaN;
 }
+
+// Kinds (as named in the geometry JSON) of the surfaces in `cells` that
+// `surfaceEval` cannot evaluate, i.e. returns NaN for.
+function unsampledSurfaceKinds(cells) {
+  const kinds = new Set();
+  const visit = (expr) => {
+    if (expr.Halfspace) {
+      const s = expr.Halfspace.Above || expr.Halfspace.Below;
+      if (Number.isNaN(surfaceEval(s, 0, 0, 0))) kinds.add(Object.keys(s.kind)[0]);
+    }
+    const pair = expr.Intersection || expr.Union;
+    if (pair) { visit(pair[0]); visit(pair[1]); }
+    if (expr.Complement) visit(expr.Complement);
+  };
+  for (const cell of cells) visit(cell.region.expr);
+  return [...kinds];
+}
+
+// The browser cannot re-sample a CSG geometry with such a surface kind, so when
+// yamc embedded its rendered image the view stays on that image and this says
+// why ('' otherwise). Without an image the cells those surfaces bound are left
+// blank rather than drawn wrongly.
+const UNSAMPLED_KINDS = GEOMETRY_KIND === 'csg' ? unsampledSurfaceKinds(GEOMETRY_JSON.cells) : [];
+const RESAMPLE_NOTICE = UNSAMPLED_KINDS.length > 0 && PRESAMPLED_B64
+  ? 'This geometry has surface kinds the browser view cannot re-sample (' +
+    UNSAMPLED_KINDS.join(', ') + '); showing the pre-rendered image.'
+  : '';
 

@@ -271,6 +271,12 @@ let cachedOutlinePH = 0, cachedOutlinePV = 0;
 function renderOutline() {
   if (!outlinePlotter || state.outline === 'none') {
     olCanvas.width = 0; olCanvas.height = 0;
+    // No plotter: only the pre-rendered outline can be shown, and only at the
+    // view it was rendered for (it also feeds the tooltip's cell lookup).
+    if (!outlinePlotter) {
+      cachedOutlineData = null;
+      if (atPresampledView()) renderPresampledGrid();
+    }
     return;
   }
 
@@ -436,7 +442,7 @@ function renderFrame() {
   fitCanvas();
   renderColorbar();
   updateAxisLabels();
-  statusEl.textContent = '';
+  statusEl.textContent = RESAMPLE_NOTICE;
 }
 
 // ---- Canvas fitting (CSS scaling) ----
@@ -1182,15 +1188,33 @@ class JsCsgPlotter {
 
 function regionContains(region, x, y, z) { return evalExpr(region.expr, x, y, z); }
 
+// true, false or null (unknown: a surface surfaceEval cannot evaluate decides
+// it). null is falsy, so a cell is never drawn where it cannot be placed.
 function evalExpr(expr, x, y, z) {
   if (expr.Halfspace) {
     const hs = expr.Halfspace;
-    if (hs.Above) return surfaceEval(hs.Above, x, y, z) > 0;
-    if (hs.Below) return surfaceEval(hs.Below, x, y, z) < 0;
+    const f = surfaceEval(hs.Above || hs.Below, x, y, z);
+    if (Number.isNaN(f)) return null;
+    return hs.Above ? f > 0 : f < 0;
   }
-  if (expr.Intersection) return evalExpr(expr.Intersection[0], x, y, z) && evalExpr(expr.Intersection[1], x, y, z);
-  if (expr.Union) return evalExpr(expr.Union[0], x, y, z) || evalExpr(expr.Union[1], x, y, z);
-  if (expr.Complement) return !evalExpr(expr.Complement, x, y, z);
+  if (expr.Intersection) {
+    const a = evalExpr(expr.Intersection[0], x, y, z);
+    if (a === false) return false;
+    const b = evalExpr(expr.Intersection[1], x, y, z);
+    if (b === false) return false;
+    return a === null || b === null ? null : true;
+  }
+  if (expr.Union) {
+    const a = evalExpr(expr.Union[0], x, y, z);
+    if (a === true) return true;
+    const b = evalExpr(expr.Union[1], x, y, z);
+    if (b === true) return true;
+    return a === null || b === null ? null : false;
+  }
+  if (expr.Complement) {
+    const a = evalExpr(expr.Complement, x, y, z);
+    return a === null ? null : !a;
+  }
   return false;
 }
 
@@ -1201,21 +1225,51 @@ function surfacesAtPoint(x, y, z, tol) {
   const hits = [];
   for (let i = 0; i < SURFACE_TABLE.length; i++) {
     const entry = SURFACE_TABLE[i];
-    if (Math.abs(surfaceEval(entry.surface, x, y, z)) <= tol) {
+    const f = surfaceEval(entry.surface, x, y, z);
+    if (!Number.isNaN(f) && Math.abs(f) <= tol) {
       hits.push(entry.name);
     }
   }
   return hits;
 }
 
+// Implicit function of the surface at (x, y, z), or NaN for a kind this
+// cannot evaluate (e.g. Flux).
 function surfaceEval(surface, x, y, z) {
   const k = surface.kind;
   if (k.Plane) return k.Plane.a*x + k.Plane.b*y + k.Plane.c*z - k.Plane.d;
   if (k.Sphere) { const dx=x-k.Sphere.x0,dy=y-k.Sphere.y0,dz=z-k.Sphere.z0; return Math.sqrt(dx*dx+dy*dy+dz*dz)-k.Sphere.radius; }
   if (k.Cylinder) { const ax=k.Cylinder.axis,or=k.Cylinder.origin; const vx=x-or[0],vy=y-or[1],vz=z-or[2]; const dot=vx*ax[0]+vy*ax[1]+vz*ax[2]; const dx=vx-dot*ax[0],dy=vy-dot*ax[1],dz=vz-dot*ax[2]; return Math.sqrt(dx*dx+dy*dy+dz*dz)-k.Cylinder.radius; }
   if (k.ZTorus) { const t=k.ZTorus; const dx=x-t.x0,dy=y-t.y0,dz=z-t.z0; const rho=Math.sqrt(dx*dx+dy*dy); return (rho-t.a)*(rho-t.a)/(t.c*t.c)+dz*dz/(t.b*t.b)-1.0; }
-  return 0;
+  return NaN;
 }
+
+// Kinds (as named in the geometry JSON) of the surfaces in `cells` that
+// `surfaceEval` cannot evaluate, i.e. returns NaN for.
+function unsampledSurfaceKinds(cells) {
+  const kinds = new Set();
+  const visit = (expr) => {
+    if (expr.Halfspace) {
+      const s = expr.Halfspace.Above || expr.Halfspace.Below;
+      if (Number.isNaN(surfaceEval(s, 0, 0, 0))) kinds.add(Object.keys(s.kind)[0]);
+    }
+    const pair = expr.Intersection || expr.Union;
+    if (pair) { visit(pair[0]); visit(pair[1]); }
+    if (expr.Complement) visit(expr.Complement);
+  };
+  for (const cell of cells) visit(cell.region.expr);
+  return [...kinds];
+}
+
+// The browser cannot re-sample outlines of a CSG geometry with such a surface
+// kind: no outline plotter is made, only the pre-rendered outline is shown (at
+// the view it was rendered for) and this says why ('' otherwise).
+const UNSAMPLED_KINDS = GEOMETRY_KIND === 'csg' ? unsampledSurfaceKinds(GEOMETRY_JSON.cells) : [];
+const RESAMPLE_NOTICE = UNSAMPLED_KINDS.length > 0
+  ? 'This geometry has surface kinds the browser view cannot re-sample (' +
+    UNSAMPLED_KINDS.join(', ') + '); ' +
+    (PRESAMPLED_OUTLINE_B64 ? 'showing the pre-rendered outline only.' : 'geometry outlines are not drawn.')
+  : '';
 
 
 // ---- Init ----
@@ -1271,6 +1325,17 @@ function renderPresampledGrid() {
   olCtx.putImageData(img, 0, 0);
 }
 
+// Whether the view is the one the pre-rendered outline was sampled for: the
+// initial basis and slice at the full mesh extent `initView` sets.
+function atPresampledView() {
+  if (state.basis !== NATIVE_BASIS || state.sliceIdx !== INITIAL_SLICE_BIN) return false;
+  const axes = basisAxes(NATIVE_BASIS);
+  return state.originH === (MESH_LL[axes[0]] + MESH_UR[axes[0]]) / 2 &&
+    state.originV === (MESH_LL[axes[1]] + MESH_UR[axes[1]]) / 2 &&
+    state.widthH === MESH_UR[axes[0]] - MESH_LL[axes[0]] &&
+    state.widthV === MESH_UR[axes[1]] - MESH_LL[axes[1]];
+}
+
 async function init() {
   initView(state.basis);
   // Set initial slice to the requested bin index (direct bin index)
@@ -1287,8 +1352,11 @@ async function init() {
   // Load outline plotter if geometry provided (for subsequent slices)
   if (GEOMETRY_JSON) {
     if (GEOMETRY_KIND === 'csg') {
-      outlinePlotter = new JsCsgPlotter(GEOMETRY_JSON);
-      if (!presampledOutlineData) renderFrame(); // only re-render if no presampled
+      // No plotter when outlines cannot be re-sampled (RESAMPLE_NOTICE).
+      if (!RESAMPLE_NOTICE) {
+        outlinePlotter = new JsCsgPlotter(GEOMETRY_JSON);
+        if (!presampledOutlineData) renderFrame(); // only re-render if no presampled
+      }
     } else if (GEOMETRY_KIND === 'mesh' && typeof YAMT_WASM_BASE64 !== 'undefined') {
       statusEl.textContent = 'Loading WASM...';
       try {

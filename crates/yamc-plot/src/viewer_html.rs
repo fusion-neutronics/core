@@ -802,15 +802,33 @@ pub fn render_png_rgba(
 const CSG_WORKER_SOURCE: &str = r#"
 let cells = null;
 function regionContains(region, x, y, z) { return evalExpr(region.expr, x, y, z); }
+// true, false or null (unknown: a surface surfaceEval cannot evaluate decides
+// it). null is falsy, so a cell is never filled where it cannot be placed.
 function evalExpr(expr, x, y, z) {
   if (expr.Halfspace) {
     const hs = expr.Halfspace;
-    if (hs.Above) return surfaceEval(hs.Above, x, y, z) > 0;
-    if (hs.Below) return surfaceEval(hs.Below, x, y, z) < 0;
+    const f = surfaceEval(hs.Above || hs.Below, x, y, z);
+    if (Number.isNaN(f)) return null;
+    return hs.Above ? f > 0 : f < 0;
   }
-  if (expr.Intersection) return evalExpr(expr.Intersection[0], x, y, z) && evalExpr(expr.Intersection[1], x, y, z);
-  if (expr.Union) return evalExpr(expr.Union[0], x, y, z) || evalExpr(expr.Union[1], x, y, z);
-  if (expr.Complement) return !evalExpr(expr.Complement, x, y, z);
+  if (expr.Intersection) {
+    const a = evalExpr(expr.Intersection[0], x, y, z);
+    if (a === false) return false;
+    const b = evalExpr(expr.Intersection[1], x, y, z);
+    if (b === false) return false;
+    return a === null || b === null ? null : true;
+  }
+  if (expr.Union) {
+    const a = evalExpr(expr.Union[0], x, y, z);
+    if (a === true) return true;
+    const b = evalExpr(expr.Union[1], x, y, z);
+    if (b === true) return true;
+    return a === null || b === null ? null : false;
+  }
+  if (expr.Complement) {
+    const a = evalExpr(expr.Complement, x, y, z);
+    return a === null ? null : !a;
+  }
   return false;
 }
 function surfaceEval(surface, x, y, z) {
@@ -833,7 +851,7 @@ function surfaceEval(surface, x, y, z) {
     const rho = Math.sqrt(dx*dx + dy*dy);
     return (rho - t.a) * (rho - t.a) / (t.c * t.c) + dz * dz / (t.b * t.b) - 1.0;
   }
-  return 0;
+  return NaN; // a kind this cannot evaluate (e.g. Flux)
 }
 self.onmessage = function(ev) {
   const m = ev.data;
