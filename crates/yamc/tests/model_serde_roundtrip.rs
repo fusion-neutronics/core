@@ -157,3 +157,99 @@ fn deep_model_fields_survive_round_trip() {
         orig_geom.materials[0].temperature()
     );
 }
+
+fn sphere(surface_id: usize, radius: f64, boundary: BoundaryType) -> Arc<Surface> {
+    Arc::new(Surface {
+        surface_id: Some(surface_id),
+        kind: SurfaceKind::Sphere {
+            x0: 0.0,
+            y0: 0.0,
+            z0: 0.0,
+            radius,
+        },
+        boundary,
+        name: None,
+    })
+}
+
+fn intersection(a: HalfspaceType, b: HalfspaceType) -> Region {
+    use yamc::geo::RegionExpr;
+    Region {
+        expr: RegionExpr::Intersection(
+            Box::new(RegionExpr::Halfspace(a)),
+            Box::new(RegionExpr::Halfspace(b)),
+        ),
+    }
+}
+
+#[test]
+fn shared_surface_with_an_id_survives_round_trip() {
+    // The inner sphere bounds both cells. JSON writes it once per cell, so
+    // loading has to make the two copies one surface again; without that
+    // its explicit id read as a duplicate and the load failed.
+    let inner = sphere(1, 5.0, BoundaryType::Transmission);
+    let outer = sphere(2, 10.0, BoundaryType::Vacuum);
+    let core = Cell::new(
+        Some(1),
+        Region::new_from_halfspace(HalfspaceType::Below(inner.clone())),
+        None,
+        None,
+    );
+    let shell = Cell::new(
+        Some(2),
+        intersection(HalfspaceType::Above(inner), HalfspaceType::Below(outer)),
+        None,
+        None,
+    );
+    let geometry = Geometry::new(vec![core, shell], vec![]).unwrap();
+    let json = serde_json::to_string(&geometry).unwrap();
+
+    let loaded: Geometry =
+        serde_json::from_str(&json).expect("a shared surface with an id must load");
+
+    let in_core = loaded.cells[0].region.surfaces_with_sense()[0].0.clone();
+    let in_shell = loaded.cells[1]
+        .region
+        .surfaces_with_sense()
+        .into_iter()
+        .find(|(surface, _)| surface.surface_id == Some(1))
+        .unwrap()
+        .0;
+    assert!(
+        Arc::ptr_eq(&in_core, &in_shell),
+        "the inner sphere is one surface again"
+    );
+    assert_eq!(
+        serde_json::to_string(&loaded).unwrap(),
+        json,
+        "the on-disk form is unchanged"
+    );
+}
+
+#[test]
+fn one_id_on_two_different_surfaces_is_still_refused_on_load() {
+    // A genuine clash is not merged away: the two spheres differ, so they
+    // stay two surfaces and their shared id is still reported.
+    use yamc::geometry::cell::CellSerde;
+    use yamc::geometry::csg::GeometrySerde;
+    let cells = [5.0, 8.0].into_iter().enumerate().map(|(i, radius)| {
+        let surface = sphere(7, radius, BoundaryType::Vacuum);
+        CellSerde::from(Cell::new(
+            Some(i as u32 + 1),
+            Region::new_from_halfspace(HalfspaceType::Below(surface)),
+            None,
+            None,
+        ))
+    });
+    let spec = GeometrySerde {
+        cells: cells.collect(),
+        materials: vec![],
+        fills: vec![],
+    };
+    let json = serde_json::to_string(&spec).unwrap();
+
+    let error = serde_json::from_str::<Geometry>(&json)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Duplicate surface_id 7"), "{error}");
+}
