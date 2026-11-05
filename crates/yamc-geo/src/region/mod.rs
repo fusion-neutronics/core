@@ -7,6 +7,7 @@
 
 use crate::surface::Surface;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub mod expr;
@@ -14,6 +15,59 @@ pub mod flat;
 
 pub use expr::{HalfspaceType, RegionExpr};
 pub use flat::{FlatRegion, RegionOp};
+
+/// Restores the sharing of surfaces between regions after deserialization.
+///
+/// serde's `rc` support writes every `Arc<Surface>` occurrence in full and
+/// reads each one back as its own allocation, so a surface that several
+/// cells share comes back as several identical copies. Geometry validation
+/// and the transport caches identify a surface by its pointer, so those
+/// copies would read as distinct surfaces, and one explicit `surface_id`
+/// as a duplicate. The interner maps every surface to one canonical `Arc`
+/// per distinct serialized content (kind, parameters, boundary, id and
+/// name), so a genuine clash (one id on two different surfaces) still
+/// reads as two surfaces.
+#[derive(Default)]
+pub struct SurfaceInterner {
+    canonical: HashMap<String, Arc<Surface>>,
+}
+
+impl SurfaceInterner {
+    /// Replace every surface of `region` with its canonical `Arc`.
+    pub fn share(&mut self, region: &mut Region) -> Result<(), String> {
+        self.share_expr(&mut region.expr)
+    }
+
+    fn share_expr(&mut self, expr: &mut RegionExpr) -> Result<(), String> {
+        match expr {
+            RegionExpr::Halfspace(
+                HalfspaceType::Above(surface) | HalfspaceType::Below(surface),
+            ) => {
+                *surface = self.canonical(surface)?;
+                Ok(())
+            }
+            RegionExpr::Union(a, b) | RegionExpr::Intersection(a, b) => {
+                self.share_expr(a)?;
+                self.share_expr(b)
+            }
+            RegionExpr::Complement(inner) => self.share_expr(inner),
+        }
+    }
+
+    fn canonical(&mut self, surface: &Arc<Surface>) -> Result<Arc<Surface>, String> {
+        let key = serde_json::to_string(surface.as_ref()).map_err(|e| {
+            format!(
+                "could not serialize surface {:?} to compare it with the others: {e}",
+                surface.surface_id
+            )
+        })?;
+        Ok(Arc::clone(
+            self.canonical
+                .entry(key)
+                .or_insert_with(|| Arc::clone(surface)),
+        ))
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Region {

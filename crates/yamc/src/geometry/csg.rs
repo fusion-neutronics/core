@@ -1,4 +1,4 @@
-use crate::geometry::cell::Cell;
+use crate::geometry::cell::{Cell, CellSerde};
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::sync::Arc; // Used for surface deduplication
@@ -70,9 +70,13 @@ pub struct MeshFillFingerprint {
 /// `Arc` is serialized once via serde's `rc` feature); the BVH is
 /// rebuilt by `Geometry::new` on load. Mesh fills serialize only a
 /// fingerprint summary, so a geometry with fills cannot be deserialized.
+///
+/// Cells are held in their on-disk form so that loading can restore the
+/// sharing of surfaces between cells (see [`crate::geo::SurfaceInterner`])
+/// before each cell builds its caches from its region.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct GeometrySerde {
-    pub cells: Vec<Cell>,
+    pub cells: Vec<CellSerde>,
     pub materials: Vec<Arc<Material>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fills: Vec<MeshFillFingerprint>,
@@ -81,7 +85,7 @@ pub struct GeometrySerde {
 impl From<Geometry> for GeometrySerde {
     fn from(g: Geometry) -> Self {
         Self {
-            cells: g.cells,
+            cells: g.cells.into_iter().map(CellSerde::from).collect(),
             materials: g.materials,
             #[cfg(feature = "mesh")]
             fills: g.fills.iter().map(MeshFillFingerprint::from).collect(),
@@ -102,7 +106,17 @@ impl TryFrom<GeometrySerde> for Geometry {
                     .to_string(),
             );
         }
-        Geometry::new(s.cells, s.materials)
+        // Each `Arc<Surface>` occurrence comes back from JSON as its own
+        // copy. Re-share them before the cells cache their surfaces, so a
+        // surface shared between cells stays one surface (and its explicit
+        // `surface_id` does not read as a duplicate in `Geometry::new`).
+        let mut interner = crate::geo::SurfaceInterner::default();
+        let mut cells = Vec::with_capacity(s.cells.len());
+        for mut spec in s.cells {
+            interner.share(&mut spec.region)?;
+            cells.push(Cell::from(spec));
+        }
+        Geometry::new(cells, s.materials)
     }
 }
 
