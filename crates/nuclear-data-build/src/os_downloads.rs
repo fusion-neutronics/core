@@ -5,7 +5,9 @@
 //! user's language (`~/Téléchargements`) and record it as `XDG_DOWNLOAD_DIR`,
 //! and Windows users can move the Downloads known folder to another drive.
 
-use std::path::{Path, PathBuf};
+#[cfg(not(any(windows, target_os = "macos")))]
+use std::path::Path;
+use std::path::PathBuf;
 
 /// The Downloads folder, or `None` when the system has none (a headless
 /// machine with no home folder, for example).
@@ -21,6 +23,7 @@ pub fn download_dir() -> Option<PathBuf> {
 /// or an absolute path; anything else is not valid there and is ignored.
 /// `"$HOME/"` on its own is how a user turns the folder off, so downloads then
 /// land in the home folder itself.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn parse_user_dirs(text: &str, home: &Path) -> Option<PathBuf> {
     let value = text.lines().find_map(|line| {
         let line = line.trim();
@@ -30,6 +33,7 @@ pub fn parse_user_dirs(text: &str, home: &Path) -> Option<PathBuf> {
     resolve_xdg_value(value, home)
 }
 
+#[cfg(not(any(windows, target_os = "macos")))]
 fn resolve_xdg_value(value: &str, home: &Path) -> Option<PathBuf> {
     if value == "$HOME" {
         return Some(home.to_path_buf());
@@ -127,7 +131,7 @@ mod platform {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(any(windows, target_os = "macos"))))]
 mod tests {
     use super::*;
 
