@@ -1,5 +1,6 @@
 mod cone;
 mod cylinder;
+mod flux;
 mod plane;
 mod quadric;
 mod roots;
@@ -7,6 +8,7 @@ mod sphere;
 mod torus;
 
 use crate::region::{HalfspaceType, RegionExpr};
+pub use flux::FluxBoundary;
 pub use roots::quartic_real_roots;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -115,6 +117,32 @@ pub enum SurfaceKind {
         axis: [f64; 3],
         tan2_theta: f64,
     },
+    /// The points at signed 3-D distance `offset` (cm, positive outwards)
+    /// from a free-form toroidal boundary: the boundary itself for
+    /// `offset == 0` (a flux surface), a layer surface otherwise. Layers
+    /// sharing one boundary are nested by construction.
+    Flux {
+        boundary: Arc<FluxBoundary>,
+        offset: f64,
+    },
+}
+
+impl SurfaceKind {
+    /// Short name of the kind, for messages.
+    pub fn name(&self) -> &'static str {
+        match self {
+            SurfaceKind::Plane { .. } => "Plane",
+            SurfaceKind::Sphere { .. } => "Sphere",
+            SurfaceKind::Cylinder { .. } => "Cylinder",
+            SurfaceKind::ZTorus { .. } => "ZTorus",
+            SurfaceKind::XTorus { .. } => "XTorus",
+            SurfaceKind::YTorus { .. } => "YTorus",
+            SurfaceKind::Quadric { .. } => "Quadric",
+            SurfaceKind::Cone { .. } => "Cone",
+            SurfaceKind::Flux { offset, .. } if *offset == 0.0 => "FluxSurface",
+            SurfaceKind::Flux { .. } => "OffsetSurface",
+        }
+    }
 }
 
 /// Implicit torus equation in axis-permuted coordinates:
@@ -228,6 +256,13 @@ impl Surface {
                 axis,
                 tan2_theta,
             } => cone::distance(point, direction, *apex, *axis, *tan2_theta),
+            SurfaceKind::Flux { boundary, offset } => boundary.distance(
+                point,
+                direction,
+                *offset,
+                on_surface,
+                self.boundary == BoundaryType::Vacuum,
+            ),
         }
     }
     /// Builder-style setter for the optional `name` metadata field.
@@ -310,6 +345,9 @@ impl Surface {
                 axis,
                 tan2_theta,
             } => cone::evaluate(point, *apex, *axis, *tan2_theta),
+            SurfaceKind::Flux { boundary, offset } => {
+                boundary.evaluate([point.0, point.1, point.2], *offset)
+            }
         }
     }
 
@@ -325,6 +363,11 @@ impl Surface {
             SurfaceKind::Quadric { .. } => None,
             // The double cone is unbounded along its axis.
             SurfaceKind::Cone { .. } => None,
+            // The inside of a flux or offset surface is bounded; its
+            // outside is not.
+            SurfaceKind::Flux { boundary, offset } => {
+                halfspace_below.then(|| boundary.bounding_box(*offset))
+            }
             SurfaceKind::Plane { .. } => {
                 // Planes contribute constraints through axis_constraint(), not bounding_box()
                 None

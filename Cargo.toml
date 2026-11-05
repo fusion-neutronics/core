@@ -75,3 +75,12 @@ opt-level = 3
 # speed and leaves every other crate's debug build as it was.
 [profile.dev.package.endf]
 opt-level = 2
+
+# Flux and offset surfaces find each distance by Newton's method over a
+# Fourier series and march rays with dozens of such evaluations; unoptimized,
+# the flux oracle tests took a minute and a debug-built transport test with
+# flux layers is many times slower again. Optimizing this one small crate
+# keeps those near release speed and leaves every other crate's debug build
+# as it was.
+[profile.dev.package.yamc-geo]
+opt-level = 2

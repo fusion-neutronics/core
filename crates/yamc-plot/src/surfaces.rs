@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use yamc_geo::geometry::CsgGeometry;
 use yamc_geo::region::RegionExpr;
-use yamc_geo::surface::{Surface, SurfaceKind};
+use yamc_geo::surface::Surface;
 
 /// One row of the surface table the viewer sees.
 pub struct SurfaceTableEntry {
@@ -69,23 +69,10 @@ fn display_name_for(surf: &Surface, kind_counters: &mut HashMap<&'static str, us
     if let Some(id) = surf.surface_id {
         return format!("surface {id}");
     }
-    let kind = surface_kind_name(&surf.kind);
+    let kind = surf.kind.name();
     let idx = kind_counters.entry(kind).or_insert(0);
     *idx += 1;
     format!("{kind} #{}", *idx)
-}
-
-fn surface_kind_name(kind: &SurfaceKind) -> &'static str {
-    match kind {
-        SurfaceKind::Plane { .. } => "Plane",
-        SurfaceKind::Sphere { .. } => "Sphere",
-        SurfaceKind::Cylinder { .. } => "Cylinder",
-        SurfaceKind::ZTorus { .. } => "ZTorus",
-        SurfaceKind::XTorus { .. } => "XTorus",
-        SurfaceKind::YTorus { .. } => "YTorus",
-        SurfaceKind::Quadric { .. } => "Quadric",
-        SurfaceKind::Cone { .. } => "Cone",
-    }
 }
 
 /// Walk a single `RegionExpr` collecting surfaces (used by the
