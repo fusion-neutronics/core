@@ -4,6 +4,7 @@ import pytest
 
 cq = pytest.importorskip("cadquery")
 from yamc.cad import CadToYamc  # noqa: E402
+from yamc.cad.mesher import _DEFAULT_TOLERANCE  # noqa: E402
 
 
 def test_single_box_surface_mesh():
@@ -110,12 +111,12 @@ def test_cylinder_mesh():
     assert mesh.num_faces == 3
     assert len(mesh.triangles) >= 3  # At minimum
     # All vertices should be near the cylinder: on it, or moved off its
-    # curved surface by less than the default tolerance (0.1) so the mesh
-    # keeps the cylinder's volume.
+    # curved surface by less than the default tolerance so the mesh keeps
+    # the cylinder's volume.
     for v in mesh.vertices:
         x, y, z = v
         r = (x * x + y * y) ** 0.5
-        assert r <= 0.5 + 0.1, f"Vertex outside cylinder: radius={r}"
+        assert r <= 0.5 + _DEFAULT_TOLERANCE, f"Vertex outside cylinder: radius={r}"
         assert -1.0 - 1e-6 <= z <= 1.0 + 1e-6, f"Vertex outside cylinder: z={z}"
 
 

@@ -25,9 +25,12 @@ if TYPE_CHECKING:
     import cadquery
 
 # Surface meshing tolerances of a solid that the caller does not set: the
-# chordal deflection (3D units) and the angular deflection (radians).
-_DEFAULT_TOLERANCE = 0.1
-_DEFAULT_ANGULAR_TOLERANCE = 0.1
+# chordal deflection (cm) and the angular deflection (radians). Chosen on
+# large imported B-spline models, where 0.5 / 0.2 kept the worst
+# solid's volume within 0.1% and lost no particles; at an angular tolerance of
+# 0.5 the two faces of a 0.7 cm wall crossed.
+_DEFAULT_TOLERANCE = 0.5
+_DEFAULT_ANGULAR_TOLERANCE = 0.2
 
 # Move vertices so every curved face's mesh encloses the CAD face's volume
 # (see :mod:`yamc.cad._face_volumes`). Off only to compare against.
@@ -418,7 +421,7 @@ class CadToYamc:
             target_edge_length: Target tet edge length (3D units). Required
                 when *tet_volumes* is set.
             tolerance: Chordal deflection tolerance for surface meshing
-                (3D units).  Smaller values produce more triangles on
+                (cm).  Smaller values produce more triangles on
                 curved surfaces.  A number applies to every solid. A dict
                 sets it per solid, keyed by material tag (every solid with
                 that tag), for instance ``{"first_wall": 0.01, "coil": 1.0}``,
@@ -441,10 +444,10 @@ class CadToYamc:
                 lies inside it, so the vertices of curved surfaces and edges
                 are then moved off them, by less than the tolerance, until
                 each surface's mesh encloses the volume the CAD surface does:
-                a coarse mesh keeps its solids' volumes. Default 0.1.
+                a coarse mesh keeps its solids' volumes. Default 0.5 cm.
             angular_tolerance: Angular deflection tolerance for surface
                 meshing (radians), a number or a per-solid dict as for
-                *tolerance*.  Default 0.1 (~5.7 degrees).
+                *tolerance*.  Default 0.2 (~11.5 degrees).
             fidelity_check: Refuse, raising ``MeshFidelityError``, a mesh
                 whose face areas or solid volumes are far from the CAD's, or
                 in which a solid's surface crosses itself (a wall thinner than
@@ -544,7 +547,7 @@ class CadToYamc:
 
         Args:
             tolerance: Chordal deflection tolerance for surface meshing
-                (3D units): a number for every solid, or a dict from solid
+                (cm): a number for every solid, or a dict from solid
                 id or material tag to a number; see :meth:`mesh`.
             angular_tolerance: Angular deflection tolerance (radians), a
                 number or a per-solid dict; see :meth:`mesh`.
