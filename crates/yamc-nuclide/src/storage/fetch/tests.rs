@@ -294,7 +294,9 @@ fn a_body_with_another_sha256_is_refused() {
     let scratch = Scratch::new("sha256");
     let dest = scratch.downloads("jendl5-n.tar.gz");
 
-    let err = download_file(&url, &dest, bytes, &sha256).unwrap_err();
+    let err = download_file(&url, &dest, bytes, &sha256)
+        .unwrap_err()
+        .to_string();
     let got = format!(
         "the host sent a different file, with sha256 {}",
         sha256_hex(&other)
@@ -330,7 +332,9 @@ fn a_body_of_another_size_is_refused() {
     ] {
         let url = origin.serve(path, vec![reply]);
         let dest = scratch.downloads(path);
-        let err = download_file(&url, &dest, bytes, &sha256).unwrap_err();
+        let err = download_file(&url, &dest, bytes, &sha256)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains(&why), "{err}");
         assert_names_the_way_out(&err, &url, &dest);
         assert_nothing_kept(&dest);
@@ -350,7 +354,9 @@ fn a_body_that_runs_on_is_not_read_past_the_pinned_size() {
     let scratch = Scratch::new("flood");
     let dest = scratch.downloads("TENDL-n.tgz");
 
-    let err = download_file(&url, &dest, bytes, &sha256).unwrap_err();
+    let err = download_file(&url, &dest, bytes, &sha256)
+        .unwrap_err()
+        .to_string();
     let why = format!("the host sent more than the expected {bytes} bytes");
     assert!(err.contains(&why), "{err}");
     assert_names_the_way_out(&err, &url, &dest);
@@ -380,7 +386,37 @@ fn an_html_page_in_place_of_the_file_is_named_as_one() {
         let url = origin.serve(path, vec![reply]);
         let dest = scratch.downloads(path);
         let err = download_file(&url, &dest, bytes, &sha256).unwrap_err();
+        assert!(err.needs_browser, "{err}");
+        let err = err.to_string();
         assert!(err.contains("an HTML page in place of the file"), "{err}");
+        assert_names_the_way_out(&err, &url, &dest);
+        assert_nothing_kept(&dest);
+        assert_eq!(origin.hits(path), 1, "{path}");
+    }
+}
+
+/// A Cloudflare challenge is refused at once as needing a browser, even when
+/// it comes as a 503, which is otherwise retried.
+#[test]
+fn a_cloudflare_challenge_needs_a_browser() {
+    let origin = Origin::start();
+    let (bytes, sha256) = pins();
+    let scratch = Scratch::new("challenge");
+    // The origin writes the Content-Type as given, so the header rides on it.
+    let marked = "text/html; charset=UTF-8\r\ncf-mitigated: challenge";
+    for (path, status) in [
+        ("fendl-3.2d-T1-neutron-endf.zip", "503 Service Unavailable"),
+        ("fendl-3.2d-T1-atom-endf.zip", "403 Forbidden"),
+    ] {
+        let url = origin.serve(
+            path,
+            vec![Reply::Status(status, marked, CHALLENGE.to_vec())],
+        );
+        let dest = scratch.downloads(path);
+        let err = download_file(&url, &dest, bytes, &sha256).unwrap_err();
+        assert!(err.needs_browser, "{err}");
+        let err = err.to_string();
+        assert!(err.contains("Cloudflare bot check"), "{err}");
         assert_names_the_way_out(&err, &url, &dest);
         assert_nothing_kept(&dest);
         assert_eq!(origin.hits(path), 1, "{path}");
@@ -406,6 +442,8 @@ fn a_403_is_refused_at_once() {
         let url = origin.serve(path, vec![Reply::Status(status, content_type, body)]);
         let dest = scratch.downloads(path.rsplit('/').next().unwrap());
         let err = download_file(&url, &dest, bytes, &sha256).unwrap_err();
+        assert_eq!(err.needs_browser, status.starts_with("403"), "{err}");
+        let err = err.to_string();
         assert!(
             err.contains(&format!("the host answered HTTP {status}")),
             "{err}"
@@ -459,7 +497,9 @@ fn a_pinned_file_in_place_is_used_without_a_request() {
         ),
     ] {
         fs::write(&dest, &wrong).unwrap();
-        let err = download_file(&url, &dest, bytes, &sha256).unwrap_err();
+        let err = download_file(&url, &dest, bytes, &sha256)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains(&found), "{err}");
         assert!(err.contains("HTTP 403 Forbidden"), "{err}");
         assert_names_the_way_out(&err, &url, &dest);
@@ -503,7 +543,9 @@ fn a_refusal_leaves_a_browser_download_in_progress_alone() {
             fs::write(&dest, b"").unwrap();
         }
         fs::write(part_path(&dest), begun).unwrap();
-        let err = download_file(&url, &dest, bytes, &sha256).unwrap_err();
+        let err = download_file(&url, &dest, bytes, &sha256)
+            .unwrap_err()
+            .to_string();
         assert_names_the_way_out(&err, &url, &dest);
         assert_eq!(fs::read(part_path(&dest)).unwrap(), begun, "{path}");
     }
@@ -540,7 +582,9 @@ fn transfer_failures_are_retried_from_the_start() {
 
     let url = origin.serve("TENDL-g.tgz", vec![Reply::Drop]);
     let dest = scratch.downloads("TENDL-g.tgz");
-    let err = download_file(&url, &dest, bytes, &sha256).unwrap_err();
+    let err = download_file(&url, &dest, bytes, &sha256)
+        .unwrap_err()
+        .to_string();
     assert!(
         err.contains(&format!("{attempts} attempts failed")),
         "{err}"
@@ -560,7 +604,9 @@ fn a_pin_that_is_not_a_sha256_is_refused_before_any_request() {
     let not_hex = "g".repeat(64);
     let too_long = format!("{}0", sha256_hex(b"x"));
     for pin in ["", "abc", not_hex.as_str(), too_long.as_str()] {
-        let err = download_file(&url, &dest, 5000, pin).unwrap_err();
+        let err = download_file(&url, &dest, 5000, pin)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("is not 64 hex digits"), "{err}");
     }
     assert_eq!(origin.hits("x.zip"), 0);
@@ -578,7 +624,9 @@ fn an_address_that_cannot_be_requested_is_refused_at_once() {
         "file:///data/TENDL-g.tgz",
         "tendl.imperial.ac.uk/tendl_2025/tar_files/TENDL-g.tgz",
     ] {
-        let err = download_file(url, &dest, bytes, &sha256).unwrap_err();
+        let err = download_file(url, &dest, bytes, &sha256)
+            .unwrap_err()
+            .to_string();
         assert!(!err.contains("attempts failed"), "{err}");
         assert_names_the_way_out(&err, url, &dest);
         assert_nothing_kept(&dest);
@@ -623,7 +671,9 @@ fn a_full_disk_is_reported_at_once() {
     // Every write to /dev/full fails with ENOSPC, as on a full disk.
     std::os::unix::fs::symlink("/dev/full", part_path(&dest)).unwrap();
 
-    let err = download_file(&url, &dest, bytes, &sha256).unwrap_err();
+    let err = download_file(&url, &dest, bytes, &sha256)
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("could not write"), "{err}");
     assert!(err.contains("No space left on device"), "{err}");
     assert!(!err.contains("web browser"), "{err}");
