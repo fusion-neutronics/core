@@ -511,6 +511,7 @@ pub fn translate_for_gpu(
     if geometry.has_mesh_fills() {
         return Err(GpuTranslateError::MeshFillUnsupported);
     }
+    reject_unsupported_surfaces(&geometry.cells)?;
 
     let (cell_aabbs, cell_to_material, has_void) =
         translate_cells(&geometry.cells, geometry.materials.len())?;
@@ -847,7 +848,7 @@ pub(crate) fn translate_surfaces(
     let mut surface_boundaries = Vec::with_capacity(surfaces_in_order.len());
 
     for surface in &surfaces_in_order {
-        let (kind, params) = encode_surface(&surface.kind);
+        let (kind, params) = encode_surface(&surface.kind)?;
         surface_types.push(kind);
         surface_params.extend_from_slice(&params);
         surface_boundaries.push(match surface.boundary {
@@ -944,14 +945,30 @@ pub(crate) fn translate_region_program(cells: &[Cell]) -> Vec<u32> {
     program
 }
 
+/// Refuse surface kinds the kernel has no arm for, before the cell
+/// translation could fail on them with a less clear message.
+pub(crate) fn reject_unsupported_surfaces(cells: &[Cell]) -> Result<(), GpuTranslateError> {
+    for cell in cells {
+        for (surface, _sense) in &cell.cached_surfaces {
+            if let SurfaceKind::Flux { .. } = surface.kind {
+                return Err(GpuTranslateError::SurfaceKindUnsupported {
+                    kind: surface.kind.name(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Map a yamc-geo `SurfaceKind` to the kernel's `(type, [param; 10])`
 /// encoding. The kernel reads a uniform stride-10 slot per surface and
 /// dispatches on the type discriminant; unused tail slots are zero.
 /// The match is exhaustive over every `SurfaceKind`, so a future
 /// variant added without an encoding here is a compile error rather
-/// than a runtime reject.
-fn encode_surface(kind: &SurfaceKind) -> (u32, [f64; 10]) {
-    match *kind {
+/// than a silent wrong answer; kinds without a kernel arm (flux and
+/// offset surfaces) are refused.
+fn encode_surface(kind: &SurfaceKind) -> Result<(u32, [f64; 10]), GpuTranslateError> {
+    Ok(match *kind {
         SurfaceKind::Sphere { x0, y0, z0, radius } => (
             SURFACE_SPHERE,
             [x0, y0, z0, radius, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
@@ -1015,7 +1032,10 @@ fn encode_surface(kind: &SurfaceKind) -> (u32, [f64; 10]) {
                 apex[0], apex[1], apex[2], axis[0], axis[1], axis[2], tan2_theta, 0.0, 0.0, 0.0,
             ],
         ),
-    }
+        SurfaceKind::Flux { .. } => {
+            return Err(GpuTranslateError::SurfaceKindUnsupported { kind: kind.name() });
+        }
+    })
 }
 
 /// Aggregated XS + angle buffers across every material in the
@@ -2446,7 +2466,7 @@ mod tests {
             ),
         ];
         for (surface, want_type, want_params) in cases {
-            let (kind, params) = encode_surface(&surface.kind);
+            let (kind, params) = encode_surface(&surface.kind).unwrap();
             assert_eq!(kind, want_type, "type mismatch for {:?}", surface.kind);
             assert_eq!(
                 params, want_params,
@@ -2581,6 +2601,33 @@ mod tests {
 
     fn unit_sphere() -> Arc<Surface> {
         Arc::new(Surface::new_sphere(0.0, 0.0, 0.0, 1.0, Some(1), None))
+    }
+
+    #[test]
+    fn flux_surfaces_are_refused_with_a_clear_error() {
+        let boundary = std::sync::Arc::new(
+            crate::geo::FluxBoundary::new(
+                1,
+                vec![[0, 0], [1, 0]],
+                vec![600.0, 150.0],
+                vec![[-1, 0]],
+                vec![150.0],
+            )
+            .unwrap(),
+        );
+        let plasma = crate::geo::Surface::new_flux(boundary, Some(1), None);
+        let layer = plasma.offset(10.0, Some(2), None).unwrap();
+        for (surface, kind) in [(plasma, "FluxSurface"), (layer, "OffsetSurface")] {
+            let expected = GpuTranslateError::SurfaceKindUnsupported { kind };
+            assert_eq!(encode_surface(&surface.kind).unwrap_err(), expected);
+            let region = crate::geo::Region::new_from_halfspace(crate::geo::HalfspaceType::Below(
+                std::sync::Arc::new(surface),
+            ));
+            let cells = [Cell::new(Some(1), region, None, None)];
+            assert_eq!(reject_unsupported_surfaces(&cells).unwrap_err(), expected);
+            assert_eq!(translate_surfaces(&cells).unwrap_err(), expected);
+            assert!(expected.to_string().contains("compute='cpu'"));
+        }
     }
 
     #[test]

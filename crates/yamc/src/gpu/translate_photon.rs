@@ -28,8 +28,8 @@ use yamc_gpu::photon::xs::photon_xs::{extract_photon_material_xs, GpuPhotonXs};
 
 use super::error::GpuTranslateError;
 use super::translate::{
-    sample_initial_particles_for_batch, translate_cells, translate_region_program,
-    translate_surfaces,
+    reject_unsupported_surfaces, sample_initial_particles_for_batch, translate_cells,
+    translate_region_program, translate_surfaces,
 };
 use crate::geometry::backend::GeometryKind;
 use crate::model::Model;
@@ -144,6 +144,7 @@ pub fn translate_photon_for_gpu(
     };
     #[cfg(not(feature = "mesh"))]
     let GeometryKind::Csg(geometry) = &model.geometry;
+    reject_unsupported_surfaces(&geometry.cells)?;
 
     let (cell_aabbs, cell_to_material, has_void) =
         translate_cells(&geometry.cells, geometry.materials.len())?;
