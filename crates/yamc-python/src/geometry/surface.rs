@@ -94,7 +94,7 @@ impl PySurface {
                 "FluxSurface".to_string()
             }
             yamc::geo::SurfaceKind::Flux { offset, .. } => {
-                format!("OffsetSurface(distance={offset})")
+                format!("OffsetSurface(distance={offset:?})")
             }
         };
         let boundary = match self.inner.boundary {
@@ -116,14 +116,16 @@ impl PySurface {
 
     /// Evaluate the surface equation at a point.
     ///
+    /// For flux and offset surfaces the value is the signed distance (cm)
+    /// from the surface.
+    ///
     /// Args:
     ///     point: Tuple of 3 floats (x, y, z)
     ///
     /// Returns:
     ///     Float value. Negative means inside/below, positive means outside/above, zero means on surface.
     pub fn evaluate(&self, point: (f64, f64, f64)) -> f64 {
-        // Call the core Rust implementation
-        self.inner.evaluate(point)
+        self.inner.evaluate_exact(point)
     }
 
     /// Offset of a plane perpendicular to the x-axis (axis='x'), else None
