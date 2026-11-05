@@ -183,7 +183,7 @@ def _bake_mirrored_parts(assembly):
 
 
 # Imprint threads when the caller does not say. Each OCC imprint thread holds
-# its own working set: on a 108-solid assembly the peak was 4.2, 7.0, 13.2 and
+# its own working set: on a 64-solid assembly the peak was 4.2, 7.0, 13.2 and
 # 25.0 GB on 1, 2, 4 and 8 threads, for 945, 410, 180 and 159 s. Four is where
 # more threads stop paying for their memory.
 IMPRINT_THREADS = 4
