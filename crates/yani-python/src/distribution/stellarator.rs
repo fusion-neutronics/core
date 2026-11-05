@@ -242,8 +242,9 @@ impl PyFluxShell {
 /// neutron rate is set by the simulation, not here.
 ///
 /// The density and temperature profiles are those of ``tokamak_source``
-/// (Fausser et al., Fus. Eng. Des. 87 (2012) 787) with the minor radius
-/// replaced by ``rho``, so the pedestal is placed by ``pedestal_rho``. Plot
+/// (Fausser et al., Fus. Eng. Des. 87 (2012) 787), with the normalised minor
+/// radius they take there (the ``rho`` of a ``TokamakShape``) replaced by
+/// this shape's ``rho``, so the pedestal is placed by ``pedestal_rho``. Plot
 /// them with ``tokamak_ion_density`` / ``tokamak_ion_temperature`` using
 /// ``minor_radius=1``, ``pedestal_radius=pedestal_rho`` and ``r=rho``.
 ///

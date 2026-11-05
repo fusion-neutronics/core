@@ -1,19 +1,24 @@
-//! Python bindings for the parametric tokamak plasma source.
+//! Python bindings for the parametric tokamak plasma source and its shape.
 //!
-//! The signatures deliberately mirror the `openmc-plasma-source` package
-//! (same argument names, same units, same defaults) so a model can be run
-//! through both codes and compared without rewriting the plasma parameters.
+//! The profile arguments keep the `openmc-plasma-source` package's names,
+//! units and defaults, so its plasma parameters carry over as they are. The
+//! shape is the exception: its five arguments (`major_radius`,
+//! `minor_radius`, `elongation`, `triangularity`, `shafranov_factor`) make up
+//! a `TokamakShape`, passed to `tokamak_source` as `shape`, as a
+//! `StellaratorShape` is to `stellarator_source`. The names and units are
+//! unchanged, but a call is no longer argument for argument the same.
 
 use std::collections::HashMap;
 
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
-use pyo3_stub_gen::derive::gen_stub_pyfunction;
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
 use yamc_source::distribution::energy::FusionReactants;
 use yamc_source::source::ParticleSource;
 use yamc_source::tokamak::{
-    convert_a_alpha_to_r_z, neutron_source_density, ConfinementMode, FuelIon, TokamakPlasma,
+    neutron_source_density, normalised_radius, ConfinementMode, FuelIon, PlasmaProfiles,
+    TokamakPlasma, TokamakShape,
 };
 
 use crate::distribution::PyNeutronSource;
@@ -126,6 +131,174 @@ pub(crate) fn parse_fuel(fuel: Option<HashMap<String, f64>>) -> PyResult<Vec<(Fu
     Ok(parsed)
 }
 
+/// A tokamak plasma shape: nested flux surfaces with elongation,
+/// triangularity and a Shafranov shift, in the parameterisation of Fausser et
+/// al., Fus. Eng. Des. 87 (2012) 787.
+///
+/// The flux surface at normalised radius ``rho`` (0 on the magnetic axis, 1
+/// on the plasma boundary) has minor radius ``a = rho * minor_radius``. At
+/// poloidal angle ``theta`` it lies at
+/// ``R = major_radius + a * cos(theta + triangularity * sin(theta)) + shift``
+/// and ``Z = elongation * a * sin(theta)``, where the Shafranov shift
+/// ``shift = shafranov_factor * (1 - rho**2)`` moves the magnetic axis out by
+/// ``shafranov_factor`` and falls to zero on the boundary.
+///
+/// These are the five shape arguments of the ``openmc-plasma-source``
+/// package's ``tokamak_source``, with the same names and units, made into the
+/// one ``shape`` argument of ``tokamak_source`` here, as ``StellaratorShape``
+/// is for ``stellarator_source``.
+///
+/// Args:
+///     major_radius: Plasma major radius (cm).
+///     minor_radius: Plasma minor radius (cm), less than ``major_radius``.
+///     elongation: Plasma elongation (dimensionless).
+///     triangularity: Plasma triangularity (dimensionless), from -1 to 1.
+///     shafranov_factor: Shafranov factor (cm), the outward radial shift of
+///         the magnetic axis, less than half the minor radius either way.
+///
+/// Raises:
+///     ValueError: If a parameter is NaN or infinite (the message names it),
+///         a radius or the elongation is not positive, the minor radius is
+///         not less than the major radius, the triangularity is outside -1
+///         to 1, or the Shafranov factor is half the minor radius or more.
+///
+/// Examples:
+///     >>> import yamc
+///     >>> shape = yamc.sources.TokamakShape(
+///     ...     major_radius=906.0,
+///     ...     minor_radius=292.258,
+///     ...     elongation=1.557,
+///     ...     triangularity=0.270,
+///     ...     shafranov_factor=0.44789,
+///     ... )
+///     >>> r, z = shape.evaluate(1.0, 0.0)  # the outboard midplane
+#[gen_stub_pyclass]
+#[pyclass(name = "TokamakShape", frozen, from_py_object)]
+#[derive(Clone)]
+pub struct PyTokamakShape {
+    pub inner: TokamakShape,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyTokamakShape {
+    #[new]
+    #[pyo3(signature = (*, major_radius, minor_radius, elongation, triangularity, shafranov_factor))]
+    fn new(
+        major_radius: f64,
+        minor_radius: f64,
+        elongation: f64,
+        triangularity: f64,
+        shafranov_factor: f64,
+    ) -> PyResult<Self> {
+        let inner = TokamakShape::new(
+            major_radius,
+            minor_radius,
+            elongation,
+            triangularity,
+            shafranov_factor,
+        )
+        .map_err(PyErr::new::<PyValueError, _>)?;
+        Ok(Self { inner })
+    }
+
+    /// Plasma major radius (cm).
+    #[getter]
+    fn major_radius(&self) -> f64 {
+        self.inner.major_radius()
+    }
+
+    /// Plasma minor radius (cm).
+    #[getter]
+    fn minor_radius(&self) -> f64 {
+        self.inner.minor_radius()
+    }
+
+    /// Plasma elongation (dimensionless).
+    #[getter]
+    fn elongation(&self) -> f64 {
+        self.inner.elongation()
+    }
+
+    /// Plasma triangularity (dimensionless).
+    #[getter]
+    fn triangularity(&self) -> f64 {
+        self.inner.triangularity()
+    }
+
+    /// Shafranov factor (cm), the outward radial shift of the magnetic axis.
+    #[getter]
+    fn shafranov_factor(&self) -> f64 {
+        self.inner.shafranov_factor()
+    }
+
+    /// Plasma volume (cm^3), inside the boundary ``rho = 1``.
+    fn volume(&self) -> f64 {
+        self.inner.volume()
+    }
+
+    /// Cylindrical ``(R, Z)`` in cm at flux coordinates ``(rho, theta)``.
+    ///
+    /// Either argument is a float or a sequence of floats; a scalar
+    /// broadcasts against a sequence, so a whole flux surface or radial
+    /// chord evaluates in one call.
+    ///
+    /// Args:
+    ///     rho: Normalised radius, 0 on the magnetic axis and 1 on the
+    ///         boundary.
+    ///     theta: Poloidal angle (radians).
+    ///
+    /// Returns:
+    ///     An ``(R, Z)`` tuple in cm, each a float or a list of floats.
+    ///
+    /// Raises:
+    ///     ValueError: If ``rho`` is outside 0 to 1, or ``rho`` and ``theta``
+    ///         are sequences of different lengths.
+    fn evaluate(
+        &self,
+        py: Python<'_>,
+        rho: &Bound<'_, PyAny>,
+        theta: &Bound<'_, PyAny>,
+    ) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
+        let (pairs, scalar) = zip_args(
+            "rho",
+            &FloatArg::extract("rho", rho)?,
+            "theta",
+            &FloatArg::extract("theta", theta)?,
+        )?;
+        let (mut radii, mut heights) = (
+            Vec::with_capacity(pairs.len()),
+            Vec::with_capacity(pairs.len()),
+        );
+        for (rho, theta) in pairs {
+            if !(0.0..=1.0).contains(&rho) {
+                return Err(PyErr::new::<PyValueError, _>(format!(
+                    "rho must be between 0 and 1 (got {rho})"
+                )));
+            }
+            let (r, z) = self.inner.point(rho, theta);
+            radii.push(r);
+            heights.push(z);
+        }
+        Ok((
+            shape_like(py, scalar, radii)?,
+            shape_like(py, scalar, heights)?,
+        ))
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "TokamakShape(major_radius={}, minor_radius={}, elongation={}, triangularity={}, \
+             shafranov_factor={})",
+            self.inner.major_radius(),
+            self.inner.minor_radius(),
+            self.inner.elongation(),
+            self.inner.triangularity(),
+            self.inner.shafranov_factor()
+        )
+    }
+}
+
 /// Build the neutron sources describing a parametric tokamak plasma.
 ///
 /// The plasma is discretised onto a cylindrical (R, phi, Z) mesh: every
@@ -136,12 +309,18 @@ pub(crate) fn parse_fuel(fuel: Option<HashMap<String, f64>>) -> PyResult<Vec<(Fu
 /// spectra. Strengths are normalised to sum to 1; the absolute neutron rate
 /// is set by the simulation, not here.
 ///
-/// The profile models are from Fausser et al., 'Tokamak D-T neutron source
-/// models for different plasma physics confinement modes', Fus. Eng. Des. 87
-/// (2012) 787, and the arguments match the ``openmc-plasma-source`` package's
-/// ``tokamak_source`` so the two can be compared directly. Two physics
-/// differences to expect in such a comparison: T(t,2n)4He is not included,
-/// since yamc has no T-T neutron spectrum model, where
+/// The shape and profile models are from Fausser et al., 'Tokamak D-T neutron
+/// source models for different plasma physics confinement modes', Fus. Eng.
+/// Des. 87 (2012) 787, and the arguments are those of the
+/// ``openmc-plasma-source`` package's ``tokamak_source``, with the same
+/// names, units and defaults, so the two can be compared. The exception is
+/// the shape: its five arguments (``major_radius``, ``minor_radius``,
+/// ``elongation``, ``triangularity`` and ``shafranov_factor``) are given here
+/// as one ``TokamakShape``, as ``stellarator_source`` takes a
+/// ``StellaratorShape``.
+///
+/// Two physics differences to expect in such a comparison: T(t,2n)4He is not
+/// included, since yamc has no T-T neutron spectrum model, where
 /// ``openmc-plasma-source`` takes one from NeSST (for D-T fuel the T-T yield
 /// is a small fraction of the D-T yield); and the birth peaks sit a few tens
 /// of keV apart, because yamc's Ballabio spectrum takes the zero-temperature
@@ -149,10 +328,7 @@ pub(crate) fn parse_fuel(fuel: Option<HashMap<String, f64>>) -> PyResult<Vec<(Fu
 /// tabulated 14.021 / 2.4495 MeV.
 ///
 /// Args:
-///     major_radius: Plasma major radius (cm).
-///     minor_radius: Plasma minor radius (cm).
-///     elongation: Plasma elongation (dimensionless).
-///     triangularity: Plasma triangularity (dimensionless).
+///     shape: The plasma shape.
 ///     mode: Confinement mode, one of 'L', 'H' or 'A'.
 ///     ion_density_centre: Ion density at the plasma centre (m^-3).
 ///     ion_density_peaking_factor: Ion density peaking factor (dimensionless).
@@ -165,9 +341,8 @@ pub(crate) fn parse_fuel(fuel: Option<HashMap<String, f64>>) -> PyResult<Vec<(Fu
 ///             beta_T in the reference).
 ///     ion_temperature_pedestal: Ion temperature at the pedestal (eV).
 ///     ion_temperature_separatrix: Ion temperature at the separatrix (eV).
-///     pedestal_radius: Minor radius at the pedestal (cm).
-///     shafranov_factor: Shafranov factor (cm), the outward radial shift of
-///             the magnetic surfaces.
+///     pedestal_radius: Minor radius at the pedestal (cm), less than the
+///             shape's ``minor_radius``.
 ///     start_angle: Toroidal angle at which the plasma starts, in radians.
 ///             Defaults to 0.
 ///     rotation_angle: Toroidal extent of the plasma, in radians. Negative
@@ -188,17 +363,21 @@ pub(crate) fn parse_fuel(fuel: Option<HashMap<String, f64>>) -> PyResult<Vec<(Fu
 ///
 /// Raises:
 ///     ValueError: If a parameter is NaN or infinite (the message names it),
-///             the plasma parameters are inconsistent (for example a minor
-///             radius larger than the major radius), the fuel is not D and/or
-///             T, or the plasma is too cold to make neutrons.
+///             the plasma parameters are inconsistent (for example a pedestal
+///             radius beyond the shape's minor radius), the fuel is not D
+///             and/or T, or the plasma is too cold to make neutrons.
 ///
 /// Examples:
 ///     >>> import yamc
-///     >>> sources = yamc.sources.tokamak_source(
+///     >>> shape = yamc.sources.TokamakShape(
 ///     ...     major_radius=906.0,
 ///     ...     minor_radius=292.258,
 ///     ...     elongation=1.557,
 ///     ...     triangularity=0.270,
+///     ...     shafranov_factor=0.44789,
+///     ... )
+///     >>> sources = yamc.sources.tokamak_source(
+///     ...     shape=shape,
 ///     ...     mode="H",
 ///     ...     ion_density_centre=1.09e20,
 ///     ...     ion_density_peaking_factor=1,
@@ -210,7 +389,6 @@ pub(crate) fn parse_fuel(fuel: Option<HashMap<String, f64>>) -> PyResult<Vec<(Fu
 ///     ...     ion_temperature_pedestal=6.09e3,
 ///     ...     ion_temperature_separatrix=0.1e3,
 ///     ...     pedestal_radius=0.8 * 292.258,
-///     ...     shafranov_factor=0.44789,
 ///     ... )
 ///     >>> model = yamc.Model(geometry, sources, tallies)  # doctest: +SKIP
 #[gen_stub_pyfunction]
@@ -220,10 +398,7 @@ pub(crate) fn parse_fuel(fuel: Option<HashMap<String, f64>>) -> PyResult<Vec<(Fu
     name = "tokamak_source",
     signature = (
         *,
-        major_radius,
-        minor_radius,
-        elongation,
-        triangularity,
+        shape,
         mode,
         ion_density_centre,
         ion_density_peaking_factor,
@@ -235,7 +410,6 @@ pub(crate) fn parse_fuel(fuel: Option<HashMap<String, f64>>) -> PyResult<Vec<(Fu
         ion_temperature_pedestal,
         ion_temperature_separatrix,
         pedestal_radius,
-        shafranov_factor,
         start_angle = 0.0,
         rotation_angle = std::f64::consts::TAU,
         mesh_resolution = (100, 100),
@@ -244,10 +418,7 @@ pub(crate) fn parse_fuel(fuel: Option<HashMap<String, f64>>) -> PyResult<Vec<(Fu
     )
 )]
 pub fn py_tokamak_source(
-    major_radius: f64,
-    minor_radius: f64,
-    elongation: f64,
-    triangularity: f64,
+    shape: PyTokamakShape,
     mode: &str,
     ion_density_centre: f64,
     ion_density_peaking_factor: f64,
@@ -259,7 +430,6 @@ pub fn py_tokamak_source(
     ion_temperature_pedestal: f64,
     ion_temperature_separatrix: f64,
     pedestal_radius: f64,
-    shafranov_factor: f64,
     start_angle: f64,
     rotation_angle: f64,
     mesh_resolution: (usize, usize),
@@ -267,10 +437,7 @@ pub fn py_tokamak_source(
     fuel: Option<HashMap<String, f64>>,
 ) -> PyResult<Vec<PyNeutronSource>> {
     let plasma = TokamakPlasma {
-        major_radius,
-        minor_radius,
-        elongation,
-        triangularity,
+        shape: shape.inner,
         mode: ConfinementMode::parse(mode).map_err(PyErr::new::<PyValueError, _>)?,
         ion_density_centre,
         ion_density_peaking_factor,
@@ -282,7 +449,6 @@ pub fn py_tokamak_source(
         ion_temperature_pedestal,
         ion_temperature_separatrix,
         pedestal_radius,
-        shafranov_factor,
         start_angle,
         rotation_angle,
         mesh_resolution,
@@ -350,18 +516,24 @@ pub fn py_tokamak_ion_density(
     ion_density_separatrix: f64,
     r: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    let plasma = TokamakPlasma {
+    let profiles = PlasmaProfiles {
         mode: ConfinementMode::parse(mode).map_err(PyErr::new::<PyValueError, _>)?,
         ion_density_centre,
         ion_density_peaking_factor,
         ion_density_pedestal,
         ion_density_separatrix,
-        minor_radius,
-        pedestal_radius,
-        ..TokamakPlasma::default()
+        pedestal: pedestal_radius / minor_radius,
+        // Only the density profile is evaluated.
+        ion_temperature_centre: 0.0,
+        ion_temperature_peaking_factor: 0.0,
+        ion_temperature_beta: 0.0,
+        ion_temperature_pedestal: 0.0,
+        ion_temperature_separatrix: 0.0,
     };
     let radii = FloatArg::extract("r", r)?;
-    map_arg(py, &radii, |value| plasma.ion_density(value))
+    map_arg(py, &radii, |value| {
+        Ok(profiles.ion_density(normalised_radius(value, minor_radius)?))
+    })
 }
 
 /// Ion temperature of a tokamak plasma at a given minor radius.
@@ -421,95 +593,24 @@ pub fn py_tokamak_ion_temperature(
     ion_temperature_separatrix: f64,
     minor_radius: f64,
 ) -> PyResult<Py<PyAny>> {
-    let plasma = TokamakPlasma {
+    let profiles = PlasmaProfiles {
         mode: ConfinementMode::parse(mode).map_err(PyErr::new::<PyValueError, _>)?,
-        pedestal_radius,
-        ion_temperature_pedestal,
         ion_temperature_centre,
-        ion_temperature_beta,
         ion_temperature_peaking_factor,
+        ion_temperature_beta,
+        ion_temperature_pedestal,
         ion_temperature_separatrix,
-        minor_radius,
-        ..TokamakPlasma::default()
+        pedestal: pedestal_radius / minor_radius,
+        // Only the temperature profile is evaluated.
+        ion_density_centre: 0.0,
+        ion_density_peaking_factor: 0.0,
+        ion_density_pedestal: 0.0,
+        ion_density_separatrix: 0.0,
     };
     let radii = FloatArg::extract("r", r)?;
-    map_arg(py, &radii, |value| plasma.ion_temperature(value))
-}
-
-/// Convert plasma (a, alpha) coordinates to (R, Z) coordinates.
-///
-/// ``a`` is the minor radius of a flux surface and ``alpha`` the poloidal
-/// angle; the mapping applies triangularity, elongation and the Shafranov
-/// shift. Either argument may be a float or a sequence of floats, and a
-/// scalar broadcasts against a sequence.
-///
-/// Args:
-///     a: Minor radius of the flux surface (cm).
-///     alpha: Poloidal angle (radians).
-///     shafranov_factor: Shafranov factor (cm).
-///     minor_radius: Plasma minor radius (cm).
-///     major_radius: Plasma major radius (cm).
-///     triangularity: Plasma triangularity (dimensionless).
-///     elongation: Plasma elongation (dimensionless).
-///
-/// Returns:
-///     An ``(R, Z)`` tuple in cm, each a float or a list of floats.
-#[gen_stub_pyfunction]
-#[pyfunction]
-#[allow(clippy::too_many_arguments)]
-#[pyo3(
-    name = "tokamak_convert_a_alpha_to_r_z",
-    signature = (
-        *,
-        a,
-        alpha,
-        shafranov_factor,
-        minor_radius,
-        major_radius,
-        triangularity,
-        elongation,
-    )
-)]
-pub fn py_tokamak_convert_a_alpha_to_r_z(
-    py: Python<'_>,
-    a: &Bound<'_, PyAny>,
-    alpha: &Bound<'_, PyAny>,
-    shafranov_factor: f64,
-    minor_radius: f64,
-    major_radius: f64,
-    triangularity: f64,
-    elongation: f64,
-) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
-    let (pairs, scalar) = zip_args(
-        "a",
-        &FloatArg::extract("a", a)?,
-        "alpha",
-        &FloatArg::extract("alpha", alpha)?,
-    )?;
-    let mut radii = Vec::with_capacity(pairs.len());
-    let mut heights = Vec::with_capacity(pairs.len());
-    for (a, alpha) in pairs {
-        if a < 0.0 {
-            return Err(PyErr::new::<PyValueError, _>(format!(
-                "a must not be negative (got {a})"
-            )));
-        }
-        let (r, z) = convert_a_alpha_to_r_z(
-            a,
-            alpha,
-            shafranov_factor,
-            minor_radius,
-            major_radius,
-            triangularity,
-            elongation,
-        );
-        radii.push(r);
-        heights.push(z);
-    }
-    Ok((
-        shape_like(py, scalar, radii)?,
-        shape_like(py, scalar, heights)?,
-    ))
+    map_arg(py, &radii, |value| {
+        Ok(profiles.ion_temperature(normalised_radius(value, minor_radius)?))
+    })
 }
 
 /// Neutron source density of a fusing plasma.

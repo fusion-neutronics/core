@@ -7,19 +7,25 @@ the profiles it is built from, and shows where the neutrons come from.
 No nuclear data is needed: this only samples the source. Drop the returned
 list into ``yamc.Model(source=...)`` to transport it.
 
-The arguments mirror the openmc-plasma-source package's ``tokamak_source``,
-so the same numbers describe the same plasma in both codes.
+The parameters are those of the openmc-plasma-source package's
+``tokamak_source``, with the same names and units, so the same numbers describe
+the same plasma in both codes. The five that describe the shape make up a
+``TokamakShape`` here, passed as ``shape``.
 """
 import math
 
 import yamc
 
 # A EU-DEMO-like plasma. Lengths in cm, densities in m^-3, temperatures in eV.
-PLASMA = dict(
+SHAPE = yamc.sources.TokamakShape(
     major_radius=906.0,
     minor_radius=292.258,
     elongation=1.557,
     triangularity=0.270,
+    shafranov_factor=0.44789,
+)
+PLASMA = dict(
+    shape=SHAPE,
     mode="H",
     ion_density_centre=1.09e20,
     ion_density_peaking_factor=1,
@@ -30,23 +36,32 @@ PLASMA = dict(
     ion_temperature_beta=6.0,
     ion_temperature_pedestal=6.09e3,
     ion_temperature_separatrix=0.1e3,
-    pedestal_radius=0.8 * 292.258,
-    shafranov_factor=0.44789,
+    pedestal_radius=0.8 * SHAPE.minor_radius,
     fuel={"D": 0.5, "T": 0.5},
 )
+
+# ---------------------------------------------------------------------------
+# The shape: R and Z of any flux surface (rho = 0 on the magnetic axis, 1 on
+# the boundary), which plot the cross-section directly, and the volume.
+# ---------------------------------------------------------------------------
+thetas = [2 * math.pi * i / 360 for i in range(360)]
+boundary_r, boundary_z = SHAPE.evaluate(1.0, thetas)
+print(f"boundary: R from {min(boundary_r):.1f} to {max(boundary_r):.1f} cm, "
+      f"Z up to {max(boundary_z):.1f} cm")
+print(f"plasma volume: {SHAPE.volume() / 1e6:.1f} m^3\n")
 
 # ---------------------------------------------------------------------------
 # The profiles the source is built from. Both depend only on the minor radius,
 # and both accept a list of radii so they plot directly.
 # ---------------------------------------------------------------------------
-radii = [i * PLASMA["minor_radius"] / 10 for i in range(11)]
+radii = [i * SHAPE.minor_radius / 10 for i in range(11)]
 
 densities = yamc.sources.tokamak_ion_density(
     mode=PLASMA["mode"],
     ion_density_centre=PLASMA["ion_density_centre"],
     ion_density_peaking_factor=PLASMA["ion_density_peaking_factor"],
     ion_density_pedestal=PLASMA["ion_density_pedestal"],
-    minor_radius=PLASMA["minor_radius"],
+    minor_radius=SHAPE.minor_radius,
     pedestal_radius=PLASMA["pedestal_radius"],
     ion_density_separatrix=PLASMA["ion_density_separatrix"],
     r=radii,
@@ -61,7 +76,7 @@ temperatures = yamc.sources.tokamak_ion_temperature(
     ion_temperature_beta=PLASMA["ion_temperature_beta"],
     ion_temperature_peaking_factor=PLASMA["ion_temperature_peaking_factor"],
     ion_temperature_separatrix=PLASMA["ion_temperature_separatrix"],
-    minor_radius=PLASMA["minor_radius"],
+    minor_radius=SHAPE.minor_radius,
 )
 
 print("minor radius (cm)   ion density (m^-3)   ion temperature (keV)")

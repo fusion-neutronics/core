@@ -1,22 +1,24 @@
 //! Tests for the parametric tokamak plasma source.
 
+use std::f64::consts::{FRAC_PI_2, PI, TAU};
+
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use yamc_source::distribution::energy::FusionReactants;
 use yamc_source::source::{SourceEnergyDistribution, SourceSpatialDistribution};
 use yamc_source::tokamak::{
-    convert_a_alpha_to_r_z, neutron_source_density, reactivity, ConfinementMode, FuelIon,
-    TokamakPlasma,
+    neutron_source_density, reactivity, ConfinementMode, FuelIon, TokamakPlasma, TokamakShape,
 };
 
-/// A EU-DEMO-like plasma, the parameter set used in the `openmc-plasma-source`
-/// examples, so the two implementations can be compared directly.
+/// The shape of a EU-DEMO-like plasma, the parameter set used in the
+/// `openmc-plasma-source` examples, so the two implementations can be
+/// compared directly.
+fn demo_shape() -> TokamakShape {
+    TokamakShape::new(906.0, 292.258, 1.557, 0.270, 0.44789).unwrap()
+}
+
 fn demo_plasma() -> TokamakPlasma {
     TokamakPlasma {
-        major_radius: 906.0,
-        minor_radius: 292.258,
-        elongation: 1.557,
-        triangularity: 0.270,
         mode: ConfinementMode::H,
         ion_density_centre: 1.09e20,
         ion_density_peaking_factor: 1.0,
@@ -28,12 +30,11 @@ fn demo_plasma() -> TokamakPlasma {
         ion_temperature_pedestal: 6.09e3,
         ion_temperature_separatrix: 0.1e3,
         pedestal_radius: 0.8 * 292.258,
-        shafranov_factor: 0.44789,
         // A coarse mesh keeps the test fast; the physics is resolution
         // independent to within the binning.
         mesh_resolution: (20, 20),
         grid_density: 100,
-        ..TokamakPlasma::default()
+        ..TokamakPlasma::new(demo_shape())
     }
 }
 
@@ -89,7 +90,7 @@ fn profiles_hit_their_named_values() {
     assert!(relative_error(plasma.ion_temperature(pedestal).unwrap(), 6.09e3) < 1.0e-9);
 
     // And at the separatrix (the plasma edge) the separatrix values.
-    let edge = plasma.minor_radius;
+    let edge = plasma.shape.minor_radius();
     assert!(relative_error(plasma.ion_density(edge).unwrap(), 3.0e19) < 1.0e-9);
     assert!(relative_error(plasma.ion_temperature(edge).unwrap(), 0.1e3) < 1.0e-9);
 }
@@ -102,55 +103,224 @@ fn l_mode_profiles_are_parabolic() {
         ion_temperature_peaking_factor: 1.0,
         ..demo_plasma()
     };
-    let half = 0.5 * plasma.minor_radius;
+    let half = 0.5 * plasma.shape.minor_radius();
     // (1 - (r/a)^2) with r = a/2 is 3/4.
     assert!(relative_error(plasma.ion_density(half).unwrap(), 0.75 * 1.09e20) < 1.0e-9);
     assert!(relative_error(plasma.ion_temperature(half).unwrap(), 0.75 * 45.9e3) < 1.0e-9);
     // L mode has no pedestal: both profiles reach zero at the edge.
-    assert!(plasma.ion_density(plasma.minor_radius).unwrap().abs() < 1.0e-6);
+    assert!(
+        plasma
+            .ion_density(plasma.shape.minor_radius())
+            .unwrap()
+            .abs()
+            < 1.0e-6
+    );
 }
 
 #[test]
 fn profiles_reject_positions_outside_the_plasma() {
     let plasma = demo_plasma();
-    let error = plasma.ion_density(plasma.minor_radius * 1.1).unwrap_err();
+    let error = plasma
+        .ion_density(plasma.shape.minor_radius() * 1.1)
+        .unwrap_err();
     assert!(error.contains("minor radius position"), "{error}");
     assert!(plasma.ion_temperature(-1.0).is_err());
 }
 
 #[test]
-fn shape_mapping_places_the_flux_surface_extremes() {
-    let plasma = demo_plasma();
-    let a = plasma.minor_radius;
-    // No Shafranov shift on the outermost surface, so the outboard and
-    // inboard midplane points sit a minor radius either side of R0.
-    let (r_outboard, z_outboard) = plasma.convert_a_alpha_to_r_z(a, 0.0);
-    assert!(relative_error(r_outboard, plasma.major_radius + a) < 1.0e-9);
+fn shape_places_the_flux_surface_extremes() {
+    let shape = demo_shape();
+    let (r0, a) = (shape.major_radius(), shape.minor_radius());
+    // No Shafranov shift on the boundary, so the outboard and inboard
+    // midplane points sit a minor radius either side of R0.
+    let (r_outboard, z_outboard) = shape.point(1.0, 0.0);
+    assert!(relative_error(r_outboard, r0 + a) < 1.0e-12);
     assert!(z_outboard.abs() < 1.0e-9);
 
-    let (r_inboard, _) = plasma.convert_a_alpha_to_r_z(a, std::f64::consts::PI);
-    assert!(relative_error(r_inboard, plasma.major_radius - a) < 1.0e-9);
+    let (r_inboard, _) = shape.point(1.0, PI);
+    assert!(relative_error(r_inboard, r0 - a) < 1.0e-12);
 
-    // The top of the plasma is elongation * a above the midplane.
-    let (_, z_top) = plasma.convert_a_alpha_to_r_z(a, std::f64::consts::FRAC_PI_2);
-    assert!(relative_error(z_top, plasma.elongation * a) < 1.0e-9);
+    // The top of the plasma is elongation * a above the midplane, pulled in
+    // to R0 - a sin(triangularity).
+    let (r_top, z_top) = shape.point(1.0, FRAC_PI_2);
+    assert!(relative_error(z_top, shape.elongation() * a) < 1.0e-12);
+    assert!(relative_error(r_top, r0 - a * shape.triangularity().sin()) < 1.0e-12);
 
     // The Shafranov shift is at its largest on the magnetic axis.
-    let (r_axis, _) = plasma.convert_a_alpha_to_r_z(0.0, 0.0);
-    assert!(relative_error(r_axis, plasma.major_radius + plasma.shafranov_factor) < 1.0e-9);
+    let (r_axis, z_axis) = shape.point(0.0, 1.0);
+    assert_eq!((r_axis, z_axis), (r0 + shape.shafranov_factor(), 0.0));
+}
 
-    // The free function and the method describe the same plasma.
-    let (r_free, z_free) = convert_a_alpha_to_r_z(
-        0.5 * a,
-        1.0,
-        plasma.shafranov_factor,
-        plasma.minor_radius,
-        plasma.major_radius,
-        plasma.triangularity,
-        plasma.elongation,
+#[test]
+fn shape_matches_the_fausser_parameterisation() {
+    let shape = demo_shape();
+    for rho in [0.0, 0.25, 0.5, 0.8, 1.0] {
+        for theta in [0.0, 0.7, 2.0, PI, 4.1, 5.9] {
+            let a = rho * shape.minor_radius();
+            let r = shape.major_radius()
+                + a * (theta + shape.triangularity() * theta.sin()).cos()
+                + shape.shafranov_factor() * (1.0 - rho * rho);
+            let z = shape.elongation() * a * theta.sin();
+            let (r_shape, z_shape) = shape.point(rho, theta);
+            assert!(
+                relative_error(r_shape, r) < 1.0e-12,
+                "R at ({rho}, {theta})"
+            );
+            assert!(
+                (z_shape - z).abs() < 1.0e-12 * a.max(1.0),
+                "Z at ({rho}, {theta})"
+            );
+        }
+    }
+}
+
+/// Bessel function `J_n(x)` by its power series, converged for `|x| <= 2`.
+fn bessel_j(n: i32, x: f64) -> f64 {
+    let factorial = |k: i32| (1..=k).map(f64::from).product::<f64>();
+    (0..30)
+        .map(|k| {
+            let sign = if k % 2 == 0 { 1.0 } else { -1.0 };
+            sign * (0.5 * x).powi(2 * k + n) / (factorial(k) * factorial(k + n))
+        })
+        .sum()
+}
+
+#[test]
+fn shape_volume_is_analytic() {
+    // A circular cross-section is a torus, 2 pi^2 R0 a^2, whatever the
+    // Shafranov factor: the shift is zero on the boundary.
+    for shafranov_factor in [0.0, 40.0, -40.0] {
+        let volume = TokamakShape::new(600.0, 150.0, 1.0, 0.0, shafranov_factor)
+            .unwrap()
+            .volume();
+        let expected = 2.0 * PI * PI * 600.0 * 150.0 * 150.0;
+        assert!(
+            relative_error(volume, expected) < 1.0e-12,
+            "{volume} vs {expected}"
+        );
+    }
+    // Elongation stretches it in Z alone.
+    let volume = TokamakShape::new(600.0, 150.0, 1.8, 0.0, 0.0)
+        .unwrap()
+        .volume();
+    let expected = 2.0 * PI * PI * 600.0 * 1.8 * 150.0 * 150.0;
+    assert!(
+        relative_error(volume, expected) < 1.0e-12,
+        "{volume} vs {expected}"
     );
-    let (r_method, z_method) = plasma.convert_a_alpha_to_r_z(0.5 * a, 1.0);
-    assert_eq!((r_free, z_free), (r_method, z_method));
+
+    // With triangularity d, expanding R^2 on the boundary with the
+    // Jacobi-Anger expansion gives
+    // pi^2 k a^2 [2 R0 (J0(d) + J2(d)) - a/2 (J1(2d) + J3(2d))].
+    let (r0, a, k) = (906.0, 292.258, 1.557);
+    for d in [0.27, -0.6, 1.0, -1.0] {
+        let terms = 2.0 * r0 * (bessel_j(0, d) + bessel_j(2, d))
+            - 0.5 * a * (bessel_j(1, 2.0 * d) + bessel_j(3, 2.0 * d));
+        let expected = PI * PI * k * a * a * terms;
+        let volume = TokamakShape::new(r0, a, k, d, 0.44789).unwrap().volume();
+        assert!(
+            relative_error(volume, expected) < 1.0e-12,
+            "{volume} vs {expected}"
+        );
+    }
+}
+
+#[test]
+fn shape_volume_matches_a_polygon_through_the_boundary() {
+    // Pappus: 2 pi times the first moment of the cross-section about the axis,
+    // (1/6) sum (R_i + R_j)(R_i Z_j - R_j Z_i) for a polygon. An inscribed
+    // polygon of n sides is short by O(1/n^2).
+    let n = 200_000;
+    for triangularity in [0.27, -0.6, 1.0] {
+        let shape = TokamakShape::new(906.0, 292.258, 1.557, triangularity, 0.44789).unwrap();
+        let points: Vec<(f64, f64)> = (0..n)
+            .map(|i| shape.point(1.0, TAU * i as f64 / n as f64))
+            .collect();
+        let moment: f64 = (0..n)
+            .map(|i| {
+                let ((r_i, z_i), (r_j, z_j)) = (points[i], points[(i + 1) % n]);
+                (r_i + r_j) * (r_i * z_j - r_j * z_i)
+            })
+            .sum::<f64>()
+            / 6.0;
+        let volume = shape.volume();
+        assert!(
+            relative_error(volume, TAU * moment) < 1.0e-8,
+            "{volume} vs {}",
+            TAU * moment
+        );
+    }
+}
+
+#[test]
+fn bad_shapes_are_refused() {
+    let cases = [
+        (
+            (906.0, 1000.0, 1.557, 0.27, 0.44789),
+            "minor_radius must be less than major_radius (got 1000 >= 906)",
+        ),
+        (
+            (-1.0, 292.258, 1.557, 0.27, 0.44789),
+            "major_radius must be positive (got -1)",
+        ),
+        (
+            (906.0, 0.0, 1.557, 0.27, 0.44789),
+            "minor_radius must be positive (got 0)",
+        ),
+        (
+            (906.0, 292.258, 0.0, 0.27, 0.44789),
+            "elongation must be positive (got 0)",
+        ),
+        (
+            (906.0, 292.258, 1.557, 1.5, 0.44789),
+            "triangularity must be between -1 and 1 (got 1.5)",
+        ),
+        (
+            (906.0, 292.258, 1.557, 0.27, -200.0),
+            "abs(shafranov_factor) must be less than half the minor radius (got 200 >= 146.129)",
+        ),
+    ];
+    for ((r0, a, k, d, s), expected) in cases {
+        assert_eq!(TokamakShape::new(r0, a, k, d, s).unwrap_err(), expected);
+    }
+    // NaN and infinity are refused first, naming the parameter.
+    for (index, name) in [
+        "major_radius",
+        "minor_radius",
+        "elongation",
+        "triangularity",
+        "shafranov_factor",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for value in [f64::NAN, f64::INFINITY] {
+            let mut parameters = [906.0, 292.258, 1.557, 0.27, 0.44789];
+            parameters[index] = value;
+            let [r0, a, k, d, s] = parameters;
+            assert_eq!(
+                TokamakShape::new(r0, a, k, d, s).unwrap_err(),
+                format!("{name} must be a finite number (got {value})")
+            );
+        }
+    }
+}
+
+#[test]
+fn a_shape_round_trips_through_serde_and_is_checked_when_read() {
+    let shape = demo_shape();
+    let json = serde_json::to_string(&shape).unwrap();
+    assert_eq!(serde_json::from_str::<TokamakShape>(&json).unwrap(), shape);
+
+    let bad = json.replace("\"minor_radius\":292.258", "\"minor_radius\":1000.0");
+    assert_ne!(bad, json);
+    let error = serde_json::from_str::<TokamakShape>(&bad)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("minor_radius must be less than major_radius"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -163,9 +333,10 @@ fn sources_are_normalised_and_shaped_like_the_plasma() {
     assert!((total - 1.0).abs() < 1.0e-12, "strengths summed to {total}");
 
     let mut rng = StdRng::seed_from_u64(42);
-    let r_max = plasma.major_radius + plasma.minor_radius + plasma.shafranov_factor.abs();
-    let r_min = plasma.major_radius - plasma.minor_radius - plasma.shafranov_factor.abs();
-    let z_max = plasma.elongation * plasma.minor_radius;
+    let shape = plasma.shape;
+    let r_max = shape.major_radius() + shape.minor_radius() + shape.shafranov_factor().abs();
+    let r_min = shape.major_radius() - shape.minor_radius() - shape.shafranov_factor().abs();
+    let z_max = shape.elongation() * shape.minor_radius();
     for source in &sources {
         for _ in 0..4 {
             let [x, y, z] = source.space.sample(&mut rng);
@@ -252,7 +423,7 @@ fn tritium_only_fuel_is_rejected() {
 fn a_toroidal_sector_only_emits_inside_itself() {
     let plasma = TokamakPlasma {
         start_angle: 0.5,
-        rotation_angle: std::f64::consts::FRAC_PI_2,
+        rotation_angle: FRAC_PI_2,
         ..demo_plasma()
     };
     let sources = plasma.sources().unwrap();
@@ -262,7 +433,7 @@ fn a_toroidal_sector_only_emits_inside_itself() {
             let [x, y, _] = source.space.sample(&mut rng);
             let phi = y.atan2(x);
             assert!(
-                (0.5 - 1.0e-9..=0.5 + std::f64::consts::FRAC_PI_2 + 1.0e-9).contains(&phi),
+                (0.5 - 1.0e-9..=0.5 + FRAC_PI_2 + 1.0e-9).contains(&phi),
                 "phi = {phi} outside the requested sector"
             );
         }
@@ -273,7 +444,7 @@ fn a_toroidal_sector_only_emits_inside_itself() {
 fn a_negative_rotation_angle_sweeps_the_other_way() {
     let plasma = TokamakPlasma {
         start_angle: 0.0,
-        rotation_angle: -std::f64::consts::FRAC_PI_2,
+        rotation_angle: -FRAC_PI_2,
         ..demo_plasma()
     };
     let sources = plasma.sources().unwrap();
@@ -282,7 +453,7 @@ fn a_negative_rotation_angle_sweeps_the_other_way() {
         let [x, y, _] = source.space.sample(&mut rng);
         let phi = y.atan2(x);
         assert!(
-            (-std::f64::consts::FRAC_PI_2 - 1.0e-9..=1.0e-9).contains(&phi),
+            (-FRAC_PI_2 - 1.0e-9..=1.0e-9).contains(&phi),
             "phi = {phi} outside the requested sector"
         );
     }
@@ -310,14 +481,15 @@ fn emission_is_concentrated_where_the_plasma_is_hottest() {
     // The peaked temperature profile puts most of the yield near the magnetic
     // axis, not spread evenly over the poloidal cross-section.
     let plasma = demo_plasma();
+    let shape = plasma.shape;
     let sources = plasma.sources().unwrap();
     let mut rng = StdRng::seed_from_u64(3);
     let mut near_axis = 0.0;
     for source in &sources {
         let [x, y, z] = source.space.sample(&mut rng);
         let r = (x * x + y * y).sqrt();
-        let radius = ((r - plasma.major_radius).powi(2) + (z / plasma.elongation).powi(2)).sqrt();
-        if radius < 0.5 * plasma.minor_radius {
+        let radius = ((r - shape.major_radius()).powi(2) + (z / shape.elongation()).powi(2)).sqrt();
+        if radius < 0.5 * shape.minor_radius() {
             near_axis += source.strength;
         }
     }
@@ -362,31 +534,10 @@ fn invalid_parameters_are_rejected() {
     let cases: Vec<(TokamakPlasma, &str)> = vec![
         (
             TokamakPlasma {
-                minor_radius: 1000.0,
-                ..demo_plasma()
-            },
-            "minor_radius must be less than major_radius",
-        ),
-        (
-            TokamakPlasma {
                 pedestal_radius: 500.0,
                 ..demo_plasma()
             },
-            "pedestal_radius must be less than minor_radius",
-        ),
-        (
-            TokamakPlasma {
-                shafranov_factor: 200.0,
-                ..demo_plasma()
-            },
-            "shafranov_factor",
-        ),
-        (
-            TokamakPlasma {
-                triangularity: 1.5,
-                ..demo_plasma()
-            },
-            "triangularity must be between -1 and 1",
+            "pedestal_radius must be less than minor_radius (got 500 >= 292.258)",
         ),
         (
             TokamakPlasma {
@@ -449,15 +600,12 @@ fn confinement_modes_and_fuel_species_parse() {
 
 /// A NaN passes the range checks written as `value <= 0.0` and the like, and
 /// the peaking factors and beta were not checked at all, so every float
-/// parameter is checked for being finite first, naming itself.
+/// parameter is checked for being finite first, naming itself. The shape's
+/// own are refused when it is built (`bad_shapes_are_refused`).
 #[test]
 fn a_parameter_that_is_not_a_finite_number_is_refused_naming_it() {
     type Field = fn(&mut TokamakPlasma) -> &mut f64;
-    let fields: [(&str, Field); 17] = [
-        ("major_radius", |p| &mut p.major_radius),
-        ("minor_radius", |p| &mut p.minor_radius),
-        ("elongation", |p| &mut p.elongation),
-        ("triangularity", |p| &mut p.triangularity),
+    let fields: [(&str, Field); 12] = [
         ("ion_density_centre", |p| &mut p.ion_density_centre),
         ("ion_density_peaking_factor", |p| {
             &mut p.ion_density_peaking_factor
@@ -476,7 +624,6 @@ fn a_parameter_that_is_not_a_finite_number_is_refused_naming_it() {
             &mut p.ion_temperature_separatrix
         }),
         ("pedestal_radius", |p| &mut p.pedestal_radius),
-        ("shafranov_factor", |p| &mut p.shafranov_factor),
         ("start_angle", |p| &mut p.start_angle),
         ("rotation_angle", |p| &mut p.rotation_angle),
     ];

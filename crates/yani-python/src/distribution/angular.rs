@@ -171,8 +171,9 @@ pub fn register_distribution_classes(
     parent_module.add_class::<PyNormal>()?;
     parent_module.add_class::<PyCylindricalRing>()?;
     parent_module.add_function(wrap_pyfunction!(py_fusion_neutron_spectrum, parent_module)?)?;
-    // The parametric tokamak plasma source and the plasma profile helpers it
-    // is built from.
+    // The parametric tokamak plasma source, its shape and the plasma profile
+    // helpers it is built from.
+    parent_module.add_class::<crate::distribution::PyTokamakShape>()?;
     parent_module.add_function(wrap_pyfunction!(
         crate::distribution::py_tokamak_source,
         parent_module
@@ -183,10 +184,6 @@ pub fn register_distribution_classes(
     )?)?;
     parent_module.add_function(wrap_pyfunction!(
         crate::distribution::py_tokamak_ion_temperature,
-        parent_module
-    )?)?;
-    parent_module.add_function(wrap_pyfunction!(
-        crate::distribution::py_tokamak_convert_a_alpha_to_r_z,
         parent_module
     )?)?;
     parent_module.add_function(wrap_pyfunction!(
