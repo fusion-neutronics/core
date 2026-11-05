@@ -27,9 +27,13 @@ mod cad;
 #[cfg(feature = "cad")]
 mod cad_scene;
 #[cfg(feature = "cad")]
+mod face_volumes;
+#[cfg(feature = "cad")]
 pub use cad::*;
 #[cfg(feature = "cad")]
 pub use cad_scene::*;
+#[cfg(feature = "cad")]
+pub use face_volumes::*;
 
 /// Refuses two different `Material` objects with one id among the materials
 /// a geometry is given. Ids are set when a Material is built, but an explicit

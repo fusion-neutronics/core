@@ -227,6 +227,7 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(geometry::mesh_faces_scene_resolved, m)?)?;
         m.add_function(wrap_pyfunction!(geometry::mesh_volume_rs, m)?)?;
         m.add_class::<geometry::SceneFaceOutput>()?;
+        m.add_class::<geometry::PyFaceVolumeMesh>()?;
     }
 
     let parallel_submodule = PyModule::new(_py, "parallel")?;
