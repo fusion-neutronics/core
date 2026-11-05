@@ -456,3 +456,65 @@ fn bad_plasmas_are_refused() {
     p.profiles.ion_temperature_separatrix = 0.0;
     assert!(p.sources().unwrap_err().contains("zero"));
 }
+
+/// The rotating ellipse of the stellarator source example, plus an `l > |m|`
+/// mode so the radial sum matters.
+fn rotating_ellipse_with_radial_modes() -> StellaratorShape {
+    StellaratorShape::new(
+        5,
+        vec![
+            [0, 0, 0],
+            [1, 1, 0],
+            [1, 1, 1],
+            [1, -1, -1],
+            [3, 1, 0],
+            [2, 0, 1],
+        ],
+        vec![600.0, 150.0, 50.0, 50.0, 4.0, -3.0],
+        vec![[1, -1, 0], [1, -1, 1], [1, 1, -1], [3, -1, 0]],
+        vec![150.0, -50.0, 50.0, 2.5],
+    )
+    .unwrap()
+}
+
+#[test]
+fn surface_modes_are_the_flux_surface() {
+    let shape = rotating_ellipse_with_radial_modes();
+    let nfp = shape.num_field_periods() as f64;
+    let series = |modes: &[[i32; 2]], values: &[f64], theta: f64, zeta: f64| {
+        modes
+            .iter()
+            .zip(values)
+            .map(|(&[m, n], &c)| {
+                let poloidal = if m >= 0 {
+                    (m as f64 * theta).cos()
+                } else {
+                    (-m as f64 * theta).sin()
+                };
+                let toroidal = if n >= 0 {
+                    (n as f64 * nfp * zeta).cos()
+                } else {
+                    (-n as f64 * nfp * zeta).sin()
+                };
+                c * poloidal * toroidal
+            })
+            .sum::<f64>()
+    };
+    for rho in [0.3, 0.75, 1.0] {
+        let (r_modes, r_mn, z_modes, z_mn) = shape.surface_modes(rho);
+        for k in 0..40 {
+            let (theta, zeta) = (k as f64 * 0.37, k as f64 * 0.21);
+            let p = shape.point(rho, theta, zeta);
+            let (r, z) = (
+                series(&r_modes, &r_mn, theta, zeta),
+                series(&z_modes, &z_mn, theta, zeta),
+            );
+            assert!(
+                (r - p.r).abs() < 1e-9 && (z - p.z).abs() < 1e-9,
+                "rho {rho}: ({r}, {z}) vs ({}, {})",
+                p.r,
+                p.z
+            );
+        }
+    }
+}

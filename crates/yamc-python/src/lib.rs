@@ -180,6 +180,8 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(geometry::Cone, m)?)?;
     m.add_function(wrap_pyfunction!(geometry::Torus, m)?)?;
     m.add_function(wrap_pyfunction!(geometry::Quadric, m)?)?;
+    m.add_function(wrap_pyfunction!(geometry::FluxSurface, m)?)?;
+    m.add_function(wrap_pyfunction!(geometry::OffsetSurface, m)?)?;
     // The surface factories above (Plane/Sphere/Cylinder/...) all return a
     // `Surface`, so the type must be importable for `-> Surface` annotations to
     // resolve and for `isinstance`/type hints to work.

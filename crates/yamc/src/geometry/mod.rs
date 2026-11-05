@@ -7,6 +7,7 @@ pub mod conversion;
 pub mod csg;
 #[cfg(feature = "mesh")]
 pub mod fill;
+pub mod flux;
 #[cfg(feature = "mesh")]
 pub mod mesh;
 pub mod neighbor_lists;

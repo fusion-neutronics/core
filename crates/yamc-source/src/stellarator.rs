@@ -250,6 +250,31 @@ impl StellaratorShape {
         }
     }
 
+    /// The flux surface `rho` as a double Fourier series in `(theta, zeta)`:
+    /// `(m, n)` modes and coefficients (cm) for `R` and for `Z`, in the same
+    /// convention as the shape (`m < 0` selects `sin(|m| theta)`, `n < 0`
+    /// selects `sin(|n| N zeta)`). Each coefficient is the shape's
+    /// `sum_l R_lmn R_l^|m|(rho)`, so the series is exactly the surface.
+    #[allow(clippy::type_complexity)]
+    pub fn surface_modes(&self, rho: f64) -> (Vec<[i32; 2]>, Vec<f64>, Vec<[i32; 2]>, Vec<f64>) {
+        let collapse = |modes: &[[i32; 3]], lmn: &[f64]| {
+            let mut groups = std::collections::BTreeMap::<(i32, i32), Vec<(i32, f64)>>::new();
+            for (&[l, m, n], &c) in modes.iter().zip(lmn) {
+                groups.entry((m, n)).or_default().push((l, c));
+            }
+            groups
+                .into_iter()
+                .map(|((m, n), mut terms)| {
+                    terms.sort_by_key(|&(l, _)| l);
+                    ([m, n], radial_sum(m.abs(), &terms, rho).0)
+                })
+                .unzip::<_, _, Vec<_>, Vec<_>>()
+        };
+        let (r_modes, r_mn) = collapse(&self.r_modes, &self.r_lmn);
+        let (z_modes, z_mn) = collapse(&self.z_modes, &self.z_lmn);
+        (r_modes, r_mn, z_modes, z_mn)
+    }
+
     /// Plasma volume (cm^3).
     pub fn volume(&self) -> f64 {
         let grid = AngularGrid::new(self);
