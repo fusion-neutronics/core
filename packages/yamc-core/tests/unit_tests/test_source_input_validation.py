@@ -118,11 +118,16 @@ def test_a_cylindrical_ring_with_an_input_that_is_not_finite_raises():
     assert _ring(origin=(1.0, 2.0, 3.0)).origin == [1.0, 2.0, 3.0]
 
 
-_TOKAMAK = {
+_TOKAMAK_SHAPE = {
     "major_radius": 906.0,
     "minor_radius": 292.258,
     "elongation": 1.557,
     "triangularity": 0.270,
+    "shafranov_factor": 0.44789,
+}
+
+_TOKAMAK = {
+    "shape": yamc.sources.TokamakShape(**_TOKAMAK_SHAPE),
     "mode": "H",
     "ion_density_centre": 1.09e20,
     "ion_density_peaking_factor": 1.0,
@@ -134,23 +139,25 @@ _TOKAMAK = {
     "ion_temperature_pedestal": 6.09e3,
     "ion_temperature_separatrix": 0.1e3,
     "pedestal_radius": 0.8 * 292.258,
-    "shafranov_factor": 0.44789,
     "mesh_resolution": (4, 4),
     "grid_density": 10,
 }
 
 
+@pytest.mark.parametrize("name", list(_TOKAMAK_SHAPE))
+def test_a_tokamak_shape_parameter_that_is_nan_raises_naming_it(name):
+    with pytest.raises(ValueError, match=rf"^{name} must be a finite number \(got NaN\)$"):
+        yamc.sources.TokamakShape(**{**_TOKAMAK_SHAPE, name: NAN})
+
+
 @pytest.mark.parametrize(
     "name",
     [
-        "major_radius",
-        "elongation",
         "ion_density_centre",
         "ion_density_peaking_factor",
         "ion_temperature_centre",
         "ion_temperature_beta",
         "pedestal_radius",
-        "shafranov_factor",
         "start_angle",
     ],
 )

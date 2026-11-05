@@ -19,10 +19,10 @@ __all__ = [
     "Monodirectional",
     "CylindricalRing",
     "fusion_neutron_spectrum",
+    "TokamakShape",
     "tokamak_source",
     "tokamak_ion_density",
     "tokamak_ion_temperature",
-    "tokamak_convert_a_alpha_to_r_z",
     "tokamak_neutron_source_density",
     "StellaratorShape",
     "FluxShell",
@@ -443,7 +443,105 @@ def fusion_neutron_spectrum(ion_temp: builtins.float, reactants: builtins.str = 
         >>> energy_dist = yani.fusion_neutron_spectrum(20000.0, reactants='DD')
     """
 
-def tokamak_source(*, major_radius: builtins.float, minor_radius: builtins.float, elongation: builtins.float, triangularity: builtins.float, mode: builtins.str, ion_density_centre: builtins.float, ion_density_peaking_factor: builtins.float, ion_density_pedestal: builtins.float, ion_density_separatrix: builtins.float, ion_temperature_centre: builtins.float, ion_temperature_peaking_factor: builtins.float, ion_temperature_beta: builtins.float, ion_temperature_pedestal: builtins.float, ion_temperature_separatrix: builtins.float, pedestal_radius: builtins.float, shafranov_factor: builtins.float, start_angle: builtins.float = 0.0, rotation_angle: builtins.float = 6.283185307179586, mesh_resolution: tuple[builtins.int, builtins.int] = (100, 100), grid_density: builtins.int = 500, fuel: typing.Optional[typing.Mapping[builtins.str, builtins.float]] = None) -> builtins.list[NeutronSource]:
+@typing.final
+class TokamakShape:
+    r"""
+    A tokamak plasma shape: nested flux surfaces with elongation,
+    triangularity and a Shafranov shift, in the parameterisation of Fausser et
+    al., Fus. Eng. Des. 87 (2012) 787.
+    
+    The flux surface at normalised radius ``rho`` (0 on the magnetic axis, 1
+    on the plasma boundary) has minor radius ``a = rho * minor_radius``. At
+    poloidal angle ``theta`` it lies at
+    ``R = major_radius + a * cos(theta + triangularity * sin(theta)) + shift``
+    and ``Z = elongation * a * sin(theta)``, where the Shafranov shift
+    ``shift = shafranov_factor * (1 - rho**2)`` moves the magnetic axis out by
+    ``shafranov_factor`` and falls to zero on the boundary.
+    
+    These are the five shape arguments of the ``openmc-plasma-source``
+    package's ``tokamak_source``, with the same names and units, made into the
+    one ``shape`` argument of ``tokamak_source`` here, as ``StellaratorShape``
+    is for ``stellarator_source``.
+    
+    Args:
+        major_radius: Plasma major radius (cm).
+        minor_radius: Plasma minor radius (cm), less than ``major_radius``.
+        elongation: Plasma elongation (dimensionless).
+        triangularity: Plasma triangularity (dimensionless), from -1 to 1.
+        shafranov_factor: Shafranov factor (cm), the outward radial shift of
+            the magnetic axis, less than half the minor radius either way.
+    
+    Raises:
+        ValueError: If a parameter is NaN or infinite (the message names it),
+            a radius or the elongation is not positive, the minor radius is
+            not less than the major radius, the triangularity is outside -1
+            to 1, or the Shafranov factor is half the minor radius or more.
+    
+    Examples:
+        >>> import yani
+        >>> shape = yani.sources.TokamakShape(
+        ...     major_radius=906.0,
+        ...     minor_radius=292.258,
+        ...     elongation=1.557,
+        ...     triangularity=0.270,
+        ...     shafranov_factor=0.44789,
+        ... )
+        >>> r, z = shape.evaluate(1.0, 0.0)  # the outboard midplane
+    """
+    @property
+    def major_radius(self) -> builtins.float:
+        r"""
+        Plasma major radius (cm).
+        """
+    @property
+    def minor_radius(self) -> builtins.float:
+        r"""
+        Plasma minor radius (cm).
+        """
+    @property
+    def elongation(self) -> builtins.float:
+        r"""
+        Plasma elongation (dimensionless).
+        """
+    @property
+    def triangularity(self) -> builtins.float:
+        r"""
+        Plasma triangularity (dimensionless).
+        """
+    @property
+    def shafranov_factor(self) -> builtins.float:
+        r"""
+        Shafranov factor (cm), the outward radial shift of the magnetic axis.
+        """
+    def __new__(cls, *, major_radius: builtins.float, minor_radius: builtins.float, elongation: builtins.float, triangularity: builtins.float, shafranov_factor: builtins.float) -> TokamakShape: ...
+    def volume(self) -> builtins.float:
+        r"""
+        Plasma volume (cm^3), inside the boundary ``rho = 1``.
+        """
+    def evaluate(self, rho: typing.Any, theta: typing.Any) -> tuple[typing.Any, typing.Any]:
+        r"""
+        Cylindrical ``(R, Z)`` in cm at flux coordinates ``(rho, theta)``.
+        
+        Either argument is a float or a sequence of floats; a scalar
+        broadcasts against a sequence, so a whole flux surface or radial
+        chord evaluates in one call.
+        
+        Args:
+            rho: Normalised radius, 0 on the magnetic axis and 1 on the
+                boundary.
+            theta: Poloidal angle (radians).
+        
+        Returns:
+            An ``(R, Z)`` tuple in cm, each a float or a list of floats.
+        
+        Raises:
+            ValueError: If ``rho`` is outside 0 to 1, ``theta`` is NaN or
+                infinite, or ``rho`` and ``theta`` are sequences of different
+                lengths.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+def tokamak_source(*, shape: TokamakShape, mode: builtins.str, ion_density_centre: builtins.float, ion_density_peaking_factor: builtins.float, ion_density_pedestal: builtins.float, ion_density_separatrix: builtins.float, ion_temperature_centre: builtins.float, ion_temperature_peaking_factor: builtins.float, ion_temperature_beta: builtins.float, ion_temperature_pedestal: builtins.float, ion_temperature_separatrix: builtins.float, pedestal_radius: builtins.float, start_angle: builtins.float = 0.0, rotation_angle: builtins.float = 6.283185307179586, mesh_resolution: tuple[builtins.int, builtins.int] = (100, 100), grid_density: builtins.int = 500, fuel: typing.Optional[typing.Mapping[builtins.str, builtins.float]] = None) -> builtins.list[NeutronSource]:
     r"""
     Build the neutron sources describing a parametric tokamak plasma.
     
@@ -455,12 +553,18 @@ def tokamak_source(*, major_radius: builtins.float, minor_radius: builtins.float
     spectra. Strengths are normalised to sum to 1; the absolute neutron rate
     is set by the simulation, not here.
     
-    The profile models are from Fausser et al., 'Tokamak D-T neutron source
-    models for different plasma physics confinement modes', Fus. Eng. Des. 87
-    (2012) 787, and the arguments match the ``openmc-plasma-source`` package's
-    ``tokamak_source`` so the two can be compared directly. Two physics
-    differences to expect in such a comparison: T(t,2n)4He is not included,
-    since yani has no T-T neutron spectrum model, where
+    The shape and profile models are from Fausser et al., 'Tokamak D-T neutron
+    source models for different plasma physics confinement modes', Fus. Eng.
+    Des. 87 (2012) 787, and the arguments are those of the
+    ``openmc-plasma-source`` package's ``tokamak_source``, with the same
+    names, units and defaults, so the two can be compared. The exception is
+    the shape: its five arguments (``major_radius``, ``minor_radius``,
+    ``elongation``, ``triangularity`` and ``shafranov_factor``) are given here
+    as one ``TokamakShape``, as ``stellarator_source`` takes a
+    ``StellaratorShape``.
+    
+    Two physics differences to expect in such a comparison: T(t,2n)4He is not
+    included, since yani has no T-T neutron spectrum model, where
     ``openmc-plasma-source`` takes one from NeSST (for D-T fuel the T-T yield
     is a small fraction of the D-T yield); and the birth peaks sit a few tens
     of keV apart, because yani's Ballabio spectrum takes the zero-temperature
@@ -468,10 +572,7 @@ def tokamak_source(*, major_radius: builtins.float, minor_radius: builtins.float
     tabulated 14.021 / 2.4495 MeV.
     
     Args:
-        major_radius: Plasma major radius (cm).
-        minor_radius: Plasma minor radius (cm).
-        elongation: Plasma elongation (dimensionless).
-        triangularity: Plasma triangularity (dimensionless).
+        shape: The plasma shape.
         mode: Confinement mode, one of 'L', 'H' or 'A'.
         ion_density_centre: Ion density at the plasma centre (m^-3).
         ion_density_peaking_factor: Ion density peaking factor (dimensionless).
@@ -484,9 +585,8 @@ def tokamak_source(*, major_radius: builtins.float, minor_radius: builtins.float
                 beta_T in the reference).
         ion_temperature_pedestal: Ion temperature at the pedestal (eV).
         ion_temperature_separatrix: Ion temperature at the separatrix (eV).
-        pedestal_radius: Minor radius at the pedestal (cm).
-        shafranov_factor: Shafranov factor (cm), the outward radial shift of
-                the magnetic surfaces.
+        pedestal_radius: Minor radius at the pedestal (cm), less than the
+                shape's ``minor_radius``.
         start_angle: Toroidal angle at which the plasma starts, in radians.
                 Defaults to 0.
         rotation_angle: Toroidal extent of the plasma, in radians. Negative
@@ -507,17 +607,21 @@ def tokamak_source(*, major_radius: builtins.float, minor_radius: builtins.float
     
     Raises:
         ValueError: If a parameter is NaN or infinite (the message names it),
-                the plasma parameters are inconsistent (for example a minor
-                radius larger than the major radius), the fuel is not D and/or
-                T, or the plasma is too cold to make neutrons.
+                the plasma parameters are inconsistent (for example a pedestal
+                radius beyond the shape's minor radius), the fuel is not D
+                and/or T, or the plasma is too cold to make neutrons.
     
     Examples:
         >>> import yani
-        >>> sources = yani.sources.tokamak_source(
+        >>> shape = yani.sources.TokamakShape(
         ...     major_radius=906.0,
         ...     minor_radius=292.258,
         ...     elongation=1.557,
         ...     triangularity=0.270,
+        ...     shafranov_factor=0.44789,
+        ... )
+        >>> sources = yani.sources.tokamak_source(
+        ...     shape=shape,
         ...     mode="H",
         ...     ion_density_centre=1.09e20,
         ...     ion_density_peaking_factor=1,
@@ -529,7 +633,6 @@ def tokamak_source(*, major_radius: builtins.float, minor_radius: builtins.float
         ...     ion_temperature_pedestal=6.09e3,
         ...     ion_temperature_separatrix=0.1e3,
         ...     pedestal_radius=0.8 * 292.258,
-        ...     shafranov_factor=0.44789,
         ... )
         >>> model = yamc.Model(geometry, sources, tallies)  # doctest: +SKIP
     """
@@ -589,28 +692,6 @@ def tokamak_ion_temperature(*, r: typing.Any, mode: builtins.str, pedestal_radiu
     Raises:
         ValueError: If ``mode`` is not 'L', 'H' or 'A', or ``r`` falls outside
                 the plasma.
-    """
-
-def tokamak_convert_a_alpha_to_r_z(*, a: typing.Any, alpha: typing.Any, shafranov_factor: builtins.float, minor_radius: builtins.float, major_radius: builtins.float, triangularity: builtins.float, elongation: builtins.float) -> tuple[typing.Any, typing.Any]:
-    r"""
-    Convert plasma (a, alpha) coordinates to (R, Z) coordinates.
-    
-    ``a`` is the minor radius of a flux surface and ``alpha`` the poloidal
-    angle; the mapping applies triangularity, elongation and the Shafranov
-    shift. Either argument may be a float or a sequence of floats, and a
-    scalar broadcasts against a sequence.
-    
-    Args:
-        a: Minor radius of the flux surface (cm).
-        alpha: Poloidal angle (radians).
-        shafranov_factor: Shafranov factor (cm).
-        minor_radius: Plasma minor radius (cm).
-        major_radius: Plasma major radius (cm).
-        triangularity: Plasma triangularity (dimensionless).
-        elongation: Plasma elongation (dimensionless).
-    
-    Returns:
-        An ``(R, Z)`` tuple in cm, each a float or a list of floats.
     """
 
 def tokamak_neutron_source_density(*, ion_density: typing.Any, ion_temperature: typing.Any, reaction: builtins.str = 'DT') -> typing.Any:
@@ -724,6 +805,10 @@ class StellaratorShape:
         
         Returns:
             An ``(R, Z)`` tuple in cm, each a float or a list of floats.
+        
+        Raises:
+            ValueError: If ``rho`` is outside 0 to 1, ``theta`` or ``zeta`` is
+                NaN or infinite, or the sequences differ in length.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -758,8 +843,9 @@ def stellarator_source(*, shape: StellaratorShape, mode: builtins.str, ion_densi
     neutron rate is set by the simulation, not here.
     
     The density and temperature profiles are those of ``tokamak_source``
-    (Fausser et al., Fus. Eng. Des. 87 (2012) 787) with the minor radius
-    replaced by ``rho``, so the pedestal is placed by ``pedestal_rho``. Plot
+    (Fausser et al., Fus. Eng. Des. 87 (2012) 787), with the normalised minor
+    radius they take there (the ``rho`` of a ``TokamakShape``) replaced by
+    this shape's ``rho``, so the pedestal is placed by ``pedestal_rho``. Plot
     them with ``tokamak_ion_density`` / ``tokamak_ion_temperature`` using
     ``minor_radius=1``, ``pedestal_radius=pedestal_rho`` and ``r=rho``.
     

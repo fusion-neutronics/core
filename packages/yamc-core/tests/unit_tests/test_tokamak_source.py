@@ -1,9 +1,9 @@
-"""The parametric tokamak plasma source and the plasma profile helpers.
+"""The parametric tokamak plasma source, its shape and the profile helpers.
 
 The Rust core has its own tests for the physics (Bosch-Hale reactivities,
-profile shapes, emission weighting); these cover the Python surface: argument
-handling, the shape of what comes back, and that the sources drop straight
-into a Model.
+profile shapes, emission weighting, the shape's volume); these cover the
+Python surface: argument handling, the shape of what comes back, and that the
+sources drop straight into a Model.
 """
 import math
 
@@ -13,11 +13,16 @@ import yamc
 
 # A EU-DEMO-like plasma, the parameter set the openmc-plasma-source examples
 # use, so a comparison between the two codes starts from the same numbers.
-DEMO = dict(
+# Its five shape arguments make up a TokamakShape here.
+SHAPE = dict(
     major_radius=906.0,
     minor_radius=292.258,
     elongation=1.557,
     triangularity=0.270,
+    shafranov_factor=0.44789,
+)
+DEMO = dict(
+    shape=yamc.sources.TokamakShape(**SHAPE),
     mode="H",
     ion_density_centre=1.09e20,
     ion_density_peaking_factor=1,
@@ -29,12 +34,125 @@ DEMO = dict(
     ion_temperature_pedestal=6.09e3,
     ion_temperature_separatrix=0.1e3,
     pedestal_radius=0.8 * 292.258,
-    shafranov_factor=0.44789,
 )
 
 # A coarse mesh keeps these tests quick; the default (100, 100) builds ~15000
 # sources.
 COARSE = dict(DEMO, mesh_resolution=(20, 20), grid_density=100)
+
+
+def fausser(rho, theta):
+    """(R, Z) of the demo shape, written out from Fausser's parameterisation."""
+    a = rho * SHAPE["minor_radius"]
+    r = (
+        SHAPE["major_radius"]
+        + a * math.cos(theta + SHAPE["triangularity"] * math.sin(theta))
+        + SHAPE["shafranov_factor"] * (1 - rho**2)
+    )
+    return r, SHAPE["elongation"] * a * math.sin(theta)
+
+
+def test_shape_keeps_its_parameters():
+    shape = DEMO["shape"]
+
+    for name, value in SHAPE.items():
+        assert getattr(shape, name) == value
+    assert repr(shape) == (
+        "TokamakShape(major_radius=906, minor_radius=292.258, elongation=1.557, "
+        "triangularity=0.27, shafranov_factor=0.44789)"
+    )
+
+
+def test_shape_evaluate_matches_the_parameterisation():
+    shape = DEMO["shape"]
+
+    # A float in, floats out: the outboard midplane of the boundary, where
+    # the Shafranov shift is zero, and the magnetic axis, where it is largest.
+    assert shape.evaluate(1.0, 0.0) == pytest.approx((906.0 + 292.258, 0.0))
+    assert shape.evaluate(0.0, 1.0) == pytest.approx((906.0 + 0.44789, 0.0))
+
+    def assert_matches(radii, heights, points):
+        assert isinstance(radii, list) and isinstance(heights, list)
+        expected = [fausser(rho, theta) for rho, theta in points]
+        assert radii == pytest.approx([r for r, _ in expected], rel=1e-12)
+        assert heights == pytest.approx([z for _, z in expected], rel=1e-12, abs=1e-9)
+
+    # A scalar broadcasts against a sequence, and the result keeps its shape.
+    thetas = [2 * math.pi * i / 12 for i in range(12)]
+    for rho in (0.0, 0.3, 0.8, 1.0):
+        assert_matches(*shape.evaluate(rho, thetas), [(rho, t) for t in thetas])
+    assert_matches(*shape.evaluate([0.2, 0.9], 2.0), [(0.2, 2.0), (0.9, 2.0)])
+
+    # Two sequences pair up elementwise.
+    rhos, thetas = [0.2, 0.6, 1.0], [0.5, 2.5, 4.5]
+    assert_matches(*shape.evaluate(rhos, thetas), list(zip(rhos, thetas)))
+
+
+@pytest.mark.parametrize(
+    "rho, theta, message",
+    [
+        (1.5, 0.0, r"rho must be between 0 and 1 \(got 1.5\)"),
+        ([0.5, -0.1], 0.0, r"rho must be between 0 and 1 \(got -0.1\)"),
+        ([0.1, 0.2], [0.0, 1.0, 2.0], r"rho and theta must be the same length \(got 2 and 3\)"),
+        (1.0, math.nan, r"theta must be a finite number \(got NaN\)"),
+        (0.5, [0.0, math.inf], r"theta must be a finite number \(got inf\)"),
+    ],
+)
+def test_shape_evaluate_rejects_bad_coordinates(rho, theta, message):
+    with pytest.raises(ValueError, match=message):
+        DEMO["shape"].evaluate(rho, theta)
+
+
+def test_shape_volume():
+    # A circular cross-section is a torus, 2 pi^2 R0 a^2, whatever the
+    # Shafranov factor: the shift is zero on the boundary.
+    torus = yamc.sources.TokamakShape(
+        major_radius=600.0,
+        minor_radius=150.0,
+        elongation=1.0,
+        triangularity=0.0,
+        shafranov_factor=30.0,
+    )
+    assert torus.volume() == pytest.approx(2 * math.pi**2 * 600.0 * 150.0**2, rel=1e-12)
+
+    # Pappus on a polygon through the evaluated boundary: 2 pi times the first
+    # moment of the cross-section about the axis.
+    n = 10000
+    radii, heights = DEMO["shape"].evaluate(1.0, [2 * math.pi * i / n for i in range(n)])
+    moment = sum(
+        (radii[i - 1] + radii[i]) * (radii[i - 1] * heights[i] - radii[i] * heights[i - 1])
+        for i in range(n)
+    ) / 6
+    assert DEMO["shape"].volume() == pytest.approx(2 * math.pi * moment, rel=1e-6)
+
+
+@pytest.mark.parametrize(
+    "override, message",
+    [
+        (dict(minor_radius=2000.0), r"minor_radius must be less than major_radius \(got 2000 >= 906\)"),
+        (dict(major_radius=-1.0), r"major_radius must be positive \(got -1\)"),
+        (dict(minor_radius=0.0), r"minor_radius must be positive \(got 0\)"),
+        (dict(elongation=0.0), r"elongation must be positive \(got 0\)"),
+        (dict(triangularity=2.0), r"triangularity must be between -1 and 1 \(got 2\)"),
+        (
+            dict(shafranov_factor=-200.0),
+            r"abs\(shafranov_factor\) must be less than half the minor radius \(got 200 >= 146.129\)",
+        ),
+        (dict(elongation=math.inf), r"elongation must be a finite number \(got inf\)"),
+    ],
+)
+def test_invalid_shapes_are_rejected(override, message):
+    with pytest.raises(ValueError, match=message):
+        yamc.sources.TokamakShape(**dict(SHAPE, **override))
+
+
+def test_the_shape_is_one_argument():
+    """openmc-plasma-source's five shape arguments are a TokamakShape here."""
+    profiles = {name: value for name, value in COARSE.items() if name != "shape"}
+    with pytest.raises(TypeError, match="unexpected keyword argument 'major_radius'"):
+        yamc.sources.tokamak_source(**SHAPE, **profiles)
+    with pytest.raises(TypeError, match="not an instance of 'TokamakShape'"):
+        yamc.sources.tokamak_source(shape=SHAPE, **profiles)
 
 
 def test_returns_neutron_sources_with_normalised_strengths():
@@ -62,10 +180,10 @@ def test_sources_are_rings_with_ballabio_spectra():
 def test_samples_land_inside_the_plasma_bounding_box():
     sources = yamc.sources.tokamak_source(**COARSE)
 
-    shift = abs(DEMO["shafranov_factor"])
-    r_max = DEMO["major_radius"] + DEMO["minor_radius"] + shift
-    r_min = DEMO["major_radius"] - DEMO["minor_radius"] - shift
-    z_max = DEMO["elongation"] * DEMO["minor_radius"]
+    shift = abs(SHAPE["shafranov_factor"])
+    r_max = SHAPE["major_radius"] + SHAPE["minor_radius"] + shift
+    r_min = SHAPE["major_radius"] - SHAPE["minor_radius"] - shift
+    z_max = SHAPE["elongation"] * SHAPE["minor_radius"]
     for source in sources[::20]:
         positions, energies = source.sample_n(5)
         for (x, y, z), energy in zip(positions, energies):
@@ -111,10 +229,9 @@ def test_sources_drive_a_model():
 @pytest.mark.parametrize(
     "override, message",
     [
-        (dict(minor_radius=2000.0), "minor_radius must be less than major_radius"),
+        (dict(pedestal_radius=300.0), "pedestal_radius must be less than minor_radius"),
         (dict(mode="X"), "mode must be one of"),
         (dict(rotation_angle=0.0), "rotation_angle must be a non-zero value"),
-        (dict(triangularity=2.0), "triangularity must be between -1 and 1"),
         (dict(fuel={"D": 0.3, "T": 0.3}), "fuel fractions must sum to 1"),
         (dict(fuel={"He3": 1.0}), 'fuel species must be "D" or "T"'),
         (dict(fuel={"T": 1.0}), "T-T fusion is not supported"),
@@ -181,27 +298,6 @@ def test_profiles_reject_radii_outside_the_plasma():
             ion_density_separatrix=1e19,
             r=101.0,
         )
-
-
-def test_convert_a_alpha_to_r_z():
-    shape = dict(
-        shafranov_factor=0.44789,
-        minor_radius=292.258,
-        major_radius=906.0,
-        triangularity=0.270,
-        elongation=1.557,
-    )
-
-    r, z = yamc.sources.tokamak_convert_a_alpha_to_r_z(a=292.258, alpha=0.0, **shape)
-    assert r == pytest.approx(906.0 + 292.258)
-    assert z == pytest.approx(0.0)
-
-    # A scalar broadcasts against a sequence, and the result keeps its shape.
-    radii, heights = yamc.sources.tokamak_convert_a_alpha_to_r_z(
-        a=292.258, alpha=[0.0, math.pi], **shape
-    )
-    assert radii == pytest.approx([906.0 + 292.258, 906.0 - 292.258])
-    assert heights == pytest.approx([0.0, 0.0])
 
 
 def test_neutron_source_density():

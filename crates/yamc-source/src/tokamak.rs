@@ -1,31 +1,39 @@
 //! Parametric tokamak plasma source.
 //!
-//! Turns a handful of plasma parameters (major/minor radius, elongation,
-//! triangularity, confinement mode, and the ion density / temperature
-//! profiles) into a set of ring sources that reproduce the neutron emission
-//! of a tokamak plasma.
+//! Turns a plasma shape ([`TokamakShape`]: major and minor radius,
+//! elongation, triangularity and Shafranov factor), a confinement mode and
+//! the ion density / temperature profiles into a set of ring sources that
+//! reproduce the neutron emission of a tokamak plasma.
 //!
-//! The profile models follow Fausser et al., "Tokamak D-T neutron source
-//! models for different plasma physics confinement modes", Fus. Eng. Des. 87
-//! (2012) 787, doi:10.1016/j.fusengdes.2012.02.025 -- the same models the
-//! `openmc-plasma-source` package implements, so the two can be compared
-//! parameter for parameter.
+//! The shape and profile models follow Fausser et al., "Tokamak D-T neutron
+//! source models for different plasma physics confinement modes", Fus. Eng.
+//! Des. 87 (2012) 787, doi:10.1016/j.fusengdes.2012.02.025 -- the same models
+//! the `openmc-plasma-source` package implements, with the same parameter
+//! names and units, so the two can be compared. They differ in how the shape
+//! is given: `openmc-plasma-source` takes its five parameters as separate
+//! arguments, where here they make up a [`TokamakShape`], as a stellarator's
+//! make up a [`StellaratorShape`](crate::stellarator::StellaratorShape).
 //!
 //! The plasma is discretised on a cylindrical (R, phi, Z) mesh. A dense grid
-//! in plasma `(a, alpha)` coordinates is forward-mapped to `(R, Z)`, weighted
-//! by the local volume element and neutron source density, and binned into
-//! the mesh; every non-empty voxel becomes one [`Source`] whose spatial
-//! distribution is that voxel and whose energy is the Ballabio spectrum at
-//! the voxel's emission-weighted ion temperature. One source is emitted per
-//! (voxel, reaction), so the D-D and D-T components keep their own spectra
-//! and strengths.
+//! in plasma `(a, alpha)` coordinates (minor radius and poloidal angle) is
+//! forward-mapped to `(R, Z)`, weighted by the local volume element and
+//! neutron source density, and binned into the mesh; every non-empty voxel
+//! becomes one [`Source`] whose spatial distribution is that voxel and whose
+//! energy is the Ballabio spectrum at the voxel's emission-weighted ion
+//! temperature. One source is emitted per (voxel, reaction), so the D-D and
+//! D-T components keep their own spectra and strengths.
 //!
 //! Within a voxel the position is sampled uniformly in R rather than
 //! uniformly in volume, so emission is flat across the voxel instead of
 //! rising with R. The bias is of order `dR / 2R` -- a few parts in a thousand
 //! at the default resolution, and smaller on a finer mesh.
 
+use std::f64::consts::{PI, TAU};
+
+use serde::{Deserialize, Serialize};
+
 use crate::distribution::angular::AngularDistribution;
+use crate::distribution::check_finite;
 use crate::distribution::energy::{fusion_neutron_spectrum, FusionReactants, Uniform};
 use crate::distribution::spatial::{CylindricalRing, Univariate};
 use crate::source::{Source, SourceEnergyDistribution, SourceSpatialDistribution};
@@ -139,42 +147,207 @@ pub fn neutron_source_density(
     ion_density * reactivity(ion_temperature, reactants)
 }
 
-/// Map plasma `(a, alpha)` coordinates onto `(R, Z)` in cm.
+/// A tokamak plasma shape: nested flux surfaces with elongation,
+/// triangularity and a Shafranov shift. Lengths in cm, angles in radians.
 ///
-/// `a` is the minor radius of the flux surface and `alpha` the poloidal
-/// angle. The mapping applies triangularity, elongation and the Shafranov
-/// shift, which falls off quadratically from the magnetic axis.
-pub fn convert_a_alpha_to_r_z(
-    a: f64,
-    alpha: f64,
-    shafranov_factor: f64,
-    minor_radius: f64,
+/// The flux surface at normalised radius `rho` in [0, 1] -- 0 on the
+/// magnetic axis, 1 on the plasma boundary -- has minor radius
+/// `a = rho * minor_radius`, and at poloidal angle `theta` lies at
+///
+/// ```text
+/// R = major_radius + a cos(theta + triangularity sin(theta)) + shafranov_factor (1 - rho^2)
+/// Z = elongation a sin(theta)
+/// ```
+///
+/// The Shafranov shift moves the magnetic axis out by `shafranov_factor` and
+/// falls off quadratically to zero on the boundary.
+///
+/// [`TokamakShape::new`] checks the parameters, and deserialising does the
+/// same, so every shape is a valid one.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "TokamakShapeData")]
+pub struct TokamakShape {
     major_radius: f64,
-    triangularity: f64,
+    minor_radius: f64,
     elongation: f64,
-) -> (f64, f64) {
-    let shafranov_shift = shafranov_factor * (1.0 - (a / minor_radius).powi(2));
-    let r = major_radius + a * (alpha + triangularity * alpha.sin()).cos() + shafranov_shift;
-    let z = elongation * a * alpha.sin();
-    (r, z)
+    triangularity: f64,
+    shafranov_factor: f64,
 }
 
-/// A parametric tokamak plasma.
+#[derive(Deserialize)]
+struct TokamakShapeData {
+    major_radius: f64,
+    minor_radius: f64,
+    elongation: f64,
+    triangularity: f64,
+    shafranov_factor: f64,
+}
+
+impl TryFrom<TokamakShapeData> for TokamakShape {
+    type Error = String;
+
+    fn try_from(d: TokamakShapeData) -> Result<Self, String> {
+        Self::new(
+            d.major_radius,
+            d.minor_radius,
+            d.elongation,
+            d.triangularity,
+            d.shafranov_factor,
+        )
+    }
+}
+
+impl TokamakShape {
+    /// Build and check a shape: every parameter finite, a positive major
+    /// radius, minor radius and elongation, the minor radius below the major
+    /// radius, the triangularity in [-1, 1] and the Shafranov factor less than
+    /// half the minor radius either way.
+    pub fn new(
+        major_radius: f64,
+        minor_radius: f64,
+        elongation: f64,
+        triangularity: f64,
+        shafranov_factor: f64,
+    ) -> Result<Self, String> {
+        for (name, value) in [
+            ("major_radius", major_radius),
+            ("minor_radius", minor_radius),
+            ("elongation", elongation),
+            ("triangularity", triangularity),
+            ("shafranov_factor", shafranov_factor),
+        ] {
+            check_finite(name, value)?;
+        }
+        if major_radius <= 0.0 {
+            return Err(format!(
+                "major_radius must be positive (got {major_radius})"
+            ));
+        }
+        if minor_radius <= 0.0 {
+            return Err(format!(
+                "minor_radius must be positive (got {minor_radius})"
+            ));
+        }
+        if minor_radius >= major_radius {
+            return Err(format!(
+                "minor_radius must be less than major_radius (got {minor_radius} >= \
+                 {major_radius})"
+            ));
+        }
+        if elongation <= 0.0 {
+            return Err(format!("elongation must be positive (got {elongation})"));
+        }
+        if !(-1.0..=1.0).contains(&triangularity) {
+            return Err(format!(
+                "triangularity must be between -1 and 1 (got {triangularity})"
+            ));
+        }
+        if shafranov_factor.abs() >= 0.5 * minor_radius {
+            return Err(format!(
+                "abs(shafranov_factor) must be less than half the minor radius (got {} >= {})",
+                shafranov_factor.abs(),
+                0.5 * minor_radius
+            ));
+        }
+        Ok(Self {
+            major_radius,
+            minor_radius,
+            elongation,
+            triangularity,
+            shafranov_factor,
+        })
+    }
+
+    /// Plasma major radius (cm).
+    pub fn major_radius(&self) -> f64 {
+        self.major_radius
+    }
+
+    /// Plasma minor radius (cm).
+    pub fn minor_radius(&self) -> f64 {
+        self.minor_radius
+    }
+
+    /// Plasma elongation (dimensionless).
+    pub fn elongation(&self) -> f64 {
+        self.elongation
+    }
+
+    /// Plasma triangularity (dimensionless).
+    pub fn triangularity(&self) -> f64 {
+        self.triangularity
+    }
+
+    /// Shafranov factor (cm): the outward radial shift of the magnetic axis.
+    pub fn shafranov_factor(&self) -> f64 {
+        self.shafranov_factor
+    }
+
+    /// `(R, Z)` in cm on the flux surface at normalised radius `rho` (0 on
+    /// the magnetic axis, 1 on the boundary), at poloidal angle `theta`.
+    pub fn point(&self, rho: f64, theta: f64) -> (f64, f64) {
+        self.point_at_minor_radius(rho * self.minor_radius, theta)
+    }
+
+    /// [`TokamakShape::point`] in minor radius `a` (cm) instead of `rho`, with
+    /// the poloidal angle `alpha`: the coordinates [`TokamakPlasma::sources`]
+    /// lays its grid out in.
+    fn point_at_minor_radius(&self, a: f64, alpha: f64) -> (f64, f64) {
+        let shafranov_shift = self.shafranov_factor * (1.0 - (a / self.minor_radius).powi(2));
+        let r = self.major_radius
+            + a * (alpha + self.triangularity * alpha.sin()).cos()
+            + shafranov_shift;
+        let z = self.elongation * a * alpha.sin();
+        (r, z)
+    }
+
+    /// `|d(R, Z)/d(a, alpha)|`, the poloidal area element of the mapping in
+    /// minor radius `a` (cm) and poloidal angle `alpha`.
+    fn poloidal_jacobian(&self, a: f64, alpha: f64) -> f64 {
+        let theta = alpha + self.triangularity * alpha.sin();
+        let dtheta_dalpha = 1.0 + self.triangularity * alpha.cos();
+        let dr_da =
+            theta.cos() - 2.0 * self.shafranov_factor * a / (self.minor_radius * self.minor_radius);
+        let dr_dalpha = -a * theta.sin() * dtheta_dalpha;
+        let dz_da = self.elongation * alpha.sin();
+        let dz_dalpha = self.elongation * a * alpha.cos();
+        (dr_da * dz_dalpha - dr_dalpha * dz_da).abs()
+    }
+
+    /// Plasma volume (cm^3): the volume inside the boundary `rho = 1`.
+    pub fn volume(&self) -> f64 {
+        // Green's theorem turns the integral of R over the cross-section into
+        // the boundary integral of R^2 / 2 dZ, so the volume 2 pi int R dA is
+        // pi times the boundary integral of R^2 dZ. The Shafranov shift is
+        // zero on the boundary, where R = R0 + a cos(t + d sin t) and
+        // Z = k a sin t. The integrand is periodic and analytic in t, so the
+        // trapezoid rule converges exponentially: it is exact for every
+        // Fourier mode below POINTS, and the modes of R^2 fall off like the
+        // Bessel functions J_n(2 d), as 1 / n! for |d| <= 1.
+        const POINTS: usize = 64;
+        let step = TAU / POINTS as f64;
+        let sum: f64 = (0..POINTS)
+            .map(|i| {
+                let t = step * i as f64;
+                let (r, _) = self.point(1.0, t);
+                r * r * t.cos()
+            })
+            .sum();
+        PI * self.elongation * self.minor_radius * step * sum
+    }
+}
+
+/// A parametric tokamak plasma: a [`TokamakShape`], the Fausser profiles in
+/// minor radius and a fuel.
 ///
 /// Lengths are in cm, ion densities in m^-3, ion temperatures in eV and
-/// angles in radians. Build one and call [`TokamakPlasma::sources`] for the
-/// ring sources, or the profile methods for the density / temperature curves
-/// the source is built from.
+/// angles in radians. Build one with [`TokamakPlasma::new`] and call
+/// [`TokamakPlasma::sources`] for the ring sources, or the profile methods for
+/// the density / temperature curves the source is built from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TokamakPlasma {
-    /// Plasma major radius (cm).
-    pub major_radius: f64,
-    /// Plasma minor radius (cm).
-    pub minor_radius: f64,
-    /// Plasma elongation (dimensionless).
-    pub elongation: f64,
-    /// Plasma triangularity (dimensionless).
-    pub triangularity: f64,
+    /// Plasma shape.
+    pub shape: TokamakShape,
     /// Confinement mode.
     pub mode: ConfinementMode,
     /// Ion density at the plasma centre (m^-3).
@@ -197,8 +370,6 @@ pub struct TokamakPlasma {
     pub ion_temperature_separatrix: f64,
     /// Minor radius at the pedestal (cm).
     pub pedestal_radius: f64,
-    /// Shafranov factor (cm): the outward radial shift of the magnetic axis.
-    pub shafranov_factor: f64,
     /// Toroidal angle at which the plasma sector starts (radians).
     pub start_angle: f64,
     /// Toroidal extent of the plasma sector (radians). Negative extends the
@@ -215,43 +386,13 @@ pub struct TokamakPlasma {
     pub fuel: Vec<(FuelIon, f64)>,
 }
 
-impl Default for TokamakPlasma {
-    /// The optional parameters only: a full torus, a 100 x 100 mesh, a 500 x
-    /// 500 mapping grid and 50:50 D-T fuel. Every plasma parameter is left at
-    /// zero and must be set, since there is no meaningful default tokamak.
-    fn default() -> Self {
-        Self {
-            major_radius: 0.0,
-            minor_radius: 0.0,
-            elongation: 0.0,
-            triangularity: 0.0,
-            mode: ConfinementMode::H,
-            ion_density_centre: 0.0,
-            ion_density_peaking_factor: 0.0,
-            ion_density_pedestal: 0.0,
-            ion_density_separatrix: 0.0,
-            ion_temperature_centre: 0.0,
-            ion_temperature_peaking_factor: 0.0,
-            ion_temperature_beta: 0.0,
-            ion_temperature_pedestal: 0.0,
-            ion_temperature_separatrix: 0.0,
-            pedestal_radius: 0.0,
-            shafranov_factor: 0.0,
-            start_angle: 0.0,
-            rotation_angle: std::f64::consts::TAU,
-            mesh_resolution: (100, 100),
-            grid_density: 500,
-            fuel: vec![(FuelIon::Deuterium, 0.5), (FuelIon::Tritium, 0.5)],
-        }
-    }
-}
-
 /// Fausser ion density and temperature profiles in a normalised radius
 /// `x` in [0, 1] (0 on the magnetic axis, 1 at the separatrix).
 ///
-/// Shared by [`TokamakPlasma`], where `x = a / minor_radius`, and the
-/// stellarator source, where `x` is `rho`, the square root of the normalised
-/// toroidal flux. Units as for [`TokamakPlasma`].
+/// Shared by [`TokamakPlasma`], where `x` is the `rho` of its
+/// [`TokamakShape`], `a / minor_radius`, and the stellarator source, where `x`
+/// is `rho`, the square root of the normalised toroidal flux. Units as for
+/// [`TokamakPlasma`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlasmaProfiles {
     pub mode: ConfinementMode,
@@ -333,7 +474,7 @@ impl PlasmaProfiles {
             ),
             ("pedestal_rho", self.pedestal),
         ] {
-            crate::distribution::check_finite(name, value)?;
+            check_finite(name, value)?;
         }
         if !(self.pedestal > 0.0 && self.pedestal < 1.0) {
             return Err(format!(
@@ -364,6 +505,18 @@ impl PlasmaProfiles {
         }
         Ok(())
     }
+}
+
+/// `a / minor_radius`, the normalised radius of the flux surface of minor
+/// radius `a` (cm), refusing an `a` outside the plasma.
+pub fn normalised_radius(a: f64, minor_radius: f64) -> Result<f64, String> {
+    if !(0.0..=minor_radius).contains(&a) {
+        return Err(format!(
+            "minor radius position must be between 0 and the plasma minor radius {minor_radius} \
+             cm (got {a} cm)"
+        ));
+    }
+    Ok(a / minor_radius)
 }
 
 /// The neutron-producing reactions `fuel` supports, each paired with the
@@ -414,6 +567,32 @@ pub fn validate_fuel(fuel: &[(FuelIon, f64)]) -> Result<(), String> {
 }
 
 impl TokamakPlasma {
+    /// A plasma of this shape with the optional parameters at their defaults:
+    /// a full torus, a 100 x 100 mesh, a 500 x 500 mapping grid and 50:50 D-T
+    /// fuel. The mode is H and every profile parameter is left at zero, to be
+    /// set, since there is no meaningful default plasma.
+    pub fn new(shape: TokamakShape) -> Self {
+        Self {
+            shape,
+            mode: ConfinementMode::H,
+            ion_density_centre: 0.0,
+            ion_density_peaking_factor: 0.0,
+            ion_density_pedestal: 0.0,
+            ion_density_separatrix: 0.0,
+            ion_temperature_centre: 0.0,
+            ion_temperature_peaking_factor: 0.0,
+            ion_temperature_beta: 0.0,
+            ion_temperature_pedestal: 0.0,
+            ion_temperature_separatrix: 0.0,
+            pedestal_radius: 0.0,
+            start_angle: 0.0,
+            rotation_angle: TAU,
+            mesh_resolution: (100, 100),
+            grid_density: 500,
+            fuel: vec![(FuelIon::Deuterium, 0.5), (FuelIon::Tritium, 0.5)],
+        }
+    }
+
     /// The profiles in normalised radius `a / minor_radius`.
     pub fn profiles(&self) -> PlasmaProfiles {
         PlasmaProfiles {
@@ -427,33 +606,20 @@ impl TokamakPlasma {
             ion_temperature_beta: self.ion_temperature_beta,
             ion_temperature_pedestal: self.ion_temperature_pedestal,
             ion_temperature_separatrix: self.ion_temperature_separatrix,
-            pedestal: self.pedestal_radius / self.minor_radius,
+            pedestal: self.pedestal_radius / self.shape.minor_radius,
         }
     }
 
     /// Ion density (m^-3) on the flux surface of minor radius `a` (cm).
     pub fn ion_density(&self, a: f64) -> Result<f64, String> {
-        self.check_minor_radius(a)?;
-        Ok(self.profiles().ion_density(a / self.minor_radius))
+        let x = normalised_radius(a, self.shape.minor_radius)?;
+        Ok(self.profiles().ion_density(x))
     }
 
     /// Ion temperature (eV) on the flux surface of minor radius `a` (cm).
     pub fn ion_temperature(&self, a: f64) -> Result<f64, String> {
-        self.check_minor_radius(a)?;
-        Ok(self.profiles().ion_temperature(a / self.minor_radius))
-    }
-
-    /// Map `(a, alpha)` onto `(R, Z)` in cm using this plasma's shape.
-    pub fn convert_a_alpha_to_r_z(&self, a: f64, alpha: f64) -> (f64, f64) {
-        convert_a_alpha_to_r_z(
-            a,
-            alpha,
-            self.shafranov_factor,
-            self.minor_radius,
-            self.major_radius,
-            self.triangularity,
-            self.elongation,
-        )
+        let x = normalised_radius(a, self.shape.minor_radius)?;
+        Ok(self.profiles().ion_temperature(x))
     }
 
     /// The neutron-producing reactions this fuel supports, each paired with
@@ -483,11 +649,12 @@ impl TokamakPlasma {
         self.validate()?;
         let reactions = self.reactions()?;
 
+        let shape = &self.shape;
         let (n_r, n_z) = self.mesh_resolution;
-        let shift = self.shafranov_factor.abs();
-        let r_min = self.major_radius - self.minor_radius - shift;
-        let r_max = self.major_radius + self.minor_radius + shift;
-        let z_max = self.elongation * self.minor_radius;
+        let shift = shape.shafranov_factor.abs();
+        let r_min = shape.major_radius - shape.minor_radius - shift;
+        let r_max = shape.major_radius + shape.minor_radius + shift;
+        let z_max = shape.elongation * shape.minor_radius;
         let r_edges = linspace(r_min, r_max, n_r + 1);
         let z_edges = linspace(-z_max, z_max, n_z + 1);
 
@@ -496,8 +663,8 @@ impl TokamakPlasma {
         let mut temperature_weights = vec![vec![0.0_f64; n_cells]; reactions.len()];
 
         let grid_density = self.grid_density as f64;
-        let da = self.minor_radius / grid_density;
-        let dalpha = std::f64::consts::TAU / grid_density;
+        let da = shape.minor_radius / grid_density;
+        let dalpha = TAU / grid_density;
         let cell_area = da * dalpha;
 
         // Density, temperature and hence source density depend only on the
@@ -521,7 +688,7 @@ impl TokamakPlasma {
 
             for j in 0..self.grid_density {
                 let alpha = (j as f64 + 0.5) * dalpha;
-                let (r, z) = self.convert_a_alpha_to_r_z(a, alpha);
+                let (r, z) = shape.point_at_minor_radius(a, alpha);
                 let (Some(bin_r), Some(bin_z)) = (
                     bin_index(r, r_min, r_max, n_r),
                     bin_index(z, -z_max, z_max, n_z),
@@ -533,7 +700,7 @@ impl TokamakPlasma {
                 // plasma volume it represents: the toroidal factor R times the
                 // poloidal Jacobian |d(R, Z)/d(a, alpha)|. Without the R factor
                 // the inboard side of the plasma is over-weighted.
-                let volume = r * self.poloidal_jacobian(a, alpha) * cell_area;
+                let volume = r * shape.poloidal_jacobian(a, alpha) * cell_area;
                 for (k, source_density) in source_densities.iter().enumerate() {
                     let weight = source_density * volume;
                     strengths[k][cell] += weight;
@@ -583,18 +750,6 @@ impl TokamakPlasma {
         Ok(sources)
     }
 
-    /// `|d(R, Z)/d(a, alpha)|`, the poloidal area element of the mapping.
-    fn poloidal_jacobian(&self, a: f64, alpha: f64) -> f64 {
-        let theta = alpha + self.triangularity * alpha.sin();
-        let dtheta_dalpha = 1.0 + self.triangularity * alpha.cos();
-        let dr_da =
-            theta.cos() - 2.0 * self.shafranov_factor * a / (self.minor_radius * self.minor_radius);
-        let dr_dalpha = -a * theta.sin() * dtheta_dalpha;
-        let dz_da = self.elongation * alpha.sin();
-        let dz_dalpha = self.elongation * a * alpha.cos();
-        (dr_da * dz_dalpha - dr_dalpha * dz_da).abs()
-    }
-
     /// The toroidal sector as an ascending `(low, high)` pair of angles. The
     /// angles are not wrapped into `[0, 2*pi)`: a ring source takes the sine
     /// and cosine of whatever it samples, so a sector crossing the seam needs
@@ -608,28 +763,14 @@ impl TokamakPlasma {
         }
     }
 
-    fn check_minor_radius(&self, a: f64) -> Result<(), String> {
-        if !(0.0..=self.minor_radius).contains(&a) {
-            return Err(format!(
-                "minor radius position must be between 0 and the plasma minor radius {} cm \
-                 (got {a} cm)",
-                self.minor_radius
-            ));
-        }
-        Ok(())
-    }
-
     /// Check the parameters that [`TokamakPlasma::sources`] relies on, so a
-    /// bad plasma fails before any sampling rather than producing NaNs.
+    /// bad plasma fails before any sampling rather than producing NaNs. The
+    /// shape was checked when it was built.
     pub fn validate(&self) -> Result<(), String> {
         // First, and every one of them: the range checks below are written as
         // `value <= 0.0` and the like, which a NaN passes, and the peaking
         // factors and beta are not range-checked at all.
         for (name, value) in [
-            ("major_radius", self.major_radius),
-            ("minor_radius", self.minor_radius),
-            ("elongation", self.elongation),
-            ("triangularity", self.triangularity),
             ("ion_density_centre", self.ion_density_centre),
             (
                 "ion_density_peaking_factor",
@@ -649,53 +790,15 @@ impl TokamakPlasma {
                 self.ion_temperature_separatrix,
             ),
             ("pedestal_radius", self.pedestal_radius),
-            ("shafranov_factor", self.shafranov_factor),
             ("start_angle", self.start_angle),
             ("rotation_angle", self.rotation_angle),
         ] {
-            crate::distribution::check_finite(name, value)?;
+            check_finite(name, value)?;
         }
-        if self.major_radius <= 0.0 {
-            return Err(format!(
-                "major_radius must be positive (got {})",
-                self.major_radius
-            ));
-        }
-        if self.minor_radius <= 0.0 {
-            return Err(format!(
-                "minor_radius must be positive (got {})",
-                self.minor_radius
-            ));
-        }
-        if self.minor_radius >= self.major_radius {
-            return Err(format!(
-                "minor_radius must be less than major_radius (got {} >= {})",
-                self.minor_radius, self.major_radius
-            ));
-        }
-        if self.elongation <= 0.0 {
-            return Err(format!(
-                "elongation must be positive (got {})",
-                self.elongation
-            ));
-        }
-        if !(-1.0..=1.0).contains(&self.triangularity) {
-            return Err(format!(
-                "triangularity must be between -1 and 1 (got {})",
-                self.triangularity
-            ));
-        }
-        if self.pedestal_radius >= self.minor_radius {
+        if self.pedestal_radius >= self.shape.minor_radius {
             return Err(format!(
                 "pedestal_radius must be less than minor_radius (got {} >= {})",
-                self.pedestal_radius, self.minor_radius
-            ));
-        }
-        if self.shafranov_factor.abs() >= 0.5 * self.minor_radius {
-            return Err(format!(
-                "abs(shafranov_factor) must be less than half the minor radius (got {} >= {})",
-                self.shafranov_factor.abs(),
-                0.5 * self.minor_radius
+                self.pedestal_radius, self.shape.minor_radius
             ));
         }
         for (name, value) in [
@@ -719,14 +822,13 @@ impl TokamakPlasma {
                 return Err(format!("{name} must not be negative (got {value})"));
             }
         }
-        let two_pi = std::f64::consts::TAU;
-        if !(-two_pi..=two_pi).contains(&self.start_angle) {
+        if !(-TAU..=TAU).contains(&self.start_angle) {
             return Err(format!(
                 "start_angle must be between -2*pi and 2*pi (got {})",
                 self.start_angle
             ));
         }
-        if !(-two_pi..=two_pi).contains(&self.rotation_angle) || self.rotation_angle == 0.0 {
+        if !(-TAU..=TAU).contains(&self.rotation_angle) || self.rotation_angle == 0.0 {
             return Err(format!(
                 "rotation_angle must be a non-zero value between -2*pi and 2*pi (got {})",
                 self.rotation_angle
