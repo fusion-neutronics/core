@@ -8287,10 +8287,12 @@ def mesh_faces(faces: typing.Sequence[typing.Any], scheduler: builtins.str = 'da
     Mesh multiple faces in batch.
     """
 
-def mesh_faces_scene_resolved(faces: typing.Sequence[tuple[builtins.int, typing.Sequence[tuple[builtins.int, builtins.bool, typing.Sequence[typing.Sequence[builtins.float]]]], typing.Sequence[typing.Sequence[tuple[builtins.int, builtins.bool, typing.Sequence[typing.Sequence[builtins.float]]]]], builtins.bool, builtins.str]], tolerance: builtins.float = 0.01, angular_tolerance: builtins.float = 0.3) -> builtins.list[SceneFaceOutput]:
+def mesh_faces_scene_resolved(faces: typing.Sequence[tuple[builtins.int, typing.Sequence[tuple[builtins.int, builtins.bool, typing.Sequence[typing.Sequence[builtins.float]]]], typing.Sequence[typing.Sequence[tuple[builtins.int, builtins.bool, typing.Sequence[typing.Sequence[builtins.float]]]]], builtins.bool, builtins.str]], tolerance: builtins.float = 0.01, angular_tolerance: builtins.float = 0.3, threads: typing.Optional[builtins.int] = None) -> builtins.list[SceneFaceOutput]:
     r"""
     Mesh faces from pre-resolved UV boundary loops (empty edge table; yamc owns
     edge discretization in OCP). Returns one output per input face, in order.
+    The faces are meshed in parallel on ``threads`` threads, or on rayon's
+    global pool when ``threads`` is ``None`` (the default).
     """
 
 def mesh_to_arrow(path: builtins.str, vertices: typing.Sequence[builtins.float], triangles: typing.Sequence[builtins.int], triangle_surface_ids: typing.Sequence[builtins.int], triangle_physical_groups: typing.Sequence[builtins.int], tetrahedra: typing.Sequence[builtins.int] = [], tet_volume_ids: typing.Sequence[builtins.int] = [], tet_physical_groups: typing.Sequence[builtins.int] = [], physical_groups_json: builtins.str = '{}', surface_volumes_json: builtins.str = '[]', volume_measures_json: builtins.str = '', imprinted: typing.Optional[builtins.bool] = None, contact_tolerance: typing.Optional[builtins.float] = None, overlaps: typing.Sequence[tuple[builtins.int, builtins.int]] = [], separated: typing.Sequence[tuple[builtins.int, builtins.int]] = []) -> None:
@@ -8313,13 +8315,15 @@ def mesh_to_arrow(path: builtins.str, vertices: typing.Sequence[builtins.float],
     gap between them is kept rather than filled.
     """
 
-def mesh_volume_rs(boundary_vertices: typing.Sequence[typing.Sequence[builtins.float]], boundary_triangles: typing.Sequence[typing.Sequence[builtins.int]], target_edge_length: builtins.float) -> tuple[builtins.list[builtins.list[builtins.float]], builtins.list[builtins.list[builtins.int]]]:
+def mesh_volume_rs(boundary_vertices: typing.Sequence[typing.Sequence[builtins.float]], boundary_triangles: typing.Sequence[typing.Sequence[builtins.int]], target_edge_length: builtins.float, threads: typing.Optional[builtins.int] = None) -> tuple[builtins.list[builtins.list[builtins.float]], builtins.list[builtins.list[builtins.int]]]:
     r"""
     Tetrahedralize a solid from its conformal boundary surface mesh (replaces
     netgen). Returns `(interior_vertices, tetrahedra)`. Boundary vertices are
     preserved exactly (tet indices `0..len(boundary_vertices)` reference them,
     `>=` reference the returned interior vertices), and tets are pre-oriented
-    to positive volume - so no winding swap or face remapping is needed.
+    to positive volume - so no winding swap or face remapping is needed. The
+    work runs on ``threads`` threads, or on rayon's global pool when
+    ``threads`` is ``None`` (the default).
     """
 
 def radionuclide_production(neutron_files: typing.Sequence[builtins.str]) -> list:
@@ -8695,7 +8699,7 @@ def simulate_shutdown_dose(schedule: PulseSchedule, tallies: typing.Sequence[Tal
         >>> dose["dose"].mean[-1]
     """
 
-def solid_contact_samples(vertices: typing.Sequence[typing.Sequence[builtins.float]], solids: typing.Sequence[tuple[builtins.int, typing.Sequence[typing.Sequence[builtins.int]]]], tolerance: builtins.float, samples: builtins.int = 8) -> builtins.list[tuple[builtins.int, builtins.int, builtins.list[builtins.list[builtins.float]]]]:
+def solid_contact_samples(vertices: typing.Sequence[typing.Sequence[builtins.float]], solids: typing.Sequence[tuple[builtins.int, typing.Sequence[typing.Sequence[builtins.int]]]], tolerance: builtins.float, samples: builtins.int = 8, threads: typing.Optional[builtins.int] = None) -> builtins.list[tuple[builtins.int, builtins.int, builtins.list[builtins.list[builtins.float]]]]:
     r"""
     Points where two solids' surface meshes come within ``tolerance``.
     
@@ -8710,6 +8714,8 @@ def solid_contact_samples(vertices: typing.Sequence[typing.Sequence[builtins.flo
         solids: ``(solid_id, triangles)`` per solid.
         tolerance: The contact tolerance (3D units).
         samples: Points to return per pair at most.
+        threads: Threads to run the search on, or ``None`` (the default) for
+            rayon's global pool.
     
     Returns:
         ``[(solid_a, solid_b, [[x, y, z], ...]), ...]``, the points on
@@ -8718,7 +8724,7 @@ def solid_contact_samples(vertices: typing.Sequence[typing.Sequence[builtins.flo
         vertex (which lies on both CAD surfaces, so the two touch).
     """
 
-def solid_overlaps(vertices: typing.Sequence[typing.Sequence[builtins.float]], solids: typing.Sequence[tuple[builtins.int, typing.Sequence[typing.Sequence[builtins.int]]]], depth_tolerance: builtins.float) -> builtins.list[tuple[builtins.int, builtins.int, builtins.float, builtins.float]]:
+def solid_overlaps(vertices: typing.Sequence[typing.Sequence[builtins.float]], solids: typing.Sequence[tuple[builtins.int, typing.Sequence[typing.Sequence[builtins.int]]]], depth_tolerance: builtins.float, threads: typing.Optional[builtins.int] = None) -> builtins.list[tuple[builtins.int, builtins.int, builtins.float, builtins.float]]:
     r"""
     Pairs of solids whose surface meshes overlap deeper than ``depth_tolerance``.
     
@@ -8733,6 +8739,8 @@ def solid_overlaps(vertices: typing.Sequence[typing.Sequence[builtins.float]], s
             boundary as ``[i, j, k]`` indices into ``vertices``.
         depth_tolerance: Penetration (3D units) at or below which a feature
             counts as touching rather than inside.
+        threads: Threads to run the check on, or ``None`` (the default) for
+            rayon's global pool.
     
     Returns:
         ``[(solid_a, solid_b, max_depth, exposure), ...]`` for every
@@ -8741,7 +8749,7 @@ def solid_overlaps(vertices: typing.Sequence[typing.Sequence[builtins.float]], s
         isotropic tracks through the model that cross the overlap.
     """
 
-def solid_self_intersections(vertices: typing.Sequence[typing.Sequence[builtins.float]], solids: typing.Sequence[tuple[builtins.int, typing.Sequence[typing.Sequence[builtins.int]]]], rel_tol: builtins.float = 1e-06, samples: builtins.int = 4) -> builtins.list[tuple[builtins.int, builtins.int, builtins.float, builtins.list[builtins.list[builtins.float]]]]:
+def solid_self_intersections(vertices: typing.Sequence[typing.Sequence[builtins.float]], solids: typing.Sequence[tuple[builtins.int, typing.Sequence[typing.Sequence[builtins.int]]]], rel_tol: builtins.float = 1e-06, samples: builtins.int = 4, threads: typing.Optional[builtins.int] = None) -> builtins.list[tuple[builtins.int, builtins.int, builtins.float, builtins.list[builtins.list[builtins.float]]]]:
     r"""
     Solids whose surface mesh crosses itself.
     
@@ -8759,6 +8767,8 @@ def solid_self_intersections(vertices: typing.Sequence[typing.Sequence[builtins.
             box around the solids' vertices; the default is the tolerance
             the surface assembler welds vertices at.
         samples: Crossing points to return per solid at most, deepest first.
+        threads: Threads to run the check on, or ``None`` (the default) for
+            rayon's global pool.
     
     Returns:
         ``[(solid_id, pairs, max_depth, [[x, y, z], ...]), ...]`` for every
@@ -8771,7 +8781,7 @@ def solid_self_intersections(vertices: typing.Sequence[typing.Sequence[builtins.
             finite, or ``rel_tol`` is negative.
     """
 
-def solid_shared_volume(vertices: typing.Sequence[typing.Sequence[builtins.float]], triangles_a: typing.Sequence[typing.Sequence[builtins.int]], triangles_b: typing.Sequence[typing.Sequence[builtins.int]], tolerance: builtins.float, samples: builtins.int = 200000, seed: builtins.int = 1) -> tuple[builtins.float, builtins.float, typing.Optional[builtins.int]]:
+def solid_shared_volume(vertices: typing.Sequence[typing.Sequence[builtins.float]], triangles_a: typing.Sequence[typing.Sequence[builtins.int]], triangles_b: typing.Sequence[typing.Sequence[builtins.int]], tolerance: builtins.float, samples: builtins.int = 200000, seed: builtins.int = 1, threads: typing.Optional[builtins.int] = None) -> tuple[builtins.float, builtins.float, typing.Optional[builtins.int]]:
     r"""
     Volume shared by two solids' closed surface meshes.
     
@@ -8783,6 +8793,8 @@ def solid_shared_volume(vertices: typing.Sequence[typing.Sequence[builtins.float
         tolerance: Distance below which the two surfaces count as touching.
         samples: Points sampled when the volume has to be estimated.
         seed: Seed of the deterministic sampler.
+        threads: Threads to run the sampling on, or ``None`` (the default) for
+            rayon's global pool.
     
     Returns:
         ``(volume, std_err, embedded)``. When the surfaces never come within

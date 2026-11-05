@@ -13,6 +13,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
 
+use super::cad::on_threads;
 use yamm::mesher::{mesh_faces_scene, MeshMode, SceneFace, SceneFaceEdge};
 use yamm::volume::{mesh_volume, VolumeInput};
 
@@ -86,14 +87,17 @@ fn parse_mode(mode: &str) -> PyResult<MeshMode> {
 
 /// Mesh faces from pre-resolved UV boundary loops (empty edge table; yamc owns
 /// edge discretization in OCP). Returns one output per input face, in order.
+/// The faces are meshed in parallel on ``threads`` threads, or on rayon's
+/// global pool when ``threads`` is ``None`` (the default).
 #[gen_stub_pyfunction]
 #[pyfunction]
-#[pyo3(signature = (faces, tolerance=0.01, angular_tolerance=0.3))]
+#[pyo3(signature = (faces, tolerance=0.01, angular_tolerance=0.3, threads=None))]
 pub fn mesh_faces_scene_resolved(
     py: Python<'_>,
     faces: Vec<PreFace>,
     tolerance: f64,
     angular_tolerance: f64,
+    threads: Option<usize>,
 ) -> PyResult<Vec<SceneFaceOutput>> {
     let scene_faces: Vec<SceneFace> = faces
         .into_iter()
@@ -114,7 +118,11 @@ pub fn mesh_faces_scene_resolved(
         .collect::<PyResult<_>>()?;
 
     let outputs = py
-        .detach(|| mesh_faces_scene(vec![], scene_faces, tolerance, angular_tolerance))
+        .detach(|| {
+            on_threads(threads, || {
+                mesh_faces_scene(vec![], scene_faces, tolerance, angular_tolerance)
+            })
+        })?
         .map_err(|e| PyRuntimeError::new_err(format!("mesh_faces_scene failed: {e}")))?;
 
     Ok(outputs
@@ -144,14 +152,18 @@ pub fn mesh_faces_scene_resolved(
 /// netgen). Returns `(interior_vertices, tetrahedra)`. Boundary vertices are
 /// preserved exactly (tet indices `0..len(boundary_vertices)` reference them,
 /// `>=` reference the returned interior vertices), and tets are pre-oriented
-/// to positive volume - so no winding swap or face remapping is needed.
+/// to positive volume - so no winding swap or face remapping is needed. The
+/// work runs on ``threads`` threads, or on rayon's global pool when
+/// ``threads`` is ``None`` (the default).
 #[gen_stub_pyfunction]
 #[pyfunction]
+#[pyo3(signature = (boundary_vertices, boundary_triangles, target_edge_length, threads=None))]
 pub fn mesh_volume_rs(
     py: Python<'_>,
     boundary_vertices: Vec<[f64; 3]>,
     boundary_triangles: Vec<[usize; 3]>,
     target_edge_length: f64,
+    threads: Option<usize>,
 ) -> PyResult<(Vec<[f64; 3]>, Vec<[usize; 4]>)> {
     let input = VolumeInput {
         boundary_vertices,
@@ -159,7 +171,7 @@ pub fn mesh_volume_rs(
         target_edge_length,
     };
     let out = py
-        .detach(|| mesh_volume(&input))
+        .detach(|| on_threads(threads, || mesh_volume(&input)))?
         .map_err(|e| PyRuntimeError::new_err(format!("mesh_volume failed: {e}")))?;
     Ok((out.interior_vertices, out.tetrahedra))
 }

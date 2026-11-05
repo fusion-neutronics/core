@@ -160,8 +160,9 @@ def _structured_grid_face(surf, tolerance, angular_tolerance):
     return verts, triangles
 
 
-def scene_face_meshes(pa, face_tolerances, face_ids=None):
-    """Mesh the given faces with the scene CDT (default: all faces).
+def scene_face_meshes(pa, face_tolerances, face_ids=None, threads=None):
+    """Mesh the given faces with the scene CDT (default: all faces), on
+    *threads* threads (``None``: rayon's global pool).
 
     *face_tolerances* maps each face id to its ``(tolerance,
     angular_tolerance)``. An edge is discretized once for every face on it, at
@@ -215,7 +216,7 @@ def scene_face_meshes(pa, face_tolerances, face_ids=None):
     out_by_fid = {
         o.face_id: o
         for (tolerance, angular_tolerance), faces in pre_faces.items()
-        for o in mesh_faces_scene_resolved(faces, tolerance, angular_tolerance)
+        for o in mesh_faces_scene_resolved(faces, tolerance, angular_tolerance, threads)
     }
 
     result = {}

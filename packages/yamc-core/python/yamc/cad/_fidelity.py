@@ -268,13 +268,14 @@ def check_mesh_fidelity(mesh, pa, tolerance):
     return problems
 
 
-def check_self_crossing(mesh, angular_tolerance):
+def check_self_crossing(mesh, angular_tolerance, threads=None):
     """Solids of *mesh* (SurfaceMesh) whose surface crosses itself.
 
     Args:
         mesh: SurfaceMesh from the assembler.
         angular_tolerance: ``{solid_id: angle}``, the angular deflection
             each solid was meshed at (radians), quoted in the problem.
+        threads: Threads to run the check on; ``None`` for rayon's global pool.
 
     Returns:
         List of human-readable problem strings (empty when no solid's facets
@@ -288,5 +289,7 @@ def check_self_crossing(mesh, angular_tolerance):
         "thinner than the faceting has had its faces meshed through each other; "
         "mesh it at an angular_tolerance tighter than "
         f"{angular_tolerance[sid]:g}"
-        for sid, pairs, depth, points in solid_self_intersections(mesh.vertices, solids)
+        for sid, pairs, depth, points in solid_self_intersections(
+            mesh.vertices, solids, threads=threads
+        )
     ]

@@ -16,18 +16,21 @@ from yamc._core import solid_contact_samples
 from ._overlap import _solid_triangles
 
 
-def find_separated(mesh, solid_shapes, contact_tolerance):
+def find_separated(mesh, solid_shapes, contact_tolerance, threads=None):
     """Solid pairs within *contact_tolerance* in *mesh* whose CAD solids do not
     touch, as 1-based ``(a, b)`` solid ids.
 
     A pair touches when any of its sample points (mesh vertices of one solid
     near the other) lies within a thousandth of the tolerance of the other CAD
     solid, inside or on it. A pair whose meshes share a vertex, or only come
-    close between vertices, has no samples and counts as touching.
+    close between vertices, has no samples and counts as touching. The search
+    runs on *threads* threads (``None``: rayon's global pool).
     """
     solids = sorted(_solid_triangles(mesh).items())
     eps = 1e-3 * contact_tolerance
-    samples = list(solid_contact_samples(mesh.vertices, solids, contact_tolerance))
+    samples = list(
+        solid_contact_samples(mesh.vertices, solids, contact_tolerance, threads=threads)
+    )
     separated = []
     cad = None
     # Grouped by the other solid, so one solid's extrema are held at a time.

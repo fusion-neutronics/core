@@ -7,6 +7,35 @@ use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pyme
 use yamm::mesher::{self, EdgeInput, FaceInput, MeshMode};
 use yamt::io::arrow::{write_arrow_mesh, MeshData};
 
+/// Run `work` on a pool of `threads` threads made for it, or on rayon's
+/// global pool when `threads` is `None`.
+///
+/// The global pool can only be sized once per process, so a caller limiting
+/// the threads of one mesh gets a pool of its own, dropped afterwards. Rayon
+/// work started inside runs on that pool, nested `par_iter`s included.
+pub(crate) fn on_threads<T: Send>(
+    threads: Option<usize>,
+    work: impl FnOnce() -> T + Send,
+) -> PyResult<T> {
+    let Some(n) = threads else {
+        return Ok(work());
+    };
+    if n == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "threads must be a positive integer, got 0",
+        ));
+    }
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(n)
+        .build()
+        .map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "could not start a pool of {n} threads: {e}"
+            ))
+        })?;
+    Ok(pool.install(work))
+}
+
 /// Mesh a single face in UV space.
 #[gen_stub_pyfunction]
 #[pyfunction]
@@ -542,6 +571,8 @@ pub fn cad_mesh_labels(
 ///         boundary as ``[i, j, k]`` indices into ``vertices``.
 ///     depth_tolerance: Penetration (3D units) at or below which a feature
 ///         counts as touching rather than inside.
+///     threads: Threads to run the check on, or ``None`` (the default) for
+///         rayon's global pool.
 ///
 /// Returns:
 ///     ``[(solid_a, solid_b, max_depth, exposure), ...]`` for every
@@ -550,16 +581,20 @@ pub fn cad_mesh_labels(
 ///     isotropic tracks through the model that cross the overlap.
 #[gen_stub_pyfunction]
 #[pyfunction]
-#[pyo3(signature = (vertices, solids, depth_tolerance))]
+#[pyo3(signature = (vertices, solids, depth_tolerance, threads=None))]
 pub fn solid_overlaps(
     vertices: Vec<[f64; 3]>,
     solids: Vec<(usize, Vec<[usize; 3]>)>,
     depth_tolerance: f64,
-) -> Vec<(usize, usize, f64, f64)> {
-    yamm::overlap::find_solid_overlaps(&vertices, &solids, &[], depth_tolerance)
+    threads: Option<usize>,
+) -> PyResult<Vec<(usize, usize, f64, f64)>> {
+    let found = on_threads(threads, || {
+        yamm::overlap::find_solid_overlaps(&vertices, &solids, &[], depth_tolerance)
+    })?;
+    Ok(found
         .into_iter()
         .map(|o| (o.solid_a, o.solid_b, o.max_depth, o.exposure))
-        .collect()
+        .collect())
 }
 
 /// Volume shared by two solids' closed surface meshes.
@@ -572,6 +607,8 @@ pub fn solid_overlaps(
 ///     tolerance: Distance below which the two surfaces count as touching.
 ///     samples: Points sampled when the volume has to be estimated.
 ///     seed: Seed of the deterministic sampler.
+///     threads: Threads to run the sampling on, or ``None`` (the default) for
+///         rayon's global pool.
 ///
 /// Returns:
 ///     ``(volume, std_err, embedded)``. When the surfaces never come within
@@ -582,7 +619,8 @@ pub fn solid_overlaps(
 ///     standard error ``std_err``.
 #[gen_stub_pyfunction]
 #[pyfunction]
-#[pyo3(signature = (vertices, triangles_a, triangles_b, tolerance, samples=200_000, seed=1))]
+#[pyo3(signature = (vertices, triangles_a, triangles_b, tolerance, samples=200_000, seed=1, threads=None))]
+#[allow(clippy::too_many_arguments)]
 pub fn solid_shared_volume(
     vertices: Vec<[f64; 3]>,
     triangles_a: Vec<[usize; 3]>,
@@ -590,18 +628,22 @@ pub fn solid_shared_volume(
     tolerance: f64,
     samples: usize,
     seed: u64,
-) -> (f64, f64, Option<usize>) {
-    match yamm::overlap::shared_volume(
-        &vertices,
-        &triangles_a,
-        &triangles_b,
-        tolerance,
-        samples,
-        seed,
-    ) {
+    threads: Option<usize>,
+) -> PyResult<(f64, f64, Option<usize>)> {
+    let shared = on_threads(threads, || {
+        yamm::overlap::shared_volume(
+            &vertices,
+            &triangles_a,
+            &triangles_b,
+            tolerance,
+            samples,
+            seed,
+        )
+    })?;
+    Ok(match shared {
         yamm::overlap::SharedVolume::Embedded(i) => (0.0, 0.0, Some(i)),
         yamm::overlap::SharedVolume::Estimate { volume, std_err } => (volume, std_err, None),
-    }
+    })
 }
 
 /// Points where two solids' surface meshes come within ``tolerance``.
@@ -617,6 +659,8 @@ pub fn solid_shared_volume(
 ///     solids: ``(solid_id, triangles)`` per solid.
 ///     tolerance: The contact tolerance (3D units).
 ///     samples: Points to return per pair at most.
+///     threads: Threads to run the search on, or ``None`` (the default) for
+///         rayon's global pool.
 ///
 /// Returns:
 ///     ``[(solid_a, solid_b, [[x, y, z], ...]), ...]``, the points on
@@ -625,15 +669,18 @@ pub fn solid_shared_volume(
 ///     vertex (which lies on both CAD surfaces, so the two touch).
 #[gen_stub_pyfunction]
 #[pyfunction]
-#[pyo3(signature = (vertices, solids, tolerance, samples=8))]
+#[pyo3(signature = (vertices, solids, tolerance, samples=8, threads=None))]
 #[allow(clippy::type_complexity)]
 pub fn solid_contact_samples(
     vertices: Vec<[f64; 3]>,
     solids: Vec<(usize, Vec<[usize; 3]>)>,
     tolerance: f64,
     samples: usize,
-) -> Vec<(usize, usize, Vec<[f64; 3]>)> {
-    yamm::overlap::contact_samples(&vertices, &solids, tolerance, samples)
+    threads: Option<usize>,
+) -> PyResult<Vec<(usize, usize, Vec<[f64; 3]>)>> {
+    on_threads(threads, || {
+        yamm::overlap::contact_samples(&vertices, &solids, tolerance, samples)
+    })
 }
 
 /// Solids whose surface mesh crosses itself.
@@ -652,6 +699,8 @@ pub fn solid_contact_samples(
 ///         box around the solids' vertices; the default is the tolerance
 ///         the surface assembler welds vertices at.
 ///     samples: Crossing points to return per solid at most, deepest first.
+///     threads: Threads to run the check on, or ``None`` (the default) for
+///         rayon's global pool.
 ///
 /// Returns:
 ///     ``[(solid_id, pairs, max_depth, [[x, y, z], ...]), ...]`` for every
@@ -664,17 +713,19 @@ pub fn solid_contact_samples(
 ///         finite, or ``rel_tol`` is negative.
 #[gen_stub_pyfunction]
 #[pyfunction]
-#[pyo3(signature = (vertices, solids, rel_tol=1e-6, samples=4))]
+#[pyo3(signature = (vertices, solids, rel_tol=1e-6, samples=4, threads=None))]
 #[allow(clippy::type_complexity)]
 pub fn solid_self_intersections(
     vertices: Vec<[f64; 3]>,
     solids: Vec<(usize, Vec<[usize; 3]>)>,
     rel_tol: f64,
     samples: usize,
+    threads: Option<usize>,
 ) -> PyResult<Vec<(usize, usize, f64, Vec<[f64; 3]>)>> {
-    let found =
+    let found = on_threads(threads, || {
         yamm::self_intersection::find_self_intersections(&vertices, &solids, rel_tol, samples)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    })?
+    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
     Ok(found
         .into_iter()
         .map(|s| {

@@ -99,6 +99,14 @@ def _positive_finite(value, label, expected="a number"):
     return float(value)
 
 
+def _rayon_threads(mesh_threads):
+    """The thread count for the Rust work of one mesh: ``None`` for ``"all"``,
+    which leaves it on rayon's global pool as before, or the validated count,
+    which runs it on a pool of its own."""
+    threads = resolve_threads(mesh_threads, "mesh_threads")
+    return None if mesh_threads == "all" else threads
+
+
 def _check_per_solid(value, name, material_tags):
     """Check a per-solid setting before the imprint, so a mistake fails fast.
 
@@ -456,9 +464,11 @@ class CadToYamc:
                 prior OCC thread settings are restored even if imprinting fails.
                 Validated but unused when imprinting is skipped.
             mesh_threads: ``"all"`` (default) uses all logical processors for
-                OCC ``BRepMesh`` face meshing, or pass a positive integer to
-                limit its threads and reduce peak RAM. The triangulation is
-                the same on any number of threads.
+                meshing, or pass a positive integer to limit its threads and
+                reduce peak RAM: OCC ``BRepMesh`` face meshing, the Rust scene
+                CDT, the self-crossing, overlap and contact checks, and tet
+                meshing all run on at most that many. The triangulation is the
+                same on any number of threads.
             contact_tolerance: Only with ``imprint=False``: the distance
                 (3D units) within which two solids count as touching, one for
                 the whole model. A particle crosses an overlap or a gap
@@ -510,7 +520,7 @@ class CadToYamc:
         )
 
         if tet_volumes:
-            self.mesh_volumes(tet_volumes, target_edge_length)
+            self.mesh_volumes(tet_volumes, target_edge_length, mesh_threads=mesh_threads)
 
         return self._surface_mesh
 
@@ -540,7 +550,7 @@ class CadToYamc:
                 number or a per-solid dict; see :meth:`mesh`.
             imprint: Imprint the assembly first; see :meth:`mesh`.
             imprint_threads: Threads for imprinting only; see :meth:`mesh`.
-            mesh_threads: Threads for BRepMesh face meshing; see :meth:`mesh`.
+            mesh_threads: Threads for meshing and its checks; see :meth:`mesh`.
             contact_tolerance: See :meth:`mesh`.
             overlaps: See :meth:`mesh`.
 
@@ -565,6 +575,8 @@ class CadToYamc:
         self,
         volumes_to_tet: list[str] | None = None,
         tet_target_edge_length: float | None = None,
+        *,
+        mesh_threads: int | Literal["all"] = "all",
     ) -> dict[int, tuple[list[list[float]], list[list[int]]]]:
         """Generate tetrahedral meshes for selected volumes.
 
@@ -573,12 +585,14 @@ class CadToYamc:
                 If None, tet-meshes all volumes.
             tet_target_edge_length: Target tet edge length (3D units). If
                 None, a default derived from each solid's size is used.
+            mesh_threads: Threads for tet meshing; see :meth:`mesh`.
 
         Returns:
             Dict mapping solid_id -> (tet_vertices, tet_connectivity).
         """
         if self._surface_mesh is None:
             raise RuntimeError("No surface mesh. Call mesh() or mesh_surfaces() first.")
+        threads = _rayon_threads(mesh_threads)
 
         # Determine which solids to tet-mesh
         solids_to_tet = set()
@@ -595,6 +609,7 @@ class CadToYamc:
         self._mesh_volumes(
             solids_to_tet,
             tet_target_edge_length=tet_target_edge_length,
+            threads=threads,
         )
         return self._tet_data
 
@@ -661,6 +676,7 @@ class CadToYamc:
             angular_tolerance, "angular_tolerance", self._material_tags
         )
 
+        rayon_threads = _rayon_threads(mesh_threads)
         mesh_threads = resolve_threads(mesh_threads, "mesh_threads")
         self._processed = process_assembly(
             self._assembly, self._material_tags, imprint=imprint,
@@ -708,7 +724,9 @@ class CadToYamc:
         per_face.update(
             brepmesh_face_meshes(pa, brep_fids, face_tolerances, mesh_threads)
         )
-        per_face.update(scene_face_meshes(pa, face_tolerances, scene_fids))
+        per_face.update(
+            scene_face_meshes(pa, face_tolerances, scene_fids, rayon_threads)
+        )
         release_freed_memory()
 
         (vertices, triangles, triangle_face_ids, triangle_surface_ids,
@@ -742,7 +760,9 @@ class CadToYamc:
             )
 
             problems = check_mesh_fidelity(self._surface_mesh, pa, solid_tolerance)
-            problems += check_self_crossing(self._surface_mesh, solid_angular_tolerance)
+            problems += check_self_crossing(
+                self._surface_mesh, solid_angular_tolerance, rayon_threads
+            )
             if problems:
                 detail = "\n  ".join(problems)
                 raise MeshFidelityError(
@@ -762,13 +782,16 @@ class CadToYamc:
                 found = [
                     pair
                     for pair in find_overlaps(
-                        self._surface_mesh, 2.0 * min(overlap_limit.values())
+                        self._surface_mesh, 2.0 * min(overlap_limit.values()),
+                        rayon_threads,
                     )
                     if pair[2] > 2.0 * max(overlap_limit[pair[0]], overlap_limit[pair[1]])
                 ]
                 limit = "twice the larger deflection of the two solids"
             else:
-                found = find_overlaps(self._surface_mesh, contact_tolerance)
+                found = find_overlaps(
+                    self._surface_mesh, contact_tolerance, rayon_threads
+                )
                 limit = f"the contact tolerance ({contact_tolerance:g})"
             if found and imprint:
                 detail = "\n  ".join(describe(self._surface_mesh, found, overlap_limit))
@@ -802,7 +825,8 @@ class CadToYamc:
                 )
             if found:
                 pairs, measures, lines = resolve_smaller_wins(
-                    self._surface_mesh, found, contact_tolerance
+                    self._surface_mesh, found, contact_tolerance,
+                    threads=rayon_threads,
                 )
                 self._overlaps = pairs
                 self._volume_measures = measures
@@ -816,12 +840,12 @@ class CadToYamc:
             from ._contact import find_separated
 
             self._separated = find_separated(
-                self._surface_mesh, pa.solid_shapes, contact_tolerance
+                self._surface_mesh, pa.solid_shapes, contact_tolerance, rayon_threads
             )
 
         return self._surface_mesh
 
-    def _mesh_volumes(self, solids_to_tet, tet_target_edge_length=None):
+    def _mesh_volumes(self, solids_to_tet, tet_target_edge_length=None, threads=None):
         """Tetrahedralize each solid with the yamm tet mesher (mesh_volume).
 
         Each solid's surface triangles (from the scene surface mesh) are welded
@@ -882,7 +906,7 @@ class CadToYamc:
                 tel = _default_tet_edge_length(boundary_verts)
 
             interior_verts, tets = mesh_volume_rs(
-                boundary_verts, boundary_tris, float(tel)
+                boundary_verts, boundary_tris, float(tel), threads
             )
 
             # tets index boundary_verts (0..N) then interior_verts (N..).
