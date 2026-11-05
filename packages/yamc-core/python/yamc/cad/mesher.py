@@ -29,6 +29,10 @@ if TYPE_CHECKING:
 _DEFAULT_TOLERANCE = 0.1
 _DEFAULT_ANGULAR_TOLERANCE = 0.1
 
+# Move vertices so every curved face's mesh encloses the CAD face's volume
+# (see :mod:`yamc.cad._face_volumes`). Off only to compare against.
+_PRESERVE_FACE_VOLUMES = True
+
 
 @dataclass
 class SurfaceMesh:
@@ -359,6 +363,7 @@ class CadToYamc:
         self._overlaps = []  # (low, high) 1-based solid pairs, high takes the overlap
         self._volume_measures = None  # per-solid volumes when overlaps are resolved
         self._separated = []  # (a, b) 1-based solid pairs a real gap apart
+        self._face_volume_stats = None  # what preserve_face_volumes did
 
     def add_cadquery_object(
         self,
@@ -423,10 +428,19 @@ class CadToYamc:
                 triangles, and then all take the finest of their values.
                 Where OCC cannot keep touching surfaces watertight at
                 different values, the surfaces joined to them are meshed at
-                the finest value among them. Default 0.1.
+                the finest value among them. A mesh of a curved surface
+                lies inside it, so the vertices of curved surfaces and edges
+                are then moved off them, by less than the tolerance, until
+                each surface's mesh encloses the volume the CAD surface does:
+                a coarse mesh keeps its solids' volumes. Default 0.1.
             angular_tolerance: Angular deflection tolerance for surface
                 meshing (radians), a number or a per-solid dict as for
                 *tolerance*.  Default 0.1 (~5.7 degrees).
+            fidelity_check: Refuse, raising ``MeshFidelityError``, a mesh
+                whose face areas or solid volumes are far from the CAD's, or
+                in which a solid's surface crosses itself (a wall thinner than
+                its facets' sag, meshed at too loose an angular tolerance).
+                Default True.
             imprint: Imprint the assembly first, so solids that touch share
                 one surface where they meet (a conformal mesh). ``False``
                 skips the imprint and meshes every solid on its own: much
@@ -702,10 +716,21 @@ class CadToYamc:
             face_solid_reversed=pa.face_solid_reversed,
         )
 
+        self._face_volume_stats = None
+        if _PRESERVE_FACE_VOLUMES:
+            from ._face_volumes import preserve_face_volumes
+
+            self._face_volume_stats = preserve_face_volumes(
+                self._surface_mesh, pa, face_tolerances
+            )
+
         if fidelity_check:
-            from ._fidelity import MeshFidelityError, check_mesh_fidelity
+            from ._fidelity import (
+                MeshFidelityError, check_mesh_fidelity, check_self_crossing,
+            )
 
             problems = check_mesh_fidelity(self._surface_mesh, pa, solid_tolerance)
+            problems += check_self_crossing(self._surface_mesh, solid_angular_tolerance)
             if problems:
                 detail = "\n  ".join(problems)
                 raise MeshFidelityError(

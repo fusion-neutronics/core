@@ -636,6 +636,54 @@ pub fn solid_contact_samples(
     yamm::overlap::contact_samples(&vertices, &solids, tolerance, samples)
 }
 
+/// Solids whose surface mesh crosses itself.
+///
+/// Every pair of a solid's triangles that share no vertex (by index, or by
+/// position within the tolerance) is tested exactly for a crossing: a wall
+/// thinner than the faceting whose two faces have been meshed through each
+/// other. Triangles that touch, along an edge, at a point or within the
+/// tolerance, do not count, and degenerate ones are skipped.
+///
+/// Args:
+///     vertices: Global ``[x, y, z]`` vertex array.
+///     solids: ``(solid_id, triangles)`` per solid, each its full closed
+///         boundary as ``[i, j, k]`` indices into ``vertices``.
+///     rel_tol: The contact tolerance as a fraction of the diagonal of the
+///         box around the solids' vertices; the default is the tolerance
+///         the surface assembler welds vertices at.
+///     samples: Crossing points to return per solid at most, deepest first.
+///
+/// Returns:
+///     ``[(solid_id, pairs, max_depth, [[x, y, z], ...]), ...]`` for every
+///     solid that crosses itself: the number of crossing triangle pairs, how
+///     far the deepest pair passes through each other, and the deepest
+///     crossing points.
+///
+/// Raises:
+///     ValueError: If a triangle indexes past ``vertices``, a vertex is not
+///         finite, or ``rel_tol`` is negative.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (vertices, solids, rel_tol=1e-6, samples=4))]
+#[allow(clippy::type_complexity)]
+pub fn solid_self_intersections(
+    vertices: Vec<[f64; 3]>,
+    solids: Vec<(usize, Vec<[usize; 3]>)>,
+    rel_tol: f64,
+    samples: usize,
+) -> PyResult<Vec<(usize, usize, f64, Vec<[f64; 3]>)>> {
+    let found =
+        yamm::self_intersection::find_self_intersections(&vertices, &solids, rel_tol, samples)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    Ok(found
+        .into_iter()
+        .map(|s| {
+            let points = s.samples.iter().map(|c| c.point).collect();
+            (s.solid, s.pairs, s.max_depth, points)
+        })
+        .collect())
+}
+
 /// Weld coincident vertices of a triangle mesh into a watertight, index-shared
 /// boundary (the compiled core of the CAD pipeline's vertex welding).
 ///
