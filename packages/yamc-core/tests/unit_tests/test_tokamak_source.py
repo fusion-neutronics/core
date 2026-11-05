@@ -94,6 +94,8 @@ def test_shape_evaluate_matches_the_parameterisation():
         (1.5, 0.0, r"rho must be between 0 and 1 \(got 1.5\)"),
         ([0.5, -0.1], 0.0, r"rho must be between 0 and 1 \(got -0.1\)"),
         ([0.1, 0.2], [0.0, 1.0, 2.0], r"rho and theta must be the same length \(got 2 and 3\)"),
+        (1.0, math.nan, r"theta must be a finite number \(got NaN\)"),
+        (0.5, [0.0, math.inf], r"theta must be a finite number \(got inf\)"),
     ],
 )
 def test_shape_evaluate_rejects_bad_coordinates(rho, theta, message):

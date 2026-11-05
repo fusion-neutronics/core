@@ -535,8 +535,9 @@ class TokamakShape:
             An ``(R, Z)`` tuple in cm, each a float or a list of floats.
         
         Raises:
-            ValueError: If ``rho`` is outside 0 to 1, or ``rho`` and ``theta``
-                are sequences of different lengths.
+            ValueError: If ``rho`` is outside 0 to 1, ``theta`` is NaN or
+                infinite, or ``rho`` and ``theta`` are sequences of different
+                lengths.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -804,6 +805,10 @@ class StellaratorShape:
         
         Returns:
             An ``(R, Z)`` tuple in cm, each a float or a list of floats.
+        
+        Raises:
+            ValueError: If ``rho`` is outside 0 to 1, ``theta`` or ``zeta`` is
+                NaN or infinite, or the sequences differ in length.
         """
     def __repr__(self) -> builtins.str: ...
 

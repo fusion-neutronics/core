@@ -14,6 +14,7 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
+use yamc_source::distribution::check_finite;
 use yamc_source::distribution::energy::FusionReactants;
 use yamc_source::source::ParticleSource;
 use yamc_source::tokamak::{
@@ -252,8 +253,9 @@ impl PyTokamakShape {
     ///     An ``(R, Z)`` tuple in cm, each a float or a list of floats.
     ///
     /// Raises:
-    ///     ValueError: If ``rho`` is outside 0 to 1, or ``rho`` and ``theta``
-    ///         are sequences of different lengths.
+    ///     ValueError: If ``rho`` is outside 0 to 1, ``theta`` is NaN or
+    ///         infinite, or ``rho`` and ``theta`` are sequences of different
+    ///         lengths.
     fn evaluate(
         &self,
         py: Python<'_>,
@@ -276,6 +278,7 @@ impl PyTokamakShape {
                     "rho must be between 0 and 1 (got {rho})"
                 )));
             }
+            check_finite("theta", theta).map_err(PyErr::new::<PyValueError, _>)?;
             let (r, z) = self.inner.point(rho, theta);
             radii.push(r);
             heights.push(z);

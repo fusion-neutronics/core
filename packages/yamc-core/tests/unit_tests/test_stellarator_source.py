@@ -71,6 +71,19 @@ def test_shape_volume_and_evaluation(shape):
         assert zi == pytest.approx(0.5 * (A * math.sin(theta) - E * math.sin(angle)))
 
 
+@pytest.mark.parametrize(
+    "rho, theta, zeta, message",
+    [
+        (1.5, 0.0, 0.0, r"rho must be between 0 and 1 \(got 1.5\)"),
+        (1.0, math.nan, 0.0, r"theta must be a finite number \(got NaN\)"),
+        (0.5, [0.0, 1.0], math.inf, r"zeta must be a finite number \(got inf\)"),
+    ],
+)
+def test_shape_evaluate_rejects_bad_coordinates(shape, rho, theta, zeta, message):
+    with pytest.raises(ValueError, match=message):
+        shape.evaluate(rho, theta, zeta)
+
+
 def test_sources_are_flux_shells_with_ballabio_spectra(sources, shape):
     assert len(sources) == 100  # 50 shells for each of D-T and D-D
     assert sum(source.strength for source in sources) == pytest.approx(1.0)

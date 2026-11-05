@@ -7,6 +7,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
+use yamc_source::distribution::check_finite;
 use yamc_source::source::ParticleSource;
 use yamc_source::stellarator::{FluxShell, StellaratorPlasma, StellaratorShape};
 use yamc_source::tokamak::{ConfinementMode, PlasmaProfiles};
@@ -138,6 +139,10 @@ impl PyStellaratorShape {
     ///
     /// Returns:
     ///     An ``(R, Z)`` tuple in cm, each a float or a list of floats.
+    ///
+    /// Raises:
+    ///     ValueError: If ``rho`` is outside 0 to 1, ``theta`` or ``zeta`` is
+    ///         NaN or infinite, or the sequences differ in length.
     fn evaluate(
         &self,
         py: Python<'_>,
@@ -170,13 +175,15 @@ impl PyStellaratorShape {
         };
         let (mut radii, mut heights) = (Vec::with_capacity(length), Vec::with_capacity(length));
         for i in 0..length {
-            let rho = at(i, 0);
+            let (rho, theta, zeta) = (at(i, 0), at(i, 1), at(i, 2));
             if !(0.0..=1.0).contains(&rho) {
                 return Err(value_error(format!(
                     "rho must be between 0 and 1 (got {rho})"
                 )));
             }
-            let p = self.inner.point(rho, at(i, 1), at(i, 2));
+            check_finite("theta", theta).map_err(value_error)?;
+            check_finite("zeta", zeta).map_err(value_error)?;
+            let p = self.inner.point(rho, theta, zeta);
             radii.push(p.r);
             heights.push(p.z);
         }
