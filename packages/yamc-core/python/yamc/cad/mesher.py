@@ -16,7 +16,7 @@ import numbers
 import os
 import warnings
 
-from .assembly_processor import process_assembly
+from .assembly_processor import process_assembly, release_freed_memory, resolve_threads
 from . import cad_mesh_labels as _cad_mesh_labels
 from . import cad_mesh_to_arrow as _cad_mesh_to_arrow
 from . import weld_mesh as _weld_mesh
@@ -397,6 +397,7 @@ class CadToYamc:
         overlaps: str = "error",
         *,
         imprint_threads: int | Literal["all"] = "all",
+        mesh_threads: int | Literal["all"] = "all",
     ) -> SurfaceMesh:
         """Mesh the assembly: surfaces + optional tet volumes.
 
@@ -454,6 +455,10 @@ class CadToYamc:
                 and reduce peak RAM. Does not change subsequent meshing. The
                 prior OCC thread settings are restored even if imprinting fails.
                 Validated but unused when imprinting is skipped.
+            mesh_threads: ``"all"`` (default) uses all logical processors for
+                OCC ``BRepMesh`` face meshing, or pass a positive integer to
+                limit its threads and reduce peak RAM. The triangulation is
+                the same on any number of threads.
             contact_tolerance: Only with ``imprint=False``: the distance
                 (3D units) within which two solids count as touching, one for
                 the whole model. A particle crosses an overlap or a gap
@@ -501,6 +506,7 @@ class CadToYamc:
             contact_tolerance=contact_tolerance,
             overlaps=overlaps,
             imprint_threads=imprint_threads,
+            mesh_threads=mesh_threads,
         )
 
         if tet_volumes:
@@ -522,6 +528,7 @@ class CadToYamc:
         overlaps: str = "error",
         *,
         imprint_threads: int | Literal["all"] = "all",
+        mesh_threads: int | Literal["all"] = "all",
     ) -> SurfaceMesh:
         """Mesh all surfaces of the assembly.
 
@@ -533,6 +540,7 @@ class CadToYamc:
                 number or a per-solid dict; see :meth:`mesh`.
             imprint: Imprint the assembly first; see :meth:`mesh`.
             imprint_threads: Threads for imprinting only; see :meth:`mesh`.
+            mesh_threads: Threads for BRepMesh face meshing; see :meth:`mesh`.
             contact_tolerance: See :meth:`mesh`.
             overlaps: See :meth:`mesh`.
 
@@ -550,6 +558,7 @@ class CadToYamc:
             contact_tolerance=contact_tolerance,
             overlaps=overlaps,
             imprint_threads=imprint_threads,
+            mesh_threads=mesh_threads,
         )
 
     def mesh_volumes(
@@ -602,6 +611,7 @@ class CadToYamc:
         contact_tolerance=None,
         overlaps="error",
         imprint_threads="all",
+        mesh_threads="all",
     ):
         """Mesh surfaces with a hybrid backend, mirroring cad-to-dagmc-mesher.
 
@@ -651,6 +661,7 @@ class CadToYamc:
             angular_tolerance, "angular_tolerance", self._material_tags
         )
 
+        mesh_threads = resolve_threads(mesh_threads, "mesh_threads")
         self._processed = process_assembly(
             self._assembly, self._material_tags, imprint=imprint,
             imprint_threads=imprint_threads,
@@ -695,9 +706,10 @@ class CadToYamc:
 
         per_face = {}
         per_face.update(
-            brepmesh_face_meshes(pa, brep_fids, face_tolerances, parallel=not imprint)
+            brepmesh_face_meshes(pa, brep_fids, face_tolerances, mesh_threads)
         )
         per_face.update(scene_face_meshes(pa, face_tolerances, scene_fids))
+        release_freed_memory()
 
         (vertices, triangles, triangle_face_ids, triangle_surface_ids,
          face_to_surface_id) = assemble_surface_mesh(pa, per_face)

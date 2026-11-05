@@ -7,6 +7,9 @@ faces belong to which solids, shared faces, and face orientation per solid.
 
 from __future__ import annotations
 
+import ctypes
+import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from threading import RLock
 from typing import Literal
@@ -36,6 +39,39 @@ from ._fidelity import _occ_signed_volume
 
 
 _IMPRINT_THREAD_LOCK = RLock()
+
+
+@contextmanager
+def occ_threads(threads: int):
+    """Run the OCC work inside on at most *threads* threads of the default
+    pool, restoring the pool afterwards. Serialised, since the pool is global."""
+    with _IMPRINT_THREAD_LOCK:
+        pool = OSD_ThreadPool.DefaultPool_s()
+        previous_threads = pool.NbThreads()
+        previous_launch_threads = pool.NbDefaultThreadsToLaunch()
+        try:
+            setThreads(threads)
+            pool.SetNbDefaultThreadsToLaunch(threads)
+            yield
+        finally:
+            setThreads(previous_threads)
+            pool.SetNbDefaultThreadsToLaunch(previous_launch_threads)
+
+
+def release_freed_memory():
+    """Hand memory the process has freed back to the operating system.
+
+    glibc keeps freed heap memory for reuse, so after a large OCC operation the
+    process still holds its peak: a 64-solid imprint left 9.5GB resident that
+    nothing referenced, and every later stage of meshing ran on top of it.
+    ``malloc_trim`` returns it (0.6GB left). Linux with glibc only; elsewhere
+    this does nothing.
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    trim = getattr(ctypes.CDLL(None), "malloc_trim", None)
+    if trim is not None:
+        trim(0)
 
 
 class OverlappingSolidsError(ValueError):
@@ -146,14 +182,18 @@ def _bake_mirrored_parts(assembly):
     return parts
 
 
-def _resolve_imprint_threads(imprint_threads: int | Literal["all"]) -> int:
-    if isinstance(imprint_threads, str) and imprint_threads == "all":
+def resolve_threads(threads: int | Literal["all"], name: str = "threads") -> int:
+    """A thread count from ``"all"`` (every logical processor) or a positive
+    integer; *name* is the argument named in the error otherwise."""
+    if isinstance(threads, str) and threads == "all":
         return max(1, OSD_Parallel.NbLogicalProcessors_s())
-    if type(imprint_threads) is int and imprint_threads > 0:
-        return imprint_threads
-    raise ValueError(
-        f"imprint_threads must be 'all' or a positive integer, got {imprint_threads!r}"
-    )
+    if type(threads) is int and threads > 0:
+        return threads
+    raise ValueError(f"{name} must be 'all' or a positive integer, got {threads!r}")
+
+
+def _resolve_imprint_threads(imprint_threads: int | Literal["all"]) -> int:
+    return resolve_threads(imprint_threads, "imprint_threads")
 
 
 def _imprint_assembly(assembly, imprint_threads: int | Literal["all"] = "all"):
@@ -176,20 +216,12 @@ def _imprint_assembly(assembly, imprint_threads: int | Literal["all"] = "all"):
         return _compound_without_imprint(assembly)
 
     imprint = cq.occ_impl.assembly.imprint
-    with _IMPRINT_THREAD_LOCK:
-        pool = OSD_ThreadPool.DefaultPool_s()
-        previous_threads = pool.NbThreads()
-        previous_launch_threads = pool.NbDefaultThreadsToLaunch()
-        try:
-            setThreads(threads)
-            pool.SetNbDefaultThreadsToLaunch(threads)
-            if "glue" in inspect.signature(imprint).parameters:
-                compound, solids = imprint(assembly, glue="partial")
-            else:
-                compound, solids = imprint(assembly)
-        finally:
-            setThreads(previous_threads)
-            pool.SetNbDefaultThreadsToLaunch(previous_launch_threads)
+    with occ_threads(threads):
+        if "glue" in inspect.signature(imprint).parameters:
+            compound, solids = imprint(assembly, glue="partial")
+        else:
+            compound, solids = imprint(assembly)
+    release_freed_memory()
     return _strip_free_internal_edges(compound, solids)
 
 
