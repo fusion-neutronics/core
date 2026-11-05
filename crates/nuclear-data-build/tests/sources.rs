@@ -251,32 +251,3 @@ fn with_no_downloads_folder_the_message_asks_for_one() {
         "{err}"
     );
 }
-
-#[test]
-fn a_recipe_with_an_unpinned_source_is_refused_before_any_request() {
-    let origin = Origin::start();
-    let scratch = Scratch::new("unpinned");
-    let file = body(11, 1000);
-    let url = origin.serve("a.tar.gz", Reply::file(&file));
-    let mut unpinned = source("b.tar.gz", &url, &file, Sublibrary::Neutron);
-    unpinned.pin = None;
-    let r = recipe(
-        "jendl-5.0",
-        vec![
-            source("a.tar.gz", &url, &file, Sublibrary::Neutron),
-            unpinned,
-        ],
-    );
-    let err = fetch(&r, &scratch.dir("lib"), &no_os_folder()).unwrap_err();
-    assert!(err.contains("jendl-5.0 cannot be built yet"), "{err}");
-    assert!(err.contains("b.tar.gz"), "{err}");
-    assert_eq!(origin.hits("a.tar.gz"), 0);
-}
-
-#[test]
-fn the_real_recipes_not_pinned_yet_are_refused() {
-    let scratch = Scratch::new("real-unpinned");
-    let r = nuclear_data_build::recipe::recipe("jendl-5.0").unwrap();
-    let err = fetch(r, &scratch.dir("lib"), &no_os_folder()).unwrap_err();
-    assert!(err.contains("jendl-5.0 cannot be built yet"), "{err}");
-}

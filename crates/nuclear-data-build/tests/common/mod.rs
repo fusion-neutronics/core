@@ -60,7 +60,7 @@ pub fn source(name: &str, url: &str, body: &[u8], sublibrary: Sublibrary) -> Sou
     Source {
         name: leak(name.to_string()),
         url: leak(url.to_string()),
-        pin: Some(pin_of(body)),
+        pin: pin_of(body),
         sublibrary,
         keep: |_| true,
     }

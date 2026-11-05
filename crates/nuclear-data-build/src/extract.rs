@@ -45,7 +45,7 @@ pub fn extract(
         let expected: String = parts
             .iter()
             .map(|f| {
-                let pin = f.source.pin.expect("a fetched source is pinned");
+                let pin = f.source.pin;
                 format!("{} {}\n", pin.sha256, f.source.name)
             })
             .collect();

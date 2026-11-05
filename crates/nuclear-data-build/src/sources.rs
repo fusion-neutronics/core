@@ -68,33 +68,17 @@ pub fn downloads_dir(root: &Path) -> PathBuf {
 /// Make every source of `recipe` available on local disk, checked against
 /// its pin, in recipe order.
 ///
-/// Fails, before any request, on a recipe with a source not pinned yet.
-/// Otherwise every source is tried; then, if any is missing, one error lists
+/// Every source is tried; then, if any is missing, one error lists
 /// the files whose hosts only serve them to a web browser (with links, sizes
 /// and where to save them) and any that failed another way.
 pub fn fetch(recipe: &Recipe, root: &Path, search: &Search) -> Result<Vec<Fetched>, String> {
-    let unpinned: Vec<&str> = recipe
-        .sources
-        .iter()
-        .filter(|s| s.pin.is_none())
-        .map(|s| s.name)
-        .collect();
-    if !unpinned.is_empty() {
-        return Err(format!(
-            "{} cannot be built yet: {} of its source files are not pinned to a size and \
-             sha256 in this version ({}).",
-            recipe.keyword,
-            unpinned.len(),
-            unpinned.join(", ")
-        ));
-    }
     let build = downloads_dir(root);
     let mut scans = Scans::default();
     let mut fetched = Vec::new();
     let mut browser = Vec::new();
     let mut failed = Vec::new();
     for source in recipe.sources {
-        let pin = source.pin.expect("checked above");
+        let pin = source.pin;
         let dest = build.join(source.name);
         if let Some(dir) = &search.downloads
             && let Some(path) = scans.find(dir, pin)?
@@ -298,7 +282,7 @@ fn missing_message(
         out.push('\n');
         let width = browser.iter().map(|s| s.url.len()).max().unwrap_or(0);
         for s in browser {
-            let size = s.pin.map(|p| human(p.bytes)).unwrap_or_default();
+            let size = human(s.pin.bytes);
             out.push_str(&format!("  {:<width$}  {size}\n", s.url));
         }
         out.push_str("\nThen run the build again.\n");
