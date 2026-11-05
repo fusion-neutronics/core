@@ -28,6 +28,9 @@ pub struct Cell {
     pub(crate) fill_role: Option<crate::geometry::fill::FillRole>,
     /// Cached list of surfaces with sense for fast iteration (avoids repeated collection)
     pub(crate) cached_surfaces: Vec<(Arc<crate::geo::Surface>, bool)>,
+    /// Whether any of `cached_surfaces` is free-form (searched for
+    /// iteratively), so `closest_surface` caps those searches.
+    pub(crate) has_free_form: bool,
     /// Flattened RPN representation of the region for iterative evaluation.
     /// Built once at construction time; used by `contains()` and `distance_to_surface()`.
     pub(crate) flat_region: FlatRegion,
@@ -80,19 +83,34 @@ impl Cell {
         let mut closest_boundary = None;
         let mut closest_surface_id = None;
 
-        // Use cached surfaces for fast iteration (avoids repeated collection)
-        for (surface_arc, _sense) in &self.cached_surfaces {
-            let surface: &crate::geo::Surface = surface_arc.as_ref();
-            let offset = on_surface
-                .filter(|on| surface.surface_id == Some(on.surface_id))
-                .map(|on| on.offset);
-            if let Some(dist) = surface.distance_to_surface_on(point, direction, offset)
-                && dist > 1e-10
-                && dist < min_dist
-            {
-                min_dist = dist;
-                closest_boundary = Some(surface.boundary.clone());
-                closest_surface_id = surface.surface_id;
+        // Closed-form surfaces first, then free-form ones, each of which
+        // stops searching at the nearest crossing found so far: a crossing
+        // beyond it could not be the closest anyway.
+        for free_form in [false, true] {
+            if free_form && !self.has_free_form {
+                break;
+            }
+            for (surface_arc, _sense) in &self.cached_surfaces {
+                let surface: &crate::geo::Surface = surface_arc.as_ref();
+                if surface.is_free_form() != free_form {
+                    continue;
+                }
+                let offset = on_surface
+                    .filter(|on| surface.surface_id == Some(on.surface_id))
+                    .map(|on| on.offset);
+                let dist = if free_form {
+                    surface.distance_to_surface_capped(point, direction, offset, min_dist)
+                } else {
+                    surface.distance_to_surface_on(point, direction, offset)
+                };
+                if let Some(dist) = dist
+                    && dist > 1e-10
+                    && dist < min_dist
+                {
+                    min_dist = dist;
+                    closest_boundary = Some(surface.boundary.clone());
+                    closest_surface_id = surface.surface_id;
+                }
             }
         }
 
@@ -141,6 +159,7 @@ impl Cell {
     ) -> Self {
         // Pre-cache surfaces for fast iteration during transport
         let cached_surfaces = region.surfaces_with_sense();
+        let has_free_form = cached_surfaces.iter().any(|(s, _)| s.is_free_form());
         // Compile region to flat RPN for iterative containment checks
         let flat_region = region.flatten();
         Cell {
@@ -152,6 +171,7 @@ impl Cell {
             #[cfg(feature = "mesh")]
             fill_role: None,
             cached_surfaces,
+            has_free_form,
             flat_region,
         }
     }

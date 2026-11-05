@@ -503,3 +503,63 @@ fn a_boundary_round_trips_through_json() {
     }
     assert_eq!(serde_json::to_string(&back).unwrap(), json);
 }
+
+/// Rough per-call costs (run in release: `cargo test --release -p yamc-geo
+/// flux::tests::timing -- --ignored --nocapture`).
+#[test]
+#[ignore]
+fn timing() {
+    use std::time::Instant;
+    for (name, boundary) in [
+        ("circular torus", circular_torus(600.0, 150.0)),
+        ("rotating ellipse", rotating_ellipse()),
+        ("bean", bean()),
+    ] {
+        let base = Surface::new_flux(Arc::new(boundary), None, None);
+        for d in [0.0, 15.0] {
+            let s = base.offset(d, None, None).unwrap();
+            let mut rng = Rng(99);
+            let pts: Vec<(f64, f64, f64)> = (0..2000)
+                .map(|_| {
+                    (
+                        rng.range(-900.0, 900.0),
+                        rng.range(-900.0, 900.0),
+                        rng.range(-300.0, 300.0),
+                    )
+                })
+                .collect();
+            let rays: Vec<([f64; 3], [f64; 3])> = (0..500)
+                .map(|_| {
+                    (
+                        [
+                            rng.range(-900.0, 900.0),
+                            rng.range(-900.0, 900.0),
+                            rng.range(-300.0, 300.0),
+                        ],
+                        rng.direction(),
+                    )
+                })
+                .collect();
+            let t = Instant::now();
+            let mut acc = 0.0;
+            for &p in &pts {
+                acc += s.evaluate(p);
+            }
+            let eval_us = t.elapsed().as_secs_f64() * 1e6 / pts.len() as f64;
+            let t = Instant::now();
+            for &p in &pts {
+                acc += s.evaluate_exact(p);
+            }
+            let exact_us = t.elapsed().as_secs_f64() * 1e6 / pts.len() as f64;
+            let t = Instant::now();
+            let mut hits = 0;
+            for &(o, u) in &rays {
+                if s.distance_to_surface(o, u).is_some() {
+                    hits += 1;
+                }
+            }
+            let ray_us = t.elapsed().as_secs_f64() * 1e6 / rays.len() as f64;
+            println!("{name:17} offset {d:4}: evaluate {eval_us:8.2} us, exact {exact_us:8.2} us, ray {ray_us:9.2} us ({hits} hits) [{acc:.1}]");
+        }
+    }
+}

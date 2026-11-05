@@ -256,13 +256,40 @@ impl Surface {
                 axis,
                 tan2_theta,
             } => cone::distance(point, direction, *apex, *axis, *tan2_theta),
+            SurfaceKind::Flux { .. } => {
+                self.distance_to_surface_capped(point, direction, on_surface, f64::INFINITY)
+            }
+        }
+    }
+
+    /// Whether the surface is free-form (a flux or offset surface), whose
+    /// crossings are searched for iteratively rather than solved in closed
+    /// form.
+    pub fn is_free_form(&self) -> bool {
+        matches!(self.kind, SurfaceKind::Flux { .. })
+    }
+
+    /// [`Surface::distance_to_surface_on`] for a caller that only needs
+    /// crossings nearer than `t_max`: a free-form surface stops searching
+    /// there and returns `None` for a crossing beyond it. Closed-form kinds
+    /// ignore the cap.
+    pub fn distance_to_surface_capped(
+        &self,
+        point: [f64; 3],
+        direction: [f64; 3],
+        on_surface: Option<f64>,
+        t_max: f64,
+    ) -> Option<f64> {
+        match &self.kind {
             SurfaceKind::Flux { boundary, offset } => boundary.distance(
                 point,
                 direction,
                 *offset,
                 on_surface,
                 self.boundary == BoundaryType::Vacuum,
+                t_max,
             ),
+            _ => self.distance_to_surface_on(point, direction, on_surface),
         }
     }
     /// Builder-style setter for the optional `name` metadata field.
@@ -348,6 +375,20 @@ impl Surface {
             SurfaceKind::Flux { boundary, offset } => {
                 boundary.evaluate([point.0, point.1, point.2], *offset)
             }
+        }
+    }
+
+    /// [`Surface::evaluate`] with an exact magnitude. For flux and offset
+    /// surfaces `evaluate` has an exact sign but, away from the surface,
+    /// returns only a rigorous lower bound on the distance (all transport
+    /// needs); this returns the signed distance (cm) itself. Other kinds
+    /// return `evaluate` unchanged.
+    pub fn evaluate_exact(&self, point: (f64, f64, f64)) -> f64 {
+        match &self.kind {
+            SurfaceKind::Flux { boundary, offset } => {
+                boundary.signed_distance([point.0, point.1, point.2]) - offset
+            }
+            _ => self.evaluate(point),
         }
     }
 

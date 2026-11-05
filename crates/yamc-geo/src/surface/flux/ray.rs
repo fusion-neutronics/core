@@ -276,7 +276,8 @@ enum Outcome {
 
 impl Engine {
     /// Distance along the ray to the first crossing of the level set
-    /// `D = offset` beyond `MIN_ROOT`, or `None`.
+    /// `D = offset` beyond `MIN_ROOT`, or `None` (also when the crossing is
+    /// beyond `t_max`, where the search stops).
     ///
     /// `on_surface` is `Some(offset)` when the particle has just crossed
     /// this level set and sits that far past the crossing. Without it a
@@ -294,10 +295,12 @@ impl Engine {
         offset: f64,
         on_surface: Option<f64>,
         vacuum: bool,
+        t_max: f64,
     ) -> Option<f64> {
         let mut bx = self.patches.extents;
         bx.inflate(offset.max(0.0) + self.margin);
         let (t0, t1) = bx.clip(origin, direction)?;
+        let t1 = t1.min(t_max);
         if t1 <= MIN_ROOT {
             return None;
         }

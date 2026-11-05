@@ -167,7 +167,11 @@ impl Engine {
     }
 
     /// Newton's method for the closest surface point, from `(theta,
-    /// zeta)`, optionally kept inside a parameter rectangle.
+    /// zeta)`, optionally kept inside a parameter rectangle. It stops when
+    /// the tangential part of `x - X` is below `newton_tolerance` (the
+    /// distance is then exact to second order in that residual), and
+    /// reports `converged` for such a point with a positive-definite
+    /// Hessian inside the rectangle.
     pub(super) fn newton(
         &self,
         x: [f64; 3],
@@ -180,59 +184,61 @@ impl Engine {
             Some((tr, zr)) => (t.clamp(tr[0], tr[1]), z.clamp(zr[0], zr[1])),
             None => (t, z),
         };
+        let interior = |t: f64, z: f64| {
+            rect.is_none_or(|(tr, zr)| t > tr[0] && t < tr[1] && z > zr[0] && z < zr[1])
+        };
         let (mut t, mut z) = clamp(theta, zeta);
         let mut sp = self.series.point(t, z);
         let mut r = sub(x, sp.x);
         let mut f = dot(r, r);
-        let tol = self.newton_tolerance;
         let mut converged = false;
         for _ in 0..max_iter {
             let g = [-dot(r, sp.x_t), -dot(r, sp.x_z)];
             let h00 = dot(sp.x_t, sp.x_t) - dot(r, sp.x_tt);
             let h01 = dot(sp.x_t, sp.x_z) - dot(r, sp.x_tz);
             let h11 = dot(sp.x_z, sp.x_z) - dot(r, sp.x_zz);
-            let det = h00 * h11 - h01 * h01;
-            let pd = h00 > 0.0 && det > 0.0;
+            let pd = h00 > 0.0 && h00 * h11 - h01 * h01 > 0.0;
+            let tangential = (g[0].abs() / dot(sp.x_t, sp.x_t).sqrt())
+                .max(g[1].abs() / dot(sp.x_z, sp.x_z).sqrt());
+            if tangential <= self.newton_tolerance {
+                converged = pd && interior(t, z);
+                break;
+            }
             // Newton where the Hessian is positive definite, otherwise a
-            // Levenberg-Marquardt step that is a descent direction.
+            // Levenberg-Marquardt step, which is a descent direction.
             let (a00, a11) = if pd {
                 (h00, h11)
             } else {
                 let lambda = h00.abs().max(h11.abs()) + 1.0;
                 (h00 + lambda, h11 + lambda)
             };
-            let det_a = a00 * a11 - h01 * h01;
-            if det_a <= 0.0 || !det_a.is_finite() {
+            let det = a00 * a11 - h01 * h01;
+            if det <= 0.0 || !det.is_finite() {
                 break;
             }
-            let mut dt = -(a11 * g[0] - h01 * g[1]) / det_a;
-            let mut dz = -(a00 * g[1] - h01 * g[0]) / det_a;
-            let mut improved = false;
-            for _ in 0..40 {
+            let mut dt = -(a11 * g[0] - h01 * g[1]) / det;
+            let mut dz = -(a00 * g[1] - h01 * g[0]) / det;
+            // Take the step unless it increases the distance beyond
+            // round-off; halve it otherwise.
+            let slack = self.margin * (2.0 * f.sqrt() + self.margin);
+            let mut moved = false;
+            for _ in 0..20 {
                 let (nt, nz) = clamp(t + dt, z + dz);
                 let np = self.series.point(nt, nz);
                 let nr = sub(x, np.x);
                 let nf = dot(nr, nr);
-                if nf <= f {
-                    let moved = [np.x[0] - sp.x[0], np.x[1] - sp.x[1], np.x[2] - sp.x[2]];
-                    (t, z, sp, r, f) = (nt, nz, np, nr, nf);
-                    improved = true;
-                    if pd && dot(moved, moved).sqrt() <= tol {
-                        converged = true;
-                    }
+                if nf <= f + slack {
+                    moved = (nt, nz) != (t, z);
+                    (t, z, sp, r, f) = (nt, nz, np, nr, nf.min(f));
                     break;
                 }
                 dt *= 0.5;
                 dz *= 0.5;
             }
-            if converged || !improved {
-                // No descent step: a stationary point (or the clamp edge).
-                if !improved {
-                    converged = pd
-                        && rect.is_none_or(|(tr, zr)| {
-                            t > tr[0] && t < tr[1] && z > zr[0] && z < zr[1]
-                        });
-                }
+            if !moved {
+                // No step lowers the distance: a stationary point within
+                // round-off, or a corner of the rectangle.
+                converged = pd && interior(t, z);
                 break;
             }
         }
@@ -246,22 +252,26 @@ impl Engine {
     }
 
     /// Whether `foot` (at distance `dist`) is the global closest point of
-    /// a point on `side`: no patch outside its 3 x 3 neighbourhood comes
-    /// closer than `dist`, and inside that neighbourhood the surface does
-    /// not curve towards the point enough for the normals to meet within
-    /// `dist`.
+    /// a point on `side`: no patch outside a neighbourhood of the foot
+    /// comes closer than `dist`, and inside that neighbourhood the surface
+    /// does not curve towards the point enough for the normals to meet
+    /// within `dist`.
     fn certified(&self, x: [f64; 3], foot: &Foot, dist: f64, side: f64) -> bool {
         if !foot.converged {
             return false;
         }
+        // Exclude a neighbourhood wide enough that the patches beyond it are
+        // clearly farther than `dist` (about `dist` across), and require the
+        // curvature condition over the same neighbourhood.
         let centre = self.patches.patch_of(foot.theta, foot.zeta);
-        let kappa = self.patches.curvature_near(centre, 1, side);
+        let radius = 1 + ((dist / self.patches.min_size.max(self.margin)).ceil() as usize).min(8);
+        let kappa = self.patches.curvature_near(centre, radius, side);
         if dist * kappa >= 0.9 {
             return false;
         }
         let far2 = self
             .patches
-            .min_distance2(x, Some((centre, 1)), dist * dist);
+            .min_distance2(x, Some((centre, radius)), dist * dist);
         far2 >= dist * dist
     }
 
@@ -272,20 +282,13 @@ impl Engine {
             if lb2 >= best.d2 {
                 break;
             }
+            // One start per patch: a minimum on a patch's edge is inside a
+            // neighbour, which is searched too.
             let (tr, zr) = self.patches.rect(i, j);
             let (tm, zm) = (0.5 * (tr[0] + tr[1]), 0.5 * (zr[0] + zr[1]));
-            let inset = |a: [f64; 2], f: f64| a[0] + (a[1] - a[0]) * f;
-            for (t0, z0) in [
-                (tm, zm),
-                (inset(tr, 0.1), inset(zr, 0.1)),
-                (inset(tr, 0.9), inset(zr, 0.1)),
-                (inset(tr, 0.1), inset(zr, 0.9)),
-                (inset(tr, 0.9), inset(zr, 0.9)),
-            ] {
-                let foot = self.newton(x, t0, z0, Some((tr, zr)), 30);
-                if foot.d2 < best.d2 {
-                    best = foot;
-                }
+            let foot = self.newton(x, tm, zm, Some((tr, zr)), 20);
+            if foot.d2 < best.d2 {
+                best = foot;
             }
         }
         best

@@ -149,6 +149,13 @@ pub(super) struct Patches {
     /// safety factor).
     convex: Vec<f64>,
     concave: Vec<f64>,
+    /// A sphere around each patch: its centre point and a radius covering
+    /// the samples' convex hull plus the sag, so `|x - c| - r` bounds the
+    /// distance to the patch from below (far tighter than the box for a
+    /// tilted patch).
+    spheres: Vec<([f64; 3], f64)>,
+    /// Smallest patch extent (cm), for sizing neighbourhoods.
+    pub min_size: f64,
     nodes: Vec<Node>,
     pub extents: Aabb,
     /// Largest convex / concave curvature over the whole surface.
@@ -176,17 +183,24 @@ impl Patches {
             + (hz / 2.0).powi(2) / 8.0 * series.bounds.x_zz()
             + margin;
         let mut boxes = Vec::with_capacity(nt * nz);
+        let mut spheres = Vec::with_capacity(nt * nz);
         let mut convex = Vec::with_capacity(nt * nz);
         let mut concave = Vec::with_capacity(nt * nz);
         let mut extents = Aabb::empty();
+        let mut min_size = f64::INFINITY;
         for j in 0..nz {
             for i in 0..nt {
                 let mut bx = Aabb::empty();
                 let (mut kv, mut kc) = (0.0_f64, 0.0_f64);
+                let centre = samples[((2 * j + 1) % sz) * st + (2 * i + 1) % st];
+                let mut radius2 = 0.0_f64;
                 for b in 0..3 {
                     for a in 0..3 {
                         let s = ((2 * j + b) % sz) * st + (2 * i + a) % st;
-                        bx.grow_point(samples[s]);
+                        let x = samples[s];
+                        bx.grow_point(x);
+                        let d = [x[0] - centre[0], x[1] - centre[1], x[2] - centre[2]];
+                        radius2 = radius2.max(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
                         let (k1, k2) = curv[s];
                         kv = kv.max(k1).max(k2);
                         kc = kc.max(-k1).max(-k2);
@@ -195,6 +209,8 @@ impl Patches {
                 bx.inflate(sag);
                 extents.grow_box(&bx);
                 boxes.push(bx);
+                spheres.push((centre, radius2.sqrt() + sag));
+                min_size = min_size.min(radius2.sqrt());
                 convex.push(kv.max(0.0) * CURVATURE_SAFETY);
                 concave.push(kc.max(0.0) * CURVATURE_SAFETY);
             }
@@ -209,6 +225,8 @@ impl Patches {
             boxes,
             convex,
             concave,
+            spheres,
+            min_size,
             nodes: Vec::new(),
             extents,
             max_convex,
@@ -285,10 +303,19 @@ impl Patches {
         di.min(self.nt - di) <= radius && dj.min(self.nz - dj) <= radius
     }
 
-    /// Smallest squared box distance from `x` over all patches, skipping
-    /// those within `radius` patches of `exclude`, pruned at `cutoff2`
-    /// (returns at least... the true minimum, or `cutoff2` if none is
-    /// below it).
+    /// Squared lower bound on the distance from `x` to patch `patch`: the
+    /// larger of its box and sphere bounds.
+    #[inline]
+    fn leaf_bound2(&self, patch: usize, x: [f64; 3]) -> f64 {
+        let (c, r) = self.spheres[patch];
+        let d = ((x[0] - c[0]).powi(2) + (x[1] - c[1]).powi(2) + (x[2] - c[2]).powi(2)).sqrt();
+        let sphere = (d - r).max(0.0);
+        self.boxes[patch].distance2(x).max(sphere * sphere)
+    }
+
+    /// Smallest squared lower bound on the distance from `x` to any patch,
+    /// skipping those within `radius` patches of `exclude`; `cutoff2` if
+    /// none is below it.
     pub fn min_distance2(
         &self,
         x: [f64; 3],
@@ -310,7 +337,7 @@ impl Patches {
                 if exclude.is_some_and(|(c, r)| self.near(patch, c, r)) {
                     continue;
                 }
-                best = best.min(node.bx.distance2(x));
+                best = best.min(self.leaf_bound2(patch, x));
                 continue;
             }
             // Visit the nearer child first (pushed last).
@@ -338,7 +365,7 @@ impl Patches {
             .iter()
             .enumerate()
             .filter(|(p, _)| !exclude.is_some_and(|(c, r)| self.near(*p, c, r)))
-            .map(|(_, b)| b.distance2(x))
+            .map(|(p, _)| self.leaf_bound2(p, x))
             .fold(best, f64::min)
     }
 
@@ -355,6 +382,10 @@ impl Patches {
             }
             if node.left == u32::MAX {
                 let patch = node.patch as usize;
+                let d2 = self.leaf_bound2(patch, x);
+                if d2 >= cutoff2 {
+                    continue;
+                }
                 out.push((d2, patch % self.nt, patch / self.nt));
             } else {
                 stack.push(node.left);

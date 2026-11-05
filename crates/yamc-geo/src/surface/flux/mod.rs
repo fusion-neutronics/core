@@ -237,9 +237,10 @@ impl FluxBoundary {
         offset: f64,
         on_surface: Option<f64>,
         vacuum: bool,
+        t_max: f64,
     ) -> Option<f64> {
         self.engine
-            .ray(point, direction, offset, on_surface, vacuum)
+            .ray(point, direction, offset, on_surface, vacuum, t_max)
     }
 
     /// Box containing the points within `offset` of the boundary (for a
@@ -267,7 +268,8 @@ pub(super) struct Engine {
     poly_sin: Vec<f64>,
     /// Floating-point allowance (cm), far below the 1e-8 cm crossing nudge.
     margin: f64,
-    /// Newton stops when the closest point moves less than this (cm).
+    /// Newton stops when the tangential part of `x - X` is below this
+    /// (cm); the distance is then exact to second order in it.
     newton_tolerance: f64,
     /// Largest curvature of either sign anywhere on the surface.
     kappa_all: f64,
@@ -295,8 +297,19 @@ impl Engine {
         }
         let orientation_in = check_cuts(&series)?;
         let orientation_3d = -orientation_in;
-        let nt = (8 * m_cols).max(32);
-        let nz = series.nfp as usize * (4 * (series.n_max + 1)).max(8);
+        // Patches about as long toroidally as poloidally, so their bounds
+        // stay tight: the poloidal count follows the mode content, and the
+        // toroidal one the ratio of the toroidal to the poloidal extent.
+        let b = &series.bounds;
+        let nt = (8 * m_cols).clamp(48, 256);
+        let poloidal = (b.r_t + b.z_t).max(margin);
+        let toroidal = b.r + b.r_z + b.z_z;
+        let nfp = series.nfp as usize;
+        let per_period = ((toroidal / poloidal * nt as f64) / nfp as f64).ceil() as usize;
+        let nz = nfp
+            * per_period
+                .max(4 * (series.n_max + 1))
+                .clamp(8, 2048 / nfp.max(1));
         let patches = Patches::new(&series, nt, nz, orientation_3d, margin);
         if patches.min_radius() <= 0.0 {
             return Err(
@@ -307,7 +320,7 @@ impl Engine {
         }
         let kappa_all = patches.max_convex.max(patches.max_concave);
         Ok(Self {
-            newton_tolerance: 1e-11 * scale.max(1.0) / 1000.0_f64.max(1.0),
+            newton_tolerance: 1e-10 * (scale / 1000.0).max(1.0),
             series,
             patches,
             orientation_in,
