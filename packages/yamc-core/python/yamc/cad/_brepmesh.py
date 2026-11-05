@@ -23,17 +23,7 @@ from OCP.TopoDS import TopoDS, TopoDS_Compound
 from ._scene_extract import TopTools_IndexedMapOfShape, face_edge_ids
 
 
-# BRepMesh runs in parallel on this many threads, whatever the machine. The
-# triangulation does not depend on the count (a 64-solid imported model gave the
-# same 1.4 to 2.2 million triangles, bit for bit, on 1, 4, 8 and 22 threads,
-# imprinted or not), but the peak memory grows with it: meshing that model
-# without imprinting peaked at 11.4GB on 22 threads, 8.5GB on 8, 4.4GB on 4
-# and 1.9GB on 1, taking 35, 82, 43 and 197 s. Four is near the fastest at a
-# third of the memory.
-MESH_THREADS = 4
-
-
-def run_brepmesh(shape, tolerance, angular_tolerance):
+def run_brepmesh(shape, tolerance, angular_tolerance, threads):
     """Run ``BRepMesh_IncrementalMesh`` with interior deflection control.
 
     The simple ``(shape, deflection, relative, angle)`` constructor leaves
@@ -46,9 +36,11 @@ def run_brepmesh(shape, tolerance, angular_tolerance):
     (and ``DeflectionInterior``) explicitly enforces the tolerances on
     interior nodes as well.
 
-    Faces are meshed in parallel on :data:`MESH_THREADS` threads. The result
-    does not depend on the thread count, imprinted or not; see
-    tests/cad/test_mesh_threads.py.
+    Faces are meshed in parallel on *threads* threads. The triangulation does
+    not depend on the count, imprinted or not (see
+    tests/cad/test_mesh_threads.py); time and peak memory do. On a 64-solid
+    imported model meshed without imprinting, 22 threads took 35 s and peaked
+    at 11.4GB, 4 took 43 s at 4.4GB and 1 took 197 s at 1.9GB.
     """
     from OCP.IMeshTools import IMeshTools_Parameters
 
@@ -60,7 +52,7 @@ def run_brepmesh(shape, tolerance, angular_tolerance):
     params.Angle = angular_tolerance
     params.AngleInterior = angular_tolerance
     params.InParallel = True
-    with occ_threads(MESH_THREADS):
+    with occ_threads(threads):
         BRepMesh_IncrementalMesh(shape, params)
 
 
@@ -210,7 +202,7 @@ def _groups(face_ids, links):
     return list(groups.values())
 
 
-def _mesh_in_passes(pa, face_ids, mesh_at, face_edges, edge_faces):
+def _mesh_in_passes(pa, face_ids, mesh_at, face_edges, edge_faces, threads):
     """Mesh *face_ids* in passes, finest first, each pass together with the
     faces meshed before it that share an edge with it."""
     meshed = set()
@@ -224,12 +216,12 @@ def _mesh_in_passes(pa, face_ids, mesh_at, face_edges, edge_faces):
             if other in meshed
         })
         run_brepmesh(
-            _compound(pa.face_to_occ[fid] for fid in group + reused), *value
+            _compound(pa.face_to_occ[fid] for fid in group + reused), *value, threads
         )
         meshed.update(group)
 
 
-def _mesh_face_by_face(pa, face_ids, face_tolerances):
+def _mesh_face_by_face(pa, face_ids, face_tolerances, threads):
     """Mesh each face at its own ``(deflection, angle)``, keeping every shared
     edge conformal. Returns ``{face_id: mesh}`` as :func:`_face_mesh` gives.
 
@@ -270,7 +262,7 @@ def _mesh_face_by_face(pa, face_ids, face_tolerances):
 
     mesh_at = {fid: face_tolerances[fid] for fid in face_ids}
     _finest_first_on_shared_edges(mesh_at, shared, placements)
-    _mesh_in_passes(pa, face_ids, mesh_at, face_edges, edge_faces)
+    _mesh_in_passes(pa, face_ids, mesh_at, face_edges, edge_faces, threads)
     meshes = {fid: _face_mesh(pa.face_to_occ[fid]) for fid in face_ids}
 
     def watertight(group):
@@ -301,16 +293,16 @@ def _mesh_face_by_face(pa, face_ids, face_tolerances):
             mesh_at.update(dict.fromkeys(group, _finest(mesh_at[fid] for fid in group)))
         faces = [fid for group in redo for fid in group]
         BRepTools.Clean_s(_compound(pa.face_to_occ[fid] for fid in faces))
-        _mesh_in_passes(pa, faces, mesh_at, face_edges, edge_faces)
+        _mesh_in_passes(pa, faces, mesh_at, face_edges, edge_faces, threads)
         meshes.update({fid: _face_mesh(pa.face_to_occ[fid]) for fid in faces})
     return meshes
 
 
-def brepmesh_face_meshes(pa, face_ids, face_tolerances):
+def brepmesh_face_meshes(pa, face_ids, face_tolerances, threads=1):
     """Per-face BRepMesh triangulations for ``face_ids``.
 
     *face_tolerances* maps each face id to the ``(deflection, angle)`` it is
-    meshed at. When every face asks for the same, ``BRepMesh_IncrementalMesh``
+    meshed at, on *threads* threads. When every face asks for the same, ``BRepMesh_IncrementalMesh``
     runs once on the imprinted compound (so the discretization is harmonized
     across faces); otherwise each face is meshed at its own, see
     :func:`_mesh_face_by_face`. Triangulations already on the shapes (a
@@ -327,8 +319,8 @@ def brepmesh_face_meshes(pa, face_ids, face_tolerances):
     BRepTools.Clean_s(pa.imprinted_compound)
     values = {face_tolerances[fid] for fid in face_ids}
     if len(values) == 1:
-        run_brepmesh(pa.imprinted_compound, *values.pop())
+        run_brepmesh(pa.imprinted_compound, *values.pop(), threads)
         meshes = {fid: _face_mesh(pa.face_to_occ[fid]) for fid in face_ids}
     else:
-        meshes = _mesh_face_by_face(pa, face_ids, face_tolerances)
+        meshes = _mesh_face_by_face(pa, face_ids, face_tolerances, threads)
     return {fid: mesh for fid, mesh in meshes.items() if mesh is not None and mesh[1]}

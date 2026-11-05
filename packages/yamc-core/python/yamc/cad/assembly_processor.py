@@ -182,14 +182,18 @@ def _bake_mirrored_parts(assembly):
     return parts
 
 
-def _resolve_imprint_threads(imprint_threads: int | Literal["all"]) -> int:
-    if isinstance(imprint_threads, str) and imprint_threads == "all":
+def resolve_threads(threads: int | Literal["all"], name: str = "threads") -> int:
+    """A thread count from ``"all"`` (every logical processor) or a positive
+    integer; *name* is the argument named in the error otherwise."""
+    if isinstance(threads, str) and threads == "all":
         return max(1, OSD_Parallel.NbLogicalProcessors_s())
-    if type(imprint_threads) is int and imprint_threads > 0:
-        return imprint_threads
-    raise ValueError(
-        f"imprint_threads must be 'all' or a positive integer, got {imprint_threads!r}"
-    )
+    if type(threads) is int and threads > 0:
+        return threads
+    raise ValueError(f"{name} must be 'all' or a positive integer, got {threads!r}")
+
+
+def _resolve_imprint_threads(imprint_threads: int | Literal["all"]) -> int:
+    return resolve_threads(imprint_threads, "imprint_threads")
 
 
 def _imprint_assembly(assembly, imprint_threads: int | Literal["all"] = "all"):
