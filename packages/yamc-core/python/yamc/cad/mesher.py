@@ -436,6 +436,11 @@ class CadToYamc:
             angular_tolerance: Angular deflection tolerance for surface
                 meshing (radians), a number or a per-solid dict as for
                 *tolerance*.  Default 0.1 (~5.7 degrees).
+            fidelity_check: Refuse, raising ``MeshFidelityError``, a mesh
+                whose face areas or solid volumes are far from the CAD's, or
+                in which a solid's surface crosses itself (a wall thinner than
+                its facets' sag, meshed at too loose an angular tolerance).
+                Default True.
             imprint: Imprint the assembly first, so solids that touch share
                 one surface where they meet (a conformal mesh). ``False``
                 skips the imprint and meshes every solid on its own: much
@@ -720,9 +725,12 @@ class CadToYamc:
             )
 
         if fidelity_check:
-            from ._fidelity import MeshFidelityError, check_mesh_fidelity
+            from ._fidelity import (
+                MeshFidelityError, check_mesh_fidelity, check_self_crossing,
+            )
 
             problems = check_mesh_fidelity(self._surface_mesh, pa, solid_tolerance)
+            problems += check_self_crossing(self._surface_mesh, solid_angular_tolerance)
             if problems:
                 detail = "\n  ".join(problems)
                 raise MeshFidelityError(

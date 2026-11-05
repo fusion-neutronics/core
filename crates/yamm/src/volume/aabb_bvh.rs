@@ -92,16 +92,92 @@ pub struct TriangleBvh {
     nodes: Vec<BvhNode>,
     /// Triangles reordered during BVH build.
     tris: Vec<[[f64; 3]; 3]>,
+    /// Input index of each reordered triangle, `tris[k]` being input
+    /// triangle `ids[k]`.
+    ids: Vec<usize>,
 }
 
 impl TriangleBvh {
     /// Build a BVH from triangle vertex data.
     pub fn new(triangles: &[([f64; 3], [f64; 3], [f64; 3])]) -> Self {
-        let mut tris: Vec<[[f64; 3]; 3]> = triangles.iter().map(|(a, b, c)| [*a, *b, *c]).collect();
-        let n = tris.len();
+        let mut items: Vec<([[f64; 3]; 3], usize)> = triangles
+            .iter()
+            .enumerate()
+            .map(|(i, (a, b, c))| ([*a, *b, *c], i))
+            .collect();
+        let n = items.len();
         let mut nodes = Vec::with_capacity(node_count(n));
-        build_recursive(&mut nodes, &mut tris, 0, n);
-        TriangleBvh { nodes, tris }
+        build_recursive(&mut nodes, &mut items, 0, n);
+        let (tris, ids) = items.into_iter().unzip();
+        TriangleBvh { nodes, tris, ids }
+    }
+
+    /// Every pair of distinct triangles whose bounding boxes come within `pad`
+    /// of each other, passed to `test` as `(i, tri_i, j, tri_j)` with `i < j`
+    /// the input indices, keeping what `test` returns. Runs in parallel over
+    /// the leaves; the result is sorted by `(i, j)`, so it does not depend on
+    /// the thread scheduling.
+    pub fn self_pairs<T, F>(&self, pad: f64, test: F) -> Vec<(usize, usize, T)>
+    where
+        T: Send,
+        F: Fn(usize, &[[f64; 3]; 3], usize, &[[f64; 3]; 3]) -> Option<T> + Sync,
+    {
+        use rayon::prelude::*;
+        let leaves: Vec<usize> = (0..self.nodes.len())
+            .filter(|&k| matches!(self.nodes[k], BvhNode::Leaf { .. }))
+            .collect();
+        let mut found: Vec<(usize, usize, T)> = leaves
+            .par_iter()
+            .flat_map_iter(|&leaf| {
+                let mut out = Vec::new();
+                let (start, count, lbox) = match &self.nodes[leaf] {
+                    BvhNode::Leaf { start, count, aabb } => (*start, *count, *aabb),
+                    BvhNode::Internal { .. } => return out.into_iter(),
+                };
+                let mut stack = SmallVec::<[usize; 64]>::new();
+                stack.push(0);
+                while let Some(ni) = stack.pop() {
+                    if aabb_gap(&lbox, self.nodes[ni].aabb()) > pad {
+                        continue;
+                    }
+                    match &self.nodes[ni] {
+                        BvhNode::Internal { left, right, .. } => {
+                            stack.push(*left);
+                            stack.push(*right);
+                        }
+                        // Each pair of leaves once, from the lower-numbered.
+                        BvhNode::Leaf {
+                            start: s2,
+                            count: c2,
+                            ..
+                        } if ni >= leaf => {
+                            for a in start..start + count {
+                                let ba = tri_box(&self.tris[a]);
+                                let from = if ni == leaf { a + 1 } else { *s2 };
+                                for b in from..*s2 + *c2 {
+                                    if aabb_gap(&ba, &tri_box(&self.tris[b])) > pad {
+                                        continue;
+                                    }
+                                    let (i, j) = (self.ids[a], self.ids[b]);
+                                    let (i, ti, j, tj) = if i < j {
+                                        (i, &self.tris[a], j, &self.tris[b])
+                                    } else {
+                                        (j, &self.tris[b], i, &self.tris[a])
+                                    };
+                                    if let Some(t) = test(i, ti, j, tj) {
+                                        out.push((i, j, t));
+                                    }
+                                }
+                            }
+                        }
+                        BvhNode::Leaf { .. } => {}
+                    }
+                }
+                out.into_iter()
+            })
+            .collect();
+        found.sort_by_key(|x| (x.0, x.1));
+        found
     }
 
     /// Count ray-triangle intersections (for inside/outside testing).
@@ -405,12 +481,12 @@ impl TriangleBvh {
 
 fn build_recursive(
     nodes: &mut Vec<BvhNode>,
-    tris: &mut Vec<[[f64; 3]; 3]>,
+    tris: &mut Vec<([[f64; 3]; 3], usize)>,
     start: usize,
     count: usize,
 ) -> usize {
     let mut aabb = Aabb::empty();
-    for tri in tris.iter().skip(start).take(count) {
+    for (tri, _) in tris.iter().skip(start).take(count) {
         aabb.expand_tri(tri);
     }
 
@@ -425,7 +501,7 @@ fn build_recursive(
     let mid = start + count / 2;
 
     // Partial sort to find median along axis
-    tris[start..start + count].select_nth_unstable_by(count / 2, |a, b| {
+    tris[start..start + count].select_nth_unstable_by(count / 2, |(a, _), (b, _)| {
         let ca = (a[0][axis] + a[1][axis] + a[2][axis]) / 3.0;
         let cb = (b[0][axis] + b[1][axis] + b[2][axis]) / 3.0;
         ca.partial_cmp(&cb).unwrap_or(std::cmp::Ordering::Equal)
