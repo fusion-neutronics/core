@@ -312,6 +312,12 @@ function collectSurfaces() {
       group.occurrences.push(surf);
     });
   }
+  // A kind with no editable fields (one Rust has and surfaceSpec does not)
+  // gets no card, so Apply can never write it back as an empty
+  // `kind[name] = {}`.
+  for (const [key, group] of out) {
+    if (group.spec.length === 0) out.delete(key);
+  }
   return out;
 }
 
@@ -337,6 +343,8 @@ function surfaceSpec(kindName, p) {
         { name: "origin", type: "vec3", value: p.origin.slice() },
         { name: "radius", type: "scalar", value: p.radius },
       ];
+    case "XTorus":
+    case "YTorus":
     case "ZTorus":
       return [
         { name: "x0", type: "scalar", value: p.x0 },
@@ -346,8 +354,39 @@ function surfaceSpec(kindName, p) {
         { name: "b", type: "scalar", value: p.b },
         { name: "c", type: "scalar", value: p.c },
       ];
+    case "Quadric":
+      // a x^2 + b y^2 + c z^2 + d xy + e yz + f xz + g x + h y + j z + k (no i).
+      return ["a", "b", "c", "d", "e", "f", "g", "h", "j", "k"].map(
+        (name) => ({ name, type: "scalar", value: p[name] }),
+      );
+    case "Cone":
+      return [
+        { name: "apex", type: "vec3", value: p.apex.slice() },
+        { name: "axis", type: "vec3", value: p.axis.slice() },
+        { name: "tan2_theta", type: "scalar", value: p.tan2_theta },
+      ];
     default:
       return [];
+  }
+}
+
+// Sanity-checks the params read back from a card (throwing on the first
+// problem) before Apply writes them into the model, which must not hold a
+// surface Rust refuses to load (a zero Cylinder or Cone axis; it makes any
+// other axis a unit vector) or loads as a degenerate one.
+function checkSurfaceParams(kindName, p) {
+  if (kindName === "Sphere" && !(p.radius > 0)) throw new Error("Sphere radius must be > 0");
+  if (kindName === "Cylinder" && !(p.radius > 0)) throw new Error("Cylinder radius must be > 0");
+  if (kindName === "Cylinder" || kindName === "Cone") {
+    const ax = p.axis;
+    if (ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2] < 1e-12) throw new Error(`${kindName} axis cannot be zero vector`);
+  }
+  if (["XTorus", "YTorus", "ZTorus"].includes(kindName) && !(p.a > 0 && p.b > 0 && p.c > 0)) {
+    throw new Error(`${kindName} a, b and c must be > 0`);
+  }
+  if (kindName === "Cone" && !(p.tan2_theta > 0)) throw new Error("Cone tan2_theta must be > 0");
+  if (kindName === "Quadric" && ["a", "b", "c", "d", "e", "f", "g", "h", "j"].every((name) => p[name] === 0)) {
+    throw new Error("Quadric needs a non-zero coefficient among a to j");
   }
 }
 
@@ -441,13 +480,7 @@ if (applySurfsBtn) applySurfsBtn.onclick = () => {
           newParams[field.name] = arr;
         }
       }
-      // Sanity-checks per kind.
-      if (group.kindName === "Sphere" && !(newParams.radius > 0)) throw new Error("Sphere radius must be > 0");
-      if (group.kindName === "Cylinder" && !(newParams.radius > 0)) throw new Error("Cylinder radius must be > 0");
-      if (group.kindName === "Cylinder") {
-        const ax = newParams.axis;
-        if (ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2] < 1e-12) throw new Error("Cylinder axis cannot be zero vector");
-      }
+      checkSurfaceParams(group.kindName, newParams);
       // Push to every occurrence -- same identity reference across cells.
       for (const surf of group.occurrences) {
         surf.kind[group.kindName] = newParams;
