@@ -1,16 +1,19 @@
 //! Transport through implicit surfaces.
 //!
-//! Spheres given as formulas track like Sphere surfaces: the same
-//! histories from the same seed give the same tallies cell by cell, with
-//! the outermost sphere the vacuum boundary or inside one. A gyroid
-//! lattice of iron and void, in a box of planes or inside an implicit
-//! superellipsoid that is itself the vacuum boundary, loses no particle in
-//! any tracking mode, and Woodcock tracking (which only asks the surfaces
-//! for their sign) agrees cell by cell with surface tracking (which asks
-//! for ray crossings). A cell must bound an implicit surface that has no
-//! bounding box, and its searches stopped at the cell's box still find the
-//! nearest crossing. The transport tests self-skip if the endf-b8.1 Fe56
-//! fixture is absent.
+//! Spheres and tori given as formulas track like Sphere and ZTorus
+//! surfaces: the same histories from the same seed give the same tallies
+//! cell by cell, in surface and in Woodcock tracking, with the outermost
+//! layer the vacuum boundary or inside one. A gyroid lattice of iron and
+//! void (in a block of vacuum planes, in a block of planes inside a vacuum
+//! sphere, or filling an implicit superellipsoid that is itself the vacuum
+//! boundary) and an iron slab with a port cut through it by a
+//! superellipsoid lose no particle in any tracking mode, and Woodcock
+//! tracking (which asks the surfaces only for their sign, and for the
+//! distance to a vacuum boundary) agrees cell by cell with surface
+//! tracking (which asks for every crossing). A cell must bound an implicit
+//! surface that has no bounding box, and its searches stopped at the
+//! cell's box still find the nearest crossing. The transport tests
+//! self-skip if the endf-b8.1 Fe56 fixture is absent.
 
 use std::collections::HashMap;
 use std::f64::consts::TAU;
@@ -33,9 +36,16 @@ use yamc_tallies::CellFilter;
 
 const NUCLIDE: &str = "Fe56";
 const PARTICLES: usize = 4000;
+/// Histories per configuration and tracking mode in the at-scale test.
+const AT_SCALE: usize = 1_000_000;
 /// A gyroid of period 4 cm, its walls where the field is +-0.3.
 const GYROID: &str = "sin(pi / 2 * x) * cos(pi / 2 * y) + sin(pi / 2 * y) * cos(pi / 2 * z) \
                       + sin(pi / 2 * z) * cos(pi / 2 * x) - 0.3";
+/// A port 30 by 8 by 12 cm with rounded edges, centred on (15, 0, 0).
+const PORT: &str = "((x - 15) / 15)^4 + (y / 4)^4 + (z / 6)^4 - 1";
+const ORIGIN: [f64; 3] = [0.0, 0.0, 0.0];
+/// The magnetic axis of the tori, at y = 0.
+const AXIS: [f64; 3] = [600.0, 0.0, 0.0];
 
 fn data_present() -> bool {
     std::path::Path::new(&yamc_test_cache::nuclide_path(NUCLIDE)).is_dir()
@@ -61,6 +71,27 @@ fn implicit(formula: &str, id: usize, boundary: Option<BoundaryType>) -> Arc<Sur
     Arc::new(Surface::new_implicit(formula, Some(id), boundary))
 }
 
+/// A torus about the z axis, of major radius 600 cm and minor radius
+/// `minor`, as its signed distance: as a user would write it.
+fn torus_formula(minor: f64, id: usize, boundary: Option<BoundaryType>) -> Arc<Surface> {
+    implicit(
+        &format!("sqrt((sqrt(x^2 + y^2) - 600)^2 + z^2) - {minor}"),
+        id,
+        boundary,
+    )
+}
+
+fn sphere(radius: f64, id: usize, boundary: Option<BoundaryType>) -> Arc<Surface> {
+    Arc::new(Surface::new_sphere(
+        0.0,
+        0.0,
+        0.0,
+        radius,
+        Some(id),
+        boundary,
+    ))
+}
+
 fn below(s: &Arc<Surface>) -> Region {
     Region::new_from_halfspace(HalfspaceType::Below(s.clone()))
 }
@@ -69,15 +100,15 @@ fn above(s: &Arc<Surface>) -> Region {
     Region::new_from_halfspace(HalfspaceType::Above(s.clone()))
 }
 
-/// The box `[-h, h]^3` of planes, as a region.
-fn cube(h: f64, first_id: usize, boundary: Option<BoundaryType>) -> Region {
+/// The box from `lo` to `hi` of planes, as a region.
+fn block(lo: [f64; 3], hi: [f64; 3], first_id: usize, boundary: Option<BoundaryType>) -> Region {
     let planes = [
-        Surface::x_plane(-h, Some(first_id), boundary.clone()),
-        Surface::x_plane(h, Some(first_id + 1), boundary.clone()),
-        Surface::y_plane(-h, Some(first_id + 2), boundary.clone()),
-        Surface::y_plane(h, Some(first_id + 3), boundary.clone()),
-        Surface::z_plane(-h, Some(first_id + 4), boundary.clone()),
-        Surface::z_plane(h, Some(first_id + 5), boundary),
+        Surface::x_plane(lo[0], Some(first_id), boundary.clone()),
+        Surface::x_plane(hi[0], Some(first_id + 1), boundary.clone()),
+        Surface::y_plane(lo[1], Some(first_id + 2), boundary.clone()),
+        Surface::y_plane(hi[1], Some(first_id + 3), boundary.clone()),
+        Surface::z_plane(lo[2], Some(first_id + 4), boundary.clone()),
+        Surface::z_plane(hi[2], Some(first_id + 5), boundary),
     ]
     .map(Arc::new);
     above(&planes[0])
@@ -86,6 +117,11 @@ fn cube(h: f64, first_id: usize, boundary: Option<BoundaryType>) -> Region {
         .intersection(&below(&planes[3]))
         .intersection(&above(&planes[4]))
         .intersection(&below(&planes[5]))
+}
+
+/// The box `[-h, h]^3` of planes, as a region.
+fn cube(h: f64, first_id: usize, boundary: Option<BoundaryType>) -> Region {
+    block([-h; 3], [h; 3], first_id, boundary)
 }
 
 /// Per-cell flux tallies, one per cell.
@@ -101,11 +137,16 @@ fn tallies(cells: u32) -> Vec<Arc<Tally>> {
         .collect()
 }
 
-/// Run with 14.1 MeV neutrons from the origin; return the lost-particle
+/// Run with 14.1 MeV neutrons from `source`; return the lost-particle
 /// count and per-cell `(mean, std)`.
-fn run(geometry: Geometry, mode: TrackingMode, particles: usize) -> (usize, Vec<(f64, f64)>) {
+fn run(
+    geometry: Geometry,
+    mode: TrackingMode,
+    particles: usize,
+    source: [f64; 3],
+) -> (usize, Vec<(f64, f64)>) {
     let source = ParticleSource::Neutron(Source {
-        space: SourceSpatialDistribution::Point(Point::new([0.0, 0.0, 0.0])),
+        space: SourceSpatialDistribution::Point(Point::new(source)),
         angle: AngularDistribution::Isotropic,
         energy: SourceEnergyDistribution::Discrete(Discrete::new(vec![14.1e6], vec![1.0]).unwrap()),
         strength: 1.0,
@@ -131,51 +172,93 @@ fn run(geometry: Geometry, mode: TrackingMode, particles: usize) -> (usize, Vec<
     (model.lost_particles.len(), flux)
 }
 
+/// Cells inside the first of the nested `layers` (innermost first),
+/// between each layer and the next and, with a `world` (a vacuum
+/// surface), from the last layer out to it; iron where `is_iron` says.
+/// Without a world the last layer is the vacuum boundary.
+fn nested(layers: &[Arc<Surface>], world: Option<&Arc<Surface>>, is_iron: &[bool]) -> Geometry {
+    let mut regions = vec![below(&layers[0])];
+    for pair in layers.windows(2) {
+        regions.push(above(&pair[0]).intersection(&below(&pair[1])));
+    }
+    if let Some(world) = world {
+        regions.push(above(&layers[layers.len() - 1]).intersection(&below(world)));
+    }
+    let cells = regions
+        .into_iter()
+        .zip(is_iron)
+        .zip(1..)
+        .map(|((region, &filled), id)| Cell::new(Some(id), region, None, filled.then_some(0)))
+        .collect();
+    Geometry::new(cells, vec![iron()]).unwrap()
+}
+
 /// Void inside 10 cm, iron to 15, void to 20, iron to 30, then void out
 /// to a vacuum sphere at 35 cm, or nothing beyond 30 if that sphere is
 /// itself the vacuum boundary. `sphere(radius, id, boundary)` makes the
-/// surfaces.
+/// surfaces, the vacuum sphere at 35 cm too.
 fn shells(
     sphere: impl Fn(f64, usize, Option<BoundaryType>) -> Arc<Surface>,
     vacuum_back: bool,
 ) -> Geometry {
     let back = vacuum_back.then_some(BoundaryType::Vacuum);
-    let s: Vec<Arc<Surface>> = [(10.0, None), (15.0, None), (20.0, None), (30.0, back)]
+    let layers: Vec<Arc<Surface>> = [(10.0, None), (15.0, None), (20.0, None), (30.0, back)]
         .into_iter()
-        .enumerate()
-        .map(|(i, (r, boundary))| sphere(r, i + 1, boundary))
+        .zip(1..)
+        .map(|((r, boundary), id)| sphere(r, id, boundary))
         .collect();
-    let mut cells = vec![
-        Cell::new(Some(1), below(&s[0]), None, None),
-        Cell::new(
-            Some(2),
-            above(&s[0]).intersection(&below(&s[1])),
-            None,
-            Some(0),
-        ),
-        Cell::new(
-            Some(3),
-            above(&s[1]).intersection(&below(&s[2])),
-            None,
-            None,
-        ),
-        Cell::new(
-            Some(4),
-            above(&s[2]).intersection(&below(&s[3])),
-            None,
-            Some(0),
-        ),
-    ];
-    if !vacuum_back {
-        let world = sphere(35.0, 5, Some(BoundaryType::Vacuum));
-        cells.push(Cell::new(
-            Some(5),
-            above(&s[3]).intersection(&below(&world)),
-            None,
-            None,
-        ));
+    let world = (!vacuum_back).then(|| sphere(35.0, 5, Some(BoundaryType::Vacuum)));
+    nested(&layers, world.as_ref(), &[false, true, false, true, false])
+}
+
+/// The layers of a tokamak around a circular plasma of major radius
+/// 600 cm and minor radius 150 cm: plasma and a 15 cm scrape-off layer
+/// (void), a 5 cm iron first wall and a 40 cm iron blanket, then void out
+/// to a vacuum sphere of radius 1100 cm, or nothing beyond the blanket if
+/// its back is itself the vacuum boundary. `torus(minor, id, boundary)`
+/// makes the layers.
+fn tokamak(
+    torus: impl Fn(f64, usize, Option<BoundaryType>) -> Arc<Surface>,
+    vacuum_back: bool,
+) -> Geometry {
+    let back = vacuum_back.then_some(BoundaryType::Vacuum);
+    let layers: Vec<Arc<Surface>> = [(150.0, None), (165.0, None), (170.0, None), (210.0, back)]
+        .into_iter()
+        .zip(1..)
+        .map(|((minor, boundary), id)| torus(minor, id, boundary))
+        .collect();
+    let world = (!vacuum_back).then(|| sphere(1100.0, 5, Some(BoundaryType::Vacuum)));
+    nested(&layers, world.as_ref(), &[false, false, true, true, false])
+}
+
+/// The same histories from the same seed, in surface tracking and in
+/// Woodcock tracking (whose vacuum exits are searched for too): the
+/// formulas' crossings agree with the closed forms' to round-off (about
+/// 1e-11 cm), so the tallies differ only where a history's collision fell
+/// within round-off of a crossing and the history went the other way,
+/// which moves a tally by ~1e-6 of itself, far inside its statistics.
+fn same_tallies(
+    closed: impl Fn() -> Geometry,
+    formulas: impl Fn() -> Geometry,
+    source: [f64; 3],
+    what: &str,
+) {
+    for mode in [TrackingMode::Surface, TrackingMode::Woodcock] {
+        let (lost_closed, by_closed) = run(closed(), mode, PARTICLES, source);
+        let (lost_formulas, by_formulas) = run(formulas(), mode, PARTICLES, source);
+        assert_eq!((lost_closed, lost_formulas), (0, 0), "{mode:?} ({what})");
+        for (cell, (a, b)) in by_closed.iter().zip(&by_formulas).enumerate() {
+            assert!(
+                (a.0 - b.0).abs() <= 1e-5 * a.0.abs().max(b.0.abs()) + 1e-12,
+                "cell {} ({mode:?}, {what}): closed forms {} +/- {} vs formulas {} +/- {}",
+                cell + 1,
+                a.0,
+                a.1,
+                b.0,
+                b.1
+            );
+        }
     }
-    Geometry::new(cells, vec![iron()]).unwrap()
 }
 
 #[test]
@@ -185,55 +268,149 @@ fn implicit_spheres_track_like_spheres() {
         return;
     }
     for vacuum_back in [false, true] {
-        let closed = shells(
-            |r, id, boundary| Arc::new(Surface::new_sphere(0.0, 0.0, 0.0, r, Some(id), boundary)),
-            vacuum_back,
-        );
         // Written as yamc evaluates a sphere, so the two agree in sign
         // everywhere and differ only in where a search puts a crossing.
-        let formulas = shells(
-            |r, id, boundary| implicit(&format!("sqrt(x^2 + y^2 + z^2) - {r}"), id, boundary),
-            vacuum_back,
+        same_tallies(
+            || shells(sphere, vacuum_back),
+            || {
+                shells(
+                    |r, id, boundary| {
+                        implicit(&format!("sqrt(x^2 + y^2 + z^2) - {r}"), id, boundary)
+                    },
+                    vacuum_back,
+                )
+            },
+            ORIGIN,
+            &format!("spheres, vacuum back {vacuum_back}"),
         );
-        let (lost_closed, by_closed) = run(closed, TrackingMode::Surface, PARTICLES);
-        let (lost_formulas, by_formulas) = run(formulas, TrackingMode::Surface, PARTICLES);
-        assert_eq!((lost_closed, lost_formulas), (0, 0));
-        // The same histories: crossings agree to round-off (about 1e-11
-        // cm), so the tallies differ only where a history's collision fell
-        // within round-off of a crossing and the history went the other
-        // way.
-        for (cell, (a, b)) in by_closed.iter().zip(&by_formulas).enumerate() {
+    }
+}
+
+#[test]
+fn implicit_tori_track_like_ztorus() {
+    if !data_present() {
+        eprintln!("skipping: {NUCLIDE} fixture absent");
+        return;
+    }
+    for vacuum_back in [false, true] {
+        let ztorus = |minor: f64, id: usize, boundary: Option<BoundaryType>| {
+            Arc::new(Surface::new_ztorus(
+                0.0,
+                0.0,
+                0.0,
+                600.0,
+                minor,
+                minor,
+                Some(id),
+                boundary,
+            ))
+        };
+        same_tallies(
+            || tokamak(ztorus, vacuum_back),
+            || tokamak(torus_formula, vacuum_back),
+            AXIS,
+            &format!("tori, vacuum back {vacuum_back}"),
+        );
+    }
+}
+
+/// What holds the gyroid lattice.
+#[derive(Clone, Copy, Debug)]
+enum Holder {
+    /// The box `[-10, 10]^3` of vacuum planes.
+    VacuumPlanes,
+    /// That box of planes, with void around it inside a vacuum sphere of
+    /// radius 20 cm.
+    PlanesInVacuumSphere,
+    /// The vacuum superellipsoid `x^4 + y^4 + z^4 = 10^4`, which the
+    /// lattice fills.
+    VacuumSuperellipsoid,
+}
+
+/// An iron gyroid lattice and the void between its walls, in `holder`.
+fn lattice(holder: Holder) -> Geometry {
+    let gyroid = implicit(GYROID, 1, None);
+    let vacuum = Some(BoundaryType::Vacuum);
+    let (inside, around) = match holder {
+        Holder::VacuumPlanes => (cube(10.0, 2, vacuum), None),
+        Holder::PlanesInVacuumSphere => {
+            let block = cube(10.0, 2, None);
+            let around = below(&sphere(20.0, 8, vacuum)).intersection(&block.complement());
+            (block, Some(around))
+        }
+        Holder::VacuumSuperellipsoid => {
+            (below(&implicit("x^4 + y^4 + z^4 - 10000", 2, vacuum)), None)
+        }
+    };
+    let mut cells = vec![
+        Cell::new(Some(1), inside.intersection(&below(&gyroid)), None, Some(0)),
+        Cell::new(Some(2), inside.intersection(&above(&gyroid)), None, None),
+    ];
+    cells.extend(around.map(|region| Cell::new(Some(3), region, None, None)));
+    Geometry::new(cells, vec![iron()]).unwrap()
+}
+
+/// An iron slab 20 cm thick (x from 5 to 25 cm) and 60 cm square, with a
+/// void port through it cut by the superellipsoid `PORT`, which reaches
+/// 5 cm out of either face; void around the slab, inside a vacuum sphere
+/// of radius 60 cm.
+fn port_through_a_slab() -> Geometry {
+    let port = implicit(PORT, 1, None);
+    let slab = block([5.0, -30.0, -30.0], [25.0, 30.0, 30.0], 2, None);
+    let world = sphere(60.0, 8, Some(BoundaryType::Vacuum));
+    let cells = vec![
+        Cell::new(Some(1), slab.intersection(&above(&port)), None, Some(0)),
+        Cell::new(Some(2), slab.intersection(&below(&port)), None, None),
+        Cell::new(
+            Some(3),
+            below(&world).intersection(&slab.complement()),
+            None,
+            None,
+        ),
+    ];
+    Geometry::new(cells, vec![iron()]).unwrap()
+}
+
+/// No history is lost in any of `modes`, and each of them agrees with the
+/// first (surface tracking) cell by cell, within 4 standard deviations.
+fn tracking_modes_agree(
+    geometry: impl Fn() -> Geometry,
+    source: [f64; 3],
+    modes: &[TrackingMode],
+    particles: usize,
+    what: &str,
+) {
+    let mut results = Vec::new();
+    for &mode in modes {
+        let (lost, flux) = run(geometry(), mode, particles, source);
+        assert_eq!(
+            lost, 0,
+            "{mode:?} ({what}): {lost} of {particles} histories lost"
+        );
+        results.push((mode, flux));
+    }
+    let (_, surface) = &results[0];
+    for (mode, flux) in &results[1..] {
+        for (cell, (a, b)) in surface.iter().zip(flux).enumerate() {
+            let sigma = (a.1 * a.1 + b.1 * b.1).sqrt();
             assert!(
-                (a.0 - b.0).abs() <= 1e-5 * a.0.abs().max(b.0.abs()) + 1e-12,
-                "cell {} (vacuum back {vacuum_back}): spheres {} vs formulas {}",
+                (a.0 - b.0).abs() <= 4.0 * sigma,
+                "cell {} ({what}): surface tracking {} +/- {}, {mode:?} {} +/- {}",
                 cell + 1,
                 a.0,
-                b.0
+                a.1,
+                b.0,
+                b.1
             );
         }
     }
 }
 
-/// An iron gyroid lattice and the void between its walls, in the box
-/// `[-10, 10]^3` of vacuum planes or inside the vacuum superellipsoid
-/// `x^4 + y^4 + z^4 = 10^4`.
-fn lattice(in_planes: bool) -> Geometry {
-    let gyroid = implicit(GYROID, 1, None);
-    let inside = if in_planes {
-        cube(10.0, 2, Some(BoundaryType::Vacuum))
-    } else {
-        below(&implicit(
-            "x^4 + y^4 + z^4 - 10000",
-            2,
-            Some(BoundaryType::Vacuum),
-        ))
-    };
-    let cells = vec![
-        Cell::new(Some(1), inside.intersection(&below(&gyroid)), None, Some(0)),
-        Cell::new(Some(2), inside.intersection(&above(&gyroid)), None, None),
-    ];
-    Geometry::new(cells, vec![iron()]).unwrap()
-}
+const ALL_MODES: [TrackingMode; 3] = [
+    TrackingMode::Surface,
+    TrackingMode::Hybrid,
+    TrackingMode::Woodcock,
+];
 
 #[test]
 fn a_gyroid_lattice_loses_no_particles_and_tracking_modes_agree() {
@@ -241,37 +418,34 @@ fn a_gyroid_lattice_loses_no_particles_and_tracking_modes_agree() {
         eprintln!("skipping: {NUCLIDE} fixture absent");
         return;
     }
-    for in_planes in [true, false] {
-        let mut results = Vec::new();
-        for mode in [
-            TrackingMode::Surface,
-            TrackingMode::Hybrid,
-            TrackingMode::Woodcock,
-        ] {
-            let (lost, flux) = run(lattice(in_planes), mode, PARTICLES);
-            assert_eq!(
-                lost, 0,
-                "{mode:?} (in planes {in_planes}): {lost} of {PARTICLES} histories lost"
-            );
-            results.push((mode, flux));
-        }
-        let (_, surface) = &results[0];
-        for (mode, flux) in &results[1..] {
-            for (cell, (a, b)) in surface.iter().zip(flux).enumerate() {
-                let sigma = (a.1 * a.1 + b.1 * b.1).sqrt();
-                assert!(
-                    (a.0 - b.0).abs() <= 4.0 * sigma,
-                    "cell {} (in planes {in_planes}): surface tracking {} +/- {}, {mode:?} {} \
-                     +/- {}",
-                    cell + 1,
-                    a.0,
-                    a.1,
-                    b.0,
-                    b.1
-                );
-            }
-        }
+    for holder in [
+        Holder::VacuumPlanes,
+        Holder::PlanesInVacuumSphere,
+        Holder::VacuumSuperellipsoid,
+    ] {
+        tracking_modes_agree(
+            || lattice(holder),
+            ORIGIN,
+            &ALL_MODES,
+            PARTICLES,
+            &format!("{holder:?}"),
+        );
     }
+}
+
+#[test]
+fn a_port_through_a_slab_loses_no_particles_and_tracking_modes_agree() {
+    if !data_present() {
+        eprintln!("skipping: {NUCLIDE} fixture absent");
+        return;
+    }
+    tracking_modes_agree(
+        port_through_a_slab,
+        ORIGIN,
+        &ALL_MODES,
+        PARTICLES,
+        "port through a slab",
+    );
 }
 
 #[test]
@@ -436,4 +610,48 @@ fn cells_stop_implicit_searches_at_their_bounding_box() {
         }
     }
     assert!(in_cell > 50 && elsewhere > 50, "{in_cell} {elsewhere}");
+}
+
+/// The check at scale quoted in the pull request: a million histories in
+/// each configuration above, in surface and in Woodcock tracking, lose
+/// none, and the two agree cell by cell. Run it in release (about four
+/// minutes on 8 threads) with `cargo test --release -p yamc --test
+/// implicit_surface_transport -- --ignored`.
+#[test]
+#[ignore]
+fn implicit_surfaces_lose_no_particles_at_scale() {
+    if !data_present() {
+        eprintln!("skipping: {NUCLIDE} fixture absent");
+        return;
+    }
+    let modes = [TrackingMode::Surface, TrackingMode::Woodcock];
+    for vacuum_back in [false, true] {
+        tracking_modes_agree(
+            || tokamak(torus_formula, vacuum_back),
+            AXIS,
+            &modes,
+            AT_SCALE,
+            &format!("tori, vacuum back {vacuum_back}"),
+        );
+    }
+    for holder in [
+        Holder::VacuumPlanes,
+        Holder::PlanesInVacuumSphere,
+        Holder::VacuumSuperellipsoid,
+    ] {
+        tracking_modes_agree(
+            || lattice(holder),
+            ORIGIN,
+            &modes,
+            AT_SCALE,
+            &format!("{holder:?}"),
+        );
+    }
+    tracking_modes_agree(
+        port_through_a_slab,
+        ORIGIN,
+        &modes,
+        AT_SCALE,
+        "port through a slab",
+    );
 }
