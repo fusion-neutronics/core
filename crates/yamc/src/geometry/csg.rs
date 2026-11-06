@@ -377,17 +377,30 @@ impl Geometry {
         direction: [f64; 3],
         on_surface: Option<crate::geometry::backend::OnSurface>,
     ) -> Option<crate::geometry::backend::BoundaryHit> {
+        self.closest_boundary_within(cell_index, position, direction, on_surface, f64::INFINITY)
+    }
+
+    /// [`Geometry::closest_boundary`] capped as in
+    /// [`Cell::closest_surface_within`].
+    pub fn closest_boundary_within(
+        &self,
+        cell_index: usize,
+        position: [f64; 3],
+        direction: [f64; 3],
+        on_surface: Option<crate::geometry::backend::OnSurface>,
+        cap: f64,
+    ) -> Option<crate::geometry::backend::BoundaryHit> {
         use crate::geometry::backend::BoundaryHit;
         let cell = &self.cells[cell_index];
-        let csg_hit = cell.closest_surface(position, direction, on_surface).map(
-            |(boundary, dist, surf_id)| BoundaryHit {
+        let csg_hit = cell
+            .closest_surface_within(position, direction, on_surface, cap)
+            .map(|(boundary, dist, surf_id)| BoundaryHit {
                 distance: dist,
                 boundary,
                 next_cell_index: None,
                 surface_id: surf_id,
                 relocate_triangle: None,
-            },
-        );
+            });
         #[cfg(feature = "mesh")]
         if let Some(role) = cell.fill_role {
             use crate::geometry::fill::FillRole;

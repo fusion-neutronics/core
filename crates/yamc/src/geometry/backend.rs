@@ -260,8 +260,25 @@ impl GeometryKind {
         direction: [f64; 3],
         on_surface: Option<OnSurface>,
     ) -> Option<BoundaryHit> {
+        self.closest_boundary_within(cell_index, position, direction, on_surface, f64::INFINITY)
+    }
+
+    /// [`GeometryKind::closest_boundary`] for a caller that only needs
+    /// crossings nearer than `cap`: a hit at or beyond `cap` means none
+    /// before it (only free-form CSG surfaces use the cap).
+    #[inline]
+    pub fn closest_boundary_within(
+        &self,
+        cell_index: usize,
+        position: [f64; 3],
+        direction: [f64; 3],
+        on_surface: Option<OnSurface>,
+        cap: f64,
+    ) -> Option<BoundaryHit> {
         match self {
-            GeometryKind::Csg(g) => g.closest_boundary(cell_index, position, direction, on_surface),
+            GeometryKind::Csg(g) => {
+                g.closest_boundary_within(cell_index, position, direction, on_surface, cap)
+            }
             #[cfg(feature = "mesh")]
             GeometryKind::Mesh(g) => g.closest_boundary(cell_index, position, direction),
         }

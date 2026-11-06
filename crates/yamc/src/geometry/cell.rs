@@ -79,7 +79,23 @@ impl Cell {
         direction: [f64; 3],
         on_surface: Option<crate::geometry::backend::OnSurface>,
     ) -> Option<(crate::geo::BoundaryType, f64, Option<usize>)> {
+        self.closest_surface_within(point, direction, on_surface, f64::INFINITY)
+    }
+
+    /// [`Cell::closest_surface`] for a caller that only needs crossings
+    /// nearer than `cap` (transport passes its collision distance): the
+    /// free-form surfaces stop searching there, and if nothing is found
+    /// before it the answer is a crossing at `cap` itself, which such a
+    /// caller treats as "none before the cap".
+    pub fn closest_surface_within(
+        &self,
+        point: [f64; 3],
+        direction: [f64; 3],
+        on_surface: Option<crate::geometry::backend::OnSurface>,
+        cap: f64,
+    ) -> Option<(crate::geo::BoundaryType, f64, Option<usize>)> {
         let mut min_dist = f64::INFINITY;
+        let mut capped = false;
         let mut closest_boundary = None;
         let mut closest_surface_id = None;
 
@@ -108,7 +124,10 @@ impl Cell {
                 let dist = if pass == 0 {
                     surface.distance_to_surface_on(point, direction, offset)
                 } else {
-                    surface.distance_to_surface_capped(point, direction, offset, min_dist)
+                    let limit = min_dist.min(cap);
+                    let dist = surface.distance_to_surface_capped(point, direction, offset, limit);
+                    capped |= dist.is_none() && limit < f64::INFINITY;
+                    dist
                 };
                 if let Some(dist) = dist
                     && dist > 1e-10
@@ -121,7 +140,11 @@ impl Cell {
             }
         }
 
-        closest_boundary.map(|bt| (bt, min_dist, closest_surface_id))
+        match closest_boundary {
+            Some(bt) => Some((bt, min_dist, closest_surface_id)),
+            None if capped => Some((crate::geo::BoundaryType::Transmission, cap, None)),
+            None => None,
+        }
     }
 
     /// Compute the distance to the closest surface from a point along a direction.
