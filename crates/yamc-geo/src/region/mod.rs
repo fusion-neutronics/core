@@ -13,7 +13,7 @@ pub mod expr;
 pub mod flat;
 
 pub use expr::{HalfspaceType, RegionExpr};
-pub use flat::{FlatRegion, RegionOp};
+pub use flat::{walk_rpn, FlatRegion, RegionOp, RpnStep};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Region {
