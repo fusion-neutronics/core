@@ -4992,8 +4992,8 @@ class StatisticalChecks:
 @typing.final
 class Surface:
     r"""
-    A geometric surface (plane, cylinder, sphere, …); combine with `+`/`-` into
-    the half-spaces that build CSG `Region`s.
+    A geometric surface (plane, cylinder, sphere, …). Its `.below` and `.above`
+    half-spaces, combined with `&`/`|`/`~`, build CSG `Region`s.
     """
     @property
     def x0(self) -> typing.Optional[builtins.float]:
