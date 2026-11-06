@@ -7,7 +7,8 @@
 //! `offset` (cm) from it, positive outwards, so layers built from one
 //! boundary are nested by construction and never self-intersect (past
 //! the radius where outward normals cross, the level set is trimmed with
-//! a crease, as a true distance offset is).
+//! a crease, as a true distance offset is). How far out layers stay free
+//! of creases is estimated for a warning (see [`crease`]).
 //!
 //! The sign of the distance is decided exactly in the point's own
 //! toroidal cut; its magnitude is the 3-D distance to the closest surface
@@ -15,6 +16,7 @@
 //! (see [`distance`]). Ray crossings march with steps that cannot pass a
 //! root (see [`ray`]).
 
+mod crease;
 mod distance;
 mod patches;
 mod ray;
@@ -263,6 +265,36 @@ impl FluxBoundary {
         Ok(())
     }
 
+    /// Distance outwards (cm) up to which offsets of the boundary have no
+    /// creases: the smaller of its tightest concave radius of curvature and
+    /// half its narrowest gap outside (across the hole, or a fold). It is
+    /// estimated on first use by sampling and refining, which can only
+    /// miss features finer than its grid (see the `crease` module).
+    pub fn crease_free_distance(&self) -> f64 {
+        self.engine.crease_free_distance()
+    }
+
+    /// The warning for a layer `offset` (cm) out, if that is beyond the
+    /// crease-free distance.
+    pub fn crease_warning(&self, offset: f64) -> Option<String> {
+        // The march's reach bounds the crease-free distance from below, so
+        // a layer within it needs no estimate.
+        if offset <= self.engine.reach_out {
+            return None;
+        }
+        let free = self.crease_free_distance();
+        (offset > free).then(|| {
+            format!(
+                "An outward offset of {offset:.2} cm is beyond the crease-free distance of the \
+                 flux surface (about {free:.2} cm: the smaller of its tightest concave radius of \
+                 curvature and half its narrowest gap outside, such as across the central hole). \
+                 The layer is still exactly {offset:.2} cm from the flux surface everywhere, but it \
+                 has creases (sharp edges) where offset fronts from different parts of the flux \
+                 surface meet."
+            )
+        })
+    }
+
     /// `D(point) - offset`: the sign is exact; the magnitude is exact near
     /// the level set and otherwise a rigorous lower bound.
     pub(crate) fn evaluate(&self, point: [f64; 3], offset: f64) -> f64 {
@@ -338,6 +370,9 @@ pub(super) struct Engine {
     /// is smooth, so its second derivative is bounded by the curvatures.
     reach_in: f64,
     reach_out: f64,
+    /// The outer reach estimated sharply, for the warning about creased
+    /// layers (see [`crease`]); computed on first use.
+    crease_free: OnceLock<f64>,
 }
 
 impl Engine {
@@ -402,6 +437,7 @@ impl Engine {
             kappa_concave,
             reach_in,
             reach_out,
+            crease_free: OnceLock::new(),
         })
     }
 }
@@ -529,5 +565,14 @@ impl Surface {
             boundary: boundary_type.unwrap_or_default(),
             name: None,
         })
+    }
+
+    /// For a flux layer beyond its flux surface's crease-free distance, a
+    /// warning saying so (see [`FluxBoundary::crease_warning`]).
+    pub fn crease_warning(&self) -> Option<String> {
+        match &self.kind {
+            SurfaceKind::Flux { boundary, offset } => boundary.crease_warning(*offset),
+            _ => None,
+        }
     }
 }

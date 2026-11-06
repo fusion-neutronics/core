@@ -9,6 +9,12 @@
 //!   zeta)` while `|d|` is inside the local reach.
 //! - Signs away from the surface are checked against a dense winding
 //!   number in the point's own cut.
+//! - Layers of a circular torus crease from `R0 - a` out, where the
+//!   inboard side reaches the z axis, and those of a torus pinched
+//!   toroidally from half its narrowest hole, also where that (or a tilted
+//!   torus' inboard side) lies between grid points; the bean's tightest
+//!   concave radius of curvature is checked against a dense grid. The
+//!   pinched tori and the bean are also checked along their normals.
 
 use super::FluxBoundary;
 use crate::surface::{BoundaryType, Surface, SurfaceKind};
@@ -742,6 +748,205 @@ fn loaded_layers_share_one_boundary() {
     assert_eq!(serde_json::to_string(&back).unwrap(), json);
 }
 
+#[test]
+fn a_circular_torus_is_crease_free_out_to_r0_minus_a() {
+    // The inboard equator's toroidal radius of curvature and half the gap
+    // across the hole are both R0 - a.
+    for (r0, a) in [(600.0, 150.0), (300.0, 100.0), (1000.0, 50.0)] {
+        let torus = circular_torus(r0, a);
+        let (radius, half_chord) = torus.engine.crease_free_parts();
+        for value in [radius, half_chord] {
+            assert!(
+                (value - (r0 - a)).abs() <= 1e-12 * (r0 - a),
+                "torus {r0} / {a}: radius {radius}, half chord {half_chord}"
+            );
+        }
+        assert_eq!(torus.crease_free_distance(), radius.min(half_chord));
+    }
+}
+
+#[test]
+fn a_tilted_torus_is_crease_free_out_to_its_inner_radius() {
+    // `R = R0 + a cos(t) + b sin(t)`, `Z = a sin(t)`: still axisymmetric, but
+    // innermost between grid points, at `t = pi + atan(b / a)` and `R = R0 -
+    // sqrt(a^2 + b^2)`, its toroidal radius of curvature and half the hole
+    // there. The chords there all round the axis are as long, a direction
+    // the refinement has to leave alone.
+    for (r0, a, b) in [(600.0, 150.0, 70.0), (300.0, 100.0, 45.0)] {
+        let torus = FluxBoundary::new(
+            1,
+            vec![[0, 0], [1, 0], [-1, 0]],
+            vec![r0, a, b],
+            vec![[-1, 0]],
+            vec![a],
+        )
+        .unwrap();
+        let inner = r0 - (a * a + b * b).sqrt();
+        let (radius, half_chord) = torus.engine.crease_free_parts();
+        for value in [radius, half_chord] {
+            assert!(
+                (value - inner).abs() <= 1e-12 * inner,
+                "torus {r0} / {a} / {b}: radius {radius}, half chord {half_chord}, not {inner}"
+            );
+        }
+    }
+}
+
+/// `R = 600 + 150 cos(t) + 200 cos(2 z)`, `Z = 150 sin(t)`: the hole is
+/// narrowest between `zeta = pi / 2` and `3 pi / 2`, where the inboard
+/// equator is at `R = 250` on both sides, facing each other along y.
+fn pinched_torus() -> FluxBoundary {
+    FluxBoundary::new(
+        2,
+        vec![[0, 0], [1, 0], [0, 1]],
+        vec![600.0, 150.0, 200.0],
+        vec![[-1, 0]],
+        vec![150.0],
+    )
+    .unwrap()
+}
+
+/// How much nearer the boundary than `d` its outward normals carry its
+/// points, at worst on a grid over a field period: no nearer inside the
+/// crease-free distance, and nearer once fronts meet.
+fn crease_deficit(boundary: &FluxBoundary, d: f64) -> f64 {
+    let period = TAU / boundary.num_field_periods() as f64;
+    let mut worst = 0.0_f64;
+    for j in 0..60 {
+        for i in 0..48 {
+            let (theta, zeta) = (i as f64 * TAU / 48.0, j as f64 * period / 60.0);
+            let p = add(boundary.point(theta, zeta), boundary.normal(theta, zeta), d);
+            worst = worst.max(d - boundary.signed_distance(p));
+        }
+    }
+    worst
+}
+
+#[test]
+fn a_pinched_torus_is_crease_free_out_to_half_its_hole() {
+    let pinched = pinched_torus();
+    let (radius, half_chord) = pinched.engine.crease_free_parts();
+    assert!((half_chord - 250.0).abs() <= 1e-12 * 250.0, "{half_chord}");
+    assert!(radius > half_chord, "{radius}");
+    let free = pinched.crease_free_distance();
+    assert_eq!(free, half_chord);
+    // Just past it the normals across the hole have passed its middle.
+    assert!(crease_deficit(&pinched, 0.99 * free) < 1e-9);
+    assert!(crease_deficit(&pinched, 1.01 * free) > 4.0);
+}
+
+/// `R = 600 + 150 cos(t) + 30 sin(t) + 200 cos(2 z - atan(3 / 4))`, `Z =
+/// 150 sin(t)`: the pinched torus skewed so that the hole is narrowest at
+/// `t = pi + atan(1 / 5)` and `2 z = pi + atan(3 / 4)`, between grid points
+/// in both angles, with the inboard side at `R = 400 - sqrt(150^2 + 30^2)`
+/// on both sides of it.
+fn skewed_pinched_torus() -> FluxBoundary {
+    FluxBoundary::new(
+        1,
+        vec![[0, 0], [1, 0], [-1, 0], [0, 2], [0, -2]],
+        vec![600.0, 150.0, 30.0, 160.0, 120.0],
+        vec![[-1, 0]],
+        vec![150.0],
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_skewed_pinched_torus_is_crease_free_out_to_half_its_hole() {
+    let skewed = skewed_pinched_torus();
+    let (radius, half_chord) = skewed.engine.crease_free_parts();
+    // The grid's chords are all longer; refining them finds the one across
+    // the narrowest part, normal to the boundary at both ends.
+    let half_width = 400.0 - (150.0_f64.powi(2) + 30.0_f64.powi(2)).sqrt();
+    assert!(
+        (half_chord - half_width).abs() <= 1e-12 * half_width,
+        "{half_chord} against {half_width}"
+    );
+    assert!(radius > half_chord, "{radius}");
+    let free = skewed.crease_free_distance();
+    assert_eq!(free, half_chord);
+    assert!(crease_deficit(&skewed, 0.99 * free) < 1e-9);
+    assert!(crease_deficit(&skewed, 1.01 * free) > 1.0);
+}
+
+#[test]
+fn the_beans_crease_free_distance_matches_a_dense_search() {
+    let bean = bean();
+    let e = &bean.engine;
+    let (radius, half_chord) = e.crease_free_parts();
+    // The tightest concave radius of curvature on a dense grid over a
+    // field period.
+    let (nt, nz) = (2000, 400);
+    let mut dense = f64::INFINITY;
+    for j in 0..nz {
+        let zeta = j as f64 * TAU / (5.0 * nz as f64);
+        let cut = e.series.collapse(zeta, 3);
+        for i in 0..nt {
+            let sp = cut.section(i as f64 * TAU / nt as f64).cartesian(zeta);
+            let k = super::patches::principal_curvatures(&sp, e.orientation_3d).1;
+            if k < 0.0 {
+                dense = dense.min(-1.0 / k);
+            }
+        }
+    }
+    // The search refines between grid points, so it comes out no larger
+    // than the dense grid's value, and smaller only by that grid's error.
+    assert!(
+        radius <= dense * (1.0 + 1e-12) && radius >= dense * (1.0 - 1e-5),
+        "{radius} against {dense} on the dense grid"
+    );
+    // The hole is far wider than twice that.
+    assert!(half_chord > radius, "{half_chord}");
+    assert_eq!(bean.crease_free_distance(), radius);
+    // Independently of both searches: no normal creases inside it, and just
+    // past it those at the tightest concave curvature cross their
+    // neighbours.
+    assert!(crease_deficit(&bean, 0.99 * radius) < 1e-9);
+    assert!(crease_deficit(&bean, 1.01 * radius) > 1e-3);
+}
+
+#[test]
+fn layers_beyond_the_crease_free_distance_warn() {
+    let base = Surface::new_flux(Arc::new(circular_torus(600.0, 150.0)), None, None);
+    for d in [0.0, -20.0, 15.0, 440.0] {
+        let layer = base.offset(d, None, None).unwrap();
+        assert_eq!(layer.crease_warning(), None, "{d}");
+    }
+    let warning = base
+        .offset(460.0, None, None)
+        .unwrap()
+        .crease_warning()
+        .unwrap();
+    assert!(
+        warning.contains("offset of 460.00 cm") && warning.contains("about 450.00 cm"),
+        "{warning}"
+    );
+    // Offsets of offsets: the distance from the flux surface counts, shown
+    // rounded like the crease-free distance (the sum is 450.20000000000005).
+    let wall = base.offset(300.1, None, None).unwrap();
+    assert_eq!(
+        wall.offset(139.9, None, None).unwrap().crease_warning(),
+        None
+    );
+    let warning = wall
+        .offset(150.1, None, None)
+        .unwrap()
+        .crease_warning()
+        .unwrap();
+    assert!(
+        warning.contains("offset of 450.20 cm") && warning.contains("exactly 450.20 cm"),
+        "{warning}"
+    );
+    // Beside the dumbbell's thin bar the march's reach is a few cm, but its
+    // layers are smooth out to its tightest concave radius of curvature.
+    let dumbbell = dumbbell(1000.0, 300.0, 3.0, 100.0);
+    assert!(dumbbell.engine.reach_out < 10.0);
+    assert_eq!(dumbbell.crease_warning(10.0), None);
+    assert!(dumbbell.crease_warning(400.0).is_some());
+    let sphere = Surface::new_sphere(0.0, 0.0, 0.0, 1.0, None, None);
+    assert_eq!(sphere.crease_warning(), None);
+}
+
 /// Rough per-call costs (run in release: `cargo test --release -p yamc-geo
 /// flux::tests::timing -- --ignored --nocapture`).
 #[test]
@@ -799,5 +1004,26 @@ fn timing() {
             let ray_us = t.elapsed().as_secs_f64() * 1e6 / rays.len() as f64;
             println!("{name:17} offset {d:4}: evaluate {eval_us:8.2} us, exact {exact_us:8.2} us, ray {ray_us:9.2} us ({hits} hits) [{acc:.1}]");
         }
+    }
+    // The crease-free distance, once per boundary; with two field periods
+    // the rotating ellipse samples chords across the hole.
+    let two_periods = FluxBoundary::new(
+        2,
+        vec![[0, 0], [1, 0], [1, 1], [-1, -1]],
+        vec![600.0, 150.0, 50.0, 50.0],
+        vec![[-1, 0], [-1, 1], [1, -1]],
+        vec![150.0, -50.0, 50.0],
+    )
+    .unwrap();
+    for (name, boundary) in [
+        ("circular torus", circular_torus(600.0, 150.0)),
+        ("rotating ellipse", rotating_ellipse()),
+        ("bean", bean()),
+        ("2-period ellipse", two_periods),
+    ] {
+        let t = Instant::now();
+        let free = boundary.crease_free_distance();
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        println!("{name:17} crease-free distance {free:8.2} cm in {ms:8.2} ms");
     }
 }
