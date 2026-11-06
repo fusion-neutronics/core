@@ -6,10 +6,13 @@
 //! built from, [`sources`] gets those files onto local disk checked against
 //! their pins (with one message for any a host only serves to a web
 //! browser), [`extract`] unpacks them per sublibrary, and [`identify`] names
-//! every material from its own header. Conversion comes after this.
+//! every material from its own header. Then [`convert`] turns each material
+//! into its folder of the release. The transmutation chain, the gates, the
+//! indexes and the manifest come after this.
 //!
 //! Native only: nothing in a browser builds a library.
 
+pub mod convert;
 pub mod extract;
 pub mod identify;
 pub mod os_downloads;
@@ -18,6 +21,7 @@ pub mod sources;
 
 use std::path::Path;
 
+pub use convert::{Options, Outcome, Particle};
 pub use identify::Material;
 pub use recipe::{Recipe, Sublibrary};
 pub use sources::Search;
