@@ -33,6 +33,7 @@ smoke test (see [Exercised by CI / pre-commit](#exercised-by-ci--pre-commit)).
 
 - [`geometry_cube.py`](geometry_cube.py) -- build a cube from planes (CSG).
 - [`stellarator_csg_layers.py`](stellarator_csg_layers.py) -- stellarator plasma, first wall and blanket as CSG layers (`yamc.FluxSurface` / `yamc.OffsetSurface`), no CAD or mesh.
+- [`tokamak_csg_layers.py`](tokamak_csg_layers.py) -- the same layers around a D-shaped tokamak plasma, built from the `yamc.sources.TokamakShape` that drives `tokamak_source`.
 - [`two_cubes_with_gap.py`](two_cubes_with_gap.py) -- two separated cubes; transport through the implicit complement / graveyard.
 - [`lost_particle.py`](lost_particle.py) -- how lost particles (geometry gaps) are reported and debugged.
 - [`surface_mesh_simulation.py`](surface_mesh_simulation.py) -- **(mesh)** surface-mesh geometry from CadQuery for transport.

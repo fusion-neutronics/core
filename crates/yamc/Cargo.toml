@@ -26,7 +26,11 @@ rand_chacha = { version = "0.10", optional = true }
 rayon = "1.10"
 parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive", "rc"] }
-serde_json = "1.0"
+# `float_roundtrip` parses every float in a model file back to the one that
+# was saved. The default parser can land a 17-digit float, such as a flux
+# surface's mode coefficient, one ulp off, so a loaded model would not be the
+# saved one. It costs some speed in parsing floats, nothing in writing them.
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 sha2 = "0.10"
 wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
