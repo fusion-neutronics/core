@@ -22,6 +22,7 @@ mod series;
 #[cfg(test)]
 mod tests;
 
+use crate::surface::search::along_unit;
 use crate::surface::{BoundaryType, Surface, SurfaceKind};
 use distance::MAX_POLY;
 use patches::Patches;
@@ -293,14 +294,10 @@ impl FluxBoundary {
         t_max: f64,
     ) -> Option<f64> {
         // The march measures arc length, so it runs on the unit direction.
-        let len = direction.iter().map(|v| v * v).sum::<f64>().sqrt();
-        if !(len.is_finite() && len > 0.0) || !point.iter().all(|v| v.is_finite()) {
-            return None;
-        }
-        let unit = direction.map(|v| v / len);
-        self.engine
-            .ray(point, unit, offset, on_surface, vacuum, t_max * len)
-            .map(|t| t / len)
+        along_unit(point, direction, t_max, |unit, t_max| {
+            self.engine
+                .ray(point, unit, offset, on_surface, vacuum, t_max)
+        })
     }
 
     /// Box containing the points within `offset` of the boundary (for a

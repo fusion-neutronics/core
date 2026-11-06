@@ -946,15 +946,12 @@ pub(crate) fn translate_region_program(cells: &[Cell]) -> Vec<u32> {
 }
 
 /// Refuse surface kinds the kernel has no arm for, before the cell
-/// translation could fail on them with a less clear message.
+/// translation could fail on them with a less clear message. Which kinds
+/// those are is decided once, by [`encode_surface`]'s exhaustive match.
 pub(crate) fn reject_unsupported_surfaces(cells: &[Cell]) -> Result<(), GpuTranslateError> {
     for cell in cells {
         for (surface, _sense) in &cell.cached_surfaces {
-            if let SurfaceKind::Flux { .. } = surface.kind {
-                return Err(GpuTranslateError::SurfaceKindUnsupported {
-                    kind: surface.kind.name(),
-                });
-            }
+            encode_surface(&surface.kind)?;
         }
     }
     Ok(())

@@ -4,6 +4,7 @@ mod flux;
 mod plane;
 mod quadric;
 mod roots;
+mod search;
 mod sphere;
 mod torus;
 
@@ -165,13 +166,47 @@ impl Surface {
     /// surface; 0 for a particle exactly on it), `None` otherwise. The
     /// tori then treat the crossing as an exact root and drop it, rather
     /// than solve for it in round-off (which can return it as a tiny
-    /// positive distance). The other surfaces ignore it: a quadratic's
-    /// root at the crossing comes back accurately, behind the particle.
+    /// positive distance), and a free-form surface takes it to mean the
+    /// particle is on it (it also finds that out for itself, as a surface
+    /// without an id never gets the hint). The other surfaces ignore it: a
+    /// quadratic's root at the crossing comes back accurately, behind the
+    /// particle.
     pub fn distance_to_surface_on(
         &self,
         point: [f64; 3],
         direction: [f64; 3],
         on_surface: Option<f64>,
+    ) -> Option<f64> {
+        self.distance_to_surface_capped(point, direction, on_surface, f64::INFINITY)
+    }
+
+    /// Whether the surface is free-form (a flux or offset surface), whose
+    /// crossings are searched for iteratively rather than solved in closed
+    /// form.
+    pub fn is_free_form(&self) -> bool {
+        match self.kind {
+            SurfaceKind::Plane { .. }
+            | SurfaceKind::Sphere { .. }
+            | SurfaceKind::Cylinder { .. }
+            | SurfaceKind::ZTorus { .. }
+            | SurfaceKind::XTorus { .. }
+            | SurfaceKind::YTorus { .. }
+            | SurfaceKind::Quadric { .. }
+            | SurfaceKind::Cone { .. } => false,
+            SurfaceKind::Flux { .. } => true,
+        }
+    }
+
+    /// [`Surface::distance_to_surface_on`] for a caller that only needs
+    /// crossings nearer than `t_max`: a free-form surface stops searching
+    /// there and returns `None` for a crossing beyond it. Closed-form kinds
+    /// ignore the cap.
+    pub fn distance_to_surface_capped(
+        &self,
+        point: [f64; 3],
+        direction: [f64; 3],
+        on_surface: Option<f64>,
+        t_max: f64,
     ) -> Option<f64> {
         match &self.kind {
             SurfaceKind::Plane { a, b, c, d } => plane::distance(point, direction, *a, *b, *c, *d),
@@ -257,31 +292,6 @@ impl Surface {
                 axis,
                 tan2_theta,
             } => cone::distance(point, direction, *apex, *axis, *tan2_theta),
-            SurfaceKind::Flux { .. } => {
-                self.distance_to_surface_capped(point, direction, on_surface, f64::INFINITY)
-            }
-        }
-    }
-
-    /// Whether the surface is free-form (a flux or offset surface), whose
-    /// crossings are searched for iteratively rather than solved in closed
-    /// form.
-    pub fn is_free_form(&self) -> bool {
-        matches!(self.kind, SurfaceKind::Flux { .. })
-    }
-
-    /// [`Surface::distance_to_surface_on`] for a caller that only needs
-    /// crossings nearer than `t_max`: a free-form surface stops searching
-    /// there and returns `None` for a crossing beyond it. Closed-form kinds
-    /// ignore the cap.
-    pub fn distance_to_surface_capped(
-        &self,
-        point: [f64; 3],
-        direction: [f64; 3],
-        on_surface: Option<f64>,
-        t_max: f64,
-    ) -> Option<f64> {
-        match &self.kind {
             SurfaceKind::Flux { boundary, offset } => boundary.distance(
                 point,
                 direction,
@@ -290,7 +300,6 @@ impl Surface {
                 self.boundary == BoundaryType::Vacuum,
                 t_max,
             ),
-            _ => self.distance_to_surface_on(point, direction, on_surface),
         }
     }
     /// Builder-style setter for the optional `name` metadata field.
@@ -389,10 +398,17 @@ impl Surface {
     /// kinds return `evaluate` unchanged.
     pub fn evaluate_exact(&self, point: (f64, f64, f64)) -> f64 {
         match &self.kind {
+            SurfaceKind::Plane { .. }
+            | SurfaceKind::Sphere { .. }
+            | SurfaceKind::Cylinder { .. }
+            | SurfaceKind::ZTorus { .. }
+            | SurfaceKind::XTorus { .. }
+            | SurfaceKind::YTorus { .. }
+            | SurfaceKind::Quadric { .. }
+            | SurfaceKind::Cone { .. } => self.evaluate(point),
             SurfaceKind::Flux { boundary, offset } => {
                 boundary.signed_distance([point.0, point.1, point.2]) - offset
             }
-            _ => self.evaluate(point),
         }
     }
 

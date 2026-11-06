@@ -822,6 +822,100 @@ fn loaded_layers_share_one_boundary() {
     assert_eq!(serde_json::to_string(&back).unwrap(), json);
 }
 
+/// A digest of the ray search's answers (crossing, whether the budget ran
+/// out, and evaluations, bit for bit) over a fixed set of queries: random
+/// rays, capped ones, starts on the surface with and without the transport
+/// hint, and grazing ones, on transmission and vacuum surfaces. A change
+/// meant to leave the search alone, here or in the search shared with the
+/// other free-form kinds, keeps it (`cargo test -p yamc-geo
+/// flux::tests::ray_digest -- --ignored --nocapture`, before and after; it
+/// takes minutes); libm differences between platforms change it.
+#[test]
+#[ignore]
+fn ray_digest() {
+    let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+    let mut queries = 0_usize;
+    // Random rays per offset: past its fold the spindle torus's search
+    // often runs out of evaluations, which costs seconds on a vacuum surface.
+    let cases = [
+        (
+            circular_torus(600.0, 150.0),
+            vec![(0.0, 150), (15.0, 150), (-20.0, 150), (500.0, 8)],
+        ),
+        (
+            rotating_ellipse(),
+            vec![(0.0, 150), (15.0, 150), (60.0, 150), (-10.0, 150)],
+        ),
+        (bean(), vec![(0.0, 150), (15.0, 150), (-10.0, 150)]),
+        (
+            dumbbell(1000.0, 300.0, 3.0, 100.0),
+            vec![(0.0, 150), (2.0, 150), (-1.0, 150)],
+        ),
+    ];
+    for (boundary, offsets) in cases {
+        let e = &boundary.engine;
+        let (lo, hi) = boundary.bounding_box(100.0);
+        let mut rng = Rng(2026);
+        for (offset, random) in offsets {
+            let clock = std::time::Instant::now();
+            let mut evals = 0_usize;
+            let mut worst = 0_usize;
+            let mut record = |o: [f64; 3], u: [f64; 3], hint: Option<f64>, t_max: f64| {
+                for vacuum in [false, true] {
+                    let trace = e.trace_ray(o, u, offset, hint, vacuum, t_max);
+                    let bits = [
+                        trace.crossing.map_or(u64::MAX, f64::to_bits),
+                        u64::from(trace.exhausted),
+                        trace.evaluations as u64,
+                    ];
+                    for byte in bits.iter().flat_map(|b| b.to_le_bytes()) {
+                        digest = (digest ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3);
+                    }
+                    queries += 1;
+                    evals += trace.evaluations;
+                    worst = worst.max(trace.evaluations);
+                }
+            };
+            for _ in 0..random {
+                let o = [
+                    rng.range(lo[0], hi[0]),
+                    rng.range(lo[1], hi[1]),
+                    rng.range(lo[2], hi[2]),
+                ];
+                let u = rng.direction();
+                record(o, u, None, f64::INFINITY);
+                record(o, u, None, rng.range(0.0, 300.0));
+            }
+            for _ in 0..60 {
+                let (theta, zeta) = (rng.range(0.0, TAU), rng.range(0.0, TAU));
+                let x = boundary.point(theta, zeta);
+                let n = boundary.normal(theta, zeta);
+                let s = rng.range(-3e-8, 3e-8);
+                let o = add(x, n, offset + s);
+                let u = rng.direction();
+                record(o, u, None, f64::INFINITY);
+                record(o, u, Some(s.abs()), f64::INFINITY);
+            }
+            for k in 0..30 {
+                let (theta, zeta) = (rng.range(0.0, TAU), rng.range(0.0, TAU));
+                let sp = e.series.point(theta, zeta);
+                let n = boundary.normal(theta, zeta);
+                let t = normalize(add(sp.x_t, sp.x_z, rng.range(-1.0, 1.0)));
+                let dot = t[0] * n[0] + t[1] * n[1] + t[2] * n[2];
+                let t = normalize(add(t, n, -dot));
+                let height = [1e-7, -1e-7, 1e-3, -1e-3, 0.5, -0.5][k % 6];
+                let o = add(add(add(sp.x, n, offset), n, height), t, -50.0);
+                record(o, t, None, f64::INFINITY);
+            }
+            println!(
+                "offset {offset}: {:.1} s, {evals} evals, worst {worst}",
+                clock.elapsed().as_secs_f64()
+            );
+        }
+    }
+    println!("{queries} queries, digest {digest:016x}");
+}
+
 /// Rough per-call costs (run in release: `cargo test --release -p yamc-geo
 /// flux::tests::timing -- --ignored --nocapture`).
 #[test]
