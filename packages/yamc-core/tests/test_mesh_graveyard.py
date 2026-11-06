@@ -127,7 +127,7 @@ def test_no_surface_ahead_in_a_real_volume_is_lost():
     """A cube volume missing its -z face: a particle heading -z from inside
     meets no surface of its volume, which is lost even though the
     graveyard closes the complement. (The source still locates in the
-    volume: point containment casts its first ray along +z.)"""
+    volume: point containment casts its first ray up, 2.5 degrees off +z.)"""
     geometry = _cube_geometry(
         faces=[f for f in _FACES if f != "-z"], graveyard_offset=5.0
     )
