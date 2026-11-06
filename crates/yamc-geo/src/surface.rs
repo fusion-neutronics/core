@@ -1,6 +1,7 @@
 mod cone;
 mod cylinder;
 mod flux;
+pub mod implicit;
 mod plane;
 mod quadric;
 mod roots;
@@ -10,6 +11,7 @@ mod torus;
 
 use crate::region::{HalfspaceType, RegionExpr};
 pub use flux::FluxBoundary;
+pub use implicit::ImplicitFormula;
 pub use roots::quartic_real_roots;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
