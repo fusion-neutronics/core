@@ -27,17 +27,25 @@ use distance::MAX_POLY;
 use patches::Patches;
 use serde::{Deserialize, Serialize};
 use series::{Series, MAX_M, MAX_N};
+use std::collections::HashMap;
 use std::f64::consts::TAU;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
+
+/// Most field periods supported (the patch grid keeps at least 8 rows per
+/// period and at most 2048 rows).
+const MAX_FIELD_PERIODS: u32 = 256;
 
 /// A closed toroidal boundary `R(theta, zeta)`, `Z(theta, zeta)` given by
 /// Fourier modes `(m, n)` in DESC's product convention (see the module
 /// docs), lengths in cm, `zeta` the cylindrical toroidal angle.
 ///
-/// [`FluxBoundary::new`] checks the geometry: `R > 0` everywhere and every
-/// toroidal cut a simple closed curve with the same orientation. The
-/// distance machinery is rebuilt (and the checks rerun) when a model is
-/// loaded; only the modes are stored.
+/// [`FluxBoundary::new`] checks the geometry: `R > 0` everywhere, and the
+/// toroidal cuts on a grid of angles simple closed curves with the same
+/// orientation. The cut check samples (a loop smaller than its polyline
+/// spacing, or a self-intersection only between the checked cuts, can get
+/// through); it catches badly wrong coefficients, not every degenerate
+/// shape. The distance machinery is rebuilt (and the checks rerun) when a
+/// model is loaded; only the modes are stored.
 pub struct FluxBoundary {
     num_field_periods: u32,
     r_modes: Vec<[i32; 2]>,
@@ -96,6 +104,44 @@ impl<'de> Deserialize<'de> for FluxBoundary {
     }
 }
 
+/// A boundary's modes, as a map key.
+type ModesKey = (u32, Vec<[i32; 2]>, Vec<u64>, Vec<[i32; 2]>, Vec<u64>);
+
+/// Boundaries built while loading, by their modes: a saved model holds a
+/// copy of a boundary for every surface built on it, and they all share
+/// one boundary (and its distance machinery, built once) again on load.
+static LOADED: OnceLock<Mutex<HashMap<ModesKey, Weak<FluxBoundary>>>> = OnceLock::new();
+
+/// Deserialize a boundary, sharing it with every other live boundary
+/// loaded with the same modes (for `SurfaceKind::Flux`).
+pub(crate) fn deserialize_shared<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Arc<FluxBoundary>, D::Error> {
+    let d = FluxBoundaryData::deserialize(deserializer)?;
+    let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    let key = (
+        d.num_field_periods,
+        d.r_modes.clone(),
+        bits(&d.r_mn),
+        d.z_modes.clone(),
+        bits(&d.z_mn),
+    );
+    let mut loaded = LOADED
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some(boundary) = loaded.get(&key).and_then(Weak::upgrade) {
+        return Ok(boundary);
+    }
+    let boundary = Arc::new(
+        FluxBoundary::new(d.num_field_periods, d.r_modes, d.r_mn, d.z_modes, d.z_mn)
+            .map_err(serde::de::Error::custom)?,
+    );
+    loaded.retain(|_, b| b.strong_count() > 0);
+    loaded.insert(key, Arc::downgrade(&boundary));
+    Ok(boundary)
+}
+
 impl FluxBoundary {
     /// Build and check a boundary. `r_modes` / `z_modes` are `(m, n)` pairs
     /// matching the coefficients `r_mn` / `z_mn` (cm).
@@ -106,8 +152,11 @@ impl FluxBoundary {
         z_modes: Vec<[i32; 2]>,
         z_mn: Vec<f64>,
     ) -> Result<Self, String> {
-        if num_field_periods == 0 {
-            return Err("num_field_periods must be at least 1".to_string());
+        if !(1..=MAX_FIELD_PERIODS).contains(&num_field_periods) {
+            return Err(format!(
+                "num_field_periods must be between 1 and {MAX_FIELD_PERIODS} (got \
+                 {num_field_periods})"
+            ));
         }
         for (name, modes, values) in [("r", &r_modes, &r_mn), ("z", &z_modes, &z_mn)] {
             if modes.is_empty() || modes.len() != values.len() {
@@ -189,14 +238,11 @@ impl FluxBoundary {
         self.engine.normal(&self.engine.series.point(theta, zeta))
     }
 
-    /// Largest inward offset that keeps the layer free of folds: inside
-    /// the smallest radius of curvature of the convex parts.
+    /// Depth inside the boundary up to which the distance to it is smooth
+    /// (cm): the smaller of the tightest convex radius of curvature and
+    /// half the thinnest part, both bounded conservatively.
     pub fn inner_reach(&self) -> f64 {
-        if self.engine.patches.max_convex > 0.0 {
-            1.0 / self.engine.patches.max_convex
-        } else {
-            f64::INFINITY
-        }
+        self.engine.reach_in
     }
 
     /// Refuse an offset whose level set would fold inwards.
@@ -207,8 +253,9 @@ impl FluxBoundary {
         let reach = self.inner_reach();
         if offset < 0.0 && -offset >= 0.9 * reach {
             return Err(format!(
-                "an inward offset of {:.6} cm reaches the boundary's inner fold distance \
-                 (about {reach:.6} cm), where the offset layer would crease or vanish; describe \
+                "an inward offset of {:.6} cm comes too close to the boundary's inner reach \
+                 (about {reach:.6} cm: its tightest convex radius of curvature or half its \
+                 thinnest part), beyond which the offset layer would crease or vanish; describe \
                  surfaces that deep inside the plasma with FluxSurface(shape, rho < 1) instead",
                 -offset
             ));
@@ -219,6 +266,9 @@ impl FluxBoundary {
     /// `D(point) - offset`: the sign is exact; the magnitude is exact near
     /// the level set and otherwise a rigorous lower bound.
     pub(crate) fn evaluate(&self, point: [f64; 3], offset: f64) -> f64 {
+        if !point.iter().all(|v| v.is_finite()) {
+            return f64::NAN;
+        }
         let e = &self.engine;
         let (cut, lo, hi) = e.bounds(point);
         if lo - offset > e.margin {
@@ -230,6 +280,9 @@ impl FluxBoundary {
         e.signed_from(point, &cut).d - offset
     }
 
+    /// Ray parameter `t` of the first crossing of the level set at
+    /// `offset` along `point + t * direction`, if before `t_max`; `None`
+    /// for a zero or non-finite direction or a non-finite point.
     pub(crate) fn distance(
         &self,
         point: [f64; 3],
@@ -239,8 +292,15 @@ impl FluxBoundary {
         vacuum: bool,
         t_max: f64,
     ) -> Option<f64> {
+        // The march measures arc length, so it runs on the unit direction.
+        let len = direction.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if !(len.is_finite() && len > 0.0) || !point.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let unit = direction.map(|v| v / len);
         self.engine
-            .ray(point, direction, offset, on_surface, vacuum, t_max)
+            .ray(point, unit, offset, on_surface, vacuum, t_max * len)
+            .map(|t| t / len)
     }
 
     /// Box containing the points within `offset` of the boundary (for a
@@ -271,8 +331,13 @@ pub(super) struct Engine {
     /// Newton stops when the tangential part of `x - X` is below this
     /// (cm); the distance is then exact to second order in it.
     newton_tolerance: f64,
-    /// Largest curvature of either sign anywhere on the surface.
-    kappa_all: f64,
+    /// Largest convex / concave curvature anywhere on the surface.
+    kappa_convex: f64,
+    kappa_concave: f64,
+    /// Distances inside / outside up to which the distance to the surface
+    /// is smooth, so its second derivative is bounded by the curvatures.
+    reach_in: f64,
+    reach_out: f64,
 }
 
 impl Engine {
@@ -318,7 +383,10 @@ impl Engine {
                     .to_string(),
             );
         }
-        let kappa_all = patches.max_convex.max(patches.max_concave);
+        let (kappa_convex, kappa_concave) = (patches.max_convex, patches.max_concave);
+        let (gap_in, gap_out) = patches.gaps(&series, nz / nfp, orientation_3d, margin);
+        let reach_in = (1.0 / kappa_convex).min(0.5 * gap_in);
+        let reach_out = (1.0 / kappa_concave).min(0.5 * gap_out);
         Ok(Self {
             newton_tolerance: 1e-10 * (scale / 1000.0).max(1.0),
             series,
@@ -330,14 +398,17 @@ impl Engine {
             poly_cos,
             poly_sin,
             margin,
-            kappa_all,
+            kappa_convex,
+            kappa_concave,
+            reach_in,
+            reach_out,
         })
     }
 }
 
-/// Check that every toroidal cut over a field period is a simple closed
-/// curve and that all run the same way round; return that orientation
-/// (+1 counter-clockwise in `(R, Z)`).
+/// Check, on a grid of cuts and polylines, that the toroidal cuts over a
+/// field period are simple closed curves that all run the same way round;
+/// return that orientation (+1 counter-clockwise in `(R, Z)`).
 fn check_cuts(series: &Series) -> Result<f64, String> {
     let n = (32 * (series.m_max + 1)).clamp(128, 1024);
     let cuts = 8 * (series.n_max + 1);

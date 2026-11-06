@@ -504,6 +504,244 @@ fn a_boundary_round_trips_through_json() {
     assert_eq!(serde_json::to_string(&back).unwrap(), json);
 }
 
+/// Axisymmetric dumbbell `R = r0 + l cos(t)`, `Z = sin(t) (w + h
+/// cos^6(t))`: two bulbs joined by a bar `2 w` thick at `R = r0`.
+fn dumbbell(r0: f64, l: f64, w: f64, h: f64) -> FluxBoundary {
+    FluxBoundary::new(
+        1,
+        vec![[0, 0], [1, 0]],
+        vec![r0, l],
+        vec![[-1, 0], [-3, 0], [-5, 0], [-7, 0]],
+        vec![
+            w + 2.5 * h / 32.0,
+            4.5 * h / 32.0,
+            2.5 * h / 32.0,
+            0.5 * h / 32.0,
+        ],
+    )
+    .unwrap()
+}
+
+/// First crossing of `D = offset` along the ray beyond 1e-10 cm by brute
+/// force: sphere tracing on the exact distance with steps of at least
+/// `h_min`, then bisection.
+fn brute_force_root(
+    boundary: &FluxBoundary,
+    offset: f64,
+    o: [f64; 3],
+    u: [f64; 3],
+    t_max: f64,
+    h_min: f64,
+) -> Option<f64> {
+    let g = |t: f64| boundary.signed_distance(add(o, u, t)) - offset;
+    let (mut t, mut gt) = (1e-10, g(1e-10));
+    while t < t_max {
+        let next = t + gt.abs().max(h_min);
+        let gn = g(next);
+        if gn == 0.0 || gn.signum() != gt.signum() {
+            let (mut a, mut b) = (t, next);
+            while b - a > 1e-12 {
+                let m = 0.5 * (a + b);
+                if g(m).signum() == gt.signum() {
+                    a = m;
+                } else {
+                    b = m;
+                }
+            }
+            return Some(b);
+        }
+        (t, gt) = (next, gn);
+    }
+    None
+}
+
+/// The engine's crossing (transmission and vacuum alike) against the brute
+/// force one; an earlier engine crossing is accepted if it is a genuine
+/// sign change the brute force stepped over. Returns the evaluations used.
+fn check_crossing(boundary: &FluxBoundary, offset: f64, o: [f64; 3], u: [f64; 3]) -> usize {
+    let want = brute_force_root(boundary, offset, o, u, 2000.0, 1e-5);
+    let g = |t: f64| boundary.signed_distance(add(o, u, t)) - offset;
+    let mut evaluations = 0;
+    for vacuum in [false, true] {
+        let trace = boundary
+            .engine
+            .trace_ray(o, u, offset, None, vacuum, f64::INFINITY);
+        assert!(
+            !trace.exhausted,
+            "budget ran out: {o:?} {u:?} offset {offset}"
+        );
+        evaluations = evaluations.max(trace.evaluations);
+        match (trace.crossing, want) {
+            (None, None) => {}
+            (Some(got), Some(want)) if (got - want).abs() <= 1e-7 * want.max(1.0) => {}
+            (Some(got), _) if g(got - 1e-7).signum() != g(got + 1e-7).signum() => {
+                assert!(want.is_none_or(|w| got < w), "{got} after {want:?}");
+            }
+            (got, want) => panic!(
+                "offset {offset} vacuum {vacuum} from {o:?} along {u:?}: engine {got:?}, brute \
+                 force {want:?}"
+            ),
+        }
+    }
+    evaluations
+}
+
+#[test]
+fn the_reach_stops_at_half_a_thin_part() {
+    for w in [1.0, 3.0] {
+        let boundary = dumbbell(1000.0, 300.0, w, 100.0);
+        // Half the bar's thickness bounds the depth up to which the
+        // distance is smooth, and the inward offsets allowed.
+        let reach = boundary.inner_reach();
+        assert!(reach > 0.0 && reach <= w, "w {w}: reach {reach}");
+        assert!(boundary.check_offset(-w).is_err());
+        // Up through the bar from just above its bottom face.
+        let o = [1000.0, 0.0, -w + 0.01];
+        let t = boundary.distance(o, [0.0, 0.0, 1.0], 0.0, None, false, f64::INFINITY);
+        assert!((t.unwrap() - (2.0 * w - 0.01)).abs() < 1e-9, "w {w}: {t:?}");
+        let mut rng = Rng(5);
+        for _ in 0..20 {
+            let u = normalize([rng.range(-0.3, 0.3), rng.range(-0.3, 0.3), 1.0]);
+            check_crossing(&boundary, 0.0, o, u);
+        }
+    }
+}
+
+fn normalize(v: [f64; 3]) -> [f64; 3] {
+    let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    [v[0] / n, v[1] / n, v[2] / n]
+}
+
+#[test]
+fn shallow_crossings_far_from_the_boundary_are_found() {
+    // Rays the first version of the march lost: a 60 cm vacuum layer met
+    // at about 4 degrees (it ran out of evaluations and lost the particle)
+    // and a long shallow pass over the bean.
+    let re = rotating_ellipse();
+    let o = [503.5718055698, 8.117318195608, -150.4026246763];
+    let u = normalize([0.7448347420947, -0.6642340783366, -0.06335847334877]);
+    let t = re.distance(o, u, 60.0, None, true, f64::INFINITY).unwrap();
+    assert!((t - 35.00135837).abs() < 1e-6, "{t}");
+    let cases = [
+        (
+            [589.7641814328, -161.6222524287, 147.9368027346],
+            [0.511163065, 0.8592822908, 0.0186092164],
+        ),
+        (
+            [676.228706698, -17.10159508002, -116.8618300965],
+            [-0.2121457550, 0.9576837931, -0.1945146039],
+        ),
+        (
+            [710.7376564341, 260.5423185976, -18.87414039906],
+            [-0.5184685487, 0.3333175212, -0.7874578047],
+        ),
+        (
+            [682.015489043, 61.38201297862, -110.7562139607],
+            [-0.4881572650, 0.7686358709, -0.4134022043],
+        ),
+        (
+            [83.66857412838, -484.8161908679, 166.5168101111],
+            [0.5823117902, -0.8110722038, -0.0554514135],
+        ),
+    ];
+    for (o, u) in cases {
+        for offset in [20.0, 60.0] {
+            check_crossing(&re, offset, o, normalize(u));
+        }
+    }
+    let be = bean();
+    let o = [-410.21558722345276, 303.055408290895, 151.3971638744561];
+    let u = normalize([0.7404007893171879, 0.6522989420850496, -0.1622120875064814]);
+    let t = be.distance(o, u, 0.0, None, false, f64::INFINITY).unwrap();
+    assert!((t - 282.8767171).abs() < 1e-6, "{t}");
+}
+
+#[test]
+fn grazing_rays_find_their_crossing() {
+    // Rays along the tangent plane of a level set, just inside or outside
+    // it, 50 cm before the tangent point.
+    let mut worst = 0;
+    for boundary in [rotating_ellipse(), bean()] {
+        for offset in [0.0, 15.0, 60.0, -10.0] {
+            let mut rng = Rng(77);
+            for height in [1e-7, -1e-7, 1e-3, -1e-3, 0.1, -0.1, 1.0, -1.0] {
+                for _ in 0..4 {
+                    let (theta, zeta) = (rng.range(0.0, TAU), rng.range(0.0, TAU));
+                    let sp = boundary.engine.series.point(theta, zeta);
+                    let n = boundary.normal(theta, zeta);
+                    let t = normalize(add(sp.x_t, sp.x_z, rng.range(-1.0, 1.0)));
+                    let dot = t[0] * n[0] + t[1] * n[1] + t[2] * n[2];
+                    let t = normalize(add(t, n, -dot));
+                    let o = add(add(add(sp.x, n, offset), n, height), t, -50.0);
+                    worst = worst.max(check_crossing(&boundary, offset, o, t));
+                }
+            }
+        }
+    }
+    assert!(worst < 1000, "a grazing ray took {worst} evaluations");
+}
+
+#[test]
+fn directions_are_normalised_and_checked() {
+    let boundary = rotating_ellipse();
+    let o = [503.5718055698, 8.117318195608, -150.4026246763];
+    let u = normalize([0.7448347420947, -0.6642340783366, -0.06335847334877]);
+    let unit = boundary
+        .distance(o, u, 60.0, None, false, f64::INFINITY)
+        .unwrap();
+    let long = boundary
+        .distance(o, u.map(|v| 7.0 * v), 60.0, None, false, f64::INFINITY)
+        .unwrap();
+    assert!((7.0 * long - unit).abs() < 1e-9 * unit, "{unit} {long}");
+    let none = |o: [f64; 3], u: [f64; 3]| boundary.distance(o, u, 0.0, None, false, f64::INFINITY);
+    assert_eq!(none(o, [0.0; 3]), None);
+    assert_eq!(none(o, [f64::NAN, 0.0, 1.0]), None);
+    assert_eq!(none([f64::INFINITY, 0.0, 0.0], u), None);
+    // From far away the march ends (and finds the crossing).
+    let t = none([1e9, 0.0, 0.0], [-1.0, 0.0, 0.0]).unwrap();
+    assert!((t - (1e9 - 800.0)).abs() < 1e-3, "{t}");
+}
+
+#[test]
+fn field_periods_are_limited() {
+    let with = |nfp| {
+        FluxBoundary::new(
+            nfp,
+            vec![[0, 0], [1, 0]],
+            vec![600.0, 100.0],
+            vec![[-1, 0]],
+            vec![100.0],
+        )
+    };
+    assert!(with(256).is_ok());
+    let err = with(257).unwrap_err();
+    assert!(err.contains("between 1 and 256"), "{err}");
+}
+
+#[test]
+fn loaded_layers_share_one_boundary() {
+    let base = Surface::new_flux(Arc::new(rotating_ellipse()), Some(1), None);
+    let layers = vec![
+        base.clone(),
+        base.offset(15.0, Some(2), None).unwrap(),
+        base.offset(60.0, Some(3), Some(BoundaryType::Vacuum))
+            .unwrap(),
+    ];
+    let json = serde_json::to_string(&layers).unwrap();
+    let back: Vec<Surface> = serde_json::from_str(&json).unwrap();
+    let first = match &back[0].kind {
+        SurfaceKind::Flux { boundary, .. } => Arc::clone(boundary),
+        _ => unreachable!(),
+    };
+    for layer in &back[1..] {
+        match &layer.kind {
+            SurfaceKind::Flux { boundary, .. } => assert!(Arc::ptr_eq(boundary, &first)),
+            _ => unreachable!(),
+        }
+    }
+    assert_eq!(serde_json::to_string(&back).unwrap(), json);
+}
+
 /// Rough per-call costs (run in release: `cargo test --release -p yamc-geo
 /// flux::tests::timing -- --ignored --nocapture`).
 #[test]

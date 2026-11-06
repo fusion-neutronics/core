@@ -122,6 +122,7 @@ pub enum SurfaceKind {
     /// `offset == 0` (a flux surface), a layer surface otherwise. Layers
     /// sharing one boundary are nested by construction.
     Flux {
+        #[serde(deserialize_with = "flux::deserialize_shared")]
         boundary: Arc<FluxBoundary>,
         offset: f64,
     },
@@ -380,9 +381,12 @@ impl Surface {
 
     /// [`Surface::evaluate`] with an exact magnitude. For flux and offset
     /// surfaces `evaluate` has an exact sign but, away from the surface,
-    /// returns only a rigorous lower bound on the distance (all transport
-    /// needs); this returns the signed distance (cm) itself. Other kinds
-    /// return `evaluate` unchanged.
+    /// returns only a rigorous lower bound on its magnitude (all transport
+    /// needs); this returns `D - offset` itself, with `D` the signed
+    /// distance (cm) from the flux surface. That is the distance to an
+    /// offset layer outside it and wherever the layer is not creased; near
+    /// a crease, inside the layer, the layer is farther than that. Other
+    /// kinds return `evaluate` unchanged.
     pub fn evaluate_exact(&self, point: (f64, f64, f64)) -> f64 {
         match &self.kind {
             SurfaceKind::Flux { boundary, offset } => {

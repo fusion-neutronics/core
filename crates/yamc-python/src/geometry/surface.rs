@@ -116,8 +116,11 @@ impl PySurface {
 
     /// Evaluate the surface equation at a point.
     ///
-    /// For flux and offset surfaces the value is the signed distance (cm)
-    /// from the surface.
+    /// For a flux surface the value is the signed distance (cm) from it.
+    /// For an offset surface it is the signed distance from the underlying
+    /// flux surface minus ``distance``: the distance to the layer outside
+    /// it and wherever the layer is not creased, an underestimate inside
+    /// the layer near a crease. The sign is always exact.
     ///
     /// Args:
     ///     point: Tuple of 3 floats (x, y, z)
