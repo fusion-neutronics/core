@@ -54,17 +54,35 @@ def test_an_implicit_surface_is_an_ordinary_surface():
     assert yamc.ImplicitSurface(surface.formula).formula == surface.formula
 
 
-def test_bad_formulas_fail_with_clear_messages():
-    with pytest.raises(ValueError, match=r"column 5"):
-        yamc.ImplicitSurface("x + * y")
-    with pytest.raises(ValueError, match="square root of a negative number"):
-        yamc.ImplicitSurface("sqrt(1 - x^2 - y^2) - z")
-    with pytest.raises(ValueError, match="divide by zero"):
-        yamc.ImplicitSurface("1 / (x - 1) - 2")
-    with pytest.raises(ValueError, match="is never negative"):
-        yamc.ImplicitSurface("x^2 + y^2 + z^2 + 1")
-    with pytest.raises(ValueError, match="positive constant"):
-        yamc.ImplicitSurface("smin(x, y, 0) - 1")
+@pytest.mark.parametrize(
+    ("formula", "message"),
+    [
+        # Parse errors say where, with a caret under the place.
+        ("x + * y", r"found '\*' \(column 5\):\n  x \+ \* y\n      \^"),
+        ("(x + y", r"expected '\)' to close the '\(' at column 1"),
+        ("foo(x) - 1", r"unknown name 'foo' \(the coordinates are x, y and z"),
+        ("1e400 * x - 1", r"too large for a 64-bit float \(column 1\)"),
+        ("x^2.5 - 1", r"needs a base that cannot be negative, and x can be"),
+        ("smin(x, y, 0) - 1", r"must be a positive constant .* \(column 12\)"),
+        # Operations that can be undefined, or divide by zero, where the
+        # formula is used, by name and place.
+        (
+            "sqrt(1 - x^2 - y^2) - z",
+            r"sqrt\(1 - x\^2 - y\^2\) can take the square root",
+        ),
+        ("log(x) - 1", r"log\(x\) can take the logarithm of a negative number"),
+        ("1 / (x - 1) - 2", r"1 / \(x - 1\) can divide by zero .* \(column 3\)"),
+        # Formulas that never change sign.
+        ("x^2 + y^2 + z^2 + 1", "is never negative, so nothing would be below"),
+        ("-x^2 - 1", "is never positive within 1048576 cm of the origin"),
+    ],
+)
+def test_bad_formulas_fail_with_clear_messages(formula, message):
+    with pytest.raises(ValueError, match=message):
+        yamc.ImplicitSurface(formula)
+
+
+def test_bad_options_fail_with_clear_messages():
     with pytest.raises(ValueError, match="boundary must be None or 'vacuum'"):
         yamc.ImplicitSurface("x - 1", boundary="reflective")
     with pytest.raises(TypeError):
@@ -127,7 +145,16 @@ def test_a_model_with_implicit_surfaces_saves_and_loads(tmp_path):
         geometry=yamc.Geometry(cells),
         source=yamc.NeutronSource(energy=yamc.sources.Discrete([14.06e6], [1.0])),
     )
-    assert yamc.Model.load(model.to_json()).to_json() == model.to_json()
+    # The formulas are stored as their canonical text.
+    assert GYROID in model.to_json()
+    loaded = yamc.Model.load(model.to_json())
+    assert loaded.to_json() == model.to_json()
     path = tmp_path / "lattice.json"
     model.save(str(path))
     assert yamc.Model.load(str(path)).to_json() == model.to_json()
+    # And read back to the same surfaces.
+    for point in [(0.1, 0.2, 0.3), (0.6, 0.2, 0.3), (-3.3, 4.1, 0.7), (9.9, 0.0, 0.0)]:
+        assert repr(loaded.geometry.find_cell(*point)) == repr(
+            model.geometry.find_cell(*point)
+        )
+    assert loaded.geometry.find_cell(10.1, 0.0, 0.0) is None
