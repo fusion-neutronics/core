@@ -326,6 +326,9 @@ pub(super) struct Engine {
     /// row `k`, column `m`.
     poly_cos: Vec<f64>,
     poly_sin: Vec<f64>,
+    /// The polyline's vertices `(R, Z)` when the boundary is axisymmetric,
+    /// so every cut is the same curve; empty otherwise.
+    poly_fixed: Vec<(f64, f64)>,
     /// Floating-point allowance (cm), far below the 1e-8 cm crossing nudge.
     margin: f64,
     /// Newton stops when the tangential part of `x - X` is below this
@@ -360,6 +363,19 @@ impl Engine {
                 &mut poly_sin[k * m_cols..(k + 1) * m_cols],
             );
         }
+        let poly_fixed = if series.n_max == 0 {
+            let cut = series.collapse(0.0, 1);
+            (0..n_poly)
+                .map(|k| {
+                    cut.curve_from_table(
+                        &poly_cos[k * m_cols..(k + 1) * m_cols],
+                        &poly_sin[k * m_cols..(k + 1) * m_cols],
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let orientation_in = check_cuts(&series)?;
         let orientation_3d = -orientation_in;
         // Patches about as long toroidally as poloidally, so their bounds
@@ -384,7 +400,12 @@ impl Engine {
             );
         }
         let (kappa_convex, kappa_concave) = (patches.max_convex, patches.max_concave);
-        let (gap_in, gap_out) = patches.gaps(&series, nz / nfp, orientation_3d, margin);
+        // The rows of one field period see every gap there is. An
+        // axisymmetric boundary is the same at every zeta, so its first row
+        // already does, and searching all of them would only fill the gap
+        // search's piece budget (leaving pairs too coarse to bound).
+        let rows = if series.n_max == 0 { 1 } else { nz / nfp };
+        let (gap_in, gap_out) = patches.gaps(&series, rows, orientation_3d, margin);
         let reach_in = (1.0 / kappa_convex).min(0.5 * gap_in);
         let reach_out = (1.0 / kappa_concave).min(0.5 * gap_out);
         Ok(Self {
@@ -397,6 +418,7 @@ impl Engine {
             dtheta_poly,
             poly_cos,
             poly_sin,
+            poly_fixed,
             margin,
             kappa_convex,
             kappa_concave,
