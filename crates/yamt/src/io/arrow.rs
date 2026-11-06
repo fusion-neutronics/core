@@ -1516,8 +1516,8 @@ mod tests {
         let mut data = read_arrow_mesh(path).unwrap();
         let t = data.triangles[0];
         let first_new = data.vertices.len() as VertexId;
-        for k in 0..3 {
-            data.vertices.push(data.vertices[t[k] as usize]);
+        for v in t {
+            data.vertices.push(data.vertices[v as usize]);
         }
         let surface_id = data.triangle_surface_ids[0];
         push_triangle_copy(&mut data, 0, surface_id, false);
