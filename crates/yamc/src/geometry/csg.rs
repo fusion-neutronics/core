@@ -138,6 +138,19 @@ fn is_embedded_fill_cell(cell: &Cell) -> bool {
     }
 }
 
+/// How a message names an implicit surface: by its name or id, else by
+/// its formula (shortened if long).
+fn describe_implicit(surface: &crate::geo::Surface) -> String {
+    match (&surface.name, surface.surface_id, &surface.kind) {
+        (Some(name), _, _) => format!("ImplicitSurface '{name}'"),
+        (None, Some(id), _) => format!("ImplicitSurface {id}"),
+        (None, None, crate::geo::SurfaceKind::Implicit { formula }) => {
+            format!("ImplicitSurface('{}')", formula.brief())
+        }
+        (None, None, kind) => kind.name().to_string(),
+    }
+}
+
 impl Geometry {
     /// Create a new geometry with validation and auto-assignment of IDs.
     ///
@@ -255,6 +268,49 @@ impl Geometry {
                 used_cell_ids.insert(next_cell_id);
                 next_cell_id += 1;
             }
+        }
+
+        // --- Cells bounding their unbounded implicit surfaces --------------------
+        // An implicit surface with no bounding box (a periodic formula or a
+        // plane, say) can be crossed anywhere along a ray, and its formula
+        // is checked only within WORLD of the origin, so a cell using it
+        // must be bounded by its region, within WORLD, for the surface's
+        // searches to end there.
+        for cell in &cells {
+            let unbounded = cell.cached_surfaces.iter().find(|(s, _)| {
+                matches!(&s.kind, crate::geo::SurfaceKind::Implicit { formula }
+                    if formula.bounding_box().is_none())
+            });
+            let Some((surface, _)) = unbounded else {
+                continue;
+            };
+            let bx = cell.region.bounding_box();
+            let world = crate::geo::implicit::WORLD;
+            let fix = if !bx.is_finite() {
+                "the cell's region is not bounded either. Intersect it with a bounded \
+                 region (a box of planes, say), so the surface's crossings are looked \
+                 for only there"
+                    .to_string()
+            } else if bx
+                .lower_left
+                .iter()
+                .chain(&bx.upper_right)
+                .any(|v| v.abs() > world)
+            {
+                format!(
+                    "the cell's region reaches beyond {world} cm of the origin, where \
+                     the formula is checked. Keep the region within [-{world}, {world}] \
+                     cm on each axis"
+                )
+            } else {
+                continue;
+            };
+            return Err(format!(
+                "Cell {} uses {}, which has no bounding box (none could be proved from \
+                 its formula), and {fix}.",
+                cell.cell_id.map_or("?".to_string(), |id| id.to_string()),
+                describe_implicit(surface)
+            ));
         }
 
         // --- Material IDs --------------------------------------------------------

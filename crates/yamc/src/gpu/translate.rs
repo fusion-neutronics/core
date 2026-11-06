@@ -2601,7 +2601,7 @@ mod tests {
     }
 
     #[test]
-    fn flux_surfaces_are_refused_with_a_clear_error() {
+    fn free_form_surfaces_are_refused_with_a_clear_error() {
         let boundary = std::sync::Arc::new(
             crate::geo::FluxBoundary::new(
                 1,
@@ -2614,7 +2614,14 @@ mod tests {
         );
         let plasma = crate::geo::Surface::new_flux(boundary, Some(1), None);
         let layer = plasma.offset(10.0, Some(2), None).unwrap();
-        for (surface, kind) in [(plasma, "FluxSurface"), (layer, "OffsetSurface")] {
+        let quartic = crate::geo::ImplicitFormula::new("x^4 + y^4 + z^4 - 16").unwrap();
+        let implicit =
+            crate::geo::Surface::new_implicit(std::sync::Arc::new(quartic), Some(3), None);
+        for (surface, kind) in [
+            (plasma, "FluxSurface"),
+            (layer, "OffsetSurface"),
+            (implicit, "ImplicitSurface"),
+        ] {
             let expected = GpuTranslateError::SurfaceKindUnsupported { kind };
             assert_eq!(encode_surface(&surface.kind).unwrap_err(), expected);
             let region = crate::geo::Region::new_from_halfspace(crate::geo::HalfspaceType::Below(
