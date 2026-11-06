@@ -962,8 +962,8 @@ pub(crate) fn reject_unsupported_surfaces(cells: &[Cell]) -> Result<(), GpuTrans
 /// dispatches on the type discriminant; unused tail slots are zero.
 /// The match is exhaustive over every `SurfaceKind`, so a future
 /// variant added without an encoding here is a compile error rather
-/// than a silent wrong answer; kinds without a kernel arm (flux and
-/// offset surfaces) are refused.
+/// than a silent wrong answer; kinds without a kernel arm (flux, offset
+/// and implicit surfaces) are refused.
 fn encode_surface(kind: &SurfaceKind) -> Result<(u32, [f64; 10]), GpuTranslateError> {
     Ok(match *kind {
         SurfaceKind::Sphere { x0, y0, z0, radius } => (
@@ -1029,7 +1029,7 @@ fn encode_surface(kind: &SurfaceKind) -> Result<(u32, [f64; 10]), GpuTranslateEr
                 apex[0], apex[1], apex[2], axis[0], axis[1], axis[2], tan2_theta, 0.0, 0.0, 0.0,
             ],
         ),
-        SurfaceKind::Flux { .. } => {
+        SurfaceKind::Flux { .. } | SurfaceKind::Implicit { .. } => {
             return Err(GpuTranslateError::SurfaceKindUnsupported { kind: kind.name() });
         }
     })

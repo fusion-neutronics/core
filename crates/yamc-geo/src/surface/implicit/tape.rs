@@ -634,6 +634,10 @@ impl Tape {
     /// a tangency the plain interval narrows like the length of the
     /// stretch, the centred form like its square. `slots` also records the
     /// `min` / `max` choices over the stretch's box.
+    ///
+    /// This is [`Tape::eval_stretch`] followed by [`Tape::centre`], which a
+    /// caller can run apart, paying for the centred form only where the
+    /// plain enclosures leave something undecided.
     pub fn eval_segment(
         &self,
         origin: [f64; 3],
@@ -641,18 +645,55 @@ impl Tape {
         t: Interval,
         slots: &mut SegmentSlots,
     ) -> IntervalDual {
+        let whole = self.eval_stretch(origin, direction, t, slots);
+        IntervalDual {
+            v: self.centre(origin, direction, t, slots),
+            d: whole.d,
+        }
+    }
+
+    /// The plain enclosures of [`Tape::eval_segment`]: the interval dual
+    /// over the stretch's box, which `slots` keeps for [`Tape::centre`],
+    /// and the `min` / `max` choices over that box.
+    pub fn eval_stretch(
+        &self,
+        origin: [f64; 3],
+        direction: [f64; 3],
+        t: Interval,
+        slots: &mut SegmentSlots,
+    ) -> IntervalDual {
+        let b = ray_box(origin, direction, t);
+        let whole = self.eval_interval_dual(b, direction, &mut slots.duals);
+        slots.choices.clear();
+        for &op in &self.ops {
+            slots
+                .choices
+                .push(choice(op, |a| slots.duals[a as usize].v));
+        }
+        whole
+    }
+
+    /// The value enclosure of [`Tape::eval_segment`], once
+    /// [`Tape::eval_stretch`] has run over the same stretch of the same
+    /// ray: the plain one it left in `slots` narrowed by the centred form.
+    pub fn centre(
+        &self,
+        origin: [f64; 3],
+        direction: [f64; 3],
+        t: Interval,
+        slots: &mut SegmentSlots,
+    ) -> Interval {
+        let whole = slots.duals.last().copied().unwrap_or(IntervalDual {
+            v: Interval::ENTIRE,
+            d: Interval::ENTIRE,
+        });
         let b = ray_box(origin, direction, t);
         let stretch = direction.map(|u| t * Interval::point(u));
-        let whole = self.eval_interval_dual(b, direction, &mut slots.duals);
         slots.errors.clear();
-        slots.choices.clear();
         for (i, &op) in self.ops.iter().enumerate() {
             let own = slots.duals[i].v;
             let e = error(op, &slots.duals, &slots.errors, own, &b, &stretch);
             slots.errors.push(e);
-            slots
-                .choices
-                .push(choice(op, |a| slots.duals[a as usize].v));
         }
         let error = slots.errors.last().copied().unwrap_or(Interval::ENTIRE);
         let m = 0.5 * (t.lo + t.hi);
@@ -662,13 +703,10 @@ impl Tape {
         );
         let centred = middle + whole.d * (t - Interval::point(m)) + error;
         let (lo, hi) = (centred.lo.max(whole.v.lo), centred.hi.min(whole.v.hi));
-        IntervalDual {
-            v: if lo <= hi {
-                Interval::new(lo, hi)
-            } else {
-                whole.v
-            },
-            d: whole.d,
+        if lo <= hi {
+            Interval::new(lo, hi)
+        } else {
+            whole.v
         }
     }
 

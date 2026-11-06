@@ -4,25 +4,25 @@ use super::*;
 
 /// Small deterministic generator (xorshift64*), so the tests need no
 /// dependencies.
-struct Rng(u64);
+pub(super) struct Rng(pub(super) u64);
 
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(super) fn next(&mut self) -> u64 {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;
         self.0 ^= self.0 >> 27;
         self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
     }
 
-    fn uniform(&mut self) -> f64 {
+    pub(super) fn uniform(&mut self) -> f64 {
         (self.next() >> 11) as f64 / (1u64 << 53) as f64
     }
 
-    fn range(&mut self, lo: f64, hi: f64) -> f64 {
+    pub(super) fn range(&mut self, lo: f64, hi: f64) -> f64 {
         lo + (hi - lo) * self.uniform()
     }
 
-    fn below(&mut self, n: usize) -> usize {
+    pub(super) fn below(&mut self, n: usize) -> usize {
         (self.next() % n as u64) as usize
     }
 
@@ -30,7 +30,7 @@ impl Rng {
         &items[self.below(items.len())]
     }
 
-    fn direction(&mut self) -> [f64; 3] {
+    pub(super) fn direction(&mut self) -> [f64; 3] {
         loop {
             let v = [
                 self.range(-1.0, 1.0),
@@ -46,7 +46,7 @@ impl Rng {
 }
 
 /// The tape of a formula, compiled but not checked.
-fn tape_of(text: &str) -> Tape {
+pub(super) fn tape_of(text: &str) -> Tape {
     let ast = parse(text).unwrap_or_else(|e| panic!("{text}: {}", e.message));
     match compile(&ast) {
         Ok(c) => c.tape,
@@ -74,7 +74,7 @@ fn bits(tape: &Tape) -> String {
     format!("{:?}", tape.ops())
 }
 
-fn holes() -> String {
+pub(super) fn holes() -> String {
     let mut cylinders = Vec::new();
     for i in 0..7 {
         for j in 0..7 {
@@ -88,14 +88,15 @@ fn holes() -> String {
     )
 }
 
-const SPHERE: &str = "sqrt((x - 0.3)^2 + (y - -0.2)^2 + (z - 0.1)^2) - 4";
-const ZTORUS: &str = "(sqrt((x - 0.2)^2 + (y - 0.1)^2) - 4)^2 / 1 + (z - -0.3)^2 / 1.69 - 1";
-const SUPERELLIPSOID: &str = "x^4 + y^4 + z^4 - 16";
-const SMOOTH_UNION: &str = "smin(sqrt((sqrt(x^2 + y^2) - 2.5)^2 + z^2) - 0.6, \
+pub(super) const SPHERE: &str = "sqrt((x - 0.3)^2 + (y - -0.2)^2 + (z - 0.1)^2) - 4";
+pub(super) const ZTORUS: &str =
+    "(sqrt((x - 0.2)^2 + (y - 0.1)^2) - 4)^2 / 1 + (z - -0.3)^2 / 1.69 - 1";
+pub(super) const SUPERELLIPSOID: &str = "x^4 + y^4 + z^4 - 16";
+pub(super) const SMOOTH_UNION: &str = "smin(sqrt((sqrt(x^2 + y^2) - 2.5)^2 + z^2) - 0.6, \
                             sqrt((sqrt((x - 2.5)^2 + z^2) - 1.5)^2 + y^2) - 0.5, 0.4)";
-const TWISTED: &str = "((x * cos(0.6 * z) + y * sin(0.6 * z)) / 2.5)^4 \
+pub(super) const TWISTED: &str = "((x * cos(0.6 * z) + y * sin(0.6 * z)) / 2.5)^4 \
                        + ((y * cos(0.6 * z) - x * sin(0.6 * z)) / 0.8)^4 + (z / 3)^4 - 1";
-const GYROID: &str = "sin(2 * pi / 1.5 * x) * cos(2 * pi / 1.5 * y) \
+pub(super) const GYROID: &str = "sin(2 * pi / 1.5 * x) * cos(2 * pi / 1.5 * y) \
                       + sin(2 * pi / 1.5 * y) * cos(2 * pi / 1.5 * z) \
                       + sin(2 * pi / 1.5 * z) * cos(2 * pi / 1.5 * x) - 0.3";
 

@@ -129,6 +129,12 @@ pub enum SurfaceKind {
         boundary: Arc<FluxBoundary>,
         offset: f64,
     },
+    /// The zero set of a formula `f(x, y, z)` (cm), `f < 0` below it; see
+    /// [`ImplicitFormula`]. Stored as the formula's canonical string.
+    Implicit {
+        #[serde(deserialize_with = "implicit::deserialize_shared")]
+        formula: Arc<ImplicitFormula>,
+    },
 }
 
 impl SurfaceKind {
@@ -145,6 +151,7 @@ impl SurfaceKind {
             SurfaceKind::Cone { .. } => "Cone",
             SurfaceKind::Flux { offset, .. } if *offset == 0.0 => "FluxSurface",
             SurfaceKind::Flux { .. } => "OffsetSurface",
+            SurfaceKind::Implicit { .. } => "ImplicitSurface",
         }
     }
 }
@@ -182,9 +189,9 @@ impl Surface {
         self.distance_to_surface_capped(point, direction, on_surface, f64::INFINITY)
     }
 
-    /// Whether the surface is free-form (a flux or offset surface), whose
-    /// crossings are searched for iteratively rather than solved in closed
-    /// form.
+    /// Whether the surface is free-form (a flux, offset or implicit
+    /// surface), whose crossings are searched for iteratively rather than
+    /// solved in closed form.
     pub fn is_free_form(&self) -> bool {
         match self.kind {
             SurfaceKind::Plane { .. }
@@ -195,7 +202,7 @@ impl Surface {
             | SurfaceKind::YTorus { .. }
             | SurfaceKind::Quadric { .. }
             | SurfaceKind::Cone { .. } => false,
-            SurfaceKind::Flux { .. } => true,
+            SurfaceKind::Flux { .. } | SurfaceKind::Implicit { .. } => true,
         }
     }
 
@@ -302,6 +309,13 @@ impl Surface {
                 self.boundary == BoundaryType::Vacuum,
                 t_max,
             ),
+            SurfaceKind::Implicit { formula } => formula.distance(
+                point,
+                direction,
+                on_surface,
+                self.boundary == BoundaryType::Vacuum,
+                t_max,
+            ),
         }
     }
     /// Builder-style setter for the optional `name` metadata field.
@@ -387,6 +401,7 @@ impl Surface {
             SurfaceKind::Flux { boundary, offset } => {
                 boundary.evaluate([point.0, point.1, point.2], *offset)
             }
+            SurfaceKind::Implicit { formula } => formula.evaluate([point.0, point.1, point.2]),
         }
     }
 
@@ -397,7 +412,8 @@ impl Surface {
     /// distance (cm) from the flux surface. That is the distance to an
     /// offset layer outside it and wherever the layer is not creased; near
     /// a crease, inside the layer, the layer is farther than that. Other
-    /// kinds return `evaluate` unchanged.
+    /// kinds return `evaluate` unchanged: for an implicit surface that is
+    /// the formula's value, a distance only if the formula is one.
     pub fn evaluate_exact(&self, point: (f64, f64, f64)) -> f64 {
         match &self.kind {
             SurfaceKind::Plane { .. }
@@ -407,7 +423,8 @@ impl Surface {
             | SurfaceKind::XTorus { .. }
             | SurfaceKind::YTorus { .. }
             | SurfaceKind::Quadric { .. }
-            | SurfaceKind::Cone { .. } => self.evaluate(point),
+            | SurfaceKind::Cone { .. }
+            | SurfaceKind::Implicit { .. } => self.evaluate(point),
             SurfaceKind::Flux { boundary, offset } => {
                 boundary.signed_distance([point.0, point.1, point.2]) - offset
             }
@@ -430,6 +447,14 @@ impl Surface {
             // outside is not.
             SurfaceKind::Flux { boundary, offset } => {
                 halfspace_below.then(|| boundary.bounding_box(*offset))
+            }
+            // The box proved for the formula, if one could be.
+            SurfaceKind::Implicit { formula } => {
+                if halfspace_below {
+                    formula.bounding_box()
+                } else {
+                    None
+                }
             }
             SurfaceKind::Plane { .. } => {
                 // Planes contribute constraints through axis_constraint(), not bounding_box()

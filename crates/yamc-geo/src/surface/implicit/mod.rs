@@ -39,20 +39,34 @@
 //! must bound it instead. All of this holds within [`WORLD`] of the origin
 //! (about 10 km), not beyond: far enough out a high power or an
 //! exponential overflows, and two overflows can make a NaN.
+//!
+//! Ray crossings come from a certified search on the same evaluators (see
+//! `ray`): the first point where the sign the cell test reads changes,
+//! found to 1e-11 cm, with the failure policy the free-form kinds share.
+//! The formula's value is a distance only if the formula is one, so it is
+//! never used as one: the search steps by enclosures, and a particle counts
+//! as on the surface within 1e-7 cm of it to first order (`|f| / |f'|`).
 
 mod bounds;
 mod compile;
 mod interval;
 mod parse;
+mod ray;
+#[cfg(test)]
+mod ray_tests;
 mod tape;
 #[cfg(test)]
 mod tests;
 
+use crate::surface::search::along_unit;
+use crate::surface::{BoundaryType, Surface, SurfaceKind};
 pub use bounds::WORLD;
 use bounds::{Cell, Extent, Fault, Problem};
 pub use interval::{Interval, LIBM_ULPS};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 pub use tape::{ray_box, ray_point, Choice, Dual, IntervalDual, Op, SegmentSlots, Tape};
 
 thread_local! {
@@ -151,6 +165,17 @@ impl ImplicitFormula {
         &self.text
     }
 
+    /// The formula string for messages: its first 57 characters and `...`
+    /// if it is longer than 60.
+    pub fn brief(&self) -> String {
+        if self.text.chars().count() <= 60 {
+            self.text.clone()
+        } else {
+            let head: String = self.text.chars().take(57).collect();
+            format!("{head}...")
+        }
+    }
+
     /// The compiled formula.
     pub fn tape(&self) -> &Tape {
         &self.tape
@@ -171,6 +196,33 @@ impl ImplicitFormula {
     pub fn bounding_box(&self) -> Option<([f64; 3], [f64; 3])> {
         self.bounding_box
     }
+
+    /// Ray parameter `t` of the first crossing of the surface along
+    /// `point + t * direction` beyond 1e-10 cm, if before `t_max`; `None`
+    /// for a zero or non-finite direction or a non-finite point. A search
+    /// with no bounding box to stop it stops `WORLD` from the origin.
+    pub(crate) fn distance(
+        &self,
+        point: [f64; 3],
+        direction: [f64; 3],
+        on_surface: Option<f64>,
+        vacuum: bool,
+        t_max: f64,
+    ) -> Option<f64> {
+        // The search measures length, so it runs on the unit direction.
+        along_unit(point, direction, t_max, |unit, t_max| {
+            ray::trace(
+                &self.tape,
+                self.bounding_box,
+                point,
+                unit,
+                on_surface,
+                vacuum,
+                t_max,
+            )
+            .crossing
+        })
+    }
 }
 
 impl Serialize for ImplicitFormula {
@@ -184,4 +236,45 @@ impl<'de> Deserialize<'de> for ImplicitFormula {
         let text = String::deserialize(deserializer)?;
         Self::new(&text).map_err(serde::de::Error::custom)
     }
+}
+
+impl Surface {
+    /// An implicit surface: the zero set of `formula`, below where it is
+    /// negative.
+    pub fn new_implicit(
+        formula: Arc<ImplicitFormula>,
+        surface_id: Option<usize>,
+        boundary_type: Option<BoundaryType>,
+    ) -> Self {
+        Surface {
+            surface_id,
+            kind: SurfaceKind::Implicit { formula },
+            boundary: boundary_type.unwrap_or_default(),
+            name: None,
+        }
+    }
+}
+
+/// Formulas built while loading, by their text: building one can take a
+/// tenth of a second, and a model loaded again while it is still in use, or
+/// with surfaces that share a formula but not an id, needs it again.
+static LOADED: OnceLock<Mutex<HashMap<String, Weak<ImplicitFormula>>>> = OnceLock::new();
+
+/// Deserialize a formula, sharing it with every other live formula loaded
+/// from the same text (for `SurfaceKind::Implicit`).
+pub(crate) fn deserialize_shared<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Arc<ImplicitFormula>, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    let mut loaded = LOADED
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some(formula) = loaded.get(&text).and_then(Weak::upgrade) {
+        return Ok(formula);
+    }
+    let formula = Arc::new(ImplicitFormula::new(&text).map_err(serde::de::Error::custom)?);
+    loaded.retain(|_, f| f.strong_count() > 0);
+    loaded.insert(text, Arc::downgrade(&formula));
+    Ok(formula)
 }

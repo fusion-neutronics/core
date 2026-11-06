@@ -190,6 +190,13 @@ pub(super) trait Line {
     /// ends and `a` is root-free, or `Ok(None)` if there is none; `Err(t)`
     /// if the budget ran out with no crossing before `t`.
     fn scan(&mut self, a: Self::Point, b: Self::Point) -> Result<Option<f64>, f64>;
+
+    /// Whether Newton's step is taken from `b` rather than `a`, `last_b`
+    /// saying which was evaluated last: by default that one.
+    fn newton_from_b(&self, a: &Self::Point, b: &Self::Point, last_b: bool) -> bool {
+        let _ = (a, b);
+        last_b
+    }
 }
 
 /// The first crossing in `(a, b]`, where `g` is nonzero at both ends,
@@ -197,16 +204,16 @@ pub(super) trait Line {
 /// at or just past it; `Err(t)` if the budget ran out with no crossing
 /// before `t`.
 ///
-/// Newton's method runs from the end evaluated last while each step at
-/// least halves the bracket; otherwise the step bisects (so does a Newton
-/// step that is not finite or does not land strictly inside), and the
-/// bracket is never returned unrefined. The answer is its far end, whose
-/// sign has been checked to be across the crossing, a probe where `g` is
-/// exactly 0, or, where the certificate shows the single crossing lies
-/// within the tolerance of the near end, the near end's first-order
-/// estimate of it. A probe on the near side of an uncertified bracket gets
-/// the stretch behind it scanned for a pair of crossings its ends cannot
-/// show.
+/// Newton's method runs from the end evaluated last (or the one the kind
+/// picks, [`Line::newton_from_b`]) while each step at least halves the
+/// bracket; otherwise the step bisects (so does a Newton step that is not
+/// finite or does not land strictly inside), and the bracket is never
+/// returned unrefined. The answer is its far end, whose sign has been
+/// checked to be across the crossing, a probe where `g` is exactly 0, or,
+/// where the certificate shows the single crossing lies within the
+/// tolerance of the near end, the near end's first-order estimate of it.
+/// A probe on the near side of an uncertified bracket gets the stretch
+/// behind it scanned for a pair of crossings its ends cannot show.
 pub(super) fn bracket<L: Line>(line: &mut L, mut a: L::Point, mut b: L::Point) -> Result<f64, f64> {
     let mut from_b = true;
     let mut halving = true;
@@ -228,7 +235,11 @@ pub(super) fn bracket<L: Line>(line: &mut L, mut a: L::Point, mut b: L::Point) -
         if line.spent() {
             return Err(a.t());
         }
-        let from = if from_b { &b } else { &a };
+        let from = if line.newton_from_b(&a, &b, from_b) {
+            &b
+        } else {
+            &a
+        };
         let newton = from.t() - from.g() / from.slope();
         let tm = if halving && newton > a.t() && newton < b.t() {
             newton
@@ -278,10 +289,13 @@ pub(super) fn along_unit(
 mod tests {
     use super::*;
 
-    /// `g` given as a function of the ray distance, returning `(g, g')`.
+    /// `g` given as a function of the ray distance, returning `(g, g')`;
+    /// Newton's step from the end nearer the crossing to first order if
+    /// `nearer`.
     struct Analytic<F> {
         g: F,
         floor: f64,
+        nearer: bool,
         budget: Budget,
     }
 
@@ -326,14 +340,34 @@ mod tests {
         fn scan(&mut self, _: At, _: At) -> Result<Option<f64>, f64> {
             Ok(None)
         }
+
+        fn newton_from_b(&self, a: &At, b: &At, last_b: bool) -> bool {
+            if self.nearer {
+                (b.g / b.slope).abs() <= (a.g / a.slope).abs()
+            } else {
+                last_b
+            }
+        }
     }
 
     /// The crossing `bracket` finds in `[a, b]`, and the evaluations it
     /// took.
     fn crossing(g: impl Fn(f64) -> (f64, f64), floor: f64, a: f64, b: f64) -> (f64, usize) {
+        crossing_from(g, floor, false, a, b)
+    }
+
+    /// [`crossing`], with Newton's step from the nearer end if `nearer`.
+    fn crossing_from(
+        g: impl Fn(f64) -> (f64, f64),
+        floor: f64,
+        nearer: bool,
+        a: f64,
+        b: f64,
+    ) -> (f64, usize) {
         let mut line = Analytic {
             g,
             floor,
+            nearer,
             budget: Budget::new(false),
         };
         let (a, b) = (line.exact(a), line.exact(b));
@@ -382,6 +416,30 @@ mod tests {
         let (t, evaluations) = crossing(cube, 0.0, 0.0, 5.0);
         assert!((t - 1.0).abs() <= tolerance(1.0), "{t}");
         assert!(evaluations < 200, "{evaluations} evaluations");
+    }
+
+    #[test]
+    fn a_wide_bracket_closes_from_its_nearer_end() {
+        // A ray into a sphere of radius 4 whose bracket is a whole monotone
+        // stretch, its near end 2.3 cm short of the crossing (|g'| >= 0.33
+        // over it). After a bisection the end evaluated last is the near
+        // one, whose Newton step overshoots the far end; the far end's
+        // converges.
+        let o = [0.9167010010071905, -1.7772549394664718, -0.2794539186099012];
+        let u = [-0.3762601550027884, 0.5199688612358522, 0.7668511453355004];
+        let g = |t: f64| {
+            let p: [f64; 3] = std::array::from_fn(|k| o[k] + t * u[k] - [0.3, -0.2, 0.1][k]);
+            let r = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+            (r - 4.0, (p[0] * u[0] + p[1] * u[1] + p[2] * u[2]) / r)
+        };
+        let (last, _) = crossing_from(g, 0.33, false, 2.8615911610632, 5.7231823220265);
+        let (nearer, evaluations) = crossing_from(g, 0.33, true, 2.8615911610632, 5.7231823220265);
+        assert!(
+            (nearer - 5.189186152299).abs() <= tolerance(5.2),
+            "{nearer}"
+        );
+        assert!((last - nearer).abs() <= tolerance(5.2), "{last} {nearer}");
+        assert!(evaluations <= 10, "{evaluations} evaluations");
     }
 
     #[test]

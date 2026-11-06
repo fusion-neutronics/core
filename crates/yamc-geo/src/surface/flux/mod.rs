@@ -531,11 +531,23 @@ impl Surface {
         surface_id: Option<usize>,
         boundary_type: Option<BoundaryType>,
     ) -> Result<Self, String> {
-        let SurfaceKind::Flux { boundary, offset } = &self.kind else {
-            return Err(format!(
-                "only flux surfaces (FluxSurface or OffsetSurface) can be offset, not a {}",
-                self.kind.name()
-            ));
+        let (boundary, offset) = match &self.kind {
+            SurfaceKind::Flux { boundary, offset } => (boundary, *offset),
+            SurfaceKind::Implicit { .. } => {
+                return Err(
+                    "an ImplicitSurface cannot be offset: a layer of uniform thickness needs \
+                     its formula to be a signed distance, which is not tracked yet. For a \
+                     formula f that is one, the surface d cm outside it is the formula \
+                     \"(f) - d\""
+                        .to_string(),
+                );
+            }
+            _ => {
+                return Err(format!(
+                    "only flux surfaces (FluxSurface or OffsetSurface) can be offset, not a {}",
+                    self.kind.name()
+                ));
+            }
         };
         let total = offset + distance;
         boundary.check_offset(total)?;

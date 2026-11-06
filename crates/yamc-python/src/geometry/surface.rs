@@ -96,6 +96,9 @@ impl PySurface {
             yamc::geo::SurfaceKind::Flux { offset, .. } => {
                 format!("OffsetSurface(distance={offset:?})")
             }
+            yamc::geo::SurfaceKind::Implicit { formula } => {
+                format!("ImplicitSurface('{}')", formula.brief())
+            }
         };
         let boundary = match self.inner.boundary {
             BoundaryType::Transmission => "None",

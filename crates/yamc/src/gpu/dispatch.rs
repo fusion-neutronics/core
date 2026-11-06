@@ -693,8 +693,9 @@ fn run_on_gpu_dispatch(
     model
         .validate_convergence_targets()
         .map_err(GpuDispatchError::ConvergenceTargetUnmatched)?;
-    // Surface kinds the kernels cannot evaluate (flux and offset surfaces),
-    // before any data loads; translation checks again as a backstop.
+    // Surface kinds the kernels cannot evaluate (flux, offset and implicit
+    // surfaces), before any data loads; translation checks again as a
+    // backstop.
     match &model.geometry {
         GeometryKind::Csg(geometry) => {
             super::translate::reject_unsupported_surfaces(&geometry.cells)
