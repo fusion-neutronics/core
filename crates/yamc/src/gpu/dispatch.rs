@@ -693,6 +693,16 @@ fn run_on_gpu_dispatch(
     model
         .validate_convergence_targets()
         .map_err(GpuDispatchError::ConvergenceTargetUnmatched)?;
+    // Surface kinds the kernels cannot evaluate (flux and offset surfaces),
+    // before any data loads; translation checks again as a backstop.
+    match &model.geometry {
+        GeometryKind::Csg(geometry) => {
+            super::translate::reject_unsupported_surfaces(&geometry.cells)
+                .map_err(GpuDispatchError::Translate)?
+        }
+        #[cfg(feature = "mesh")]
+        GeometryKind::Mesh(_) => {}
+    }
     // An unset transmutation source a D1S run reads, before any data loads.
     model
         .check_decay_photon_sources()

@@ -6,9 +6,10 @@
 //! and Woodcock tracking (which only asks the surfaces for their sign)
 //! agrees cell by cell with surface tracking (which asks for ray
 //! crossings). The same layers on a circular torus, as flux surfaces and
-//! as ZTorus surfaces, give the same tallies from the same seed. The
-//! source's plasma lies inside the plasma's flux surface. Self-skips if
-//! the endf-b8.1 Fe56 fixture is absent.
+//! as ZTorus surfaces, give the same tallies from the same seed, also with
+//! the outermost layer as the vacuum boundary in place of the world
+//! sphere. The source's plasma lies inside the plasma's flux surface.
+//! Self-skips if the endf-b8.1 Fe56 fixture is absent.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -74,8 +75,9 @@ fn above(s: &Arc<Surface>) -> Region {
 }
 
 /// Plasma and scrape-off layer (void), 5 cm iron first wall, 40 cm iron
-/// blanket, void out to a vacuum sphere. `layers` are the boundary and
-/// its offsets at 15, 20 and 60 cm.
+/// blanket, void out to a vacuum sphere (or, if the blanket's back is
+/// itself a vacuum surface, nothing beyond it). `layers` are the boundary
+/// and its offsets at 15, 20 and 60 cm.
 fn layered(layers: [Arc<Surface>; 4]) -> Geometry {
     let world = Arc::new(Surface::new_sphere(
         0.0,
@@ -86,7 +88,8 @@ fn layered(layers: [Arc<Surface>; 4]) -> Geometry {
         Some(BoundaryType::Vacuum),
     ));
     let [plasma, wall, wall_back, blanket_back] = layers;
-    let cells = vec![
+    let vacuum_back = blanket_back.boundary == BoundaryType::Vacuum;
+    let mut cells = vec![
         Cell::new(Some(1), below(&plasma), Some("plasma".into()), None),
         Cell::new(
             Some(2),
@@ -106,32 +109,40 @@ fn layered(layers: [Arc<Surface>; 4]) -> Geometry {
             Some("blanket".into()),
             Some(0),
         ),
-        Cell::new(
+    ];
+    if !vacuum_back {
+        cells.push(Cell::new(
             Some(5),
             above(&blanket_back).intersection(&below(&world)),
             Some("outside".into()),
             None,
-        ),
-    ];
+        ));
+    }
     Geometry::new(cells, vec![iron()]).unwrap()
 }
 
-fn offsets_of(plasma: Surface) -> [Arc<Surface>; 4] {
-    let at = |d: f64, id: usize| Arc::new(plasma.offset(d, Some(id), None).unwrap());
-    let layers = [at(15.0, 2), at(20.0, 3), at(60.0, 4)];
+/// The layers of `layered`, with the blanket's back a vacuum surface if
+/// `vacuum_back`.
+fn offsets_of(plasma: Surface, vacuum_back: bool) -> [Arc<Surface>; 4] {
+    let at = |d: f64, id: usize, boundary: Option<BoundaryType>| {
+        Arc::new(plasma.offset(d, Some(id), boundary).unwrap())
+    };
+    let back = vacuum_back.then_some(BoundaryType::Vacuum);
+    let layers = [at(15.0, 2, None), at(20.0, 3, None), at(60.0, 4, back)];
     let [wall, wall_back, blanket_back] = layers;
     [Arc::new(plasma), wall, wall_back, blanket_back]
 }
 
-fn stellarator() -> Geometry {
+fn stellarator(vacuum_back: bool) -> Geometry {
     layered(offsets_of(
         stellarator_flux_surface(&shape(), 1.0, Some(1), None).unwrap(),
+        vacuum_back,
     ))
 }
 
-/// Per-cell flux tallies, cells 1 to 5.
-fn tallies() -> Vec<Arc<Tally>> {
-    (1..=5)
+/// Per-cell flux tallies, one per cell.
+fn tallies(cells: u32) -> Vec<Arc<Tally>> {
+    (1..=cells)
         .map(|id| {
             let mut tally = Tally::new();
             tally.estimator = yamc_tallies::Estimator::TrackLength;
@@ -151,7 +162,8 @@ fn run(geometry: Geometry, mode: TrackingMode, particles: usize) -> (usize, Vec<
         energy: SourceEnergyDistribution::Discrete(Discrete::new(vec![14.1e6], vec![1.0]).unwrap()),
         strength: 1.0,
     });
-    let mut model = Model::new(geometry, vec![source], tallies());
+    let cells = geometry.cells.len() as u32;
+    let mut model = Model::new(geometry, vec![source], tallies(cells));
     model.verbose = Verbose::silent();
     model.tracking_mode = mode;
     model.max_lost_particles = usize::MAX;
@@ -177,14 +189,23 @@ fn stellarator_layers_lose_no_particles_and_tracking_modes_agree() {
         eprintln!("skipping: {NUCLIDE} fixture absent");
         return;
     }
+    for vacuum_back in [false, true] {
+        tracking_modes_agree(vacuum_back);
+    }
+}
+
+fn tracking_modes_agree(vacuum_back: bool) {
     let mut results = Vec::new();
     for mode in [
         TrackingMode::Surface,
         TrackingMode::Hybrid,
         TrackingMode::Woodcock,
     ] {
-        let (lost, flux) = run(stellarator(), mode, PARTICLES);
-        assert_eq!(lost, 0, "{mode:?}: {lost} of {PARTICLES} histories lost");
+        let (lost, flux) = run(stellarator(vacuum_back), mode, PARTICLES);
+        assert_eq!(
+            lost, 0,
+            "{mode:?} (vacuum back {vacuum_back}): {lost} of {PARTICLES} histories lost"
+        );
         results.push((mode, flux));
     }
     let (_, surface) = &results[0];
@@ -193,7 +214,8 @@ fn stellarator_layers_lose_no_particles_and_tracking_modes_agree() {
             let sigma = (a.1 * a.1 + b.1 * b.1).sqrt();
             assert!(
                 (a.0 - b.0).abs() <= 4.0 * sigma,
-                "cell {}: surface tracking {} +/- {}, {mode:?} {} +/- {}",
+                "cell {} (vacuum back {vacuum_back}): surface tracking {} +/- {}, {mode:?} {} \
+                 +/- {}",
                 cell + 1,
                 a.0,
                 a.1,
@@ -218,29 +240,35 @@ fn flux_layers_on_a_torus_track_like_ztorus() {
         vec![150.0],
     )
     .unwrap();
-    let flux = layered(offsets_of(Surface::new_flux(
-        Arc::new(circle),
-        Some(1),
-        None,
-    )));
-    let torus = |minor: f64, id: usize| {
-        Arc::new(Surface::new_ztorus(
-            0.0,
-            0.0,
-            0.0,
-            600.0,
-            minor,
-            minor,
-            Some(id),
-            None,
-        ))
-    };
-    let tori = layered([
-        torus(150.0, 1),
-        torus(165.0, 2),
-        torus(170.0, 3),
-        torus(210.0, 4),
-    ]);
+    let circle = Arc::new(circle);
+    for vacuum_back in [false, true] {
+        let flux = layered(offsets_of(
+            Surface::new_flux(Arc::clone(&circle), Some(1), None),
+            vacuum_back,
+        ));
+        let torus = |minor: f64, id: usize, boundary: Option<BoundaryType>| {
+            Arc::new(Surface::new_ztorus(
+                0.0,
+                0.0,
+                0.0,
+                600.0,
+                minor,
+                minor,
+                Some(id),
+                boundary,
+            ))
+        };
+        let tori = layered([
+            torus(150.0, 1, None),
+            torus(165.0, 2, None),
+            torus(170.0, 3, None),
+            torus(210.0, 4, vacuum_back.then_some(BoundaryType::Vacuum)),
+        ]);
+        same_tallies(flux, tori);
+    }
+}
+
+fn same_tallies(flux: Geometry, tori: Geometry) {
     let (lost_flux, by_flux) = run(flux, TrackingMode::Surface, PARTICLES);
     let (lost_tori, by_tori) = run(tori, TrackingMode::Surface, PARTICLES);
     assert_eq!((lost_flux, lost_tori), (0, 0));
@@ -301,8 +329,13 @@ fn stellarator_layers_lose_no_particles_at_scale() {
         eprintln!("skipping: {NUCLIDE} fixture absent");
         return;
     }
-    for mode in [TrackingMode::Surface, TrackingMode::Woodcock] {
-        let (lost, _) = run(stellarator(), mode, 1_000_000);
-        assert_eq!(lost, 0, "{mode:?}: {lost} of 1e6 histories lost");
+    for vacuum_back in [false, true] {
+        for mode in [TrackingMode::Surface, TrackingMode::Woodcock] {
+            let (lost, _) = run(stellarator(vacuum_back), mode, 1_000_000);
+            assert_eq!(
+                lost, 0,
+                "{mode:?} (vacuum back {vacuum_back}): {lost} of 1e6 histories lost"
+            );
+        }
     }
 }

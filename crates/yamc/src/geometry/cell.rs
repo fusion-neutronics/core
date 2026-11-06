@@ -85,23 +85,30 @@ impl Cell {
 
         // Closed-form surfaces first, then free-form ones, each of which
         // stops searching at the nearest crossing found so far: a crossing
-        // beyond it could not be the closest anyway.
-        for free_form in [false, true] {
-            if free_form && !self.has_free_form {
+        // beyond it could not be the closest anyway. The free-form surface
+        // just crossed goes last, as its next crossing is usually the
+        // farthest.
+        for pass in 0..3 {
+            if pass > 0 && !self.has_free_form {
                 break;
             }
             for (surface_arc, _sense) in &self.cached_surfaces {
                 let surface: &crate::geo::Surface = surface_arc.as_ref();
-                if surface.is_free_form() != free_form {
-                    continue;
-                }
                 let offset = on_surface
                     .filter(|on| surface.surface_id == Some(on.surface_id))
                     .map(|on| on.offset);
-                let dist = if free_form {
-                    surface.distance_to_surface_capped(point, direction, offset, min_dist)
-                } else {
+                let wanted = match pass {
+                    0 => !surface.is_free_form(),
+                    1 => surface.is_free_form() && offset.is_none(),
+                    _ => surface.is_free_form() && offset.is_some(),
+                };
+                if !wanted {
+                    continue;
+                }
+                let dist = if pass == 0 {
                     surface.distance_to_surface_on(point, direction, offset)
+                } else {
+                    surface.distance_to_surface_capped(point, direction, offset, min_dist)
                 };
                 if let Some(dist) = dist
                     && dist > 1e-10
