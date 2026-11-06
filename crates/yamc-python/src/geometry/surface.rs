@@ -217,7 +217,9 @@ impl PySurface {
     }
 
     /// Compute the distance to the surface from a point in a direction.
-    /// Returns the distance as a float, or None if no intersection.
+    /// Returns the distance as a float, or None if no intersection. An
+    /// implicit surface with no bounding box is searched only within
+    /// 1048576 cm (2^20 cm) of the origin on each axis.
     pub fn distance_to_surface(
         &self,
         point: (f64, f64, f64),
