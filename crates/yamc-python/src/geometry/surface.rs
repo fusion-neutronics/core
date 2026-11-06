@@ -117,13 +117,25 @@ impl PySurface {
         }
     }
 
+    /// The formula of an ImplicitSurface as it is stored, which parses back
+    /// to the same surface, else None
+    #[getter]
+    pub fn formula(&self) -> Option<String> {
+        match &self.inner.kind {
+            yamc::geo::SurfaceKind::Implicit { formula } => Some(formula.formula().to_string()),
+            _ => None,
+        }
+    }
+
     /// Evaluate the surface equation at a point.
     ///
     /// For a flux surface the value is the signed distance (cm) from it.
     /// For an offset surface it is the signed distance from the underlying
     /// flux surface minus ``distance``: the distance to the layer outside
     /// it and wherever the layer is not creased, an underestimate inside
-    /// the layer near a crease. The sign is always exact.
+    /// the layer near a crease. The sign is always exact. For an implicit
+    /// surface it is the formula's value, a distance only if the formula is
+    /// one.
     ///
     /// Args:
     ///     point: Tuple of 3 floats (x, y, z)
@@ -745,6 +757,103 @@ pub fn OffsetSurface(
         .inner
         .offset(distance, surface_id, boundary_validated)
         .map_err(PyValueError::new_err)?;
+    if let Some(nm) = name {
+        surface = surface.with_name(nm);
+    }
+    Ok(PySurface {
+        inner: std::sync::Arc::new(surface),
+    })
+}
+
+/// Create a surface from a formula: the points where ``formula`` is zero.
+///
+/// ``.below`` is where the formula is negative and ``.above`` where it is
+/// positive, and they combine with ``&``, ``|`` and ``~`` like the
+/// half-spaces of any other surface. Coordinates are in cm. ``evaluate``
+/// returns the formula's value, which is a distance only if the formula is
+/// written as one (``sqrt(x^2 + y^2 + z^2) - 5`` is, ``x^2 + y^2 + z^2 - 25``
+/// is not); transport reads only its sign.
+///
+/// A formula is made of:
+///
+/// - numbers (``2``, ``0.5``, ``1e-3``), ``x``, ``y``, ``z`` and ``pi``;
+/// - ``+``, ``-``, ``*``, ``/``, unary ``-`` and ``^`` with a constant
+///   exponent. An integer power is a product (``x^3`` is ``x^2 * x`` and
+///   ``x^-2`` is ``1 / x^2``); any other power needs a base that cannot be
+///   negative, as in ``abs(x)^2.5``;
+/// - ``sqrt``, ``abs``, ``exp``, ``log``, ``sin`` and ``cos``, and ``min``
+///   and ``max`` of two or more arguments;
+/// - ``smin(a, b, k)`` and ``smax(a, b, k)``: the minimum and maximum
+///   blended over a distance ``k > 0`` (a polynomial blend), which round
+///   the edge where two shapes meet.
+///
+/// There are no comparisons or jumps (``floor``, ``mod``, ``atan2``): a
+/// jump in sign would be a crossing with no surface there. A formula is
+/// refused with a ValueError that says where it goes wrong if it does not
+/// parse, if it can be undefined (the square root or logarithm of a
+/// negative number, ``0 / 0``) or divide by zero where it is used, or if
+/// it never changes sign there. It is kept in a canonical form
+/// (``Surface.formula``) that reads back to the same surface, and its
+/// functions give the same results on every platform.
+///
+/// A box holding everything below the surface is proved from the formula
+/// where possible (``bounding_box_inside``). A formula with none, such as a
+/// periodic lattice, a plane or a twist, must be bounded by the other
+/// surfaces of each cell that uses it, within 1048576 cm (2^20 cm) of the
+/// origin, where formulas are checked. Implicit surfaces run on the CPU
+/// only (not with ``compute='gpu'``), cannot be offset with
+/// ``OffsetSurface`` (a layer of even thickness needs a distance), and the
+/// browser views show yamc's own image of them.
+///
+/// Args:
+///     formula: The formula, in x, y and z (cm)
+///     surface_id: Optional surface ID
+///     boundary: Boundary condition - None (default, transmission) or 'vacuum'
+///     name: Optional surface name
+///
+/// Returns:
+///     A Surface object representing the implicit surface
+///
+/// Examples:
+///     >>> import yamc
+///     >>> # A sphere of radius 5 cm, as its signed distance.
+///     >>> ball = yamc.ImplicitSurface("sqrt(x^2 + y^2 + z^2) - 5")
+///     >>> # A gyroid lattice of period 2 cm in a 10 cm box of planes.
+///     >>> gyroid = yamc.ImplicitSurface(
+///     ...     "sin(pi * x) * cos(pi * y) + sin(pi * y) * cos(pi * z)"
+///     ...     " + sin(pi * z) * cos(pi * x) - 0.3"
+///     ... )
+///     >>> box = yamc.Plane("x", -5.0).above & yamc.Plane("x", 5.0).below
+///     >>> box = box & yamc.Plane("y", -5.0).above & yamc.Plane("y", 5.0).below
+///     >>> box = box & yamc.Plane("z", -5.0).above & yamc.Plane("z", 5.0).below
+///     >>> struts = yamc.Cell(region=box & gyroid.below)
+///     >>> pores = yamc.Cell(region=box & gyroid.above)
+///     >>> # A port through a blanket shell, cut by a superellipsoid: a box
+///     >>> # 120 by 60 by 100 cm with rounded edges, across the shell.
+///     >>> port = yamc.ImplicitSurface(
+///     ...     "((x - 225) / 60)^4 + (y / 30)^4 + (z / 50)^4 - 1"
+///     ... )
+///     >>> shell = yamc.Sphere(radius=200.0).above & yamc.Sphere(radius=250.0).below
+///     >>> blanket = yamc.Cell(region=shell & port.above)
+///     >>> opening = yamc.Cell(region=shell & port.below)
+///     >>> # Two spheres 8 cm apart, blended with a 2 cm fillet where they meet.
+///     >>> pair = yamc.ImplicitSurface(
+///     ...     "smin(sqrt((x - 4)^2 + y^2 + z^2) - 5, sqrt((x + 4)^2 + y^2 + z^2) - 5, 2)"
+///     ... )
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[allow(non_snake_case)]
+#[pyo3(signature = (formula, *, surface_id = None, boundary = None, name = None))]
+pub fn ImplicitSurface(
+    formula: &str,
+    surface_id: Option<usize>,
+    boundary: Option<&str>,
+    name: Option<String>,
+) -> PyResult<PySurface> {
+    let boundary_validated = parse_boundary(boundary)?;
+    let formula = yamc::geo::ImplicitFormula::new(formula).map_err(PyValueError::new_err)?;
+    let mut surface =
+        Surface::new_implicit(std::sync::Arc::new(formula), surface_id, boundary_validated);
     if let Some(nm) = name {
         surface = surface.with_name(nm);
     }
