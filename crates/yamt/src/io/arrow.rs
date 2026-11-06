@@ -1662,9 +1662,9 @@ mod tests {
         assert_eq!(geom.num_volumes(), 2);
 
         // Left box center should be in volume 0 (fuel)
-        assert!(geom.point_in_volume(0, [0.0, 0.0, 0.0]));
+        assert!(geom.point_in_volume(0, [0.25, 0.5, 0.5]));
         // Right box center should be in volume 1 (moderator)
-        assert!(geom.point_in_volume(1, [1.0, 0.0, 0.0]));
+        assert!(geom.point_in_volume(1, [0.75, 0.5, 0.5]));
 
         // Material names
         assert_eq!(geom.material_name(0), Some("fuel"));

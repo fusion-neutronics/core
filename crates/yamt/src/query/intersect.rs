@@ -129,6 +129,89 @@ pub fn ray_triangle_intersect(
     }
 }
 
+/// What one triangle adds to a crossing count (see [`ray_triangle_parity`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum ParityHit {
+    /// The ray does not cross the triangle beyond the least distance asked.
+    Miss,
+    /// The ray crosses the triangle's interior this far along.
+    Cross(f64),
+    /// The ray meets the triangle within round-off of an edge or vertex, or
+    /// grazes its plane, so whether it crosses the surface there, and how
+    /// often, cannot be told.
+    Ambiguous,
+}
+
+/// Bound on the round-off of the barycentric numerators in
+/// [`ray_triangle_parity`], per unit of `(|s| + e) * e`, where `s` is the
+/// origin relative to `v0`, `e = |edge1| + |edge2|`, and `|v|` is the largest
+/// of a vector's components in size. The worst seen over 2e5 random rays aimed
+/// at an edge, against exact rational arithmetic from the true vertices, was
+/// 1.2 eps.
+const PARITY_EDGE_TOL: f64 = 64.0 * f64::EPSILON;
+
+/// Squared cosine between a ray and a triangle's normal below which the ray
+/// grazes the triangle.
+const PARITY_GRAZING_SQ: f64 = 1e-10;
+
+#[inline]
+fn max_abs(v: [f64; 3]) -> f64 {
+    v[0].abs().max(v[1].abs()).max(v[2].abs())
+}
+
+/// Moller-Trumbore for counting crossings: the triangle `v0`, `v0 + edge1`,
+/// `v0 + edge2` against the ray from `origin` along the unit `direction`,
+/// where only a crossing farther along than `min_t` counts.
+///
+/// Triangles that share an edge or vertex each decide alone whether a ray
+/// through it meets them. Round-off can have none of them say so, and the
+/// ray slips through the surface; a ray that only touches the surface there,
+/// at a fold, meets it once. So a ray within round-off of an edge is
+/// [`ParityHit::Ambiguous`], as one grazing the triangle is. The round-off
+/// bound grows with the distance from the origin to the triangle and with
+/// the triangle's size, and does not depend on where the mesh sits.
+#[inline]
+pub(crate) fn ray_triangle_parity(
+    origin: [f64; 3],
+    direction: [f64; 3],
+    v0: [f64; 3],
+    edge1: [f64; 3],
+    edge2: [f64; 3],
+    min_t: f64,
+) -> ParityHit {
+    let h = cross(direction, edge2);
+    let a = dot(edge1, h);
+    let s = sub(origin, v0);
+    let e = max_abs(edge1) + max_abs(edge2);
+    let tol = PARITY_EDGE_TOL * (max_abs(s) + e) * e;
+    // The barycentric coordinates u, v and w = 1 - u - v of where the ray
+    // meets the triangle's plane, times |a|. Next to a vertex, where u or v
+    // is close to 1, w keeps only the round-off of the others.
+    let (area, sign) = if a < 0.0 { (-a, -1.0) } else { (a, 1.0) };
+    let nu = sign * dot(s, h);
+    // u alone rules out most triangles: beyond area + 2 tol, v + w is below
+    // -2 tol, so one of them is below -tol.
+    if nu < -tol || nu > area + 2.0 * tol {
+        return ParityHit::Miss;
+    }
+    let q = cross(s, edge1);
+    let nv = sign * dot(direction, q);
+    let nw = area - nu - nv;
+    if nv < -tol || nw < -tol {
+        return ParityHit::Miss;
+    }
+    // Not a number when the ray lies in the triangle's plane.
+    let t = dot(edge2, q) / a;
+    if t.is_nan() || t <= min_t {
+        return ParityHit::Miss;
+    }
+    let n = cross(edge1, edge2);
+    if a * a < PARITY_GRAZING_SQ * dot(n, n) || nu <= tol || nv <= tol || nw <= tol {
+        return ParityHit::Ambiguous;
+    }
+    ParityHit::Cross(t)
+}
+
 /// Ray-triangle intersection that also returns the outward normal.
 ///
 /// Returns `Some((t, normal))` where normal = normalize(edge1 × edge2).
