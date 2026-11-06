@@ -802,17 +802,36 @@ pub fn render_png_rgba(
 const CSG_WORKER_SOURCE: &str = r#"
 let cells = null;
 function regionContains(region, x, y, z) { return evalExpr(region.expr, x, y, z); }
+// true, false or null (unknown: a surface surfaceEval cannot evaluate decides
+// it). null is falsy, so a cell is never filled where it cannot be placed.
 function evalExpr(expr, x, y, z) {
   if (expr.Halfspace) {
     const hs = expr.Halfspace;
-    if (hs.Above) return surfaceEval(hs.Above, x, y, z) > 0;
-    if (hs.Below) return surfaceEval(hs.Below, x, y, z) < 0;
+    const f = surfaceEval(hs.Above || hs.Below, x, y, z);
+    if (Number.isNaN(f)) return null;
+    return hs.Above ? f > 0 : f < 0;
   }
-  if (expr.Intersection) return evalExpr(expr.Intersection[0], x, y, z) && evalExpr(expr.Intersection[1], x, y, z);
-  if (expr.Union) return evalExpr(expr.Union[0], x, y, z) || evalExpr(expr.Union[1], x, y, z);
-  if (expr.Complement) return !evalExpr(expr.Complement, x, y, z);
+  if (expr.Intersection) {
+    const a = evalExpr(expr.Intersection[0], x, y, z);
+    if (a === false) return false;
+    const b = evalExpr(expr.Intersection[1], x, y, z);
+    if (b === false) return false;
+    return a === null || b === null ? null : true;
+  }
+  if (expr.Union) {
+    const a = evalExpr(expr.Union[0], x, y, z);
+    if (a === true) return true;
+    const b = evalExpr(expr.Union[1], x, y, z);
+    if (b === true) return true;
+    return a === null || b === null ? null : false;
+  }
+  if (expr.Complement) {
+    const a = evalExpr(expr.Complement, x, y, z);
+    return a === null ? null : !a;
+  }
   return false;
 }
+// viewer.js's surfaceEval and torusEval, without the hover distance.
 function surfaceEval(surface, x, y, z) {
   const k = surface.kind;
   if (k.Plane) return k.Plane.a * x + k.Plane.b * y + k.Plane.c * z - k.Plane.d;
@@ -829,11 +848,34 @@ function surfaceEval(surface, x, y, z) {
   }
   if (k.ZTorus) {
     const t = k.ZTorus;
-    const dx = x - t.x0, dy = y - t.y0, dz = z - t.z0;
-    const rho = Math.sqrt(dx*dx + dy*dy);
-    return (rho - t.a) * (rho - t.a) / (t.c * t.c) + dz * dz / (t.b * t.b) - 1.0;
+    return torusEval(x - t.x0, y - t.y0, z - t.z0, t);
   }
-  return 0;
+  if (k.XTorus) {
+    const t = k.XTorus;
+    return torusEval(y - t.y0, z - t.z0, x - t.x0, t);
+  }
+  if (k.YTorus) {
+    const t = k.YTorus;
+    return torusEval(x - t.x0, z - t.z0, y - t.y0, t);
+  }
+  if (k.Quadric) {
+    const q = k.Quadric;
+    return q.a * x * x + q.b * y * y + q.c * z * z + q.d * x * y + q.e * y * z + q.f * x * z
+      + q.g * x + q.h * y + q.j * z + q.k;
+  }
+  if (k.Cone) {
+    const cone = k.Cone, ap = cone.apex, ax = cone.axis;
+    const vx = x - ap[0], vy = y - ap[1], vz = z - ap[2];
+    const s = vx*ax[0] + vy*ax[1] + vz*ax[2];
+    const v2 = vx*vx + vy*vy + vz*vz;
+    return (v2 - s * s) - cone.tan2_theta * s * s;
+  }
+  return NaN; // a kind this cannot evaluate
+}
+function torusEval(t1, t2, ax, t) {
+  const rho = Math.sqrt(t1 * t1 + t2 * t2);
+  const dr = rho - t.a;
+  return dr * dr / (t.c * t.c) + ax * ax / (t.b * t.b) - 1.0;
 }
 self.onmessage = function(ev) {
   const m = ev.data;

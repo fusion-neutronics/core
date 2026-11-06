@@ -7282,7 +7282,7 @@ dependencies = [
 
 [[package]]
 name = "yamc-python"
-version = "0.17.0"
+version = "0.17.1"
 dependencies = [
  "getrandom 0.3.4",
  "getrandom 0.4.2",

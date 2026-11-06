@@ -66,6 +66,11 @@ absence into a failure.
 cargo test --workspace
 ```
 
+yamc-plot's `browser_surface_eval` tests run the browser views' JavaScript
+under [Node.js](https://nodejs.org), so they need `node` on PATH. Without it
+they fail rather than skip, since a skip would pass having checked nothing; the
+GitHub-hosted runners CI uses ship Node.
+
 ### GPU tests - run single-threaded
 
 The GPU path shares a **process-global cubecl client/device** (a cached
