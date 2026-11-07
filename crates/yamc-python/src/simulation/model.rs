@@ -406,7 +406,7 @@ impl PyModel {
 
         // Mesh geometry path
         #[cfg(feature = "mesh")]
-        if let Ok(mesh) = geometry.extract::<PyMeshGeometry>() {
+        if let Ok(mesh) = geometry.extract::<PyRef<'_, PyMeshGeometry>>() {
             return Ok(PyModel {
                 inner: make_model(yamc::geometry::backend::GeometryKind::Mesh(Box::new(
                     mesh.inner.clone(),

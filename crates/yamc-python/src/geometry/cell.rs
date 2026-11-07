@@ -349,12 +349,12 @@ impl PyCell {
     ) -> pyo3::PyResult<crate::geometry::PyVolumeResult> {
         let cell = &self.inner;
         // Points inside the placed fill body do not belong to this
-        // cell's material. The mesh is cloned once here because the
-        // rayon classifier needs a Sync view, not a Python borrow.
+        // cell's material. The rayon classifier needs a Sync view, not a
+        // Python borrow, so it takes a share of the mesh.
         #[cfg(feature = "mesh")]
         let fill_view = match &self.py_fill {
             Some(py_fill) => Some(yamc::geometry::fill::MeshFill::for_queries(
-                std::sync::Arc::new(py_fill.bind(py).try_borrow()?.inner.mesh.clone()),
+                std::sync::Arc::clone(&py_fill.bind(py).try_borrow()?.inner.mesh),
                 self.fill_translation.unwrap_or([0.0; 3]),
                 self.fill_rotation.unwrap_or([0.0; 3]),
             )),

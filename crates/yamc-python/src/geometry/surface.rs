@@ -50,8 +50,8 @@ impl PyBoundaryType {
     }
 }
 
-/// A geometric surface (plane, cylinder, sphere, …); combine with `+`/`-` into
-/// the half-spaces that build CSG `Region`s.
+/// A geometric surface (plane, cylinder, sphere, …). Its `.below` and `.above`
+/// half-spaces, combined with `&`/`|`/`~`, build CSG `Region`s.
 #[gen_stub_pyclass]
 #[pyclass(module = "yamc._core", name = "Surface", from_py_object)]
 #[derive(Clone)]

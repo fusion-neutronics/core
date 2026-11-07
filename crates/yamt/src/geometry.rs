@@ -24,6 +24,20 @@ pub enum MeshError {
         /// Its signed volume (negative, in cm³).
         signed_volume: f64,
     },
+    /// A volume's boundary lists two triangles with vertices at the same
+    /// three positions. Raised by
+    /// [`crate::mesh::topology::validate_no_duplicate_facets`].
+    DuplicateFacet {
+        /// The volume (0-based, as `volume_names` lists them).
+        volume: u32,
+        /// The two triangles, as rows of the mesh's triangle array.
+        triangles: [u32; 2],
+        /// Their surfaces (0-based).
+        surfaces: [u32; 2],
+        /// Whether they face the same way relative to the volume (a copy)
+        /// or opposite ways (a contradiction).
+        same_facing: bool,
+    },
 }
 
 impl std::fmt::Display for MeshError {
@@ -46,6 +60,41 @@ impl std::fmt::Display for MeshError {
                  output boundary), or have that writer swap the last two vertices of every \
                  tet whose signed volume is negative."
             ),
+            MeshError::DuplicateFacet {
+                volume,
+                triangles,
+                surfaces,
+                same_facing,
+            } => {
+                let surfaces = if surfaces[0] == surfaces[1] {
+                    format!("both on surface {}", surfaces[0] + 1)
+                } else {
+                    format!("on surfaces {} and {}", surfaces[0] + 1, surfaces[1] + 1)
+                };
+                if *same_facing {
+                    write!(
+                        f,
+                        "volume {volume} lists the same facet twice: triangles {} and {} ({surfaces}, \
+                         surface ids as in the file) have their vertices at the same three positions \
+                         and face the same way. A copy is counted twice in the volume's measure and \
+                         when locating points, so particles born in the volume are lost. Write each \
+                         facet once; a surface shared by two volumes is written once, with both \
+                         volumes in surface_volumes.",
+                        triangles[0], triangles[1]
+                    )
+                } else {
+                    write!(
+                        f,
+                        "volume {volume} is bounded by two facets in the same place facing opposite \
+                         ways: triangles {} and {} ({surfaces}, surface ids as in the file) have \
+                         their vertices at the same three positions, so the volume would lie on \
+                         both sides of one face. That is only valid for a face inside the volume, \
+                         written on a surface with the volume on both sides in surface_volumes. \
+                         Otherwise remove one of them.",
+                        triangles[0], triangles[1]
+                    )
+                }
+            }
         }
     }
 }

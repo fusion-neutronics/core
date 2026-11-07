@@ -48,8 +48,10 @@ use crate::common::geometry::boundary_distance::{
 };
 use cubecl::prelude::*;
 
-/// Op-stack depth. Matches the CPU `FlatRegion`'s `MAX_STACK_DEPTH`; a
-/// region tree deeper than this would need a bigger stack on both sides.
+/// Op-stack depth. Matches the CPU `FlatRegion`'s `MAX_STACK_DEPTH`. The
+/// program is emitted by `yamc_geo::region::walk_rpn`, which puts the deeper
+/// operand first, so only a region with at least 2^63 half-spaces could need
+/// more.
 pub const REGION_STACK_DEPTH: usize = 64;
 
 /// Opcode discriminants packed into the top 4 bits of each op word.
