@@ -567,6 +567,9 @@ pub fn convert_photon(
     Ok(written)
 }
 
+/// Convert a thermal scattering table; see [`crate::thermal`].
+pub use crate::thermal::{convert_thermal, ThermalSource};
+
 #[cfg(test)]
 mod tests {
     use super::*;
