@@ -349,7 +349,7 @@ impl PyTally {
                         volume_id, mesh_ref.topology.num_volumes
                     )));
                 }
-                let mesh_arc = std::sync::Arc::new(mesh_ref.clone());
+                let mesh_arc = std::sync::Arc::clone(mesh_ref);
                 let filter = yamc_tallies::UnstructuredMeshFilter::new(mesh_arc, volume_id);
                 // A surface-only mesh has no tetrahedra, so the tally would have
                 // zero bins and silently score nothing. Refuse it at

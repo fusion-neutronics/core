@@ -60,8 +60,10 @@ impl<'de> serde::Deserialize<'de> for MeshGeometry {
 
 #[derive(Clone)]
 pub struct MeshGeometry {
-    /// The underlying mesh geometry (BVH-accelerated).
-    pub mesh: yamt::MeshGeometry,
+    /// The underlying mesh geometry (BVH-accelerated). Shared, not copied,
+    /// when the geometry is cloned: it is never changed after construction,
+    /// and it holds nearly all of the memory.
+    pub mesh: Arc<yamt::MeshGeometry>,
     /// Synthetic cells: one per mesh volume + one for the implicit complement.
     pub cells: Vec<Cell>,
     /// Flat material store. `Cell.material_idx` is a slot index into this Vec.
@@ -329,7 +331,7 @@ impl MeshGeometry {
         volume_ids.push(ic_vol);
 
         Ok(MeshGeometry {
-            mesh,
+            mesh: Arc::new(mesh),
             cells,
             materials: flat_materials,
             volume_ids,
@@ -772,6 +774,20 @@ mod tests {
             ic_cell.material_idx.is_none(),
             "Complement cell should be void"
         );
+    }
+
+    /// Issue #503: a model, a mesh fill and a tally each take a clone of the
+    /// geometry, so a clone must share the mesh rather than copy it, while
+    /// the parts a model changes (cells, materials, the vacuum box) stay its
+    /// own.
+    #[test]
+    fn clone_shares_the_mesh() {
+        let mut geom = MeshGeometry::new(cube_mesh(), &HashMap::new(), None).unwrap();
+        let copy = geom.clone();
+        assert!(Arc::ptr_eq(&geom.mesh, &copy.mesh));
+        geom.add_graveyard(DEFAULT_GRAVEYARD_OFFSET);
+        assert_ne!(geom.transport_extent(), copy.transport_extent());
+        assert_eq!(copy.transport_extent(), copy.mesh.topology.global_aabb);
     }
 
     #[test]
