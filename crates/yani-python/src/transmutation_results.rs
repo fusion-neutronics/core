@@ -348,6 +348,63 @@ pub struct PyTransmutationResults {
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyTransmutationResults {
+    /// What the result rests on that the nuclear data does not give, per
+    /// material ID.
+    ///
+    /// A product whose decay the decay library has no record for is never
+    /// booked onto another nuclide: its fate is unknown, so it is counted as
+    /// produced and kept out of the inventory (``get_material`` does not hold
+    /// it). Fission in a nuclide the library gives no yields for has unknown
+    /// products. Each material's entry is a dict:
+    ///
+    /// - ``decay_library``: the decay data the run read, as configured;
+    /// - ``volume``: the material's volume in cm^3, or ``None``;
+    /// - ``fate_unknown``: per nuclide, ``atoms_per_barn_cm`` at each state
+    ///   (index 0 is the initial composition), ``production_rate`` over each
+    ///   step and ``activity_bound`` at each state, both per barn-cm per
+    ///   second, and ``produced_by`` (``"<parent> <reaction>"``,
+    ///   ``"<parent> decay"`` or ``"<parent> fission"``). The bound holds
+    ///   whatever the half-life: activity is never more than the largest
+    ///   production rate so far, taken here over each step's average;
+    /// - ``fission_without_yields``: per nuclide, its ``fission_rate`` in each
+    ///   step, per barn-cm per second;
+    /// - ``unknown_fission_share``: per step, the share of the whole fission
+    ///   rate whose products are unknown.
+    ///
+    /// Every entry names a gap of the library the run read, which is what its
+    /// evaluators would need to fill it. A material whose answer rests on
+    /// nothing missing has empty ``fate_unknown`` atoms and no
+    /// ``fission_without_yields``.
+    #[getter]
+    fn data_gaps<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let out = PyDict::new(py);
+        for (id, gaps) in &self.inner.data_gaps {
+            let d = PyDict::new(py);
+            d.set_item("decay_library", gaps.decay_library.as_deref())?;
+            d.set_item("volume", gaps.volume)?;
+            let fate = PyDict::new(py);
+            for (name, f) in gaps.produced() {
+                let e = PyDict::new(py);
+                e.set_item("atoms_per_barn_cm", f.atoms_per_barn_cm.clone())?;
+                e.set_item("production_rate", f.production_rate.clone())?;
+                e.set_item("activity_bound", f.activity_bound.clone())?;
+                e.set_item("produced_by", f.produced_by.clone())?;
+                fate.set_item(name, e)?;
+            }
+            d.set_item("fate_unknown", fate)?;
+            let fission = PyDict::new(py);
+            for (name, f) in &gaps.fission_without_yields {
+                let e = PyDict::new(py);
+                e.set_item("fission_rate", f.fission_rate.clone())?;
+                fission.set_item(name, e)?;
+            }
+            d.set_item("fission_without_yields", fission)?;
+            d.set_item("unknown_fission_share", gaps.unknown_fission_share.clone())?;
+            out.set_item(id, d)?;
+        }
+        Ok(out)
+    }
+
     /// Cumulative times [s] including t=0.
     #[getter]
     fn times(&self) -> Vec<f64> {
@@ -2283,6 +2340,23 @@ impl PyTransmutationResults {
 }
 
 impl PyTransmutationResults {
+    /// Wrap a finished solve, warning once (a ``UserWarning``) when its
+    /// answer rests on data the libraries do not give. Every transmutation
+    /// entry point of both packages returns through this, so they warn alike.
+    pub fn from_run(py: Python<'_>, inner: TransmutationResults) -> PyResult<Self> {
+        if let Some(summary) = inner.data_gaps_summary() {
+            let message = std::ffi::CString::new(summary)
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyUserWarning>(),
+                &message,
+                1,
+            )?;
+        }
+        Ok(Self { inner })
+    }
+
     /// Shared body of the two derived-quantity accessors.
     ///
     /// Not a `#[pymethods]` entry: it exists only so the two differ in nothing

@@ -157,9 +157,9 @@ impl LocalRelease {
             };
             return Err(format!(
                 "{} does not provide a '{subsection}' transmutation subsection: {listing}. \
-                 Point this transmutation part at a library that provides '{subsection}' \
-                 (endf-b8.1 provides all parts) or at a local path.",
-                self.describe()
+                 {} Set that part to one of them or to a local folder holding it.",
+                self.describe(),
+                super::url_cache::publishers_of(subsection)
             ));
         }
         for (file, required) in sections {

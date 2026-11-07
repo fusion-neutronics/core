@@ -32,12 +32,13 @@ fn unset_sources_are_refused_before_anything_is_read() {
         err.starts_with("no transmutation data is configured"),
         "{err}"
     );
+    assert!(err.contains("transmutation_reactions is not set"), "{err}");
     assert!(
-        err.contains("transmutation_reactions and transmutation_fission_yields are not set"),
+        err.contains("transmutation_fission_yields is not set"),
         "{err}"
     );
     assert!(
-        !err.contains("transmutation_decay_data ="),
+        !err.contains("transmutation_decay_data is not set"),
         "decay is set: {err}"
     );
 

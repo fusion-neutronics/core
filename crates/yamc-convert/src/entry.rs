@@ -464,21 +464,44 @@ pub fn convert_neutron_transport(
     Ok(dir)
 }
 
-/// Where the auxiliary photon tabulations live.
+/// Other copies of the auxiliary photon tabulations than the ones compiled in.
 ///
 /// None of this is in any evaluation: the photoatomic sublibrary carries no
 /// Compton profiles, no bremsstrahlung cross sections and no density effect
 /// correction, so a transport code takes them from separate published
-/// tabulations. Optional because a conversion without them still produces a
-/// usable `element.arrow`; it just has no `compton.arrow` or
-/// `bremsstrahlung.arrow` beside it.
+/// tabulations. The converter carries them (see [`bundled_tabulations`]), so
+/// these are for converting with a different release of them.
 pub struct PhotonTabulations<'a> {
     pub compton_profiles: &'a Path,
     pub density_effect: &'a Path,
     pub bremsstrahlung: &'a Path,
 }
 
+/// The auxiliary photon tabulations compiled into the converter: Compton
+/// profiles (Biggs et al. 1975), the density effect (Sternheimer et al.
+/// 1982) and bremsstrahlung (Seltzer and Berger 1986). See
+/// `crates/yamc-convert/data/README.md`. Read once.
+pub fn bundled_tabulations() -> Result<&'static endf::PhotonData, String> {
+    static BUNDLED: std::sync::OnceLock<Result<endf::PhotonData, String>> =
+        std::sync::OnceLock::new();
+    BUNDLED
+        .get_or_init(|| {
+            endf::PhotonData::from_texts(
+                include_str!("../data/compton_profiles_biggs1975.txt"),
+                include_str!("../data/density_effect_sternheimer1982.txt"),
+                include_str!("../data/bremsstrahlung_seltzer_berger1986.txt"),
+            )
+            .map_err(|e| format!("the bundled photon tabulations could not be read: {e}"))
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
 /// Convert a photoatomic evaluation into the per-element photon sections.
+///
+/// `tabulations` are other copies of the auxiliary tabulations to use; `None`
+/// uses the ones compiled in ([`bundled_tabulations`]), so every caller
+/// converts photon data the same way.
 ///
 /// `relaxation` is the atomic relaxation sublibrary for the same element,
 /// which carries the binding energies, occupancies and the transition cascade.
@@ -514,12 +537,16 @@ pub fn convert_photon(
         .filter_map(|m| m.mf1_mt451().map(|meta| (meta.za / 1000, m)))
         .collect();
 
-    let auxiliary = match tabulations {
+    let given = match tabulations {
         Some(t) => Some(
             endf::PhotonData::from_files(t.compton_profiles, t.density_effect, t.bremsstrahlung)
                 .map_err(|e| format!("the auxiliary photon tabulations could not be read: {e}"))?,
         ),
         None => None,
+    };
+    let auxiliary: Option<&endf::PhotonData> = match &given {
+        Some(data) => Some(data),
+        None => Some(bundled_tabulations()?),
     };
 
     let mut written = Vec::new();

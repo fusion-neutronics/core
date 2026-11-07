@@ -26,7 +26,7 @@
 //! `include_bytes!` from `crates/endf/fixtures/`. The three auxiliary
 //! tabulations, which are the only way `compton.arrow` and
 //! `bremsstrahlung.arrow` get written at all, are the git-tracked text files
-//! that ship in the wheel under `packages/yamc-core/python/yamc/data`. No
+//! compiled into the converter from `crates/yamc-convert/data`. No
 //! NJOY, no nuclear-data cache, no network.
 //!
 //! # Constructed inputs, and where they begin

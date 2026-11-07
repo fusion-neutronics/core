@@ -285,6 +285,9 @@ mod tests {
             sources: vec![],
             half_life_uncertainty: None,
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
         }
     }

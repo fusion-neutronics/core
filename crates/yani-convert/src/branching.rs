@@ -113,6 +113,10 @@ pub struct StateFacts {
     /// energy is unknown to the decay data, or when `level_energy` is not a
     /// stated energy (zero for an excited level, or negative).
     pub level_energy_difference: Option<f64>,
+    /// The level's excitation energy as the level matching reads it (see
+    /// [`endf::radionuclide_production::RadionuclideState::excitation_energy`]):
+    /// what a run matches a level written as evaluated against.
+    pub match_energy: Option<f64>,
     /// The evaluation's own MF=3 for `mt`, as stated. `None` when the file
     /// has no MF=3 section for that MT, even where it gives the same total
     /// through component MTs. Shared between the states of one MT, since a
@@ -924,22 +928,42 @@ impl BranchingExtractor {
                         .push(format!("{parent} MT{mt} level {}: {why}", s.lfs));
                     continue;
                 };
-                let resolved = endf::radionuclide_production::resolve_level(
-                    z,
-                    a,
-                    s.lfs,
-                    s.excitation_energy(),
-                    isomers,
-                    tol_ev,
-                );
+                // A library with no decay data of its own has nothing to name
+                // an excited level's isomer by: the level is written as the
+                // evaluation gives it, and a run names it against the decay
+                // data it is given. Matching it against another library's
+                // decay data here would build that library into this one.
+                let as_evaluated = isomers.is_empty() && s.lfs > 0;
+                let resolved = if as_evaluated {
+                    endf::radionuclide_production::ResolvedLevel {
+                        liso: 0,
+                        route: LevelRoute::AsEvaluated,
+                        conflicting_liso: None,
+                    }
+                } else {
+                    endf::radionuclide_production::resolve_level(
+                        z,
+                        a,
+                        s.lfs,
+                        s.excitation_energy(),
+                        isomers,
+                        tol_ev,
+                    )
+                };
                 let liso = resolved.liso;
-                let target = endf::gnds_name(z as u32, a as u32, liso as u32);
+                let target = if as_evaluated {
+                    endf::radionuclide_production::placeholder(z, a, s.lfs)
+                } else {
+                    endf::gnds_name(z as u32, a as u32, liso as u32)
+                };
                 // The tape's own value, kept as a fact: MF=8's ELFS where it
                 // gives one and QM - QI otherwise. excitation_energy() reads
                 // it (an unstated excited level is None there), which is not
                 // what this column records.
                 let level_energy = s.elfs.unwrap_or(s.qm - s.qi);
-                let booked_energy = if liso == 0 {
+                let booked_energy = if as_evaluated {
+                    None
+                } else if liso == 0 {
                     Some(0.0)
                 } else {
                     isomers
@@ -949,10 +973,10 @@ impl BranchingExtractor {
                 };
                 let level_energy_difference =
                     level_energy_difference(s.lfs, level_energy, booked_energy);
-                if liso > 0 {
+                if liso > 0 || as_evaluated {
                     metastable.insert(target.clone());
                 }
-                if s.lfs > 0 {
+                if s.lfs > 0 && !as_evaluated {
                     *stats
                         .level_routes
                         .entry(resolved.route.label().to_string())
@@ -1036,6 +1060,7 @@ impl BranchingExtractor {
                             level_route: resolved.route,
                             level_energy,
                             level_energy_difference,
+                            match_energy: s.excitation_energy(),
                             mf3: mf3.clone(),
                         }],
                         normalisation: normalisation.clone(),
@@ -1645,6 +1670,7 @@ pub fn write_branching(rows: &[BranchingRow], dir: &Path) -> Result<(), Box<dyn 
     let mut level_route = ListBuilder::new(StringBuilder::new());
     let mut level_energy = ListBuilder::new(Float64Builder::new());
     let mut level_energy_difference = ListBuilder::new(Float64Builder::new());
+    let mut match_energy = ListBuilder::new(Float64Builder::new());
     let mut mf3 = ListBuilder::new(ListBuilder::new(Float64Builder::new()));
     for row in rows {
         for state in &row.states {
@@ -1661,6 +1687,7 @@ pub fn write_branching(rows: &[BranchingRow], dir: &Path) -> Result<(), Box<dyn 
             level_energy_difference
                 .values()
                 .append_option(state.level_energy_difference);
+            match_energy.values().append_option(state.match_energy);
             match &state.mf3 {
                 Some(curve) => {
                     for value in sampled_on(curve, &row.energy) {
@@ -1678,6 +1705,7 @@ pub fn write_branching(rows: &[BranchingRow], dir: &Path) -> Result<(), Box<dyn 
         level_route.append(true);
         level_energy.append(true);
         level_energy_difference.append(true);
+        match_energy.append(true);
         mf3.append(true);
     }
 
@@ -1700,6 +1728,7 @@ pub fn write_branching(rows: &[BranchingRow], dir: &Path) -> Result<(), Box<dyn 
             Arc::new(level_energy_difference.finish()),
             Arc::new(mf3.finish()),
             opt_strings(&normalisation),
+            Arc::new(match_energy.finish()),
         ],
     )
 }

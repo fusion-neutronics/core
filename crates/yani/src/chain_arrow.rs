@@ -133,6 +133,8 @@ struct BranchStateColumns<'a> {
     level_energy_difference: &'a ListArray,
     mf3_cross_section: &'a ListArray,
     normalisation: &'a StringArray,
+    /// Optional: a file written before it has none.
+    match_energy: Option<&'a ListArray>,
 }
 
 const BRANCH_STATE_COLUMNS: [&str; 9] = [
@@ -149,7 +151,7 @@ const BRANCH_STATE_COLUMNS: [&str; 9] = [
 
 /// The `level_route` labels the converter writes, one per
 /// `endf::radionuclide_production::LevelRoute`.
-const LEVEL_ROUTES: [&str; 7] = [
+const LEVEL_ROUTES: [&str; 8] = [
     "ground",
     "energy",
     "near_energy",
@@ -157,6 +159,7 @@ const LEVEL_ROUTES: [&str; 7] = [
     "single_isomer",
     "no_isomers",
     "unresolved",
+    "as_evaluated",
 ];
 
 impl<'a> BranchStateColumns<'a> {
@@ -186,6 +189,7 @@ impl<'a> BranchStateColumns<'a> {
             level_energy_difference: col(batch, "level_energy_difference")?,
             mf3_cross_section: col(batch, "mf3_cross_section")?,
             normalisation: col(batch, "normalisation")?,
+            match_energy: optional_col::<ListArray>(batch, "match_energy")?,
         }))
     }
 
@@ -242,6 +246,10 @@ impl<'a> BranchStateColumns<'a> {
         let difference: Float64Array =
             items(self.level_energy_difference, i, "level_energy_difference")?;
         let mf3: ListArray = items(self.mf3_cross_section, i, "mf3_cross_section")?;
+        let matched: Option<Float64Array> = match self.match_energy {
+            Some(list) if !list.is_null(i) => Some(items(list, i, "match_energy")?),
+            _ => None,
+        };
         let n = mt.len();
         let lengths = [
             lfs.len(),
@@ -312,6 +320,10 @@ impl<'a> BranchStateColumns<'a> {
                 level_route: route.value(j).to_string(),
                 level_energy: energy.value(j),
                 level_energy_difference: option(&difference, j).then(|| difference.value(j)),
+                match_energy: matched
+                    .as_ref()
+                    .filter(|m| j < m.len() && option(*m, j))
+                    .map(|m| m.value(j)),
                 mf3_cross_section,
             });
         }
@@ -602,6 +614,7 @@ fn anything_curve(
         // state is the format's "not stated".
         level_energy: 0.0,
         level_energy_difference: (lfs == 0).then_some(0.0),
+        match_energy: None,
         mf3_cross_section: None,
     };
     Ok(Some(BranchCurve {
@@ -739,6 +752,9 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
                     half_life_uncertainty,
                     decay_energy,
                     decay_energy_uncertainty,
+                    decay_evaluated: true,
+                    excitation_energy: None,
+                    level_index: None,
                     decay_energy_components: Default::default(),
                     reactions: Vec::new(),
                     decays: Vec::new(),
@@ -966,8 +982,51 @@ fn ensure_nuclide<'a>(
             fission_yields: None,
             sources: Vec::new(),
             decay_energy_uncertainty: None,
+            // Set where the decay subsection has a record for it; a nuclide
+            // first named by a reaction, a decay mode or a yield has none.
+            decay_evaluated: false,
+            excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
         })
+}
+
+/// Give every nuclide the chain names, as a reaction's product, a decay mode's
+/// daughter or a fission product, an entry, and make every nuclide the decay
+/// data has no record for a sink: no decay (nothing about it is known) and no
+/// reactions or fission (its behaviour is not in the data the run was given).
+/// A solve then counts how much of each is produced, and its fate is
+/// reported as unknown rather than its atoms vanishing, which is what a
+/// product with no row in the solve did before.
+///
+/// Products are never booked onto another nuclide: a gap in the decay data is
+/// that library's, and is reported as such.
+fn close_over_products(chain: &mut HashMap<String, ChainNuclide>) {
+    let mut named: Vec<String> = Vec::new();
+    for nuc in chain.values() {
+        let targets = nuc
+            .reactions
+            .iter()
+            .chain(&nuc.decays)
+            .filter_map(|r| r.target.clone());
+        named.extend(targets);
+        if let Some(set) = &nuc.fission_yields {
+            for point in &set.yields {
+                named.extend(point.products.iter().map(|(p, _)| p.clone()));
+            }
+        }
+    }
+    for name in named {
+        if !chain.contains_key(&name) && crate::chain::is_nuclide_name(&name) {
+            ensure_nuclide(chain, &name);
+        }
+    }
+    for nuc in chain.values_mut() {
+        if !nuc.decay_evaluated {
+            nuc.reactions.clear();
+            nuc.fission_yields = None;
+        }
+    }
 }
 
 /// Parse a transmutation chain from separate v2 subsection directories.
@@ -978,7 +1037,7 @@ fn ensure_nuclide<'a>(
 /// - `decay_dir`: `nuclides.arrow` (name, half_life, decay_energy) plus optional
 ///   `decay_modes.arrow` and `sources.arrow`.
 /// - `reactions_dir`: optional `reactions.arrow`.
-/// - `fpy_dir`: optional `fission_yields.arrow`, `aliases.arrow` and
+/// - `fpy_dir`: optional `fission_yields.arrow` and
 ///   `evaluated_yields.arrow`.
 ///
 /// The three directories may come from different libraries. Nuclides that
@@ -1226,9 +1285,23 @@ pub fn parse_chain_parts_from_bytes(
                         )
                     })
                     .collect();
+            let excitation = optional("excitation_energy");
+            let level_index = batch.schema().index_of("level_index").ok().and_then(|idx| {
+                batch
+                    .column(idx)
+                    .as_any()
+                    .downcast_ref::<arrow_array::Int32Array>()
+            });
             for i in 0..batch.num_rows() {
                 let name = names.value(i).to_string();
                 let nuc = ensure_nuclide(&mut chain, &name);
+                nuc.decay_evaluated = true;
+                nuc.excitation_energy = excitation
+                    .filter(|column| !column.is_null(i))
+                    .map(|column| column.value(i));
+                nuc.level_index = level_index
+                    .filter(|column| !column.is_null(i))
+                    .map(|column| column.value(i) as i64);
                 for (c, (energy, sigma)) in components.iter().enumerate() {
                     nuc.decay_energy_components[c] = energy
                         .filter(|column| !column.is_null(i))
@@ -1445,29 +1518,12 @@ pub fn parse_chain_parts_from_bytes(
         );
     }
 
-    // fission_yields/aliases.arrow -- inheritors copy a parent's yields.
-    if let Some(bytes) = parts.fission_yields.get("aliases.arrow") {
-        let mut refs: Vec<(String, String)> = Vec::new();
-        for batch in read_section_bytes(
-            bytes,
-            "fission_yields/aliases.arrow",
-            "fission_yields/aliases.arrow",
-        )? {
-            let nuclides = col::<StringArray>(&batch, "nuclide")?;
-            let parents = col::<StringArray>(&batch, "fission_yield_parent")?;
-            for i in 0..batch.num_rows() {
-                refs.push((nuclides.value(i).to_string(), parents.value(i).to_string()));
-            }
-        }
-        for (name, parent) in refs {
-            let parent_yields = chain.get(&parent).and_then(|p| p.fission_yields.clone());
-            if let Some(yields) = parent_yields {
-                ensure_nuclide(&mut chain, &name).fission_yields = Some(yields);
-            }
-        }
-    }
+    // A fission_yields/aliases.arrow (an older converter's yields borrowed
+    // from another nuclide) is not read: a nuclide's fission products are its
+    // own evaluation's, or unknown.
 
     report_unstated_yield_laws(&chain);
+    close_over_products(&mut chain);
 
     // branching/branching.arrow -- optional isomeric-branching overlay, one
     // per branching source, laid over in order by `overlay_branching`.
@@ -1546,6 +1602,8 @@ fn overlay_branching(
         None => None,
     };
     let index = table.add_source(&section.source, library)?;
+    // The run's isomers, built on the first level that needs them.
+    let mut isomers: Option<endf::radionuclide_production::IsomerTable> = None;
     // The channels the sources before this one supplied, which this one does
     // not reach. Taken before any of its rows, so its own several rows of one
     // channel all land.
@@ -1569,7 +1627,9 @@ fn overlay_branching(
         let state_cols = BranchStateColumns::from_batch(&batch)?;
         for i in 0..batch.num_rows() {
             let parent = nuclides.value(i);
-            if !chain.contains_key(parent) {
+            // A parent the decay data has no record for is a product of
+            // unknown fate, which does not react (see `close_over_products`).
+            if !chain.get(parent).is_some_and(|n| n.decay_evaluated) {
                 continue;
             }
             let kind = reactions.value(i).to_string();
@@ -1596,15 +1656,56 @@ fn overlay_branching(
             if energy.is_empty() || energy.len() != values.len() {
                 continue;
             }
-            let (states, normalisation) = match &state_cols {
+            let (mut states, normalisation) = match &state_cols {
                 Some(columns) => columns.row(i, energy.len())?,
                 None => (Vec::new(), None),
             };
+
+            // A level written as the evaluation gives it, by a library with
+            // no decay data of its own, is named here against the decay data
+            // this run was given, with the converter's own rule, and the
+            // route recorded as the converter records it.
+            let mut target = target;
+            if let Some((z, a, lfs)) = endf::radionuclide_production::parse_placeholder(&target) {
+                let isomers = isomers.get_or_insert_with(|| isomer_table(chain));
+                // The energy the converter's matching reads, stored with the
+                // level; a file without it gives the level energy alone.
+                let energy = states
+                    .first()
+                    .and_then(|s| s.match_energy.or(Some(s.level_energy).filter(|&e| e > 0.0)));
+                let resolved = endf::radionuclide_production::resolve_level(
+                    z,
+                    a,
+                    lfs,
+                    energy,
+                    isomers,
+                    endf::radionuclide_production::ISOMER_ENERGY_TOLERANCE,
+                );
+                let named = endf::gnds_name(z as u32, a as u32, resolved.liso as u32);
+                let booked = isomers
+                    .get(&(z, a))
+                    .and_then(|t| t.get(&resolved.liso))
+                    .and_then(|isomer| isomer.e_iso);
+                for state in states.iter_mut() {
+                    state.level_route = resolved.route.label().to_string();
+                    state.level_energy_difference = match (energy, booked) {
+                        (Some(e), Some(b)) => Some(e - b),
+                        _ => None,
+                    };
+                }
+                table.rename(index, &target, &named);
+                target = named;
+            }
 
             // Graft the metastable-production channel when the base
             // chain lacks it (see the branching block comment in
             // `parse_chain_parts_from_bytes` and `should_graft` for the guard
             // rationale).
+            // A state the decay data has no record for is still where the
+            // evaluation sends its share: produced, of unknown fate.
+            if !chain.contains_key(&target) && crate::chain::is_nuclide_name(&target) {
+                ensure_nuclide(chain, &target);
+            }
             let target_is_nuclide = chain.contains_key(&target);
             let nuc = chain.get_mut(parent).expect("parent present");
             let kind_present = nuc.reactions.iter().any(|r| r.kind == kind);
@@ -1627,20 +1728,35 @@ fn overlay_branching(
             }
 
             table.set_source(parent, &kind, index);
-            table
+            let curves = table
                 .curves_mut()
                 .entry(parent.to_string())
                 .or_default()
                 .entry(kind)
-                .or_default()
-                .push(BranchCurve {
+                .or_default();
+            // Two levels the run's decay data names as one state are one
+            // curve, summed as the converter sums its own duplicates.
+            match curves
+                .iter_mut()
+                .find(|c| c.target == target && c.quantity == quantity)
+            {
+                Some(existing) => {
+                    let (e, v) = sum_curves(&existing.energy, &existing.values, &energy, &values);
+                    existing.energy = e;
+                    existing.values = v;
+                    let mut merged = existing.states.to_vec();
+                    merged.extend(states);
+                    existing.states = merged.into();
+                }
+                None => curves.push(BranchCurve {
                     target,
                     quantity,
                     energy,
                     values,
                     states: states.into(),
                     normalisation,
-                });
+                }),
+            }
         }
     }
 
@@ -1657,6 +1773,64 @@ fn overlay_branching(
         );
     }
     Ok(())
+}
+
+/// The isomers of the decay data a chain was loaded with, as the converter's
+/// level matching reads them: per `(Z, A)`, each state's level index, half-life
+/// and excitation energy.
+fn isomer_table(
+    chain: &HashMap<String, ChainNuclide>,
+) -> endf::radionuclide_production::IsomerTable {
+    let mut table = endf::radionuclide_production::IsomerTable::new();
+    for nuc in chain.values().filter(|n| n.decay_evaluated) {
+        let Ok((z, a, m)) = endf::zam(&nuc.name) else {
+            continue;
+        };
+        table.entry((z as i64, a as i64)).or_default().insert(
+            m as i64,
+            endf::radionuclide_production::Isomer {
+                lis: nuc.level_index.unwrap_or(-1),
+                half_life: nuc.half_life,
+                e_iso: if m == 0 {
+                    Some(0.0)
+                } else {
+                    nuc.excitation_energy
+                },
+            },
+        );
+    }
+    table
+}
+
+/// Two branching curves summed on the union of their grids, each taken as
+/// zero outside its own range, as the converter sums duplicates. Both are
+/// lin-lin, which the converter makes every curve.
+fn sum_curves(e1: &[f64], v1: &[f64], e2: &[f64], v2: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let at = |e: &[f64], v: &[f64], x: f64| -> f64 {
+        if e.is_empty() || x < e[0] || x > e[e.len() - 1] {
+            return 0.0;
+        }
+        let i = e.partition_point(|&p| p <= x);
+        if i == 0 {
+            return v[0];
+        }
+        if i >= e.len() {
+            return v[e.len() - 1];
+        }
+        let (x0, x1) = (e[i - 1], e[i]);
+        if x1 == x0 {
+            return v[i];
+        }
+        v[i - 1] + (x - x0) / (x1 - x0) * (v[i] - v[i - 1])
+    };
+    let mut grid: Vec<f64> = e1.iter().chain(e2).copied().collect();
+    grid.sort_by(f64::total_cmp);
+    grid.dedup();
+    let values = grid
+        .iter()
+        .map(|&x| at(e1, v1, x) + at(e2, v2, x))
+        .collect();
+    (grid, values)
 }
 
 /// The `library` a subsection's `provenance.json` names, or `None` where it
@@ -1936,9 +2110,15 @@ pub fn export_chain_parts<P: AsRef<Path>>(
         let mut hl_sigma_b = Float64Builder::new();
         let mut de_sigma_b = Float64Builder::new();
         let mut component_b: [(Float64Builder, Float64Builder); 3] = Default::default();
-        for name in &names {
+        let mut excitation_b = Float64Builder::new();
+        let mut level_index_b = Int32Builder::new();
+        // Only the nuclides with a decay record: a product of unknown fate is
+        // not stable, and a row for it here would say it is.
+        for name in names.iter().filter(|n| chain[**n].decay_evaluated) {
             let nuc = &chain[*name];
             name_b.append_value(&nuc.name);
+            excitation_b.append_option(nuc.excitation_energy);
+            level_index_b.append_option(nuc.level_index.map(|l| l as i32));
             for (part, (energy_b, sigma_b)) in nuc
                 .decay_energy_components
                 .iter()
@@ -1975,6 +2155,8 @@ pub fn export_chain_parts<P: AsRef<Path>>(
             columns.push(Arc::new(energy_b.finish()));
             columns.push(Arc::new(sigma_b.finish()));
         }
+        columns.push(Arc::new(excitation_b.finish()));
+        columns.push(Arc::new(level_index_b.finish()));
         let batch = RecordBatch::try_new(schema.clone(), columns)?;
         write_arrow_file(&decay_dir.join("nuclides.arrow"), schema, batch)?;
     }
@@ -2607,6 +2789,9 @@ mod tests {
                 half_life_uncertainty: Some(1.21e4),
                 decay_energy: 2.5e6,
                 decay_energy_uncertainty: Some(3.4e3),
+                decay_evaluated: true,
+                excitation_energy: None,
+                level_index: None,
                 decay_energy_components: Default::default(),
                 reactions: Vec::new(),
                 decays: Vec::new(),
@@ -2626,6 +2811,9 @@ mod tests {
                 fission_yields: None,
                 sources: Vec::new(),
                 decay_energy_uncertainty: None,
+                decay_evaluated: true,
+                excitation_energy: None,
+                level_index: None,
                 decay_energy_components: Default::default(),
             },
         );
@@ -2661,6 +2849,9 @@ mod tests {
                 half_life_uncertainty: None,
                 decay_energy: 2.5e6,
                 decay_energy_uncertainty: None,
+                decay_evaluated: true,
+                excitation_energy: None,
+                level_index: None,
                 decay_energy_components: Default::default(),
                 reactions: Vec::new(),
                 decays: Vec::new(),
@@ -2701,6 +2892,9 @@ mod tests {
             half_life_uncertainty: Some(0.0),
             decay_energy: 2.0e6,
             decay_energy_uncertainty: Some(0.0),
+            decay_evaluated: true,
+            excitation_energy: None,
+            level_index: None,
             decay_energy_components: [
                 Some(DecayEnergyComponent {
                     energy: 2.0e6,
@@ -2981,6 +3175,9 @@ mod tests {
                 ],
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_evaluated: true,
+                excitation_energy: None,
+                level_index: None,
                 decay_energy_components: Default::default(),
             },
         );
@@ -3074,6 +3271,9 @@ mod tests {
                     half_life_uncertainty: None,
                     decay_energy: 6.2e6,
                     decay_energy_uncertainty: None,
+                    decay_evaluated: true,
+                    excitation_energy: None,
+                    level_index: None,
                     decay_energy_components: Default::default(),
                     reactions: Vec::new(),
                     decays: Vec::new(),
@@ -3149,6 +3349,9 @@ mod tests {
                 half_life_uncertainty: None,
                 decay_energy: 2.6e6,
                 decay_energy_uncertainty: None,
+                decay_evaluated: true,
+                excitation_energy: None,
+                level_index: None,
                 decay_energy_components: Default::default(),
                 reactions: Vec::new(),
                 decays: Vec::new(),
@@ -3230,6 +3433,9 @@ mod tests {
                     half_life_uncertainty: None,
                     decay_energy: 0.0,
                     decay_energy_uncertainty: None,
+                    decay_evaluated: true,
+                    excitation_energy: None,
+                    level_index: None,
                     decay_energy_components: Default::default(),
                     reactions: Vec::new(),
                     decays: Vec::new(),
@@ -3294,6 +3500,9 @@ mod tests {
                     half_life_uncertainty: None,
                     decay_energy: 0.0,
                     decay_energy_uncertainty: None,
+                    decay_evaluated: true,
+                    excitation_energy: None,
+                    level_index: None,
                     decay_energy_components: Default::default(),
                     reactions: Vec::new(),
                     decays: Vec::new(),
@@ -3357,6 +3566,9 @@ mod tests {
                     half_life_uncertainty: None,
                     decay_energy: 6.2e6,
                     decay_energy_uncertainty: None,
+                    decay_evaluated: true,
+                    excitation_energy: None,
+                    level_index: None,
                     decay_energy_components: Default::default(),
                     reactions: Vec::new(),
                     decays: Vec::new(),
@@ -3418,6 +3630,9 @@ mod tests {
                 half_life_uncertainty: None,
                 decay_energy: 2.6e6,
                 decay_energy_uncertainty: None,
+                decay_evaluated: true,
+                excitation_energy: None,
+                level_index: None,
                 decay_energy_components: Default::default(),
                 reactions: Vec::new(),
                 decays: Vec::new(),
@@ -3527,6 +3742,9 @@ mod tests {
             half_life_uncertainty: None,
             decay_energy: 0.0,
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
             reactions: Vec::new(),
             decays: Vec::new(),
@@ -3986,6 +4204,9 @@ mod tests {
                 half_life_uncertainty: None,
                 decay_energy: 0.0,
                 decay_energy_uncertainty: None,
+                decay_evaluated: true,
+                excitation_energy: None,
+                level_index: None,
                 decay_energy_components: Default::default(),
                 reactions: Vec::new(),
                 decays: Vec::new(),
@@ -4137,6 +4358,9 @@ mod tests {
             half_life_uncertainty: None,
             decay_energy: 0.0,
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
             reactions,
             decays: Vec::new(),

@@ -22,11 +22,11 @@ The split of responsibilities the tests below pin down:
 * transmutation, branching and the neutron routes are on both wheels, because
   ``pip install yani`` has to be able to produce a transmutation chain without
   dragging in the transport stack;
-* photon conversion is on both, but only ``yamc`` ships the auxiliary Compton,
-  bremsstrahlung and density-effect tabulations, because they are not in any
-  evaluation and transmutation never needs them. ``yamc.convert_photon``
-  therefore defaults to its own copies where ``yani.convert_photon`` must be
-  given the three paths.
+* photon conversion is on both, with the auxiliary Compton, bremsstrahlung and
+  density-effect tabulations compiled into the shared converter, so the same
+  call with no tabulations gives the same data from either wheel;
+* the refusals, the library builder and the results' data-gap report are the
+  same code in both, so they say the same thing.
 """
 
 import lzma
@@ -43,7 +43,7 @@ yani = pytest.importorskip(
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURES = REPO / "crates" / "endf" / "fixtures"
-PHOTON_DATA = REPO / "packages" / "yamc-core" / "python" / "yamc" / "data"
+PHOTON_DATA = REPO / "crates" / "yamc-convert" / "data"
 
 
 def _unpack(name, dest):
@@ -151,46 +151,48 @@ def test_transmutation_chain_is_identical(tmp_path):
     assert any("decay" in f for f in files)
 
 
-def test_photon_is_identical_when_yani_is_given_the_tabulations(tmp_path):
-    """Photon conversion agrees, and shows why the default lives on yamc.
+def test_photon_is_identical_with_the_bundled_tabulations(tmp_path):
+    """The same call, with no tabulations, gives the same data from both.
 
-    ``yamc.convert_photon`` finds the three auxiliary tabulations in its own
-    package. ``yani`` does not ship them, so the same call has to be handed
-    their paths. Given the same inputs the two produce the same data; the
-    difference between the wheels is what they can find, not what they compute.
+    The tabulations are compiled into the shared converter, so neither wheel
+    needs to be handed them, and given them explicitly the result is the same.
     """
     photoatomic = _unpack("photoat-001_H_000.endf.xz", tmp_path / "photoat-H.endf")
+    common = dict(library="endf-b8.1", data_version="parity", created_utc=STAMP)
 
-    tabulations = {
-        "compton_profiles": str(PHOTON_DATA / "compton_profiles_biggs1975.txt"),
-        "density_effect": str(PHOTON_DATA / "density_effect_sternheimer1982.txt"),
-        "bremsstrahlung": str(PHOTON_DATA / "bremsstrahlung_seltzer_berger1986.txt"),
-    }
-    for path in tabulations.values():
-        assert Path(path).is_file(), f"the bundled tabulation {path} is missing"
-
-    out_yamc = tmp_path / "ph-yamc"
-    out_yani = tmp_path / "ph-yani"
-    # yamc: no tabulation paths, it uses the ones it ships.
-    yamc.convert_photon(
-        photoatomic_path=str(photoatomic),
-        output_dir=str(out_yamc),
-        library="endf-b8.1",
-        data_version="parity",
-        created_utc=STAMP,
-    )
-    # yani: the same files, named explicitly.
-    yani.convert_photon(
-        photoatomic_path=str(photoatomic),
-        output_dir=str(out_yani),
-        library="endf-b8.1",
-        data_version="parity",
-        created_utc=STAMP,
-        **tabulations,
-    )
-
+    out_yamc, out_yani = tmp_path / "ph-yamc", tmp_path / "ph-yani"
+    yamc.convert_photon(photoatomic, out_yamc, **common)
+    yani.convert_photon(photoatomic, out_yani, **common)
     files = _assert_identical(out_yamc, out_yani, "photon sections")
     assert any(f.endswith("element.arrow") for f in files)
+    assert any(f.endswith("compton.arrow") for f in files)
+
+    tabulations = {
+        "compton_profiles": PHOTON_DATA / "compton_profiles_biggs1975.txt",
+        "density_effect": PHOTON_DATA / "density_effect_sternheimer1982.txt",
+        "bremsstrahlung": PHOTON_DATA / "bremsstrahlung_seltzer_berger1986.txt",
+    }
+    out_given = tmp_path / "ph-given"
+    yani.convert_photon(photoatomic, out_given, **common, **tabulations)
+    _assert_identical(out_yamc, out_given, "photon sections from the given files")
+
+
+def test_both_wheels_refuse_alike():
+    """A refusal reads the same from either package, and names no package."""
+    for module in (yamc, yani):
+        module.transmutation_decay_data = None
+    messages = []
+    for module in (yamc, yani):
+        with pytest.raises(ValueError) as error:
+            module.Material({"Fe56": 1.0}, density=7.9, volume=1.0).activity()
+        messages.append(str(error.value))
+    assert messages[0] == messages[1], messages
+    assert "Libraries that publish decay data: endf-b8.1, jeff-4.0, jendl-5.0." in messages[0]
+    with pytest.raises(RuntimeError) as a:
+        yamc.generate_library("tendl-2025", "unused", parts=["decay"])
+    with pytest.raises(RuntimeError) as b:
+        yani.generate_library("tendl-2025", "unused", parts=["decay"])
+    assert str(a.value) == str(b.value)
 
 
 def test_both_wheels_expose_the_same_converters():
@@ -206,6 +208,10 @@ def test_both_wheels_expose_the_same_converters():
         "convert_neutron_xs",
         "convert_neutron_transport",
         "convert_photon",
+        "convert_photonuclear",
+        "radionuclide_production",
+        "generate_library",
+        "verify_library",
     }
     missing_yamc = {n for n in expected if not callable(getattr(yamc, n, None))}
     missing_yani = {n for n in expected if not callable(getattr(yani, n, None))}
@@ -213,7 +219,8 @@ def test_both_wheels_expose_the_same_converters():
     assert not missing_yani, f"yani is missing {sorted(missing_yani)}"
 
 
-def test_yamc_refuses_a_partial_set_of_tabulations(tmp_path):
+@pytest.mark.parametrize("module", ["yamc", "yani"])
+def test_a_partial_set_of_tabulations_is_refused(tmp_path, module):
     """Two of the three is a mistake, not a request for a mixed set.
 
     The three tabulations are read together. Accepting a partial set would
@@ -221,8 +228,8 @@ def test_yamc_refuses_a_partial_set_of_tabulations(tmp_path):
     which loads fine and is missing physics.
     """
     photoatomic = _unpack("photoat-001_H_000.endf.xz", tmp_path / "photoat-H.endf")
-    with pytest.raises(ValueError, match="all three or none"):
-        yamc.convert_photon(
+    with pytest.raises(ValueError, match="together or not at all"):
+        {"yamc": yamc, "yani": yani}[module].convert_photon(
             photoatomic_path=str(photoatomic),
             output_dir=str(tmp_path / "out"),
             compton_profiles=str(PHOTON_DATA / "compton_profiles_biggs1975.txt"),

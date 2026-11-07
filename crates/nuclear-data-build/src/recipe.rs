@@ -321,10 +321,14 @@ static RECIPES: &[Recipe<'static>] = &[
     Recipe {
         keyword: "fendl-3.2d",
         sources: FENDL_3_2D,
-        // No decay or fission yield evaluations of its own, and the chain
-        // converters assemble a network from decay data, so it has no chain
-        // parts until they can build one from its neutron files alone.
-        parts: &[Part::Neutron, Part::Photon],
+        // No decay or fission yield evaluations of its own: its chain is its
+        // reactions and their isomeric branching, from its neutron files.
+        parts: &[
+            Part::Neutron,
+            Part::Photon,
+            Part::Reactions,
+            Part::Branching,
+        ],
         njoy: Flavour::IaeaFork,
         unconvertible: &[],
         disk_bytes: 8 * GB,
@@ -333,21 +337,23 @@ static RECIPES: &[Recipe<'static>] = &[
         keyword: "irdff-ii",
         sources: IRDFF_II,
         // A dosimetry file, whose release is the isomeric branching of its
-        // isotopic evaluations. Naming a level's isomer needs decay data,
-        // which it has none of, so there is nothing to build from it alone
-        // until the branching keeps levels as evaluated and a run matches
-        // them against the decay library it is given.
-        parts: &[],
+        // isotopic evaluations, its levels as evaluated.
+        parts: &[Part::Branching],
         njoy: Flavour::Upstream,
         unconvertible: &[],
         disk_bytes: GB,
     },
 ];
 
-/// TENDL's parts: neutron and photonuclear data. TENDL has no decay or
-/// fission yield data, so no chain part until the chain converters can build
-/// reactions and branching from its neutron files alone.
-const TENDL_PARTS: &[Part] = &[Part::Neutron, Part::Photonuclear];
+/// TENDL's parts: neutron and photonuclear data, and a chain of reactions and
+/// their isomeric branching from its neutron files (TENDL has no decay or
+/// fission yield data).
+const TENDL_PARTS: &[Part] = &[
+    Part::Neutron,
+    Part::Photonuclear,
+    Part::Reactions,
+    Part::Branching,
+];
 
 /// ENDF/B-VIII.1, released August 2024 by the CSEWG through the NNDC.
 static ENDF_B8_1: &[Source] = &[
@@ -770,13 +776,9 @@ mod tests {
                     Part::Neutron => &[Sublibrary::Neutron],
                     Part::Photon => &[Sublibrary::Photoatomic],
                     Part::Photonuclear => &[Sublibrary::Photonuclear],
-                    // The chain converters assemble one network from all
-                    // three sublibraries, whichever subsection is written.
-                    Part::Decay | Part::Reactions | Part::FissionYields | Part::Branching => &[
-                        Sublibrary::Neutron,
-                        Sublibrary::Decay,
-                        Sublibrary::FissionYields,
-                    ],
+                    Part::Decay => &[Sublibrary::Decay],
+                    Part::FissionYields => &[Sublibrary::FissionYields],
+                    Part::Reactions | Part::Branching => &[Sublibrary::Neutron],
                 };
                 for s in needs {
                     assert!(has(*s), "{} {} needs {}", r.keyword, part.name(), s.dir());
@@ -809,6 +811,30 @@ mod tests {
                 assert!(!name.is_empty() && !name.contains(['/', '.']), "{key}");
             }
         }
+    }
+
+    #[test]
+    fn the_readers_table_of_subsections_is_the_recipes() {
+        let table: Vec<(&str, Vec<&str>)> = yamc_nuclide::url_cache::TRANSMUTATION_SUBSECTIONS
+            .iter()
+            .map(|(k, subs)| (*k, subs.to_vec()))
+            .collect();
+        let recipes: Vec<(&str, Vec<&str>)> = RECIPES
+            .iter()
+            .map(|r| {
+                let subs = r
+                    .parts
+                    .iter()
+                    .filter(|p| p.is_chain())
+                    .map(|p| p.name())
+                    .collect();
+                (r.keyword, subs)
+            })
+            .collect();
+        let (mut table, mut recipes) = (table, recipes);
+        table.sort();
+        recipes.sort();
+        assert_eq!(table, recipes);
     }
 
     #[test]

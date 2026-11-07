@@ -9,7 +9,7 @@
 //! here. Neither reads a nuclear data format: one needs an XML writer and the
 //! other sparse linear algebra, and both belong in a consumer.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::data::{gnds_name, zam, ATOMIC_SYMBOL};
 use crate::decay::{Decay, FissionProductYields};
@@ -731,25 +731,20 @@ pub fn normalise_branch_ratios(branch_ratios: &mut [f64]) {
 
 /// A parent's decay paths: each mode's target, its ratio normalised with
 /// [`normalise_branch_ratios`], and the tape's BR and dBR beside it untouched.
-fn decay_paths(data: &Decay, decay_data: &BTreeMap<String, Decay>) -> Vec<DecayPath> {
+fn decay_paths(data: &Decay) -> Vec<DecayPath> {
     let mut ratios: Vec<f64> = data.modes.iter().map(|m| m.branching_ratio.0).collect();
     normalise_branch_ratios(&mut ratios);
     data.modes
         .iter()
         .zip(ratios)
-        .map(|(mode, ratio)| {
-            let target = match mode.daughter() {
-                Some(d) if decay_data.contains_key(&d) => Some(d),
-                Some(d) => replace_missing(&d, decay_data),
-                None => None,
-            };
-            DecayPath {
-                kind: mode.modes.join(","),
-                target,
-                branching_ratio: ratio,
-                branching_ratio_uncertainty: mode.branching_ratio.1,
-                evaluated_branching_ratio: mode.branching_ratio.0,
-            }
+        .map(|(mode, ratio)| DecayPath {
+            kind: mode.modes.join(","),
+            // The daughter the mode leaves, whether or not the library has
+            // decay data for it.
+            target: mode.daughter(),
+            branching_ratio: ratio,
+            branching_ratio_uncertainty: mode.branching_ratio.1,
+            evaluated_branching_ratio: mode.branching_ratio.0,
         })
         .collect()
 }
@@ -761,13 +756,10 @@ pub struct DecayPath {
     pub kind: String,
     /// The nuclide left behind. `None` where the product is a bare neutron.
     ///
-    /// This is [`crate::decay::DecayMode::daughter`], or `replace_missing`'s
-    /// stand-in when that daughter has no decay data. So on spontaneous
-    /// fission it is usually the parent's own Z and A rather than a product,
-    /// and sometimes a substitute (Ds279_m1 sf -> Fm259). OpenMC's chain
-    /// agrees where the daughter is present, and writes no target for an sf
-    /// daughter that is absent. The ratio is kept as evaluated; yani's reader
-    /// is where the target is dropped.
+    /// This is [`crate::decay::DecayMode::daughter`], whether or not the
+    /// library has decay data for it. On spontaneous fission it is the
+    /// parent's own Z and A rather than a product; yani's reader is where that
+    /// target is dropped. The ratio is kept as evaluated.
     pub target: Option<String>,
     pub branching_ratio: f64,
     /// The evaluation's dBR on `branching_ratio`, exactly as MT=457 writes it.
@@ -859,23 +851,35 @@ pub struct Nuclide {
     pub decay_modes: Vec<DecayPath>,
     pub reactions: Vec<ReactionPath>,
     /// Fission yields by incident energy in eV. Empty when the nuclide does
-    /// not fission, or when its yields are borrowed from another nuclide.
+    /// not fission, or when the library has no yields for it: they are never
+    /// another nuclide's.
     pub yield_data: BTreeMap<String, FissionYields>,
     /// The yield evaluation `yield_data` is derived from, exactly as the tape
     /// gives it: the independent (MT=454) and cumulative (MT=459) yields with
     /// their DY, every product under its own name and in tape order.
     ///
     /// Kept beside `yield_data` rather than folded into it because the
-    /// derivation is not reversible. It maps a product with no decay data onto
-    /// a stand-in and sums products that land on the same name, and the DY of
-    /// such a sum is not stated anywhere: it would need the correlation
-    /// between its parts, which no evaluation publishes. A nuclide that
-    /// borrows its yields carries the evaluation it borrows them from, as it
-    /// carries the yields. `None` where there are no yields.
+    /// derivation is not reversible: it sums the products the tape lists more
+    /// than once under one name, and the DY of such a sum is not stated
+    /// anywhere, since it would need the correlation between its parts, which
+    /// no evaluation publishes. `None` where there are no yields.
     pub yield_evaluation: Option<FissionProductYields>,
-    /// The nuclide whose yields stand in for this one's, where the library has
-    /// none of its own.
-    pub borrowed_yields_from: Option<String>,
+    /// Whether the decay evaluations the chain was built from have a record
+    /// for this nuclide. A nuclide that is only a neutron target, or only a
+    /// product, has none, and nothing about its decay is known: it is not
+    /// stable for that, and a reader must not take it as stable.
+    pub decay_evaluated: bool,
+    /// The excitation energy of this nuclide's state in eV, 0.0 for a ground
+    /// state: its decay record's MF=1 MT=451 ELIS, or failing that its
+    /// isomeric transition's Q above the state the transition lands on (see
+    /// [`crate::radionuclide_production::isomer_table_from_materials`]). What
+    /// a neutron evaluation's product levels are matched against to name their
+    /// isomers. `None` without a decay record, or for an isomer whose energy
+    /// its record does not give.
+    pub excitation_energy: Option<f64>,
+    /// The nuclear level index its decay record gives the state (LIS), which
+    /// the matching falls back to. `None` without a decay record.
+    pub level_index: Option<i64>,
 }
 
 impl Nuclide {
@@ -1135,6 +1139,9 @@ impl Chain {
             }
             decay_data.insert(data.nuclide.name.clone(), data);
         }
+        // Each state's excitation energy and level index, resolved as the
+        // branching converter resolves them.
+        let isomers = crate::radionuclide_production::isomer_table_from_materials(decay);
 
         let mut fpy_data: BTreeMap<String, FissionProductYields> = BTreeMap::new();
         for material in fpy {
@@ -1146,49 +1153,70 @@ impl Chain {
             fpy_data.insert(name, FissionProductYields::from_material(material)?);
         }
 
-        // Nuclides come out ordered by Z, then A, then metastable state, which
-        // is what `zam` gives.
-        let mut parents: Vec<&String> = decay_data.keys().collect();
+        // Every nuclide the evaluations describe: a decay record, a neutron
+        // evaluation, fission yields, or any of them together. Ordered by Z, then A, then metastable state,
+        // which is what `zam` gives. A neutron target needs no decay record
+        // to have reactions, and nothing here is filtered by another
+        // sublibrary: each part says what its own evaluations say.
+        let mut names: BTreeSet<&String> = decay_data.keys().collect();
+        names.extend(fpy_data.keys());
+        // An element evaluation (A = 0) has no single residual for a
+        // reaction to leave, so it is no reactions parent.
+        names.extend(
+            q_values
+                .keys()
+                .filter(|name| zam(name).is_ok_and(|(z, a, _)| z > 0 && a > 0)),
+        );
+        let mut parents: Vec<&String> = names.into_iter().collect();
         parents.sort_by_key(|name| zam(name).unwrap_or((0, 0, 0)));
 
         let mut chain = Chain::new();
         for parent in parents {
-            let data = &decay_data[parent];
             let mut nuclide = Nuclide::new(parent);
+            let (z, a, _) = zam(parent)?;
+            let (z, a) = (z as i64, a as i64);
 
-            let half_life = data.half_life.map(|(t, _)| t).unwrap_or(0.0);
-            if !data.nuclide.stable && half_life != 0.0 {
-                nuclide.half_life = Some(half_life);
-                // The sigmas are kept as the tape writes them, zeros included.
-                // A zero is how MT=457 says "not stated", and it is the
-                // readers' job to take it that way: turning it into a null here
-                // made the published file say something the tape does not.
-                nuclide.half_life_uncertainty = data.half_life.map(|(_, s)| s);
-                // One call, so the value and its sigma cannot come from two
-                // different evaluations of the same quadrature.
-                let (energy, energy_sigma) = data.decay_energy();
-                nuclide.decay_energy = energy;
-                nuclide.decay_energy_components = data.decay_energy_components();
-                // With no component on the tape the quadrature is of nothing,
-                // and its 0.0 would be a number the evaluation never wrote.
-                nuclide.decay_energy_uncertainty = nuclide
-                    .decay_energy_components
-                    .iter()
-                    .any(Option::is_some)
-                    .then_some(energy_sigma);
-                nuclide.decay_energy_source = Some(
-                    if data.mean_energy_placeholder {
-                        DECAY_ENERGY_PLACEHOLDER
-                    } else {
-                        DECAY_ENERGY_EVALUATED
-                    }
-                    .to_string(),
-                );
-
-                nuclide.decay_modes = decay_paths(data, &decay_data);
+            if let Some(data) = decay_data.get(parent) {
+                nuclide.decay_evaluated = true;
+                let state = zam(parent)
+                    .ok()
+                    .and_then(|(z, a, m)| isomers.get(&(z as i64, a as i64))?.get(&(m as i64)));
+                nuclide.excitation_energy = state.and_then(|s| s.e_iso);
+                nuclide.level_index = state.map(|s| s.lis);
+                let half_life = data.half_life.map(|(t, _)| t).unwrap_or(0.0);
+                if !data.nuclide.stable && half_life != 0.0 {
+                    nuclide.half_life = Some(half_life);
+                    // The sigmas are kept as the tape writes them, zeros
+                    // included. A zero is how MT=457 says "not stated", and it
+                    // is the readers' job to take it that way: turning it into
+                    // a null here made the published file say something the
+                    // tape does not.
+                    nuclide.half_life_uncertainty = data.half_life.map(|(_, s)| s);
+                    // One call, so the value and its sigma cannot come from two
+                    // different evaluations of the same quadrature.
+                    let (energy, energy_sigma) = data.decay_energy();
+                    nuclide.decay_energy = energy;
+                    nuclide.decay_energy_components = data.decay_energy_components();
+                    // With no component on the tape the quadrature is of
+                    // nothing, and its 0.0 would be a number the evaluation
+                    // never wrote.
+                    nuclide.decay_energy_uncertainty = nuclide
+                        .decay_energy_components
+                        .iter()
+                        .any(Option::is_some)
+                        .then_some(energy_sigma);
+                    nuclide.decay_energy_source = Some(
+                        if data.mean_energy_placeholder {
+                            DECAY_ENERGY_PLACEHOLDER
+                        } else {
+                            DECAY_ENERGY_EVALUATED
+                        }
+                        .to_string(),
+                    );
+                    nuclide.decay_modes = decay_paths(data);
+                }
             }
 
-            let mut fissionable = false;
             if let Some(available) = q_values.get(parent) {
                 for name in reactions {
                     let Some(info) = reaction_info(name) else {
@@ -1197,15 +1225,15 @@ impl Chain {
                     if !info.mts.iter().any(|mt| available.contains_key(mt)) {
                         continue;
                     }
-                    let a = data.nuclide.mass_number + info.delta_a;
-                    let z = data.nuclide.atomic_number + info.delta_z;
-                    let symbol = ATOMIC_SYMBOL.get(z as usize).copied().unwrap_or("?");
-                    let mut daughter = Some(format!("{symbol}{a}"));
-                    if let Some(d) = &daughter
-                        && !decay_data.contains_key(d)
-                    {
-                        daughter = replace_missing(d, &decay_data);
-                    }
+                    // The residual as the reaction leaves it, whether or not
+                    // any decay library has it: a product a decay library
+                    // lacks is that library's gap, reported where a run pairs
+                    // the two, never booked onto a neighbour.
+                    let (pz, pa) = (z + info.delta_z, a + info.delta_a);
+                    let daughter = (pz > 0 && pa >= pz)
+                        .then(|| ATOMIC_SYMBOL.get(pz as usize))
+                        .flatten()
+                        .map(|symbol| format!("{symbol}{pa}"));
 
                     // The first MT of the reaction that the evaluation has.
                     let q_value = info
@@ -1229,60 +1257,31 @@ impl Chain {
                         q_value: available.get(&18).copied().unwrap_or(0.0),
                         branching_ratio: 1.0,
                     });
-                    fissionable = true;
                 }
             }
 
-            if fissionable {
-                match fpy_data.get(parent) {
-                    Some(fpy) => {
-                        let energies: Vec<f64> = if fpy.energies.is_empty() {
-                            vec![0.0]
-                        } else {
-                            fpy.energies.clone()
-                        };
-                        for (energy, table) in energies.iter().zip(&fpy.independent) {
-                            let mut yields: FissionYields = BTreeMap::new();
-                            for product in table {
-                                let name = if decay_data.contains_key(&product.name) {
-                                    Some(product.name.clone())
-                                } else {
-                                    replace_missing(&product.name, &decay_data)
-                                };
-                                // A product with no stand-in (a bare
-                                // neutron) is dropped rather than named.
-                                if let Some(name) = name {
-                                    *yields.entry(name).or_insert(0.0) += product.yield_.0;
-                                }
-                            }
-                            nuclide.yield_data.insert(energy_key(*energy), yields);
-                        }
-                        nuclide.yield_evaluation = Some(fpy.clone());
+            // The library's own yields for this nuclide, products under the
+            // names the tape gives them, whether or not its neutron evaluation
+            // fissions. A fissionable nuclide the library has no yields for
+            // has none here: its fission products are unknown,
+            // which a run reports, and no other nuclide's yields stand in.
+            if let Some(fpy) = fpy_data.get(parent) {
+                let energies: Vec<f64> = if fpy.energies.is_empty() {
+                    vec![0.0]
+                } else {
+                    fpy.energies.clone()
+                };
+                for (energy, table) in energies.iter().zip(&fpy.independent) {
+                    let mut yields: FissionYields = BTreeMap::new();
+                    for product in table {
+                        *yields.entry(product.name.clone()).or_insert(0.0) += product.yield_.0;
                     }
-                    None => {
-                        nuclide.borrowed_yields_from =
-                            Some(replace_missing_fpy(parent, &fpy_data, &decay_data));
-                    }
+                    nuclide.yield_data.insert(energy_key(*energy), yields);
                 }
+                nuclide.yield_evaluation = Some(fpy.clone());
             }
 
             chain.nuclides.push(nuclide);
-        }
-
-        // Fill in the borrowed yields, now that every nuclide exists.
-        let borrowed: Vec<(usize, String)> = chain
-            .nuclides
-            .iter()
-            .enumerate()
-            .filter_map(|(i, n)| n.borrowed_yields_from.clone().map(|from| (i, from)))
-            .collect();
-        for (i, from) in borrowed {
-            if let Some(source) = chain.get(&from) {
-                let (yields, evaluation) =
-                    (source.yield_data.clone(), source.yield_evaluation.clone());
-                chain.nuclides[i].yield_data = yields;
-                chain.nuclides[i].yield_evaluation = evaluation;
-            }
         }
 
         Ok(chain)
@@ -1408,154 +1407,6 @@ fn energy_key(energy: f64) -> String {
     format!("{energy}")
 }
 
-/// A stand-in for a product with no decay data.
-///
-/// Walks towards stability until it reaches a nuclide the library knows: down
-/// by alpha decay above Z=98, and by beta otherwise, in whichever direction
-/// the element's longest-lived isotope lies.
-///
-/// `None` when there is no stand-in: a bare neutron, which is simply dropped,
-/// or a walk that leaves the table of elements without finding one. The
-/// second happens when the decay library is small enough that the direction
-/// cannot be judged, the Python reader indexes past the end and raises
-/// `KeyError: -1` there.
-pub fn replace_missing(product: &str, decay_data: &BTreeMap<String, Decay>) -> Option<String> {
-    replace_missing_in(
-        product,
-        |name| decay_data.contains_key(name),
-        decay_data.iter().map(|(name, data)| {
-            (
-                name.as_str(),
-                data.nuclide.stable,
-                data.half_life.map_or(0.0, |(t, _)| t),
-            )
-        }),
-    )
-}
-
-/// [`replace_missing`] over any decay library, not only the converter's own.
-///
-/// `contains` says whether the library has a nuclide, and `library` gives
-/// every nuclide as `(name, stable, half-life [s])` in ascending name order,
-/// the order a `BTreeMap` walks: the longest-lived isotope is searched in that
-/// order and the first stable one ends the search, so another order can pick
-/// another direction. A half-life of 0.0 is one the library does not state.
-///
-/// Exposed so a reader of a converted chain can recover which stand-in a
-/// product of the tape was summed onto, with the converter's own rule.
-pub fn replace_missing_in<'a>(
-    product: &str,
-    contains: impl Fn(&str) -> bool,
-    library: impl IntoIterator<Item = (&'a str, bool, f64)>,
-) -> Option<String> {
-    let (z, a, state) = zam(product).ok()?;
-    let mut a = a as i64;
-    let mut z = z as i64;
-    let symbol = ATOMIC_SYMBOL.get(z as usize).copied()?;
-
-    // A neutron is not replaced by anything.
-    if z == 0 {
-        return None;
-    }
-
-    // The ground state, where the product was metastable.
-    let mut product = if state > 0 {
-        format!("{symbol}{a}")
-    } else {
-        product.to_string()
-    };
-
-    // The longest-lived isotope of this element says which way stability lies.
-    let mut half_life = 0.0;
-    let mut mass_longest_lived = a;
-    for (nuclide, stable, t) in library {
-        let Some((mass, _)) = same_element(nuclide, symbol) else {
-            continue;
-        };
-        if stable {
-            mass_longest_lived = mass;
-            break;
-        }
-        if t > half_life {
-            mass_longest_lived = mass;
-            half_life = t;
-        }
-    }
-    let beta_minus = mass_longest_lived < a;
-
-    while !contains(&product) {
-        if z > 98 {
-            z -= 2;
-            a -= 4;
-        } else if beta_minus {
-            z += 1;
-        } else {
-            z -= 1;
-        }
-        if z < 1 || a < 1 {
-            return None;
-        }
-        product = format!("{}{a}", ATOMIC_SYMBOL.get(z as usize).copied()?);
-    }
-    Some(product)
-}
-
-/// Whether a GNDS name is an isotope of the given element, and its mass.
-fn same_element(name: &str, symbol: &str) -> Option<(i64, bool)> {
-    let rest = name.strip_prefix(symbol)?;
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() {
-        return None;
-    }
-    let tail = &rest[digits.len()..];
-    // Only a metastable suffix may follow, or nothing.
-    if !tail.is_empty() && !tail.starts_with("_m") {
-        return None;
-    }
-    Some((digits.parse().ok()?, !tail.is_empty()))
-}
-
-/// A stand-in set of fission yields for an actinide the library has none for.
-///
-/// Tries the metastable state, then isotones in either direction, and falls
-/// back to U235, whose yields every library has.
-pub fn replace_missing_fpy(
-    actinide: &str,
-    fpy_data: &BTreeMap<String, FissionProductYields>,
-    decay_data: &BTreeMap<String, Decay>,
-) -> String {
-    let Ok((z, a, m)) = zam(actinide) else {
-        return "U235".to_string();
-    };
-    let (z, a) = (z as i64, a as i64);
-
-    if m == 0 {
-        let metastable = gnds_name(z as u32, a as u32, 1);
-        if fpy_data.contains_key(&metastable) {
-            return metastable;
-        }
-    }
-
-    // Isotones: the neutron number held fixed while Z moves.
-    for step in [1i64, -1] {
-        let (mut z, mut a) = (z, a);
-        let mut isotone = actinide.to_string();
-        while decay_data.contains_key(&isotone) {
-            z += step;
-            a += step;
-            if z < 0 {
-                break;
-            }
-            isotone = gnds_name(z as u32, a as u32, 0);
-            if fpy_data.contains_key(&isotone) {
-                return isotone;
-            }
-        }
-    }
-
-    "U235".to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1643,7 +1494,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let paths = decay_paths(&data, &BTreeMap::new());
+        let paths = decay_paths(&data);
         let ratios: Vec<f64> = paths.iter().map(|p| p.branching_ratio).collect();
         assert_eq!(ratios[0], 0.1, "the smaller branch is as evaluated");
         assert!((ratios[1] - 0.9).abs() < 1e-12, "the residual is on alpha");
@@ -1671,22 +1522,11 @@ mod tests {
             }],
             ..Default::default()
         };
-        let paths = decay_paths(&data, &BTreeMap::new());
+        let paths = decay_paths(&data);
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0].branching_ratio, 1.0);
         assert_eq!(paths[0].evaluated_branching_ratio, 0.45);
         assert_eq!(paths[0].branching_ratio_uncertainty, 0.15);
-    }
-
-    #[test]
-    fn a_missing_product_walks_to_one_the_library_has() {
-        // An empty library has nothing to walk to, and the walk stops rather
-        // than running off the table (where the Python reader raises
-        // `KeyError: -1`).
-        let empty = BTreeMap::new();
-        assert_eq!(replace_missing("Cd116", &empty), None);
-        // A neutron has no stand-in at all.
-        assert_eq!(replace_missing("n1", &empty), None);
     }
 
     #[test]

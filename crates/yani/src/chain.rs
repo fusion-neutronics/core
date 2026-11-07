@@ -194,6 +194,10 @@ pub struct BranchState {
     /// to, in eV; `None` where that isomer's energy is unknown or
     /// `level_energy` is not a stated energy.
     pub level_energy_difference: Option<f64>,
+    /// The level's excitation energy as the level matching reads it: ELFS
+    /// where positive, QM - QI otherwise. `None` where neither is, and from a
+    /// file written before it was stored.
+    pub match_energy: Option<f64>,
     /// The evaluation's MF=3 for `mt` on the curve's `energy` nodes, in barns:
     /// the tape's value where a node is one of its points and its own law
     /// between them, not a copy of MF=3. `None` where the file has no MF=3
@@ -251,6 +255,10 @@ pub struct BranchSource {
     /// this is what says which evaluation the path holds.
     pub library: Option<String>,
     covariance: Option<Vec<RecordBatch>>,
+    /// The levels it gives as evaluated (`"Ag110@L2"`) and the states the
+    /// run's decay data names them, which its covariance rows still carry the
+    /// first of.
+    renames: HashMap<String, String>,
 }
 
 impl BranchSource {
@@ -262,6 +270,13 @@ impl BranchSource {
     /// stated covariance of the isomeric split.
     pub fn covariance(&self) -> Option<&[RecordBatch]> {
         self.covariance.as_deref()
+    }
+
+    /// The state a target in this source's files is named in the run: the
+    /// one the run's decay data matched it to, for a level the source gives
+    /// as evaluated, and the target itself otherwise.
+    pub fn named<'a>(&'a self, target: &'a str) -> &'a str {
+        self.renames.get(target).map_or(target, String::as_str)
     }
 }
 
@@ -302,6 +317,7 @@ impl BranchTable {
             name: name.to_string(),
             library,
             covariance: None,
+            renames: HashMap::new(),
         });
         Ok(self.sources.len() - 1)
     }
@@ -329,6 +345,14 @@ impl BranchTable {
     }
 
     /// Attach source `index`'s covariance batches.
+    /// Record that source `index`'s level `from`, given as evaluated, is named
+    /// `to` in this run.
+    pub fn rename(&mut self, index: usize, from: &str, to: &str) {
+        if let Some(source) = self.sources.get_mut(index) {
+            source.renames.insert(from.to_string(), to.to_string());
+        }
+    }
+
     pub fn set_covariance(&mut self, index: usize, batches: Vec<RecordBatch>) {
         self.sources[index].covariance = Some(batches);
     }
@@ -810,6 +834,20 @@ pub struct ChainNuclide {
     /// conversion and Auger electrons), electromagnetic (gammas and x-rays),
     /// heavy particles (alphas, protons, neutrons, fission fragments).
     pub decay_energy_components: [Option<DecayEnergyComponent>; 3],
+    /// Whether the decay data the chain was loaded with has a record for this
+    /// nuclide. `false` for a product or a reaction target it has none for:
+    /// such a nuclide is not stable, its fate is unknown, and a solve counts
+    /// how much of it is produced rather than treating it as part of the
+    /// inventory (see [`crate::chain_arrow`]).
+    pub decay_evaluated: bool,
+    /// The excitation energy of this nuclide's state in eV, as its decay
+    /// record gives it (0.0 for a ground state): what a neutron evaluation's
+    /// product levels are matched against to name their isomers. `None`
+    /// without a decay record, or from a file that predates the column.
+    pub excitation_energy: Option<f64>,
+    /// The nuclear level index its decay record gives the state, which the
+    /// matching falls back to. `None` without a decay record.
+    pub level_index: Option<i64>,
     /// Neutron-induced reactions
     pub reactions: Vec<ChainReaction>,
     /// Radioactive decay modes
@@ -1594,6 +1632,28 @@ pub fn reduce_chain(
 
 // ----------------------------- Tests -----------------------------
 
+/// Whether `name` names a nuclide as the chain writes them: an element
+/// symbol, a mass number and an optional `_m<n>` isomer suffix (`Fe56`,
+/// `Am242_m1`). Not a bare neutron (`n1`) or anything else.
+pub fn is_nuclide_name(name: &str) -> bool {
+    let (base, isomer) = match name.split_once("_m") {
+        Some((base, n)) => (base, Some(n)),
+        None => (name, None),
+    };
+    if isomer.is_some_and(|n| n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit())) {
+        return false;
+    }
+    let digits = base.find(|c: char| c.is_ascii_digit());
+    let Some(at) = digits else {
+        return false;
+    };
+    let (symbol, mass) = base.split_at(at);
+    let mut chars = symbol.chars();
+    let first_upper = chars.next().is_some_and(|c| c.is_ascii_uppercase());
+    let rest_lower = chars.clone().count() <= 2 && chars.all(|c| c.is_ascii_lowercase());
+    first_upper && rest_lower && !mass.is_empty() && mass.bytes().all(|b| b.is_ascii_digit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1622,6 +1682,9 @@ mod tests {
             half_life_uncertainty: None,
             decay_energy: 0.0,
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
             reactions: vec![],
             decays: vec![],
@@ -1731,6 +1794,9 @@ mod tests {
             fission_yields: None,
             sources: Vec::new(),
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
         }
     }

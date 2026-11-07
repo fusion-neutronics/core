@@ -17,6 +17,10 @@ arrow-array = "60"
 arrow-ipc = { version = "60", features = ["lz4"] }
 arrow-schema = "60"
 nuclear-data-schema = { path = "../nuclear-data-schema" }
+# Matching a neutron evaluation's product levels to the isomers of the decay
+# data a run is given, with the rule the converter uses. No dependencies of its
+# own, so it builds for the browser too.
+endf = { path = "../endf" }
 # Reads the `library` a branching subsection's provenance.json names, which is
 # how a report tells which evaluation a branching source given as a path holds.
 serde_json = "1.0"

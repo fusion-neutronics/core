@@ -2,6 +2,8 @@
 # ruff: noqa: E501, F401, F403, F405
 
 import builtins
+import os
+import pathlib
 import typing
 from . import data as data
 from . import shapes as shapes
@@ -6056,6 +6058,37 @@ class TransmutationResults:
     Index 0 is the initial composition, index i is after timestep[i-1].
     """
     @property
+    def data_gaps(self) -> dict:
+        r"""
+        What the result rests on that the nuclear data does not give, per
+        material ID.
+        
+        A product whose decay the decay library has no record for is never
+        booked onto another nuclide: its fate is unknown, so it is counted as
+        produced and kept out of the inventory (``get_material`` does not hold
+        it). Fission in a nuclide the library gives no yields for has unknown
+        products. Each material's entry is a dict:
+        
+        - ``decay_library``: the decay data the run read, as configured;
+        - ``volume``: the material's volume in cm^3, or ``None``;
+        - ``fate_unknown``: per nuclide, ``atoms_per_barn_cm`` at each state
+          (index 0 is the initial composition), ``production_rate`` over each
+          step and ``activity_bound`` at each state, both per barn-cm per
+          second, and ``produced_by`` (``"<parent> <reaction>"``,
+          ``"<parent> decay"`` or ``"<parent> fission"``). The bound holds
+          whatever the half-life: activity is never more than the largest
+          production rate so far, taken here over each step's average;
+        - ``fission_without_yields``: per nuclide, its ``fission_rate`` in each
+          step, per barn-cm per second;
+        - ``unknown_fission_share``: per step, the share of the whole fission
+          rate whose products are unknown.
+        
+        Every entry names a gap of the library the run read, which is what its
+        evaluators would need to fill it. A material whose answer rests on
+        nothing missing has empty ``fate_unknown`` atoms and no
+        ``fission_without_yields``.
+        """
+    @property
     def times(self) -> builtins.list[builtins.float]:
         r"""
         Cumulative times [s] including t=0.
@@ -8206,7 +8239,7 @@ def convert_neutron_xs(input_path: builtins.str, output_dir: builtins.str, sourc
         Path to the directory written.
     """
 
-def convert_photon(photoatomic_path: builtins.str, output_dir: builtins.str, relaxation_path: typing.Optional[builtins.str] = None, compton_profiles: typing.Optional[builtins.str] = None, density_effect: typing.Optional[builtins.str] = None, bremsstrahlung: typing.Optional[builtins.str] = None, library: builtins.str = '', data_version: builtins.str = '', created_utc: typing.Optional[builtins.str] = None) -> builtins.list[builtins.str]:
+def convert_photon(photoatomic_path: builtins.str | os.PathLike | pathlib.Path, output_dir: builtins.str | os.PathLike | pathlib.Path, relaxation_path: typing.Optional[builtins.str | os.PathLike | pathlib.Path] = None, compton_profiles: typing.Optional[builtins.str | os.PathLike | pathlib.Path] = None, density_effect: typing.Optional[builtins.str | os.PathLike | pathlib.Path] = None, bremsstrahlung: typing.Optional[builtins.str | os.PathLike | pathlib.Path] = None, library: builtins.str = '', data_version: builtins.str = '', created_utc: typing.Optional[builtins.str] = None) -> builtins.list[builtins.str]:
     r"""
     Convert a photoatomic evaluation into the per-element photon sections.
     
@@ -8226,10 +8259,11 @@ def convert_photon(photoatomic_path: builtins.str, output_dir: builtins.str, rel
         energies, occupancies and the transition cascade. Without it the
         subshells are written with zero binding energy and no transitions,
         which is a fluorescence-free atom rather than an error.
-    compton_profiles, density_effect, bremsstrahlung : str, optional
-        The auxiliary tabulations, which no evaluation carries. All three must
-        be given together or none of them; without them ``compton.arrow`` and
-        ``bremsstrahlung.arrow`` are absent.
+    compton_profiles, density_effect, bremsstrahlung : str or path, optional
+        Other copies of the auxiliary tabulations, which no evaluation carries
+        (Compton profiles, the density effect and bremsstrahlung). The default
+        is the copies compiled into this package, the same in yamc and yani.
+        Give all three or none.
     library, data_version, created_utc
         Recorded in ``version.json``.
     

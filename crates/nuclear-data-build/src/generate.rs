@@ -25,7 +25,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use serde_json::{json, Value};
-use yamc_convert::entry::PhotonTabulations;
 use yamc_nuclide::storage::release;
 
 use crate::convert::{self, Particle};
@@ -146,12 +145,6 @@ pub fn generate(request: &Request) -> Result<Report, String> {
     let materials = identify::identify(&folders)?;
 
     let particles: Vec<Particle> = parts.iter().filter_map(|p| particle(*p)).collect();
-    let tabulations_dir = build.join("tabulations");
-    let tabulations = if particles.contains(&Particle::Photon) {
-        Some(write_tabulations(&tabulations_dir)?)
-    } else {
-        None
-    };
     if !particles.is_empty() {
         let names: Vec<&str> = particles.iter().map(|p| p.dir()).collect();
         say(&format!(
@@ -167,7 +160,7 @@ pub fn generate(request: &Request) -> Result<Report, String> {
         temperatures,
         particles: &particles,
         nuclides: request.nuclides,
-        tabulations: tabulations.as_ref().map(|t| t.borrowed()),
+        tabulations: None,
         memory_budget: None,
         workers: None,
         stop: request.stop,
@@ -289,16 +282,12 @@ fn particle(part: Part) -> Option<Particle> {
     }
 }
 
-/// The sublibraries `parts` are built from.
-fn sublibraries(recipe: &Recipe, parts: &[Part]) -> BTreeSet<Sublibrary> {
-    let has_yields = recipe
-        .sources
-        .iter()
-        .any(|s| s.sublibrary == Sublibrary::FissionYields);
+/// The sublibraries `parts` are built from: each part from its own.
+fn sublibraries(_recipe: &Recipe, parts: &[Part]) -> BTreeSet<Sublibrary> {
     let mut out = BTreeSet::new();
     for part in parts {
         match part {
-            Part::Neutron => {
+            Part::Neutron | Part::Reactions | Part::Branching => {
                 out.insert(Sublibrary::Neutron);
             }
             Part::Photon => {
@@ -307,19 +296,11 @@ fn sublibraries(recipe: &Recipe, parts: &[Part]) -> BTreeSet<Sublibrary> {
             Part::Photonuclear => {
                 out.insert(Sublibrary::Photonuclear);
             }
-            Part::Decay | Part::Reactions | Part::FissionYields => {
-                out.extend([
-                    Sublibrary::Neutron,
-                    Sublibrary::Decay,
-                    Sublibrary::FissionYields,
-                ]);
+            Part::Decay => {
+                out.insert(Sublibrary::Decay);
             }
-            Part::Branching => {
-                out.extend([Sublibrary::Neutron, Sublibrary::Decay]);
-                // Scoped to the network's parents, when there is a network.
-                if has_yields {
-                    out.insert(Sublibrary::FissionYields);
-                }
+            Part::FissionYields => {
+                out.insert(Sublibrary::FissionYields);
             }
         }
     }
@@ -511,53 +492,6 @@ fn provenance(
     p
 }
 
-/// The tabulations a photon folder carries beside its evaluation, which are
-/// in no ENDF sublibrary: Compton profiles (Biggs et al. 1975), the density
-/// effect (Sternheimer et al. 1982) and bremsstrahlung (Seltzer and Berger
-/// 1986). Compiled in, so every wheel builds photon data the same way.
-const COMPTON: &[u8] =
-    include_bytes!("../../../packages/yamc-core/python/yamc/data/compton_profiles_biggs1975.txt");
-const DENSITY: &[u8] = include_bytes!(
-    "../../../packages/yamc-core/python/yamc/data/density_effect_sternheimer1982.txt"
-);
-const BREMSSTRAHLUNG: &[u8] = include_bytes!(
-    "../../../packages/yamc-core/python/yamc/data/bremsstrahlung_seltzer_berger1986.txt"
-);
-
-/// The written tabulation files.
-struct Tabulations {
-    compton: PathBuf,
-    density: PathBuf,
-    bremsstrahlung: PathBuf,
-}
-
-impl Tabulations {
-    fn borrowed(&self) -> PhotonTabulations<'_> {
-        PhotonTabulations {
-            compton_profiles: &self.compton,
-            density_effect: &self.density,
-            bremsstrahlung: &self.bremsstrahlung,
-        }
-    }
-}
-
-fn write_tabulations(dir: &Path) -> Result<Tabulations, String> {
-    fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-    let put = |name: &str, body: &[u8]| -> Result<PathBuf, String> {
-        let path = dir.join(name);
-        if fs::read(&path).is_ok_and(|b| b == body) {
-            return Ok(path);
-        }
-        fs::write(&path, body).map_err(|e| format!("could not write {}: {e}", path.display()))?;
-        Ok(path)
-    };
-    Ok(Tabulations {
-        compton: put("compton_profiles_biggs1975.txt", COMPTON)?,
-        density: put("density_effect_sternheimer1982.txt", DENSITY)?,
-        bremsstrahlung: put("bremsstrahlung_seltzer_berger1986.txt", BREMSSTRAHLUNG)?,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,36 +500,28 @@ mod tests {
     fn parts_default_to_the_release_and_refuse_what_it_does_not_carry() {
         let tendl = recipe::recipe("tendl-2025").unwrap();
         assert_eq!(parts(tendl, None).unwrap(), tendl.parts);
-        // TENDL has no decay data, so it carries no chain part.
-        let err = parts(tendl, Some(&[Part::Reactions])).unwrap_err();
-        assert!(err.contains("no reactions part"), "{err}");
+        // TENDL has no decay data of its own, so it carries no decay part.
+        let err = parts(tendl, Some(&[Part::Decay])).unwrap_err();
+        assert!(err.contains("no decay part"), "{err}");
         let got = parts(
             tendl,
-            Some(&[Part::Photonuclear, Part::Neutron, Part::Neutron]),
+            Some(&[Part::Branching, Part::Neutron, Part::Neutron]),
         )
         .unwrap();
-        assert_eq!(got, [Part::Neutron, Part::Photonuclear]);
+        assert_eq!(got, [Part::Neutron, Part::Branching]);
         assert!(parts(tendl, Some(&[])).is_err());
-        let irdff = recipe::recipe("irdff-ii").unwrap();
-        let err = parts(irdff, None).unwrap_err();
-        assert!(err.contains("takes decay data"), "{err}");
     }
 
     #[test]
-    fn chain_parts_fetch_what_the_chain_is_assembled_from() {
+    fn each_part_fetches_its_own_sublibrary() {
         let endf = recipe::recipe("endf-b8.1").unwrap();
         let got: Vec<_> = sublibraries(endf, &[Part::Branching]).into_iter().collect();
-        assert_eq!(
-            got,
-            [
-                Sublibrary::Neutron,
-                Sublibrary::Decay,
-                Sublibrary::FissionYields
-            ]
-        );
-        let tendl = recipe::recipe("tendl-2025").unwrap();
-        let got: Vec<_> = sublibraries(tendl, tendl.parts).into_iter().collect();
-        assert_eq!(got, [Sublibrary::Neutron, Sublibrary::Photonuclear]);
+        assert_eq!(got, [Sublibrary::Neutron]);
+        let got: Vec<_> = sublibraries(endf, &[Part::Decay]).into_iter().collect();
+        assert_eq!(got, [Sublibrary::Decay]);
+        let irdff = recipe::recipe("irdff-ii").unwrap();
+        let got: Vec<_> = sublibraries(irdff, irdff.parts).into_iter().collect();
+        assert_eq!(got, [Sublibrary::Neutron]);
     }
 
     #[test]
@@ -604,16 +530,5 @@ mod tests {
         assert!(check_temperatures(&[0.0]).is_err());
         assert!(check_temperatures(&[]).is_err());
         assert!(check_temperatures(&[f64::NAN]).is_err());
-    }
-
-    #[test]
-    fn the_tabulations_are_the_files_yamc_ships() {
-        let data =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/yamc-core/python/yamc/data");
-        assert_eq!(
-            fs::read(data.join("compton_profiles_biggs1975.txt")).unwrap(),
-            COMPTON
-        );
-        assert!(DENSITY.len() > 1000 && BREMSSTRAHLUNG.len() > 1_000_000);
     }
 }

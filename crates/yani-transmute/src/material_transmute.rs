@@ -510,6 +510,14 @@ pub fn transmute_materials(
     };
 
     let mut results = TransmutationResults::new(cases[0].steps.iter().map(|st| st.dt).collect());
+    // Before the first state, so each one is taken apart into the inventory
+    // and what the decay data has no record for.
+    results.set_chain(
+        Arc::clone(&chain),
+        yamc_nuclide::config::Config::global()
+            .transmutation_decay_data
+            .clone(),
+    );
     for (c, outcome) in outcomes.into_iter().enumerate() {
         let outcome = outcome?;
         let id = ids[c];
@@ -597,9 +605,6 @@ pub fn transmute_materials(
         performed: per_spectrum.len(),
         requested,
     });
-    // Kept so routes can be derived from the same topology the solve used,
-    // rather than from whatever a second load of the chain path returns.
-    results.chain = Some(Arc::clone(&chain));
     results.data_releases = yamc_nuclide::url_cache::data_releases();
     Ok(results)
 }
@@ -2442,7 +2447,7 @@ fn run_replicas(
     // reactions and never yields, so a parent's set is the same in every
     // chain and one draw serves them all.
     let fission_yield = match (&chains, want_fission_yield) {
-        (Some(c), true) => Some(crate::fission_yield_uncertainty::candidates(&c.base, chain)),
+        (Some(c), true) => Some(crate::fission_yield_uncertainty::candidates(&c.base)),
         _ => None,
     };
 
@@ -4801,6 +4806,7 @@ mod tests {
             level_route: if lfs == 0 { "ground" } else { "energy" }.to_string(),
             level_energy: 0.0,
             level_energy_difference: Some(0.0),
+            match_energy: None,
             mf3_cross_section: None,
         }])
     }
@@ -4862,6 +4868,9 @@ mod tests {
             sources: Vec::new(),
             half_life_uncertainty: None,
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
         }
     }
@@ -6175,6 +6184,9 @@ mod tests {
                     sources: Vec::new(),
                     half_life_uncertainty: None,
                     decay_energy_uncertainty: None,
+                    decay_evaluated: true,
+                    excitation_energy: None,
+                    level_index: None,
                     decay_energy_components: Default::default(),
                 },
             );
@@ -6256,6 +6268,9 @@ mod tests {
             sources: Vec::new(),
             half_life_uncertainty: None,
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
         };
         let mut map: HashMap<String, ChainNuclide> = HashMap::new();
@@ -6409,6 +6424,9 @@ mod tests {
             }],
             half_life_uncertainty: Some(0.01 * half_life),
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
         };
         let chain: HashMap<String, ChainNuclide> = HashMap::from([

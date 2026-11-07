@@ -278,8 +278,11 @@ def relocate_submodules(pkg: Package) -> None:
 
     # Expose the submodules so `from <pkg>._core import data` resolves.
     imports = "".join(f"from . import {mod} as {mod}\n" for mod in SUBMODULES)
-    new = new.replace("import builtins\nimport typing\n",
-                      f"import builtins\nimport typing\n{imports}", 1)
+    # After the generator's own imports, whichever standard modules it
+    # imports (`os` and `pathlib` join them once a signature takes a path).
+    if "\nimport typing\n" not in new:
+        sys.exit("build_stubs: the generated stub has no `import typing` to put the submodule imports after")
+    new = new.replace("\nimport typing\n", f"\nimport typing\n{imports}", 1)
 
     new = re.sub(r"\n{3,}", "\n\n", new)
     INIT.write_text(new)

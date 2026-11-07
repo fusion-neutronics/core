@@ -1519,7 +1519,7 @@ impl PyMaterial {
         });
         let results = results.map_err(PyValueError::new_err)?;
 
-        Ok(crate::transmutation_results::PyTransmutationResults { inner: results })
+        crate::transmutation_results::PyTransmutationResults::from_run(py, results)
     }
 
     /// Drop the nuclear data this material has loaded.
