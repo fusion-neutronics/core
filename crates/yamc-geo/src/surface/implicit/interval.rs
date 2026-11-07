@@ -111,6 +111,7 @@ impl Interval {
         }
     }
 
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by the tests"))]
     pub fn contains(self, v: f64) -> bool {
         self.lo <= v && v <= self.hi
     }
@@ -120,6 +121,7 @@ impl Interval {
     }
 
     /// Both bounds finite.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by the tests"))]
     pub fn is_finite(self) -> bool {
         self.lo.is_finite() && self.hi.is_finite()
     }

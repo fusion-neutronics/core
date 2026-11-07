@@ -1,7 +1,7 @@
 mod cone;
 mod cylinder;
 mod flux;
-pub mod implicit;
+mod implicit;
 mod plane;
 mod quadric;
 mod roots;
@@ -157,11 +157,6 @@ impl SurfaceKind {
     }
 }
 
-/// Implicit torus equation in axis-permuted coordinates:
-/// `(rho - a)^2 / c^2 + ax^2 / b^2 - 1`, with `t1, t2` the transverse
-/// displacements from the centre and `ax` the axial one. Shared by
-/// X/Y/ZTorus.
-// Regular Rust implementation
 impl Surface {
     /// Compute the distance from a point along a direction to the surface.
     /// Returns Some(distance) if intersection exists and distance > 0, else None.

@@ -62,14 +62,12 @@ mod tests;
 
 use crate::surface::search::{along_unit, Trace};
 use crate::surface::{BoundaryType, Surface, SurfaceKind};
-pub use bounds::WORLD;
-use bounds::{Cell, Extent, Fault, Problem};
-pub use interval::{Interval, LIBM_ULPS};
+use bounds::{Cell, Extent, Fault, Problem, WORLD};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
-pub use tape::{ray_box, ray_point, Choice, Dual, IntervalDual, Op, SegmentSlots, Tape};
+use tape::{Op, Tape};
 
 thread_local! {
     /// Slots for [`ImplicitFormula::evaluate`], one buffer per thread.
@@ -107,6 +105,12 @@ fn short(v: f64) -> String {
 }
 
 impl ImplicitFormula {
+    /// Formulas are checked, and their boxes proved, within this distance
+    /// (cm) of the origin along each axis: 2^20 cm, about 10 km. A formula
+    /// with no bounding box is searched no further, so a cell that uses
+    /// one must be bounded within it.
+    pub const WORLD: f64 = WORLD;
+
     /// Parse, compile and check `formula`, and prove its bounding box.
     pub fn new(formula: &str) -> Result<Self, String> {
         let ast = parse::parse(formula).map_err(|e| parse::locate(formula, e.pos, &e.message))?;
@@ -202,11 +206,6 @@ impl ImplicitFormula {
             let head: String = self.text.chars().take(57).collect();
             format!("{head}...")
         }
-    }
-
-    /// The compiled formula.
-    pub fn tape(&self) -> &Tape {
-        &self.tape
     }
 
     /// The formula's value at `point`. Only its sign is meaningful: it is

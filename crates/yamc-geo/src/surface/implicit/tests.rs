@@ -1,5 +1,7 @@
 use super::compile::compile;
+use super::interval::Interval;
 use super::parse::{number, parse, Ast, BinOp, Func, Kind};
+use super::tape::{ray_box, ray_point, Choice, SegmentSlots};
 use super::*;
 
 /// Small deterministic generator (xorshift64*), so the tests need no
@@ -71,7 +73,7 @@ fn canonical(text: &str) -> String {
 
 /// A tape's instructions, constants by their bits.
 fn bits(tape: &Tape) -> String {
-    format!("{:?}", tape.ops())
+    format!("{:?}", tape.ops)
 }
 
 pub(super) fn holes() -> String {
@@ -449,7 +451,7 @@ fn numbers_print_as_the_shortest_string_that_parses_back() {
             "{v:e}: {text}"
         );
         let tape = tape_of(&format!("x + {text}"));
-        assert!(tape.ops().contains(&Op::Const(v)), "{text}");
+        assert!(tape.ops.contains(&Op::Const(v)), "{text}");
     }
     assert_eq!(number(0.1), "0.1");
     assert_eq!(number(100.0), "100");
@@ -618,7 +620,7 @@ fn check_slots(tape: &Tape, p: [f64; 3], b: [Interval; 3], dir: [f64; 3]) -> usi
     let underflow = underflowing_root(tape, &f);
     let mut checks = 0;
     for i in 0..tape.len() {
-        let (v, op) = (f[i], tape.ops()[i]);
+        let (v, op) = (f[i], tape.ops[i]);
         for (name, e) in [("interval", iv[i]), ("dual value", idu[i].v)] {
             assert!(
                 !e.lo.is_nan() && !e.hi.is_nan() && e.lo <= e.hi,
@@ -1302,7 +1304,7 @@ fn formulas_round_trip_through_json() {
         assert_eq!(json, format!("{:?}", f.formula()));
         let back: ImplicitFormula = serde_json::from_str(&json).unwrap();
         assert_eq!(back.formula(), f.formula());
-        assert_eq!(bits(back.tape()), bits(f.tape()));
+        assert_eq!(bits(&back.tape), bits(&f.tape));
         assert_eq!(back.bounding_box(), f.bounding_box());
     }
     // A bad formula in a model is refused on load.
@@ -1382,7 +1384,7 @@ fn segments_enclose_the_computed_values_along_rays() {
                     v.is_nan() || seg.v.contains(v),
                     "{v:e} not in {:?} at t = {s} ({:?})",
                     seg.v,
-                    tape.ops()
+                    tape.ops
                 );
                 let d = tape.eval_dual(p, u, &mut Vec::new()).d;
                 assert!(

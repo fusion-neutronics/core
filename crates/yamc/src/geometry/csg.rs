@@ -285,7 +285,7 @@ impl Geometry {
                 continue;
             };
             let bx = cell.region.bounding_box();
-            let world = crate::geo::implicit::WORLD;
+            let world = crate::geo::ImplicitFormula::WORLD;
             let fix = if !bx.is_finite() {
                 "the cell's region is not bounded either. Intersect it with a bounded \
                  region (a box of planes, say), so the surface's crossings are looked \

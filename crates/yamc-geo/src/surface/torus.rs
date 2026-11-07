@@ -2,6 +2,10 @@
 
 use super::roots::quartic_real_roots;
 
+/// Implicit torus equation in axis-permuted coordinates:
+/// `(rho - a)^2 / c^2 + ax^2 / b^2 - 1`, with `t1, t2` the transverse
+/// displacements from the centre and `ax` the axial one. Shared by
+/// X/Y/ZTorus.
 pub(super) fn torus_evaluate(t1: f64, t2: f64, ax: f64, a: f64, b: f64, c: f64) -> f64 {
     let rho = (t1 * t1 + t2 * t2).sqrt();
     (rho - a).powi(2) / (c * c) + ax * ax / (b * b) - 1.0

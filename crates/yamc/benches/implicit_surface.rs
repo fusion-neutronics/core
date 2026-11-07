@@ -76,7 +76,7 @@ impl Case {
 
 fn formula(name: &'static str, text: &str, span: Span) -> Case {
     let formula = Arc::new(ImplicitFormula::new(text).unwrap());
-    eprintln!("{name}: {} instructions", formula.tape().len());
+    eprintln!("{name}: {formula:?}");
     Case {
         name,
         surface: Surface::new_implicit(formula, None, None),

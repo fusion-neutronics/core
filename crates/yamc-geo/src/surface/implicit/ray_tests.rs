@@ -15,6 +15,7 @@
 //! it may skip the crossing at its feet (within 1e-6 cm).
 
 use super::ray::trace;
+use super::tape::{ray_point, Dual};
 use super::tests::{
     holes, tape_of, Rng, GYROID, SMOOTH_UNION, SPHERE, SUPERELLIPSOID, TWISTED, ZTORUS,
 };
@@ -310,7 +311,7 @@ fn surface_points(s: &Shape, n: usize, seed: u64) -> Vec<([f64; 3], [f64; 3], f6
         let o = uniform_in(&mut rng, s.region);
         let u = rng.direction();
         let end = exit(s.region, o, u);
-        let mut probe = Probe::new(s.formula.tape(), o, u);
+        let mut probe = Probe::new(&s.formula.tape, o, u);
         if let Some(&t) = probe.crossings(MIN_ROOT, end, s.step, 0.0, 1).1.first() {
             out.push((o, u, t));
         }
@@ -458,7 +459,7 @@ impl Tally {
 /// The search's answer to `case` on shape `s`.
 fn query(s: &Shape, case: &Case) -> Trace {
     trace(
-        s.formula.tape(),
+        &s.formula.tape,
         s.formula.bounding_box(),
         case.o,
         case.u,
@@ -485,7 +486,7 @@ fn campaign(s: &Shape, cases: &[Case]) -> Tally {
     let mut tally = Tally::default();
     for case in cases {
         let got = query(s, case);
-        let mut probe = Probe::new(s.formula.tape(), case.o, case.u);
+        let mut probe = Probe::new(&s.formula.tape, case.o, case.u);
         let left = left(&mut probe, case);
         let before = side(probe.g(0.0));
         let closed = s.closed.as_ref().map(|c| {
@@ -656,7 +657,7 @@ fn grazing_rays_find_the_exact_crossings() {
                 })
                 .collect();
             let f = &sphere.formula;
-            let t = exact(f.tape(), f.bounding_box(), &rays);
+            let t = exact(&f.tape, f.bounding_box(), &rays);
             check(format!("sphere grazed {delta:e} inside {hit}"), t);
         }
         // A circular torus (radii 4 and 1) crossed horizontally through its
@@ -682,7 +683,7 @@ fn grazing_rays_find_the_exact_crossings() {
                     })
                     .collect();
                 let bx = if boxed { torus.bounding_box() } else { None };
-                let t = exact(torus.tape(), bx, &rays);
+                let t = exact(&torus.tape, bx, &rays);
                 check(format!("torus top {delta:e}, hit {hit}, boxed {boxed}"), t);
             }
         }
@@ -712,7 +713,7 @@ fn grazing_rays_find_the_exact_crossings() {
                     (case, Some(want))
                 })
                 .collect();
-            let t = exact(torus.tape(), torus.bounding_box(), &rays);
+            let t = exact(&torus.tape, torus.bounding_box(), &rays);
             check(format!("torus inner wall {delta:e}, crossed {hit}"), t);
         }
         // x^4 + y^4 + z^4 = 16 crossed horizontally at height 2 - delta,
@@ -734,7 +735,7 @@ fn grazing_rays_find_the_exact_crossings() {
                 (case, Some(l - (rz / den).powf(0.25)))
             })
             .collect();
-        let t = exact(flat.tape(), flat.bounding_box(), &rays);
+        let t = exact(&flat.tape, flat.bounding_box(), &rays);
         check(format!("superellipsoid flat top {delta:e}"), t);
     }
 }
@@ -817,7 +818,7 @@ fn an_overflowing_slope_still_closes_the_bracket() {
                 continue;
             }
             rays += 1;
-            let got = trace(f.tape(), None, o, u, None, false, 5.0);
+            let got = trace(&f.tape, None, o, u, None, false, 5.0);
             assert!(
                 got.crossing
                     .is_some_and(|t| (t - root).abs() <= 1e-9 * (1.0 + root)),
@@ -873,7 +874,7 @@ fn grazing_a_thin_shell_neither_exhausts_nor_invents_crossings() {
             let (mut at, mut p, mut hint) = (0.0, o, None);
             let mut got = Vec::new();
             while got.len() < 8 {
-                let step = trace(f.tape(), f.bounding_box(), p, u, hint, false, 12.0 - at);
+                let step = trace(&f.tape, f.bounding_box(), p, u, hint, false, 12.0 - at);
                 assert!(!step.exhausted, "h {h}: exhausted from {p:?} along {u:?}");
                 evaluations += step.evaluations;
                 most = most.max(step.evaluations);
@@ -1042,7 +1043,7 @@ fn a_tangent_touch_is_no_crossing() {
     let f = ImplicitFormula::new("sqrt(x^2 + y^2 + z^2) - 4").unwrap();
     let (o, u) = ([-10.0, 0.0, 4.0], [1.0, 0.0, 0.0]);
     assert_eq!(f.evaluate(ray_point(o, u, 10.0)), 0.0);
-    let got = trace(f.tape(), f.bounding_box(), o, u, None, false, 20.0);
+    let got = trace(&f.tape, f.bounding_box(), o, u, None, false, 20.0);
     assert_eq!(got.crossing, None);
     assert!(
         !got.exhausted && got.evaluations < 400,
@@ -1052,7 +1053,7 @@ fn a_tangent_touch_is_no_crossing() {
     // Starting in that band: there is no side to start on, and the first
     // point past it that has one is above, so there is no crossing either.
     let got = trace(
-        f.tape(),
+        &f.tape,
         f.bounding_box(),
         [0.0, 0.0, 4.0],
         u,
@@ -1066,7 +1067,7 @@ fn a_tangent_touch_is_no_crossing() {
     // the first point strictly above.
     let (o, u) = ([0.0, 0.0, 4.0], [0.0, 0.0, -1.0]);
     assert_eq!(f.evaluate(ray_point(o, u, 8.0)), 0.0);
-    let got = trace(f.tape(), f.bounding_box(), o, u, None, false, 10.0);
+    let got = trace(&f.tape, f.bounding_box(), o, u, None, false, 10.0);
     assert!(
         got.crossing.is_some_and(|t| t > 8.0
             && t - 8.0 <= tolerance(8.0)
@@ -1147,7 +1148,7 @@ fn a_particle_heading_for_a_faint_surface_finds_it() {
     let here = f.evaluate([0.0; 3]);
     assert!(here < 0.0 && here * 1e-160 == 0.0);
     for hint in [None, Some(0.0)] {
-        let got = trace(f.tape(), None, [0.0; 3], [1.0, 0.0, 0.0], hint, false, 1.0);
+        let got = trace(&f.tape, None, [0.0; 3], [1.0, 0.0, 0.0], hint, false, 1.0);
         assert!(
             got.crossing.is_some_and(|t| t > 5e-8
                 && t - 5e-8 <= tolerance(5e-8)
@@ -1192,7 +1193,7 @@ fn far_along_a_ray_pieces_stop_splitting() {
     for bx in [f.bounding_box(), loose] {
         for far in [1e3, 1e5, 1e6, 1e7, 1e8] {
             let o = [0.0, -far, 0.0];
-            let got = trace(f.tape(), bx, o, [0.0, 1.0, 0.0], None, false, 2.0 * far);
+            let got = trace(&f.tape, bx, o, [0.0, 1.0, 0.0], None, false, 2.0 * far);
             assert_eq!(got.crossing, None, "{far:e}");
             assert!(
                 !got.exhausted && got.evaluations < 1_000,
@@ -1244,15 +1245,7 @@ fn a_stretch_shorter_than_the_start_step_is_searched() {
     let f = ImplicitFormula::new("x - 1e-10").unwrap();
     assert_eq!(f.evaluate([MIN_ROOT, 0.0, 0.0]), 0.0);
     for t_max in [MIN_ROOT, MIN_ROOT + 2e-13, MIN_ROOT + 1e-11, 2.0 * MIN_ROOT] {
-        let got = trace(
-            f.tape(),
-            None,
-            [0.0; 3],
-            [1.0, 0.0, 0.0],
-            None,
-            false,
-            t_max,
-        );
+        let got = trace(&f.tape, None, [0.0; 3], [1.0, 0.0, 0.0], None, false, t_max);
         // None up to the floor itself; else the first point strictly
         // above, within the cap.
         if t_max == MIN_ROOT {
@@ -1283,7 +1276,7 @@ fn an_unbounded_search_ends() {
             .trace(o, u, None, false, f64::INFINITY)
             .crossing
             .expect("a gyroid is crossed within a period or two");
-        let mut probe = Probe::new(gyroid.tape(), o, u);
+        let mut probe = Probe::new(&gyroid.tape, o, u);
         let (_, first) = probe.crossings(MIN_ROOT, t + 2e-3, 1e-3, 0.0, 1);
         assert!(
             first
@@ -1298,7 +1291,7 @@ fn an_unbounded_search_ends() {
         ("z - 0.5 * sin(x)", [0.0, 0.0, 5.0], [1.0, 0.0, 0.0]),
     ] {
         let f = ImplicitFormula::new(formula).unwrap();
-        let got = trace(f.tape(), None, o, u, None, false, f64::INFINITY);
+        let got = trace(&f.tape, None, o, u, None, false, f64::INFINITY);
         assert_eq!(got.crossing, None, "{formula}");
         assert!(
             !got.exhausted && got.evaluations < 100,
@@ -1438,7 +1431,7 @@ fn ray_timings() {
             });
             println!(
                 "| {name} {set} | {} | {} | {:.1} | {us:.2} | {closed} |",
-                s.formula.tape().len(),
+                s.formula.tape.len(),
                 cases.len(),
                 evaluations as f64 / cases.len() as f64,
             );

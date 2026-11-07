@@ -649,20 +649,12 @@ pub struct Tape {
 }
 
 impl Tape {
-    /// The instructions.
-    pub fn ops(&self) -> &[Op] {
-        &self.ops
-    }
-
     pub fn len(&self) -> usize {
         self.ops.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.ops.is_empty()
-    }
-
     /// Number of `min` / `max` instructions.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by the tests"))]
     pub fn choices(&self) -> usize {
         self.ops
             .iter()
@@ -693,6 +685,13 @@ impl Tape {
     /// [`Tape::eval_interval`], also recording in `choices` (one per
     /// instruction) which operand each `min` / `max` takes throughout the
     /// box, for [`Tape::simplify`].
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the tests check the choices the search makes by it"
+        )
+    )]
     pub fn eval_traced(
         &self,
         b: [Interval; 3],
@@ -754,6 +753,10 @@ impl Tape {
     /// This is [`Tape::eval_stretch`] followed by [`Tape::centre`], which a
     /// caller can run apart, paying for the centred form only where the
     /// plain enclosures leave something undecided.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the search runs its two halves apart")
+    )]
     pub fn eval_segment(
         &self,
         origin: [f64; 3],
