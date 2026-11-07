@@ -2660,6 +2660,7 @@ mod tests {
             decay_energy_uncertainty: None,
             decay_evaluated: true,
             excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
             reactions: vec![],
             decays: vec![],
@@ -2711,6 +2712,7 @@ mod tests {
             decay_energy_uncertainty: None,
             decay_evaluated: true,
             excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
             reactions: vec![],
             decays: vec![],
@@ -3117,6 +3119,7 @@ mod tests {
             decay_energy_uncertainty: Some(0.0),
             decay_evaluated: true,
             excitation_energy: None,
+            level_index: None,
             decay_energy_components: [
                 Some(yani::DecayEnergyComponent {
                     energy: 2.8e6,

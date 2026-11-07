@@ -741,6 +741,7 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
                     decay_energy_uncertainty,
                     decay_evaluated: true,
                     excitation_energy: None,
+                    level_index: None,
                     decay_energy_components: Default::default(),
                     reactions: Vec::new(),
                     decays: Vec::new(),
@@ -972,6 +973,7 @@ fn ensure_nuclide<'a>(
             // first named by a reaction, a decay mode or a yield has none.
             decay_evaluated: false,
             excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
         })
 }
@@ -1271,6 +1273,11 @@ pub fn parse_chain_parts_from_bytes(
                     })
                     .collect();
             let excitation = optional("excitation_energy");
+            let level_index = batch
+                .schema()
+                .index_of("level_index")
+                .ok()
+                .and_then(|idx| batch.column(idx).as_any().downcast_ref::<arrow_array::Int32Array>());
             for i in 0..batch.num_rows() {
                 let name = names.value(i).to_string();
                 let nuc = ensure_nuclide(&mut chain, &name);
@@ -1278,6 +1285,9 @@ pub fn parse_chain_parts_from_bytes(
                 nuc.excitation_energy = excitation
                     .filter(|column| !column.is_null(i))
                     .map(|column| column.value(i));
+                nuc.level_index = level_index
+                    .filter(|column| !column.is_null(i))
+                    .map(|column| column.value(i) as i64);
                 for (c, (energy, sigma)) in components.iter().enumerate() {
                     nuc.decay_energy_components[c] = energy
                         .filter(|column| !column.is_null(i))
@@ -1976,12 +1986,14 @@ pub fn export_chain_parts<P: AsRef<Path>>(
         let mut de_sigma_b = Float64Builder::new();
         let mut component_b: [(Float64Builder, Float64Builder); 3] = Default::default();
         let mut excitation_b = Float64Builder::new();
+        let mut level_index_b = Int32Builder::new();
         // Only the nuclides with a decay record: a product of unknown fate is
         // not stable, and a row for it here would say it is.
         for name in names.iter().filter(|n| chain[**n].decay_evaluated) {
             let nuc = &chain[*name];
             name_b.append_value(&nuc.name);
             excitation_b.append_option(nuc.excitation_energy);
+            level_index_b.append_option(nuc.level_index.map(|l| l as i32));
             for (part, (energy_b, sigma_b)) in nuc
                 .decay_energy_components
                 .iter()
@@ -2019,6 +2031,7 @@ pub fn export_chain_parts<P: AsRef<Path>>(
             columns.push(Arc::new(sigma_b.finish()));
         }
         columns.push(Arc::new(excitation_b.finish()));
+        columns.push(Arc::new(level_index_b.finish()));
         let batch = RecordBatch::try_new(schema.clone(), columns)?;
         write_arrow_file(&decay_dir.join("nuclides.arrow"), schema, batch)?;
     }
@@ -2653,6 +2666,7 @@ mod tests {
                 decay_energy_uncertainty: Some(3.4e3),
                 decay_evaluated: true,
                 excitation_energy: None,
+                level_index: None,
                 decay_energy_components: Default::default(),
                 reactions: Vec::new(),
                 decays: Vec::new(),
@@ -2674,6 +2688,7 @@ mod tests {
                 decay_energy_uncertainty: None,
                 decay_evaluated: true,
                 excitation_energy: None,
+                level_index: None,
                 decay_energy_components: Default::default(),
             },
         );
@@ -2711,6 +2726,7 @@ mod tests {
                 decay_energy_uncertainty: None,
                 decay_evaluated: true,
                 excitation_energy: None,
+                level_index: None,
                 decay_energy_components: Default::default(),
                 reactions: Vec::new(),
                 decays: Vec::new(),
@@ -2753,6 +2769,7 @@ mod tests {
             decay_energy_uncertainty: Some(0.0),
             decay_evaluated: true,
             excitation_energy: None,
+            level_index: None,
             decay_energy_components: [
                 Some(DecayEnergyComponent {
                     energy: 2.0e6,
@@ -3035,6 +3052,7 @@ mod tests {
                 decay_energy_uncertainty: None,
                 decay_evaluated: true,
                 excitation_energy: None,
+                level_index: None,
                 decay_energy_components: Default::default(),
             },
         );
@@ -3130,6 +3148,7 @@ mod tests {
                     decay_energy_uncertainty: None,
                     decay_evaluated: true,
                     excitation_energy: None,
+                    level_index: None,
                     decay_energy_components: Default::default(),
                     reactions: Vec::new(),
                     decays: Vec::new(),
@@ -3207,6 +3226,7 @@ mod tests {
                 decay_energy_uncertainty: None,
                 decay_evaluated: true,
                 excitation_energy: None,
+                level_index: None,
                 decay_energy_components: Default::default(),
                 reactions: Vec::new(),
                 decays: Vec::new(),
@@ -3290,6 +3310,7 @@ mod tests {
                     decay_energy_uncertainty: None,
                     decay_evaluated: true,
                     excitation_energy: None,
+                    level_index: None,
                     decay_energy_components: Default::default(),
                     reactions: Vec::new(),
                     decays: Vec::new(),
@@ -3356,6 +3377,7 @@ mod tests {
                     decay_energy_uncertainty: None,
                     decay_evaluated: true,
                     excitation_energy: None,
+                    level_index: None,
                     decay_energy_components: Default::default(),
                     reactions: Vec::new(),
                     decays: Vec::new(),
@@ -3421,6 +3443,7 @@ mod tests {
                     decay_energy_uncertainty: None,
                     decay_evaluated: true,
                     excitation_energy: None,
+                    level_index: None,
                     decay_energy_components: Default::default(),
                     reactions: Vec::new(),
                     decays: Vec::new(),
@@ -3484,6 +3507,7 @@ mod tests {
                 decay_energy_uncertainty: None,
                 decay_evaluated: true,
                 excitation_energy: None,
+                level_index: None,
                 decay_energy_components: Default::default(),
                 reactions: Vec::new(),
                 decays: Vec::new(),
@@ -3595,6 +3619,7 @@ mod tests {
             decay_energy_uncertainty: None,
             decay_evaluated: true,
             excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
             reactions: Vec::new(),
             decays: Vec::new(),
@@ -4056,6 +4081,7 @@ mod tests {
                 decay_energy_uncertainty: None,
                 decay_evaluated: true,
                 excitation_energy: None,
+                level_index: None,
                 decay_energy_components: Default::default(),
                 reactions: Vec::new(),
                 decays: Vec::new(),
@@ -4209,6 +4235,7 @@ mod tests {
             decay_energy_uncertainty: None,
             decay_evaluated: true,
             excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
             reactions,
             decays: Vec::new(),

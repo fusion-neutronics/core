@@ -821,6 +821,9 @@ pub struct ChainNuclide {
     /// product levels are matched against to name their isomers. `None`
     /// without a decay record, or from a file that predates the column.
     pub excitation_energy: Option<f64>,
+    /// The nuclear level index its decay record gives the state, which the
+    /// matching falls back to. `None` without a decay record.
+    pub level_index: Option<i64>,
     /// Neutron-induced reactions
     pub reactions: Vec<ChainReaction>,
     /// Radioactive decay modes
@@ -1635,6 +1638,7 @@ mod tests {
             decay_energy_uncertainty: None,
             decay_evaluated: true,
             excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
             reactions: vec![],
             decays: vec![],
@@ -1746,6 +1750,7 @@ mod tests {
             decay_energy_uncertainty: None,
             decay_evaluated: true,
             excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
         }
     }

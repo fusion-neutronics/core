@@ -136,6 +136,7 @@ fn nuclide(name: &str, reactions: Vec<ChainReaction>) -> ChainNuclide {
         decay_energy_uncertainty: None,
         decay_evaluated: true,
         excitation_energy: None,
+        level_index: None,
         decay_energy_components: Default::default(),
         reactions,
         decays: vec![],

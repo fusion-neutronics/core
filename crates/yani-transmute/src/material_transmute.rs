@@ -4867,6 +4867,7 @@ mod tests {
             decay_energy_uncertainty: None,
             decay_evaluated: true,
             excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
         }
     }
@@ -6182,6 +6183,7 @@ mod tests {
                     decay_energy_uncertainty: None,
                     decay_evaluated: true,
                     excitation_energy: None,
+                    level_index: None,
                     decay_energy_components: Default::default(),
                 },
             );
@@ -6265,6 +6267,7 @@ mod tests {
             decay_energy_uncertainty: None,
             decay_evaluated: true,
             excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
         };
         let mut map: HashMap<String, ChainNuclide> = HashMap::new();
@@ -6420,6 +6423,7 @@ mod tests {
             decay_energy_uncertainty: None,
             decay_evaluated: true,
             excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
         };
         let chain: HashMap<String, ChainNuclide> = HashMap::from([

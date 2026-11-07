@@ -35,6 +35,7 @@ fn chain_driven_by(parent: &str) -> Arc<HashMap<String, yani::ChainNuclide>> {
         decay_energy_uncertainty: None,
         decay_evaluated: true,
         excitation_energy: None,
+        level_index: None,
         decay_energy_components: Default::default(),
         reactions,
         decays: Vec::new(),

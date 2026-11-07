@@ -56,10 +56,8 @@ fn a_decay_photon_run_names_its_unset_sources_before_loading_data() {
         err.starts_with("use_decay_photons: no transmutation data is configured"),
         "{err}"
     );
-    assert!(
-        err.contains("transmutation_decay_data and transmutation_reactions are not set"),
-        "{err}"
-    );
+    assert!(err.contains("transmutation_decay_data is not set"), "{err}");
+    assert!(err.contains("transmutation_reactions is not set"), "{err}");
     // Fission yields are not read by D1S, so they are not asked for.
     assert!(!err.contains("transmutation_fission_yields"), "{err}");
 }

@@ -699,6 +699,7 @@ mod tests {
                 decay_energy_uncertainty: None,
                 decay_evaluated: true,
                 excitation_energy: None,
+                level_index: None,
                 decay_energy_components: Default::default(),
             },
         );
@@ -726,6 +727,7 @@ mod tests {
                 decay_energy_uncertainty: None,
                 decay_evaluated: true,
                 excitation_energy: None,
+                level_index: None,
                 decay_energy_components: Default::default(),
             },
         );
@@ -886,6 +888,7 @@ mod tests {
                 decay_energy_uncertainty: None,
                 decay_evaluated: true,
                 excitation_energy: None,
+                level_index: None,
                 decay_energy_components: Default::default(),
             },
         );
@@ -912,6 +915,7 @@ mod tests {
                 decay_energy_uncertainty: None,
                 decay_evaluated: true,
                 excitation_energy: None,
+                level_index: None,
                 decay_energy_components: Default::default(),
             },
         );
@@ -938,6 +942,7 @@ mod tests {
                 decay_energy_uncertainty: None,
                 decay_evaluated: true,
                 excitation_energy: None,
+                level_index: None,
                 decay_energy_components: Default::default(),
             },
         );
@@ -1087,6 +1092,7 @@ mod tests {
             decay_energy_uncertainty: None,
             decay_evaluated: true,
             excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
         };
         let chain_with = |interpolation| {
@@ -1113,6 +1119,7 @@ mod tests {
                     decay_energy_uncertainty: None,
                     decay_evaluated: true,
                     excitation_energy: None,
+                    level_index: None,
                     decay_energy_components: Default::default(),
                 },
             );
@@ -1217,6 +1224,7 @@ mod tests {
             decay_energy_uncertainty: None,
             decay_evaluated: true,
             excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
         };
         let chain = HashMap::from([

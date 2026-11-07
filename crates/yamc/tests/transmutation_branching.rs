@@ -95,6 +95,7 @@ fn stable(name: &str) -> ChainNuclide {
         decay_energy_uncertainty: None,
         decay_evaluated: true,
         excitation_energy: None,
+        level_index: None,
         decay_energy_components: Default::default(),
     }
 }
@@ -135,6 +136,7 @@ fn synthetic_chain() -> Arc<HashMap<String, ChainNuclide>> {
             decay_energy_uncertainty: None,
             decay_evaluated: true,
             excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
         },
     );
@@ -338,6 +340,7 @@ fn coupled_branching_folds_parents_outside_material() {
             decay_energy_uncertainty: None,
             decay_evaluated: true,
             excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
         },
     );
@@ -366,6 +369,7 @@ fn coupled_branching_folds_parents_outside_material() {
             decay_energy_uncertainty: None,
             decay_evaluated: true,
             excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
         },
     );
@@ -585,6 +589,7 @@ fn coupled_bound_keeps_grafted_metastable_reactions() {
             decay_energy_uncertainty: None,
             decay_evaluated: true,
             excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
         },
     );

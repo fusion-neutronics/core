@@ -869,11 +869,17 @@ pub struct Nuclide {
     /// product, has none, and nothing about its decay is known: it is not
     /// stable for that, and a reader must not take it as stable.
     pub decay_evaluated: bool,
-    /// The excitation energy of this nuclide's state, in eV, as its decay
-    /// record gives it (MF=1 MT=451 ELIS): 0.0 for a ground state. What a
-    /// product level of a neutron evaluation is matched against to name its
-    /// isomer. `None` without a decay record.
+    /// The excitation energy of this nuclide's state in eV, 0.0 for a ground
+    /// state: its decay record's MF=1 MT=451 ELIS, or failing that its
+    /// isomeric transition's Q above the state the transition lands on (see
+    /// [`crate::radionuclide_production::isomer_table_from_materials`]). What
+    /// a neutron evaluation's product levels are matched against to name their
+    /// isomers. `None` without a decay record, or for an isomer whose energy
+    /// its record does not give.
     pub excitation_energy: Option<f64>,
+    /// The nuclear level index its decay record gives the state (LIS), which
+    /// the matching falls back to. `None` without a decay record.
+    pub level_index: Option<i64>,
 }
 
 impl Nuclide {
@@ -1125,18 +1131,17 @@ impl Chain {
         reactions: &[&str],
     ) -> Result<Chain> {
         let mut decay_data: BTreeMap<String, Decay> = BTreeMap::new();
-        let mut excitation: BTreeMap<String, f64> = BTreeMap::new();
         for material in decay {
             let data = Decay::from_material(material)?;
             // The neutron's own decay data is not a chain nuclide.
             if data.nuclide.atomic_number == 0 {
                 continue;
             }
-            if let Some(meta) = material.mf1_mt451() {
-                excitation.insert(data.nuclide.name.clone(), meta.elis);
-            }
             decay_data.insert(data.nuclide.name.clone(), data);
         }
+        // Each state's excitation energy and level index, resolved as the
+        // branching converter resolves them.
+        let isomers = crate::radionuclide_production::isomer_table_from_materials(decay);
 
         let mut fpy_data: BTreeMap<String, FissionProductYields> = BTreeMap::new();
         for material in fpy {
@@ -1171,7 +1176,11 @@ impl Chain {
 
             if let Some(data) = decay_data.get(parent) {
                 nuclide.decay_evaluated = true;
-                nuclide.excitation_energy = excitation.get(parent).copied();
+                let state = zam(parent).ok().and_then(|(z, a, m)| {
+                    isomers.get(&(z as i64, a as i64))?.get(&(m as i64))
+                });
+                nuclide.excitation_energy = state.and_then(|s| s.e_iso);
+                nuclide.level_index = state.map(|s| s.lis);
                 let half_life = data.half_life.map(|(t, _)| t).unwrap_or(0.0);
                 if !data.nuclide.stable && half_life != 0.0 {
                     nuclide.half_life = Some(half_life);

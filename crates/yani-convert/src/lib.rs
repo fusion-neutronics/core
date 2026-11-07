@@ -281,12 +281,14 @@ pub fn write_decay(
     let mut component_energies: [Vec<Option<f64>>; 3] = Default::default();
     let mut component_sigmas: [Vec<Option<f64>>; 3] = Default::default();
     let mut excitation = Vec::new();
+    let mut level_index = Vec::new();
     // Only the nuclides the decay evaluations have records for: a reaction
     // target or a product the library has no decay data for is not stable,
     // and listing it here would say it is.
     for n in chain.nuclides.iter().filter(|n| n.decay_evaluated) {
         names.push(n.name.clone());
         excitation.push(n.excitation_energy);
+        level_index.push(n.level_index.map(|l| l as i32));
         half_lives.push(n.half_life);
         decay_energies.push(n.decay_energy);
         half_life_sigmas.push(n.half_life_uncertainty);
@@ -312,6 +314,7 @@ pub fn write_decay(
             opt_floats(&component_energies[2]),
             opt_floats(&component_sigmas[2]),
             opt_floats(&excitation),
+            opt_ints(&level_index),
         ],
     )?;
 
