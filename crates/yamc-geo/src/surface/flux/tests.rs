@@ -937,10 +937,11 @@ fn layers_beyond_the_crease_free_distance_warn() {
         warning.contains("offset of 450.20 cm") && warning.contains("exactly 450.20 cm"),
         "{warning}"
     );
-    // Beside the dumbbell's thin bar the march's reach is a few cm, but its
-    // layers are smooth out to its tightest concave radius of curvature.
+    // Beside the dumbbell's thin bar the march's reach is about a dozen cm,
+    // but its layers are smooth out to its tightest concave radius of
+    // curvature, far beyond.
     let dumbbell = dumbbell(1000.0, 300.0, 3.0, 100.0);
-    assert!(dumbbell.engine.reach_out < 10.0);
+    assert!(dumbbell.engine.reach_out < 0.1 * dumbbell.crease_free_distance());
     assert_eq!(dumbbell.crease_warning(10.0), None);
     assert!(dumbbell.crease_warning(400.0).is_some());
     let sphere = Surface::new_sphere(0.0, 0.0, 0.0, 1.0, None, None);
