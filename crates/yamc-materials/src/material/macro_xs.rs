@@ -251,8 +251,14 @@ impl Material {
         let temperature = temperature.to_string();
 
         // Unified logic: iterate all reactions; if a filter is provided skip non-matching MTs.
-        let mt_set_opt: Option<std::collections::HashSet<i32>> =
+        let mut mt_set_opt: Option<std::collections::HashSet<i32>> =
             mt_filter.map(|v| v.iter().copied().collect());
+        // The bound thermal override needs each bound nuclide's free elastic
+        // cross section even when only the total was asked for: computed
+        // here, used below, and dropped again if it was not asked for.
+        let thermal_here = temperature == self.temperature && !self.thermal.is_empty();
+        let elastic_added = thermal_here
+            && mt_set_opt.as_mut().is_some_and(|set| set.insert(2));
         for nuclide_name in self.nuclides.keys() {
             if let Some(nuclide_data) = self.nuclide_data.get(nuclide_name) {
                 let mut nuclide_reactions_map: HashMap<i32, Vec<f64>> = HashMap::new();
@@ -296,8 +302,13 @@ impl Material {
         // Bound thermal scattering replaces free elastic below each table's
         // energy_max. The tables were read at the material's own temperature,
         // so only that temperature's cross sections carry them.
-        if temperature == self.temperature {
+        if thermal_here {
             super::thermal::apply_bound_xs(&self.thermal, &grid, &mut micro_xs);
+            if elastic_added {
+                for reactions in micro_xs.values_mut() {
+                    reactions.remove(&2);
+                }
+            }
         }
         micro_xs
     }
