@@ -61,6 +61,11 @@ yani-decay = { path = "../yani-decay" }
 # build and the transport crates do not carry the regulatory tables.
 radiological-material-clearance-finder = "0.2"
 
+# The library builder, which `generate_library` runs. Native only: it downloads
+# through the TLS client and runs NJOY, neither of which a Pyodide build has.
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+nuclear-data-build = { path = "../nuclear-data-build" }
+
 [features]
 default = ["download-tls"]
 # HTTPS data downloads via the pure-Rust graviola provider (no C toolchain).

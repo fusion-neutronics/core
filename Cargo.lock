@@ -3703,6 +3703,8 @@ dependencies = [
 name = "nuclear-data-build"
 version = "0.1.0"
 dependencies = [
+ "arrow-array",
+ "arrow-ipc",
  "endf",
  "etcetera",
  "flate2",
@@ -3714,7 +3716,10 @@ dependencies = [
  "tar",
  "windows-sys 0.61.2",
  "yamc-convert",
+ "yamc-element",
  "yamc-nuclide",
+ "yani",
+ "yani-convert",
  "zip",
 ]
 
@@ -7540,6 +7545,7 @@ name = "yani-python"
 version = "0.22.1"
 dependencies = [
  "endf",
+ "nuclear-data-build",
  "pyo3",
  "pyo3-stub-gen",
  "radiological-material-clearance-finder",

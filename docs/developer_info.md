@@ -265,14 +265,41 @@ preserve one ENDF evaluation as `{Nuclide}.arrow/`:
 `read_photonuclear_from_arrow` validates the tables against the preserved
 MF=3 sections and reports the nuclide identity, reaction MTs, per-reaction
 energy-point counts and preserved section keys. No NJOY or auxiliary atomic
-tabulations are needed. The sibling `nuclear_data_generation_scripts`
-repository downloads TENDL gamma archives and publishes these directories
-under `photonuclear/`, separately from photoatomic `photon/` data.
+tabulations are needed. `generate_library` (below) converts TENDL's gamma
+sublibrary into these directories under `photonuclear/`, separately from
+photoatomic `photon/` data.
 
 This is evaluated-data processing, not photonuclear collision sampling.
 The neutron and photoatomic transport loaders cannot consume these sections.
 Photon-specific level-scattering kinematics and Kalbach-Mann sampling remain
 separate transport work.
+
+## Building a Whole Library
+
+`generate_library(keyword, path)`, in both wheels, builds one of the hosted
+libraries locally into a folder laid out as its published release, with the
+release's `manifest.json` written last. The logic is the native-only
+`crates/nuclear-data-build` crate, bound once in
+`crates/yani-python/src/library.rs`:
+
+* `recipe.rs`: per keyword, the source archives with their size and sha256
+  pins, the parts the release carries, the NJOY flavour, the library its chain
+  borrows decay data from (TENDL, FENDL and IRDFF-II use ENDF/B-VIII.1's), the
+  evaluations NJOY cannot process, and the disk a full build needs.
+* `sources.rs`, `extract.rs`, `identify.rs`: fetch (with the browser route for
+  hosts that refuse scripts), unpack per sublibrary, and name every material
+  from its MF=1 MT=451 header.
+* `convert.rs`: the memory-budgeted pool over every evaluation, with resume.
+* `chain.rs`: the transmutation subsections, staged in `.build/chain/` and
+  renamed into `transmutation/<sub>.arrow/`.
+* `gates.rs`: completeness against the recipe, read back through the real
+  readers, and the chain loading as a chain.
+* `index.rs`: each particle's `index.json`.
+* `generate.rs`: the order, the lock, `.build/state.json` (release stamp and
+  builder), the NJOY and disk checks, and the manifest.
+
+The publishing repository, `nuclear_data_generation_scripts`, builds every
+release with this call and then uploads it.
 
 ## Workspace Layout
 
@@ -313,6 +340,10 @@ core/
     nuclear-data-schema/
                     -- The Arrow schema of the simulation-ready nuclear
                        data format, declared once
+    nuclear-data-build/
+                    -- Builds a whole library from its pinned source
+                       archives into a release folder (native only;
+                       generate_library)
     yani/           -- CRAM matrix-exponential transmutation solver
     yani-transmute/ -- Transmutation driver over yani (irradiation
                        schedules, multigroup spectrum collapse,

@@ -30,11 +30,21 @@ sha2 = "0.10"
 # The converters each evaluation goes through, and the format version a
 # finished folder must carry to be reused.
 yamc-convert = { path = "../yamc-convert" }
+# The transmutation chain's converters, and its reader for the gate.
+yani-convert = { path = "../yani-convert" }
+yani = { path = "../yani" }
+# The photon reader, for the gate and photon/index.json.
+yamc-element = { path = "../yamc-element", features = ["arrow"] }
+# The reactions subsection's parents, which the branching is scoped to, and
+# decoding every chain table in the gate.
+arrow-array = "60"
+arrow-ipc = { version = "60", features = ["lz4"] }
 nuclear-data-schema = { path = "../nuclear-data-schema" }
 serde_json = "1.0"
 # The memory that is free, which sizes the conversion pool, on every platform
 # a library is built on.
-sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+# And the free disk, which a full build is refused without.
+sysinfo = { version = "0.37", default-features = false, features = ["system", "disk"] }
 
 # The Downloads known folder on Windows. The same crate and features etcetera
 # already uses, so this adds nothing to the dependency tree.

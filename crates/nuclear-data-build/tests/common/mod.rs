@@ -66,10 +66,15 @@ pub fn source(name: &str, url: &str, body: &[u8], sublibrary: Sublibrary) -> Sou
     }
 }
 
-pub fn recipe(keyword: &str, sources: Vec<Source>) -> Recipe {
+pub fn recipe(keyword: &str, sources: Vec<Source>) -> Recipe<'static> {
     Recipe {
         keyword: leak(keyword.to_string()),
         sources: Box::leak(sources.into_boxed_slice()),
+        parts: &[],
+        njoy: endf::njoy::Flavour::Upstream,
+        decay_library: None,
+        unconvertible: &[],
+        disk_bytes: 0,
     }
 }
 

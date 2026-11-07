@@ -121,6 +121,9 @@ pub fn register_classes(py: Python<'_>, m: &Bound<'_, PyModule>, package: &str) 
     m.add_function(wrap_pyfunction!(read::read_photonuclear_from_arrow, m)?)?;
     m.add_function(wrap_pyfunction!(config::cache_dir, m)?)?;
     m.add_function(wrap_pyfunction!(library::verify_library, m)?)?;
+    // Building runs NJOY and writes a folder, which nothing in a browser does.
+    #[cfg(not(target_os = "emscripten"))]
+    m.add_function(wrap_pyfunction!(library::generate_library, m)?)?;
     // The host's downloader on Pyodide, which has no sockets. Registered here
     // so the yamc and yani wheels share the one hook.
     #[cfg(target_os = "emscripten")]
