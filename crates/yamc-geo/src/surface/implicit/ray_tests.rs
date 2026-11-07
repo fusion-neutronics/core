@@ -1145,6 +1145,37 @@ fn far_along_a_ray_pieces_stop_splitting() {
     }
 }
 
+/// Next to a crossing the computed values are noisy: here they read 0 at
+/// the cap, a float past the crossing the search finds with no cap, and
+/// strictly across a float or two before it. The search took the piece
+/// ending at the cap, whose slope keeps its sign, to hold no crossing, as
+/// its far end was not across.
+#[test]
+fn a_crossing_in_the_noise_just_before_the_cap_is_found() {
+    let f = ImplicitFormula::new("abs(x)^2.5 + abs(y)^2.5 + abs(z)^2.5 - 1").unwrap();
+    let o = [
+        0.01929613419445131,
+        -0.039502943238021615,
+        1.2150783245522208,
+    ];
+    let u = [
+        -0.6552824945997756,
+        -0.48395887538336824,
+        -0.5799902233734292,
+    ];
+    let free = trace(&f.tape, f.bounding_box(), o, u, None, false, f64::INFINITY);
+    let x = free.crossing.unwrap();
+    let cap = x.next_up();
+    assert_eq!(f.evaluate(ray_point(o, u, cap)), 0.0);
+    let got = trace(&f.tape, f.bounding_box(), o, u, None, false, cap);
+    assert!(
+        got.crossing
+            .is_some_and(|t| t <= cap && f.evaluate(ray_point(o, u, t)) < 0.0),
+        "{:?} with the cap at {cap}, {x} with none",
+        got.crossing
+    );
+}
+
 /// A cap just past the floor, where the prototype's start rule stepped past
 /// an exact zero beyond the end of the stretch and built an inverted
 /// interval: a panic in debug builds, and in release no crossing where

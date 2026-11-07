@@ -61,6 +61,9 @@ const SKIP: f64 = 1e-6;
 const SKIP_SHRINK: f64 = 0.125;
 /// Tapes at least this long with a `min` or `max` are shortened per piece.
 const SHORTEN: usize = 16;
+/// Floats before the far end of a piece where `g` is exactly 0 searched
+/// for a point strictly across (see [`Ray::noise`]).
+const NOISE: usize = 16;
 /// The formula's own tape, as a piece's tape.
 const ROOT: usize = usize::MAX;
 
@@ -360,6 +363,33 @@ impl Ray<'_> {
         }
     }
 
+    /// The first of the [`NOISE`] floats before `far`, the far end of a
+    /// piece over which `g` never turns back where `g` is exactly 0, at
+    /// which `g` is strictly across (none at or before `a`, its near end);
+    /// `Err` if the budget ran out first. Near a crossing the computed
+    /// values are noisy, and can read 0 at the end of a piece (a cap, say)
+    /// with points strictly across just before it, which the piece would
+    /// otherwise be taken not to hold.
+    fn noise(&mut self, tape: usize, a: f64, far: f64) -> Option<Result<f64, f64>> {
+        let mut t = far;
+        for _ in 0..NOISE {
+            if t.next_down() <= a {
+                break;
+            }
+            t = t.next_down();
+        }
+        while t < far {
+            if self.budget.spent() {
+                return Some(Err(a));
+            }
+            if side(self.at(tape, t).g) == -self.side {
+                return Some(Ok(t));
+            }
+            t = t.next_up();
+        }
+        None
+    }
+
     /// The tape for the rest of a piece, and its halves, whose enclosures
     /// on tape `from` left their choices in the slots: a shortened one if
     /// they decide any `min` or `max` of a long tape.
@@ -516,6 +546,12 @@ impl Ray<'_> {
             return None;
         }
         let far = self.at(tape, piece.b);
+        if steady
+            && side(far.g) == 0.0
+            && let Some(found) = self.noise(tape, piece.a, piece.b)
+        {
+            return Some(found);
+        }
         if side(far.g) != -self.side {
             *last = far;
             return None;
@@ -577,6 +613,11 @@ impl Line for Ray<'_> {
 /// surface; if the evaluation budget runs out, a transmission surface
 /// returns the root-free point reached and a vacuum one `None` (see
 /// [`Outcome::trace`]).
+///
+/// Next to a crossing the computed values are noisy over a few floats. A
+/// crossing in that noise just before `t_max` is found where `g` reads 0
+/// at `t_max`, but where it reads the ray's own side there the crossing is
+/// taken to be beyond `t_max`, which it is to within those few floats.
 pub(super) fn trace(
     tape: &Tape,
     bounding_box: Option<([f64; 3], [f64; 3])>,
