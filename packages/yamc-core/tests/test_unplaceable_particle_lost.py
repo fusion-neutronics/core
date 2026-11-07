@@ -1,20 +1,21 @@
 """A particle the mesh cannot place is lost, not put in the implicit complement.
 
-A 10 cm cube with a stray triangle inside it, in the plane x + y + z = 18,
-wound to face (1, 1, 1): a facet with no volume behind it, as a mesher defect
-can leave. From the cube's centre every one of point location's four test
-rays crosses the stray facet before the cube's wall, so each counts two
-crossings, an even number, and parity alone said "outside". Each particle was
-born in the implicit complement, inside the cube, and tracked as void. Of 200,
-119 were lost later, at the cube's wall, far from where things went wrong; the
-other 81 left the geometry as ordinary leakage, with nothing counted at all.
+A 10 cm cube with a closed shell of stray triangles inside it: an octahedron
+of radius 1 cm about the cube's centre, wound to face outwards, facets with no
+volume behind them, as a mesher defect can leave. From the centre every one of
+point location's test rays, whichever way it goes, crosses the shell before
+the cube's wall, so each counts two crossings, an even number, and parity
+alone says "outside". Each particle would be born in the implicit complement,
+inside the cube, and tracked as void: lost later, at the cube's wall, far from
+where things went wrong, or leaving the geometry as ordinary leakage, with
+nothing counted at all.
 
-Each ray's nearest facet is the stray one, which the ray leaves the cube
+Each ray's nearest facet is a stray one, which the ray leaves the cube
 through, so its facing says "inside" where its parity says "outside". No ray
 gives a consistent answer, the point cannot be placed, and the particle is
 counted as lost.
 
-A cube without the stray facet is the control.
+A cube without the stray shell is the control.
 """
 import os
 import tempfile
@@ -44,8 +45,11 @@ def _cube(stray):
         t.append([a, b, c])
         t.append([a, c, d])
     if stray:
-        v += [[16, 1, 1], [1, 16, 1], [1, 1, 16]]
-        t.append([8, 9, 10])  # normal along +(1, 1, 1)
+        # Corners at the centre plus and minus 1 cm along x, y and z.
+        v += [[6, 5, 5], [4, 5, 5], [5, 6, 5], [5, 4, 5], [5, 5, 6], [5, 5, 4]]
+        for a, b in [(8, 10), (10, 9), (9, 11), (11, 8)]:
+            t.append([a, b, 12])  # upper half, normals outwards
+            t.append([b, a, 13])  # lower half
     return v, t
 
 
