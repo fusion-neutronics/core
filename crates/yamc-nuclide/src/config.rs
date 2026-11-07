@@ -623,7 +623,7 @@ mod transmutation_sources_tests {
             "transmutation_branch_ratios",
         ]
         .into_iter()
-        .filter(|setting| message.contains(&format!("yamc.{setting} = ")))
+        .filter(|setting| message.contains(&format!("{setting} is not set")))
         .collect()
     }
 
