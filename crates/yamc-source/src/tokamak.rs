@@ -301,6 +301,46 @@ impl TokamakShape {
         (r, z)
     }
 
+    /// The flux surface `rho` as a Fourier series in `theta`: `(m, n)` modes
+    /// and coefficients (cm) for `R` and for `Z`, in the convention of
+    /// [`StellaratorShape::surface_modes`](crate::stellarator::StellaratorShape::surface_modes)
+    /// with one field period. The shape is axisymmetric, so every mode has
+    /// `n = 0`: `R` takes the cosines (`m >= 0`) and `Z` the one sine
+    /// (`m = -1`).
+    ///
+    /// With `d` the triangularity, the Jacobi-Anger expansion
+    /// `exp(i d sin t) = sum_k J_k(d) exp(i k t)` gives
+    /// `cos(t + d sin t) = -J_1(d) + sum_(m >= 1) (J_(m-1)(d) - (-1)^m J_(m+1)(d)) cos(m t)`.
+    /// For `|d| <= 1`, `|J_k(d)| <= (|d| / 2)^k / k!`, so the coefficients
+    /// fall off factorially, and the series stops where the modes left out
+    /// add up to less than 1e-16 of the major radius: by `m = 15` for any
+    /// valid shape.
+    #[allow(clippy::type_complexity)]
+    pub fn surface_modes(&self, rho: f64) -> (Vec<[i32; 2]>, Vec<f64>, Vec<[i32; 2]>, Vec<f64>) {
+        let a = rho * self.minor_radius;
+        let bessel: Vec<f64> = (0..=MAX_SURFACE_MODE + 1)
+            .map(|k| bessel_j(k, self.triangularity))
+            .collect();
+        let mut r_mn: Vec<f64> = (0..=MAX_SURFACE_MODE)
+            .map(|m| match m {
+                0 => -a * bessel[1],
+                _ if m % 2 == 0 => a * (bessel[m - 1] - bessel[m + 1]),
+                _ => a * (bessel[m - 1] + bessel[m + 1]),
+            })
+            .collect();
+        let mut left_out = 0.0;
+        while let Some(&last) = r_mn.last() {
+            if r_mn.len() <= 2 || left_out + last.abs() >= 1e-16 * self.major_radius {
+                break;
+            }
+            left_out += last.abs();
+            r_mn.pop();
+        }
+        r_mn[0] += self.major_radius + self.shafranov_factor * (1.0 - rho * rho);
+        let r_modes = (0..r_mn.len() as i32).map(|m| [m, 0]).collect();
+        (r_modes, r_mn, vec![[-1, 0]], vec![self.elongation * a])
+    }
+
     /// `|d(R, Z)/d(a, alpha)|`, the poloidal area element of the mapping in
     /// minor radius `a` (cm) and poloidal angle `alpha`.
     fn poloidal_jacobian(&self, a: f64, alpha: f64) -> f64 {
@@ -335,6 +375,25 @@ impl TokamakShape {
             .sum();
         PI * self.elongation * self.minor_radius * step * sum
     }
+}
+
+/// Highest poloidal mode [`TokamakShape::surface_modes`] computes. Its
+/// series has converged well before this for any valid triangularity.
+const MAX_SURFACE_MODE: usize = 24;
+
+/// Bessel function `J_k(x)` for `|x| <= 1`, by its power series
+/// `sum_j (-1)^j (x/2)^(2j+k) / (j! (j+k)!)`. Each term is at most a quarter
+/// of the one before and opposite in sign, so nothing cancels, and a dozen
+/// terms reach round-off.
+fn bessel_j(k: usize, x: f64) -> f64 {
+    let half = 0.5 * x;
+    let mut term = (1..=k).fold(1.0, |t, j| t * half / j as f64);
+    let mut sum = term;
+    for j in 1..=12 {
+        term *= -half * half / (j * (j + k)) as f64;
+        sum += term;
+    }
+    sum
 }
 
 /// A parametric tokamak plasma: a [`TokamakShape`], the Fausser profiles in

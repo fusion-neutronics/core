@@ -643,16 +643,19 @@ pub fn Torus(
     })
 }
 
-/// Create a flux surface of a stellarator plasma shape.
+/// Create a flux surface of a stellarator or tokamak plasma shape.
 ///
-/// The surface ``rho = const`` of the same Fourier-Zernike shape that drives
-/// ``yamc.sources.stellarator_source``, so a plasma cell and its source share
-/// one shape. ``.below`` is the plasma inside the surface, ``.above`` the rest
-/// of space, as for any other surface.
+/// The surface ``rho = const`` of the same shape that drives the plasma
+/// source, a ``StellaratorShape`` for ``yamc.sources.stellarator_source`` or a
+/// ``TokamakShape`` for ``yamc.sources.tokamak_source``, so a plasma cell and
+/// its source share one shape. ``.below`` is the plasma inside the surface,
+/// ``.above`` the rest of space, as for any other surface.
 ///
 /// Args:
-///     shape: The plasma shape, a ``yamc.sources.StellaratorShape``
-///     rho: Flux label in (0, 1]; 1 (the default) is the plasma boundary
+///     shape: The plasma shape, a ``yamc.sources.StellaratorShape`` or
+///         ``yamc.sources.TokamakShape``
+///     rho: The shape's flux label in (0, 1]; 1 (the default) is the plasma
+///         boundary
 ///     surface_id: Optional surface ID
 ///     boundary: Boundary condition - None (default, transmission) or 'vacuum'
 ///     name: Optional surface name
@@ -664,21 +667,37 @@ pub fn Torus(
 #[allow(non_snake_case)]
 #[pyo3(signature = (shape, rho = 1.0, surface_id = None, boundary = None, name = None))]
 pub fn FluxSurface(
-    #[gen_stub(override_type(type_repr = "sources.StellaratorShape"))] shape: &Bound<'_, PyAny>,
+    #[gen_stub(override_type(type_repr = "sources.StellaratorShape | sources.TokamakShape"))]
+    shape: &Bound<'_, PyAny>,
     rho: f64,
     surface_id: Option<usize>,
     boundary: Option<&str>,
     name: Option<String>,
 ) -> PyResult<PySurface> {
-    let shape: PyRef<'_, yani_python::distribution::PyStellaratorShape> = shape.extract()?;
+    use yamc::geometry::flux::{flux_surface, PlasmaShape};
+    use yani_python::distribution::{PyStellaratorShape, PyTokamakShape};
     let boundary_validated = parse_boundary(boundary)?;
-    let mut surface = yamc::geometry::flux::stellarator_flux_surface(
-        &shape.inner,
-        rho,
-        surface_id,
-        boundary_validated,
-    )
-    .map_err(PyValueError::new_err)?;
+    let built = if let Ok(stellarator) = shape.extract::<PyRef<'_, PyStellaratorShape>>() {
+        flux_surface(
+            PlasmaShape::Stellarator(&stellarator.inner),
+            rho,
+            surface_id,
+            boundary_validated,
+        )
+    } else if let Ok(tokamak) = shape.extract::<PyRef<'_, PyTokamakShape>>() {
+        flux_surface(
+            PlasmaShape::Tokamak(&tokamak.inner),
+            rho,
+            surface_id,
+            boundary_validated,
+        )
+    } else {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "shape must be a yamc.sources.StellaratorShape or TokamakShape (got {})",
+            shape.get_type().name()?
+        )));
+    };
+    let mut surface = built.map_err(PyValueError::new_err)?;
     if let Some(nm) = name {
         surface = surface.with_name(nm);
     }

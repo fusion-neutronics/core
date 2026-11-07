@@ -6,7 +6,10 @@
 //! increasing mode count: a circular torus (2 modes), the rotating
 //! ellipse of the stellarator source example (7) and a synthetic
 //! stellarator boundary with modes up to m = n = 12 (about 300 R and Z
-//! coefficients), each as the boundary and as a 15 cm offset layer.
+//! coefficients), each as the boundary and as a 15 cm offset layer. Then
+//! the same for `TokamakShape` boundaries: a circular plasma (the circular
+//! torus again, built from the shape) and a D-shaped one, whose
+//! triangularity takes poloidal modes up to m = 12.
 //!
 //! Run with:
 //!     cargo bench -p yamc --bench flux_surface
@@ -19,6 +22,8 @@ use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use std::sync::Arc;
 use yamc::geo::{FluxBoundary, Surface};
+use yamc::geometry::flux::{flux_surface, PlasmaShape};
+use yamc_source::tokamak::TokamakShape;
 
 const CALLS: usize = 200;
 
@@ -116,6 +121,22 @@ fn cases() -> Vec<(&'static str, Surface)> {
     eprintln!("synthetic stellarator: {modes} modes");
     let [a, b] = flux("synthetic_stellarator", synthetic);
     out.extend([a, ("synthetic_stellarator+15cm", b.1)]);
+    let tokamak = |name: &'static str, layer: &'static str, shape: TokamakShape| {
+        let base = flux_surface(PlasmaShape::Tokamak(&shape), 1.0, None, None).unwrap();
+        let offset = base.offset(15.0, None, None).unwrap();
+        [(name, base), (layer, offset)]
+    };
+    out.extend(tokamak(
+        "tokamak_circle",
+        "tokamak_circle+15cm",
+        TokamakShape::new(600.0, 150.0, 1.0, 0.0, 0.0).unwrap(),
+    ));
+    let d_shape = TokamakShape::new(600.0, 150.0, 1.7, 0.45, 20.0).unwrap();
+    eprintln!(
+        "D-shaped tokamak: poloidal modes up to m = {}",
+        d_shape.surface_modes(1.0).0.len() - 1
+    );
+    out.extend(tokamak("tokamak_d_shape", "tokamak_d_shape+15cm", d_shape));
     out
 }
 

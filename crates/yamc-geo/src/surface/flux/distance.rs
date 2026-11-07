@@ -98,11 +98,12 @@ impl Engine {
         let sag = self.dtheta_poly.powi(2) / 8.0 * cut.curvature_bound() + self.margin;
         let p = (r_x, x[2]);
         let stride = self.series.m_max + 1;
-        let vertex = |k: usize| {
-            cut.curve_from_table(
+        let vertex = |k: usize| match self.poly_fixed.get(k) {
+            Some(&v) => v,
+            None => cut.curve_from_table(
                 &self.poly_cos[k * stride..(k + 1) * stride],
                 &self.poly_sin[k * stride..(k + 1) * stride],
-            )
+            ),
         };
         let mut segment_d2 = [0.0; MAX_POLY];
         let mut prev = vertex(n - 1);

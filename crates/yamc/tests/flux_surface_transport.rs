@@ -1,22 +1,22 @@
 //! Transport through flux and offset surfaces.
 //!
-//! A layered stellarator model (plasma, scrape-off layer, iron first wall
-//! and blanket, vacuum world) built from the rotating ellipse of the
-//! stellarator source example: no particle is lost in any tracking mode,
-//! and Woodcock tracking (which only asks the surfaces for their sign)
-//! agrees cell by cell with surface tracking (which asks for ray
-//! crossings). The same layers on a circular torus, as flux surfaces and
-//! as ZTorus surfaces, give the same tallies from the same seed, also with
-//! the outermost layer as the vacuum boundary in place of the world
+//! Layered models (plasma, scrape-off layer, iron first wall and blanket,
+//! vacuum world) built from the rotating ellipse of the stellarator source
+//! example and from a D-shaped tokamak plasma: no particle is lost in any
+//! tracking mode, and Woodcock tracking (which only asks the surfaces for
+//! their sign) agrees cell by cell with surface tracking (which asks for
+//! ray crossings). The same layers on a circular tokamak, as flux surfaces
+//! and as ZTorus surfaces, give the same tallies from the same seed, also
+//! with the outermost layer as the vacuum boundary in place of the world
 //! sphere. The source's plasma lies inside the plasma's flux surface.
 //! Self-skips if the endf-b8.1 Fe56 fixture is absent.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use yamc::geo::{BoundaryType, FluxBoundary, HalfspaceType, Region, Surface};
+use yamc::geo::{BoundaryType, HalfspaceType, Region, Surface};
 use yamc::geometry::cell::Cell;
-use yamc::geometry::flux::stellarator_flux_surface;
+use yamc::geometry::flux::{flux_surface, PlasmaShape};
 use yamc::geometry::Geometry;
 use yamc::model::{Model, TrackingMode, TransportSettings, Verbose};
 use yamc_materials::Material;
@@ -27,6 +27,7 @@ use yamc_source::source::{
     ParticleSource, Source, SourceEnergyDistribution, SourceSpatialDistribution,
 };
 use yamc_source::stellarator::StellaratorShape;
+use yamc_source::tokamak::TokamakShape;
 use yamc_tallies::filter::Filter;
 use yamc_tallies::tally::{FluxScore, Score, Tally};
 use yamc_tallies::CellFilter;
@@ -64,6 +65,12 @@ fn shape() -> StellaratorShape {
         vec![a, -e, e],
     )
     .unwrap()
+}
+
+/// A D-shaped tokamak plasma about the same size, with an outward
+/// Shafranov shift.
+fn d_shape() -> TokamakShape {
+    TokamakShape::new(600.0, 150.0, 1.7, 0.45, 20.0).unwrap()
 }
 
 fn below(s: &Arc<Surface>) -> Region {
@@ -135,7 +142,14 @@ fn offsets_of(plasma: Surface, vacuum_back: bool) -> [Arc<Surface>; 4] {
 
 fn stellarator(vacuum_back: bool) -> Geometry {
     layered(offsets_of(
-        stellarator_flux_surface(&shape(), 1.0, Some(1), None).unwrap(),
+        flux_surface(PlasmaShape::Stellarator(&shape()), 1.0, Some(1), None).unwrap(),
+        vacuum_back,
+    ))
+}
+
+fn tokamak(vacuum_back: bool) -> Geometry {
+    layered(offsets_of(
+        flux_surface(PlasmaShape::Tokamak(&d_shape()), 1.0, Some(1), None).unwrap(),
         vacuum_back,
     ))
 }
@@ -153,8 +167,9 @@ fn tallies(cells: u32) -> Vec<Arc<Tally>> {
         .collect()
 }
 
-/// Run with 14.1 MeV neutrons from the magnetic axis at `zeta = 0`;
-/// return the lost-particle count and per-cell `(mean, std)`.
+/// Run with 14.1 MeV neutrons from `(600, 0, 0)`, on the stellarator's
+/// magnetic axis at `zeta = 0` and inside every plasma here; return the
+/// lost-particle count and per-cell `(mean, std)`.
 fn run(geometry: Geometry, mode: TrackingMode, particles: usize) -> (usize, Vec<(f64, f64)>) {
     let source = ParticleSource::Neutron(Source {
         space: SourceSpatialDistribution::Point(Point::new([600.0, 0.0, 0.0])),
@@ -190,18 +205,29 @@ fn stellarator_layers_lose_no_particles_and_tracking_modes_agree() {
         return;
     }
     for vacuum_back in [false, true] {
-        tracking_modes_agree(vacuum_back);
+        tracking_modes_agree(stellarator, vacuum_back);
     }
 }
 
-fn tracking_modes_agree(vacuum_back: bool) {
+#[test]
+fn tokamak_layers_lose_no_particles_and_tracking_modes_agree() {
+    if !data_present() {
+        eprintln!("skipping: {NUCLIDE} fixture absent");
+        return;
+    }
+    for vacuum_back in [false, true] {
+        tracking_modes_agree(tokamak, vacuum_back);
+    }
+}
+
+fn tracking_modes_agree(geometry: fn(bool) -> Geometry, vacuum_back: bool) {
     let mut results = Vec::new();
     for mode in [
         TrackingMode::Surface,
         TrackingMode::Hybrid,
         TrackingMode::Woodcock,
     ] {
-        let (lost, flux) = run(stellarator(vacuum_back), mode, PARTICLES);
+        let (lost, flux) = run(geometry(vacuum_back), mode, PARTICLES);
         assert_eq!(
             lost, 0,
             "{mode:?} (vacuum back {vacuum_back}): {lost} of {PARTICLES} histories lost"
@@ -227,23 +253,15 @@ fn tracking_modes_agree(vacuum_back: bool) {
 }
 
 #[test]
-fn flux_layers_on_a_torus_track_like_ztorus() {
+fn circular_tokamak_layers_track_like_ztorus() {
     if !data_present() {
         eprintln!("skipping: {NUCLIDE} fixture absent");
         return;
     }
-    let circle = FluxBoundary::new(
-        1,
-        vec![[0, 0], [1, 0]],
-        vec![600.0, 150.0],
-        vec![[-1, 0]],
-        vec![150.0],
-    )
-    .unwrap();
-    let circle = Arc::new(circle);
+    let circle = TokamakShape::new(600.0, 150.0, 1.0, 0.0, 0.0).unwrap();
     for vacuum_back in [false, true] {
         let flux = layered(offsets_of(
-            Surface::new_flux(Arc::clone(&circle), Some(1), None),
+            flux_surface(PlasmaShape::Tokamak(&circle), 1.0, Some(1), None).unwrap(),
             vacuum_back,
         ));
         let torus = |minor: f64, id: usize, boundary: Option<BoundaryType>| {
@@ -291,8 +309,8 @@ fn same_tallies(flux: Geometry, tori: Geometry) {
 #[test]
 fn the_source_plasma_is_inside_the_plasma_surface() {
     let shape = shape();
-    let plasma = stellarator_flux_surface(&shape, 1.0, None, None).unwrap();
-    let edge = stellarator_flux_surface(&shape, 0.8, None, None).unwrap();
+    let plasma = flux_surface(PlasmaShape::Stellarator(&shape), 1.0, None, None).unwrap();
+    let edge = flux_surface(PlasmaShape::Stellarator(&shape), 0.8, None, None).unwrap();
     for k in 0..400 {
         let (rho, theta, zeta) = (
             (k as f64 * 0.618_033_988_7) % 1.0,
@@ -319,19 +337,29 @@ fn the_source_plasma_is_inside_the_plasma_surface() {
     }
 }
 
-/// The million-history check quoted in the pull request; run it in
+/// The million-history checks quoted in the pull requests; run them in
 /// release with `cargo test --release -p yamc --test flux_surface_transport
 /// -- --ignored`.
 #[test]
 #[ignore]
 fn stellarator_layers_lose_no_particles_at_scale() {
+    lose_no_particles_at_scale(stellarator);
+}
+
+#[test]
+#[ignore]
+fn tokamak_layers_lose_no_particles_at_scale() {
+    lose_no_particles_at_scale(tokamak);
+}
+
+fn lose_no_particles_at_scale(geometry: fn(bool) -> Geometry) {
     if !data_present() {
         eprintln!("skipping: {NUCLIDE} fixture absent");
         return;
     }
     for vacuum_back in [false, true] {
         for mode in [TrackingMode::Surface, TrackingMode::Woodcock] {
-            let (lost, _) = run(stellarator(vacuum_back), mode, 1_000_000);
+            let (lost, _) = run(geometry(vacuum_back), mode, 1_000_000);
             assert_eq!(
                 lost, 0,
                 "{mode:?} (vacuum back {vacuum_back}): {lost} of 1e6 histories lost"

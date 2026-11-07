@@ -337,13 +337,28 @@ impl Refiner<'_> {
         bx.inflate(sag);
         let radius = radius2.sqrt() + sag;
         let kappa = pt.convex[p].max(pt.concave[p]);
+        let half = if self.series.n_max == 0 {
+            // The middle row's turn and at most hz / 2 more, as for an
+            // axisymmetric patch (see `Patches::new`).
+            let (mut row_radius2, mut row_turn) = (0.0_f64, 0.0_f64);
+            for (x, nx) in points[3..6].iter().zip(&normals[3..6]) {
+                let d = [x[0] - centre[0], x[1] - centre[1], x[2] - centre[2]];
+                row_radius2 = row_radius2.max(dot(d, d));
+                row_turn = row_turn.max(dot(*nx, normal).clamp(-1.0, 1.0).acos());
+            }
+            let row_reach =
+                row_radius2.sqrt() + (ht / 2.0).powi(2) / 8.0 * bounds.x_tt() + self.margin;
+            (CURVATURE_SAFETY * row_turn).max(1.25 * kappa * row_reach) + 0.5 * hz
+        } else {
+            (CURVATURE_SAFETY * turn).max(1.25 * kappa * radius)
+        };
         let piece = Piece {
             centre,
             radius,
             bx,
             cone: Cone {
                 axis: normal,
-                half: (CURVATURE_SAFETY * turn).max(1.25 * kappa * radius) + 1e-6,
+                half: half + 1e-6,
             },
         };
         self.pieces.insert(key, piece);
@@ -458,6 +473,8 @@ impl Patches {
         let sag = (ht / 2.0).powi(2) / 8.0 * series.bounds.x_tt()
             + (hz / 2.0).powi(2) / 8.0 * series.bounds.x_zz()
             + margin;
+        // The part of it along a row (constant zeta).
+        let sag_t = (ht / 2.0).powi(2) / 8.0 * series.bounds.x_tt() + margin;
         let mut boxes = Vec::with_capacity(nt * nz);
         let mut spheres = Vec::with_capacity(nt * nz);
         let mut cones = Vec::with_capacity(nt * nz);
@@ -473,14 +490,22 @@ impl Patches {
                 let (centre, normal) = (samples[centre_index], normals[centre_index]);
                 let mut radius2 = 0.0_f64;
                 let mut turn = 0.0_f64;
+                // The same over the middle row, at the centre's zeta.
+                let (mut row_radius2, mut row_turn) = (0.0_f64, 0.0_f64);
                 for b in 0..3 {
                     for a in 0..3 {
                         let s = ((2 * j + b) % sz) * st + (2 * i + a) % st;
                         let x = samples[s];
                         bx.grow_point(x);
                         let d = [x[0] - centre[0], x[1] - centre[1], x[2] - centre[2]];
-                        radius2 = radius2.max(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-                        turn = turn.max(dot(normals[s], normal).clamp(-1.0, 1.0).acos());
+                        let d2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+                        let t = dot(normals[s], normal).clamp(-1.0, 1.0).acos();
+                        radius2 = radius2.max(d2);
+                        turn = turn.max(t);
+                        if b == 1 {
+                            row_radius2 = row_radius2.max(d2);
+                            row_turn = row_turn.max(t);
+                        }
                         let (k1, k2) = curv[s];
                         kv = kv.max(k1).max(k2);
                         kc = kc.max(-k1).max(-k2);
@@ -494,9 +519,24 @@ impl Patches {
                 // length from the centre; the sampled turn guards the
                 // curvature sampling, and a floor covers flat patches.
                 let reach = radius2.sqrt() + sag;
+                let kappa = kv.max(kc).max(0.0);
+                let half = if series.n_max == 0 {
+                    // An axisymmetric patch is its middle row turned about
+                    // the z axis by up to hz / 2, which turns a normal by
+                    // at most that, so only the row's arc length counts.
+                    // On a thin surface a patch is far longer toroidally
+                    // than poloidally: with the whole patch's radius, the
+                    // cones near a tight bend would hold every direction,
+                    // no pair of pieces could be ruled out, and the gap
+                    // search would leave the reach 0.
+                    let row_reach = row_radius2.sqrt() + sag_t;
+                    CURVATURE_SAFETY * row_turn.max(1.25 * kappa * row_reach) + 0.5 * hz
+                } else {
+                    CURVATURE_SAFETY * turn.max(1.25 * kappa * reach)
+                };
                 cones.push(Cone {
                     axis: normal,
-                    half: CURVATURE_SAFETY * turn.max(1.25 * kv.max(kc).max(0.0) * reach) + 1e-6,
+                    half: half + 1e-6,
                 });
                 min_size = min_size.min(radius2.sqrt());
                 convex.push(kv.max(0.0) * CURVATURE_SAFETY);

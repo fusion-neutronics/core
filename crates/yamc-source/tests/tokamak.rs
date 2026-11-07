@@ -174,6 +174,77 @@ fn shape_matches_the_fausser_parameterisation() {
     }
 }
 
+#[test]
+fn surface_modes_are_the_flux_surface() {
+    // Circular to strongly elongated, the triangularity near and at its
+    // limits either way, the Shafranov factor either way up to near its
+    // limit, and tight aspect ratios (the most modes: |d| = 1 with
+    // a close to R0).
+    let shapes = [
+        (600.0, 150.0, 1.0, 0.0, 0.0),
+        (906.0, 292.258, 1.557, 0.270, 0.44789),
+        (620.0, 200.0, 1.7, 0.95, 60.0),
+        (620.0, 200.0, 2.5, -0.95, -60.0),
+        (620.0, 200.0, 1.0, 1.0, 99.0),
+        (900.0, 100.0, 2.0, -1.0, -49.0),
+        (310.0, 300.0, 2.5, 0.6, 140.0),
+        (300.0, 299.0, 1.5, -1.0, 0.0),
+    ];
+    let mut worst: f64 = 0.0;
+    for (r0, a, k, d, s) in shapes {
+        let shape = TokamakShape::new(r0, a, k, d, s).unwrap();
+        for rho in [0.05, 0.3, 0.75, 1.0] {
+            let (r_modes, r_mn, z_modes, z_mn) = shape.surface_modes(rho);
+            // Axisymmetric: n = 0 throughout, R on the cosines from m = 0
+            // up and Z on sin(theta) alone.
+            let m_max = r_modes.len() as i32 - 1;
+            assert_eq!(r_modes, (0..=m_max).map(|m| [m, 0]).collect::<Vec<_>>());
+            assert_eq!(z_modes, [[-1, 0]]);
+            assert!(
+                m_max <= 15,
+                "({r0}, {a}, {k}, {d}, {s}) at rho {rho}: m up to {m_max}"
+            );
+            // The modes left out add up to less than 1e-16 of the major radius.
+            let left_out: f64 = (m_max + 1..40)
+                .map(|m| {
+                    let sign = if m % 2 == 0 { 1.0 } else { -1.0 };
+                    rho * a * (bessel_j(m - 1, d) - sign * bessel_j(m + 1, d)).abs()
+                })
+                .sum();
+            assert!(left_out < 1e-16 * r0, "{left_out} left out");
+            for i in 0..1000 {
+                let theta = TAU * (i as f64 + 0.37) / 1000.0;
+                // Smallest terms first, for the least round-off.
+                let r: f64 = (0..r_mn.len())
+                    .rev()
+                    .map(|m| r_mn[m] * (m as f64 * theta).cos())
+                    .sum();
+                let z = z_mn[0] * theta.sin();
+                let (r_point, z_point) = shape.point(rho, theta);
+                let error = (r - r_point).abs().max((z - z_point).abs());
+                worst = worst.max(error);
+                assert!(
+                    error <= 1e-12,
+                    "({r0}, {a}, {k}, {d}, {s}) at rho {rho}, theta {theta}: ({r}, {z}) vs \
+                     ({r_point}, {z_point})"
+                );
+            }
+        }
+    }
+    eprintln!("largest difference from TokamakShape::point: {worst:e} cm");
+    // A circle is two modes of R and one of Z.
+    let circle = TokamakShape::new(600.0, 150.0, 1.0, 0.0, 0.0).unwrap();
+    assert_eq!(
+        circle.surface_modes(1.0),
+        (
+            vec![[0, 0], [1, 0]],
+            vec![600.0, 150.0],
+            vec![[-1, 0]],
+            vec![150.0]
+        )
+    );
+}
+
 /// Bessel function `J_n(x)` by its power series, converged for `|x| <= 2`.
 fn bessel_j(n: i32, x: f64) -> f64 {
     let factorial = |k: i32| (1..=k).map(f64::from).product::<f64>();

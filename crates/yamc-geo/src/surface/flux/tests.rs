@@ -588,22 +588,102 @@ fn check_crossing(boundary: &FluxBoundary, offset: f64, o: [f64; 3], u: [f64; 3]
 
 #[test]
 fn the_reach_stops_at_half_a_thin_part() {
-    for w in [1.0, 3.0] {
-        let boundary = dumbbell(1000.0, 300.0, w, 100.0);
-        // Half the bar's thickness bounds the depth up to which the
-        // distance is smooth, and the inward offsets allowed.
-        let reach = boundary.inner_reach();
-        assert!(reach > 0.0 && reach <= w, "w {w}: reach {reach}");
-        assert!(boundary.check_offset(-w).is_err());
-        // Up through the bar from just above its bottom face.
-        let o = [1000.0, 0.0, -w + 0.01];
-        let t = boundary.distance(o, [0.0, 0.0, 1.0], 0.0, None, false, f64::INFINITY);
-        assert!((t.unwrap() - (2.0 * w - 0.01)).abs() < 1e-9, "w {w}: {t:?}");
-        let mut rng = Rng(5);
-        for _ in 0..20 {
-            let u = normalize([rng.range(-0.3, 0.3), rng.range(-0.3, 0.3), 1.0]);
-            check_crossing(&boundary, 0.0, o, u);
+    // At full size, and at a hundredth of it on the same major radius,
+    // where a patch is far longer toroidally than poloidally.
+    for scale in [1.0, 0.01] {
+        for w in [1.0, 3.0].map(|w| w * scale) {
+            let boundary = dumbbell(1000.0, 300.0 * scale, w, 100.0 * scale);
+            // Half the bar's thickness bounds the depth up to which the
+            // distance is smooth, and the inward offsets allowed.
+            let reach = boundary.inner_reach();
+            assert!(reach > 0.5 * w && reach <= w, "w {w}: reach {reach}");
+            assert!(boundary.check_offset(-w).is_err());
+            // Up through the bar from just above its bottom face.
+            let o = [1000.0, 0.0, -w + 0.01 * scale];
+            let t = boundary.distance(o, [0.0, 0.0, 1.0], 0.0, None, false, f64::INFINITY);
+            assert!(
+                (t.unwrap() - (2.0 * w - 0.01 * scale)).abs() < 1e-9,
+                "w {w}: {t:?}"
+            );
+            let mut rng = Rng(5);
+            for _ in 0..20 {
+                let u = normalize([rng.range(-0.3, 0.3), rng.range(-0.3, 0.3), 1.0]);
+                check_crossing(&boundary, 0.0, o, u);
+            }
         }
+    }
+}
+
+#[test]
+fn an_axisymmetric_boundary_searches_one_row_for_gaps() {
+    // Every row of patches of an axisymmetric boundary is a turned copy of
+    // the first, so the first row alone bounds the same gaps as all of
+    // them: as tightly or more (the boxes of a turned patch differ), and
+    // without filling the search's piece budget, which on a thin surface
+    // (a tokamak flux surface deep in the plasma) left pairs too coarse to
+    // bound and the reach 0.
+    for a in [150.0, 50.0] {
+        let boundary = FluxBoundary::new(
+            1,
+            vec![[0, 0], [1, 0], [2, 0]],
+            vec![600.0, a, 0.2 * a],
+            vec![[-1, 0]],
+            vec![2.5 * a],
+        )
+        .unwrap();
+        let e = &boundary.engine;
+        let gaps = |rows| e.patches.gaps(&e.series, rows, e.orientation_3d, e.margin);
+        let (one, all) = (gaps(1), gaps(e.patches.nz));
+        for (side, one, all) in [("inner", one.0, all.0), ("outer", one.1, all.1)] {
+            assert!(
+                one >= all && one <= 1.01 * all,
+                "a {a}, {side}: one row {one}, all rows {all}"
+            );
+        }
+        assert_eq!(
+            boundary.inner_reach(),
+            (1.0 / e.kappa_convex).min(0.5 * one.0)
+        );
+    }
+}
+
+#[test]
+fn an_axisymmetric_boundary_forms_its_side_test_polyline_once() {
+    // The same boundary with a zero toroidal mode takes the general path,
+    // which forms the cut through every query point; the side test must
+    // not tell them apart, to the bit.
+    let modes = vec![[0, 0], [1, 0], [2, 0]];
+    let axisymmetric = FluxBoundary::new(
+        1,
+        modes.clone(),
+        vec![600.0, 150.0, 30.0],
+        vec![[-1, 0], [-2, 0]],
+        vec![250.0, 12.0],
+    )
+    .unwrap();
+    let general = FluxBoundary::new(
+        1,
+        [modes, vec![[1, 1]]].concat(),
+        vec![600.0, 150.0, 30.0, 0.0],
+        vec![[-1, 0], [-2, 0]],
+        vec![250.0, 12.0],
+    )
+    .unwrap();
+    assert!(!axisymmetric.engine.poly_fixed.is_empty());
+    assert!(general.engine.poly_fixed.is_empty());
+    let mut rng = Rng(23);
+    for _ in 0..500 {
+        let p = [
+            rng.range(-900.0, 900.0),
+            rng.range(-900.0, 900.0),
+            rng.range(-300.0, 300.0),
+        ];
+        let (a, b) = (axisymmetric.engine.in_plane(p), general.engine.in_plane(p));
+        assert_eq!(
+            [a.sign, a.upper, a.theta].map(f64::to_bits),
+            [b.sign, b.upper, b.theta].map(f64::to_bits),
+            "{p:?}"
+        );
     }
 }
 

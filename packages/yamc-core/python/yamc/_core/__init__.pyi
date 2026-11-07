@@ -7647,18 +7647,21 @@ def Cylinder(axis: typing.Any, x0: typing.Optional[builtins.float] = None, y0: t
         A Surface object representing the cylinder
     """
 
-def FluxSurface(shape: sources.StellaratorShape, rho: builtins.float = 1.0, surface_id: typing.Optional[builtins.int] = None, boundary: typing.Optional[builtins.str] = None, name: typing.Optional[builtins.str] = None) -> Surface:
+def FluxSurface(shape: sources.StellaratorShape | sources.TokamakShape, rho: builtins.float = 1.0, surface_id: typing.Optional[builtins.int] = None, boundary: typing.Optional[builtins.str] = None, name: typing.Optional[builtins.str] = None) -> Surface:
     r"""
-    Create a flux surface of a stellarator plasma shape.
+    Create a flux surface of a stellarator or tokamak plasma shape.
     
-    The surface ``rho = const`` of the same Fourier-Zernike shape that drives
-    ``yamc.sources.stellarator_source``, so a plasma cell and its source share
-    one shape. ``.below`` is the plasma inside the surface, ``.above`` the rest
-    of space, as for any other surface.
+    The surface ``rho = const`` of the same shape that drives the plasma
+    source, a ``StellaratorShape`` for ``yamc.sources.stellarator_source`` or a
+    ``TokamakShape`` for ``yamc.sources.tokamak_source``, so a plasma cell and
+    its source share one shape. ``.below`` is the plasma inside the surface,
+    ``.above`` the rest of space, as for any other surface.
     
     Args:
-        shape: The plasma shape, a ``yamc.sources.StellaratorShape``
-        rho: Flux label in (0, 1]; 1 (the default) is the plasma boundary
+        shape: The plasma shape, a ``yamc.sources.StellaratorShape`` or
+            ``yamc.sources.TokamakShape``
+        rho: The shape's flux label in (0, 1]; 1 (the default) is the plasma
+            boundary
         surface_id: Optional surface ID
         boundary: Boundary condition - None (default, transmission) or 'vacuum'
         name: Optional surface name
