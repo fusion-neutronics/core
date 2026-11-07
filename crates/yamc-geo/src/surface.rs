@@ -1,5 +1,6 @@
 mod cone;
 mod cylinder;
+mod flux;
 mod plane;
 mod quadric;
 mod roots;
@@ -7,6 +8,7 @@ mod sphere;
 mod torus;
 
 use crate::region::{HalfspaceType, RegionExpr};
+pub use flux::FluxBoundary;
 pub use roots::quartic_real_roots;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -117,6 +119,33 @@ pub enum SurfaceKind {
         axis: [f64; 3],
         tan2_theta: f64,
     },
+    /// The points at signed 3-D distance `offset` (cm, positive outwards)
+    /// from a free-form toroidal boundary: the boundary itself for
+    /// `offset == 0` (a flux surface), a layer surface otherwise. Layers
+    /// sharing one boundary are nested by construction.
+    Flux {
+        #[serde(deserialize_with = "flux::deserialize_shared")]
+        boundary: Arc<FluxBoundary>,
+        offset: f64,
+    },
+}
+
+impl SurfaceKind {
+    /// Short name of the kind, for messages.
+    pub fn name(&self) -> &'static str {
+        match self {
+            SurfaceKind::Plane { .. } => "Plane",
+            SurfaceKind::Sphere { .. } => "Sphere",
+            SurfaceKind::Cylinder { .. } => "Cylinder",
+            SurfaceKind::ZTorus { .. } => "ZTorus",
+            SurfaceKind::XTorus { .. } => "XTorus",
+            SurfaceKind::YTorus { .. } => "YTorus",
+            SurfaceKind::Quadric { .. } => "Quadric",
+            SurfaceKind::Cone { .. } => "Cone",
+            SurfaceKind::Flux { offset, .. } if *offset == 0.0 => "FluxSurface",
+            SurfaceKind::Flux { .. } => "OffsetSurface",
+        }
+    }
 }
 
 /// A Cylinder or Cone axis as a model file holds it, made the unit vector
@@ -250,6 +279,40 @@ impl Surface {
                 axis,
                 tan2_theta,
             } => cone::distance(point, direction, *apex, *axis, *tan2_theta),
+            SurfaceKind::Flux { .. } => {
+                self.distance_to_surface_capped(point, direction, on_surface, f64::INFINITY)
+            }
+        }
+    }
+
+    /// Whether the surface is free-form (a flux or offset surface), whose
+    /// crossings are searched for iteratively rather than solved in closed
+    /// form.
+    pub fn is_free_form(&self) -> bool {
+        matches!(self.kind, SurfaceKind::Flux { .. })
+    }
+
+    /// [`Surface::distance_to_surface_on`] for a caller that only needs
+    /// crossings nearer than `t_max`: a free-form surface stops searching
+    /// there and returns `None` for a crossing beyond it. Closed-form kinds
+    /// ignore the cap.
+    pub fn distance_to_surface_capped(
+        &self,
+        point: [f64; 3],
+        direction: [f64; 3],
+        on_surface: Option<f64>,
+        t_max: f64,
+    ) -> Option<f64> {
+        match &self.kind {
+            SurfaceKind::Flux { boundary, offset } => boundary.distance(
+                point,
+                direction,
+                *offset,
+                on_surface,
+                self.boundary == BoundaryType::Vacuum,
+                t_max,
+            ),
+            _ => self.distance_to_surface_on(point, direction, on_surface),
         }
     }
     /// Builder-style setter for the optional `name` metadata field.
@@ -332,6 +395,26 @@ impl Surface {
                 axis,
                 tan2_theta,
             } => cone::evaluate(point, *apex, *axis, *tan2_theta),
+            SurfaceKind::Flux { boundary, offset } => {
+                boundary.evaluate([point.0, point.1, point.2], *offset)
+            }
+        }
+    }
+
+    /// [`Surface::evaluate`] with an exact magnitude. For flux and offset
+    /// surfaces `evaluate` has an exact sign but, away from the surface,
+    /// returns only a rigorous lower bound on its magnitude (all transport
+    /// needs); this returns `D - offset` itself, with `D` the signed
+    /// distance (cm) from the flux surface. That is the distance to an
+    /// offset layer outside it and wherever the layer is not creased; near
+    /// a crease, inside the layer, the layer is farther than that. Other
+    /// kinds return `evaluate` unchanged.
+    pub fn evaluate_exact(&self, point: (f64, f64, f64)) -> f64 {
+        match &self.kind {
+            SurfaceKind::Flux { boundary, offset } => {
+                boundary.signed_distance([point.0, point.1, point.2]) - offset
+            }
+            _ => self.evaluate(point),
         }
     }
 
@@ -347,6 +430,11 @@ impl Surface {
             SurfaceKind::Quadric { .. } => None,
             // The double cone is unbounded along its axis.
             SurfaceKind::Cone { .. } => None,
+            // The inside of a flux or offset surface is bounded; its
+            // outside is not.
+            SurfaceKind::Flux { boundary, offset } => {
+                halfspace_below.then(|| boundary.bounding_box(*offset))
+            }
             SurfaceKind::Plane { .. } => {
                 // Planes contribute constraints through axis_constraint(), not bounding_box()
                 None

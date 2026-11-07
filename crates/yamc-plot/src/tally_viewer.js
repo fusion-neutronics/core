@@ -271,6 +271,12 @@ let cachedOutlinePH = 0, cachedOutlinePV = 0;
 function renderOutline() {
   if (!outlinePlotter || state.outline === 'none') {
     olCanvas.width = 0; olCanvas.height = 0;
+    // No plotter: only the pre-rendered outline can be shown, and only at the
+    // view it was rendered for (it also feeds the tooltip's cell lookup).
+    if (!outlinePlotter) {
+      cachedOutlineData = null;
+      if (atPresampledView()) renderPresampledGrid();
+    }
     return;
   }
 
@@ -436,7 +442,7 @@ function renderFrame() {
   fitCanvas();
   renderColorbar();
   updateAxisLabels();
-  statusEl.textContent = '';
+  statusEl.textContent = RESAMPLE_NOTICE;
 }
 
 // ---- Canvas fitting (CSS scaling) ----
@@ -1229,7 +1235,7 @@ function surfacesAtPoint(x, y, z, tol) {
 
 // viewer.js's surfaceEval, torusEval and distanceEstimate: Rust's value (so
 // its sign), with `distance` set (hover) about the distance to the surface,
-// or NaN for a kind this cannot evaluate.
+// or NaN for a kind this cannot evaluate (e.g. Flux).
 function surfaceEval(surface, x, y, z, distance) {
   const k = surface.kind;
   if (k.Plane) return k.Plane.a*x + k.Plane.b*y + k.Plane.c*z - k.Plane.d;
@@ -1265,6 +1271,33 @@ function torusEval(t1, t2, ax, t, distance) {
 }
 
 function distanceEstimate(f, g) { const d=f/g; return d*f > 0 ? d : f; }
+
+// Kinds (as named in the geometry JSON) of the surfaces in `cells` that
+// `surfaceEval` cannot evaluate, i.e. returns NaN for.
+function unsampledSurfaceKinds(cells) {
+  const kinds = new Set();
+  const visit = (expr) => {
+    if (expr.Halfspace) {
+      const s = expr.Halfspace.Above || expr.Halfspace.Below;
+      if (Number.isNaN(surfaceEval(s, 0, 0, 0))) kinds.add(Object.keys(s.kind)[0]);
+    }
+    const pair = expr.Intersection || expr.Union;
+    if (pair) { visit(pair[0]); visit(pair[1]); }
+    if (expr.Complement) visit(expr.Complement);
+  };
+  for (const cell of cells) visit(cell.region.expr);
+  return [...kinds];
+}
+
+// The browser cannot re-sample outlines of a CSG geometry with such a surface
+// kind: no outline plotter is made, only the pre-rendered outline is shown (at
+// the view it was rendered for) and this says why ('' otherwise).
+const UNSAMPLED_KINDS = GEOMETRY_KIND === 'csg' ? unsampledSurfaceKinds(GEOMETRY_JSON.cells) : [];
+const RESAMPLE_NOTICE = UNSAMPLED_KINDS.length > 0
+  ? 'This geometry has surface kinds the browser view cannot re-sample (' +
+    UNSAMPLED_KINDS.join(', ') + '); ' +
+    (PRESAMPLED_OUTLINE_B64 ? 'showing the pre-rendered outline only.' : 'geometry outlines are not drawn.')
+  : '';
 
 
 // ---- Init ----
@@ -1320,6 +1353,17 @@ function renderPresampledGrid() {
   olCtx.putImageData(img, 0, 0);
 }
 
+// Whether the view is the one the pre-rendered outline was sampled for: the
+// initial basis and slice at the full mesh extent `initView` sets.
+function atPresampledView() {
+  if (state.basis !== NATIVE_BASIS || state.sliceIdx !== INITIAL_SLICE_BIN) return false;
+  const axes = basisAxes(NATIVE_BASIS);
+  return state.originH === (MESH_LL[axes[0]] + MESH_UR[axes[0]]) / 2 &&
+    state.originV === (MESH_LL[axes[1]] + MESH_UR[axes[1]]) / 2 &&
+    state.widthH === MESH_UR[axes[0]] - MESH_LL[axes[0]] &&
+    state.widthV === MESH_UR[axes[1]] - MESH_LL[axes[1]];
+}
+
 async function init() {
   initView(state.basis);
   // Set initial slice to the requested bin index (direct bin index)
@@ -1336,8 +1380,11 @@ async function init() {
   // Load outline plotter if geometry provided (for subsequent slices)
   if (GEOMETRY_JSON) {
     if (GEOMETRY_KIND === 'csg') {
-      outlinePlotter = new JsCsgPlotter(GEOMETRY_JSON);
-      if (!presampledOutlineData) renderFrame(); // only re-render if no presampled
+      // No plotter when outlines cannot be re-sampled (RESAMPLE_NOTICE).
+      if (!RESAMPLE_NOTICE) {
+        outlinePlotter = new JsCsgPlotter(GEOMETRY_JSON);
+        if (!presampledOutlineData) renderFrame(); // only re-render if no presampled
+      }
     } else if (GEOMETRY_KIND === 'mesh' && typeof YAMT_WASM_BASE64 !== 'undefined') {
       statusEl.textContent = 'Loading WASM...';
       try {

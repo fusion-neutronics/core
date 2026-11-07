@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use yamc_geo::geometry::CsgGeometry;
-use yamc_geo::region::RegionExpr;
+use yamc_geo::region::{HalfspaceType, RegionExpr};
 use yamc_geo::surface::{Surface, SurfaceKind};
 
 /// One row of the surface table the viewer sees.
@@ -62,6 +62,31 @@ pub fn build_surface_table(csg: &CsgGeometry) -> Vec<SurfaceTableEntry> {
     out
 }
 
+/// Whether the browser samplers can evaluate every surface of `csg`.
+///
+/// `surfaceEval` (viewer.js, tally_viewer.js and the CSG worker in
+/// viewer_html.rs) knows planes, spheres, cylinders and z-tori only. For any
+/// other kind (e.g. a flux surface) the viewer keeps the image yamc rendered
+/// rather than re-sample, so the HTML has to carry that image.
+pub fn browser_can_sample(csg: &CsgGeometry) -> bool {
+    fn evaluable(expr: &RegionExpr) -> bool {
+        match expr {
+            RegionExpr::Halfspace(HalfspaceType::Above(s) | HalfspaceType::Below(s)) => matches!(
+                s.kind,
+                SurfaceKind::Plane { .. }
+                    | SurfaceKind::Sphere { .. }
+                    | SurfaceKind::Cylinder { .. }
+                    | SurfaceKind::ZTorus { .. }
+            ),
+            RegionExpr::Union(a, b) | RegionExpr::Intersection(a, b) => {
+                evaluable(a) && evaluable(b)
+            }
+            RegionExpr::Complement(inner) => evaluable(inner),
+        }
+    }
+    csg.cells.iter().all(|cell| evaluable(&cell.region.expr))
+}
+
 fn display_name_for(surf: &Surface, kind_counters: &mut HashMap<&'static str, usize>) -> String {
     if let Some(n) = surf.name.as_ref() {
         return n.clone();
@@ -69,23 +94,10 @@ fn display_name_for(surf: &Surface, kind_counters: &mut HashMap<&'static str, us
     if let Some(id) = surf.surface_id {
         return format!("surface {id}");
     }
-    let kind = surface_kind_name(&surf.kind);
+    let kind = surf.kind.name();
     let idx = kind_counters.entry(kind).or_insert(0);
     *idx += 1;
     format!("{kind} #{}", *idx)
-}
-
-fn surface_kind_name(kind: &SurfaceKind) -> &'static str {
-    match kind {
-        SurfaceKind::Plane { .. } => "Plane",
-        SurfaceKind::Sphere { .. } => "Sphere",
-        SurfaceKind::Cylinder { .. } => "Cylinder",
-        SurfaceKind::ZTorus { .. } => "ZTorus",
-        SurfaceKind::XTorus { .. } => "XTorus",
-        SurfaceKind::YTorus { .. } => "YTorus",
-        SurfaceKind::Quadric { .. } => "Quadric",
-        SurfaceKind::Cone { .. } => "Cone",
-    }
 }
 
 /// Walk a single `RegionExpr` collecting surfaces (used by the

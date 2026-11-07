@@ -19,7 +19,9 @@ pub mod surfaces;
 pub mod tally_html;
 pub mod viewer_html;
 
-pub use surfaces::{build_surface_table, collect_region_surfaces, SurfaceTableEntry};
+pub use surfaces::{
+    browser_can_sample, build_surface_table, collect_region_surfaces, SurfaceTableEntry,
+};
 pub use tally_html::{
     build_interactive_tally_html, EmbeddedSlice, ExtraValueSlices, InteractiveTallyParams, MeshMeta,
 };

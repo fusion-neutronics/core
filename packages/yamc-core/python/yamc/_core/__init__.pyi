@@ -27,6 +27,7 @@ __all__ = [
     "Estimate",
     "FaceOutput",
     "FaceVolumeMesh",
+    "FluxSurface",
     "Geometry",
     "GeometrySliceData",
     "Halfspace",
@@ -40,6 +41,7 @@ __all__ = [
     "Model",
     "NeutronSource",
     "Nuclide",
+    "OffsetSurface",
     "Particle",
     "ParticleTrack",
     "PhotonCoefficients",
@@ -4996,6 +4998,12 @@ class Surface:
     half-spaces, combined with `&`/`|`/`~`, build CSG `Region`s.
     """
     @property
+    def distance(self) -> typing.Optional[builtins.float]:
+        r"""
+        Signed distance (cm) of a flux or offset surface from its flux
+        surface (0 for a FluxSurface), else None
+        """
+    @property
     def x0(self) -> typing.Optional[builtins.float]:
         r"""
         Offset of a plane perpendicular to the x-axis (axis='x'), else None
@@ -5059,6 +5067,12 @@ class Surface:
     def evaluate(self, point: tuple[builtins.float, builtins.float, builtins.float]) -> builtins.float:
         r"""
         Evaluate the surface equation at a point.
+        
+        For a flux surface the value is the signed distance (cm) from it.
+        For an offset surface it is the signed distance from the underlying
+        flux surface minus ``distance``: the distance to the layer outside
+        it and wherever the layer is not creased, an underestimate inside
+        the layer near a crease. The sign is always exact.
         
         Args:
             point: Tuple of 3 floats (x, y, z)
@@ -7631,6 +7645,50 @@ def Cylinder(axis: typing.Any, x0: typing.Optional[builtins.float] = None, y0: t
     
     Returns:
         A Surface object representing the cylinder
+    """
+
+def FluxSurface(shape: sources.StellaratorShape, rho: builtins.float = 1.0, surface_id: typing.Optional[builtins.int] = None, boundary: typing.Optional[builtins.str] = None, name: typing.Optional[builtins.str] = None) -> Surface:
+    r"""
+    Create a flux surface of a stellarator plasma shape.
+    
+    The surface ``rho = const`` of the same Fourier-Zernike shape that drives
+    ``yamc.sources.stellarator_source``, so a plasma cell and its source share
+    one shape. ``.below`` is the plasma inside the surface, ``.above`` the rest
+    of space, as for any other surface.
+    
+    Args:
+        shape: The plasma shape, a ``yamc.sources.StellaratorShape``
+        rho: Flux label in (0, 1]; 1 (the default) is the plasma boundary
+        surface_id: Optional surface ID
+        boundary: Boundary condition - None (default, transmission) or 'vacuum'
+        name: Optional surface name
+    
+    Returns:
+        A Surface object representing the flux surface
+    """
+
+def OffsetSurface(base: Surface, distance: builtins.float, surface_id: typing.Optional[builtins.int] = None, boundary: typing.Optional[builtins.str] = None, name: typing.Optional[builtins.str] = None) -> Surface:
+    r"""
+    Create the surface at a fixed distance outside (or inside) a flux surface.
+    
+    The points at signed 3-D distance ``distance`` (cm) from the flux surface
+    that ``base`` is built on, positive outwards: a first-wall or blanket
+    layer of uniform thickness. Distances are measured from that flux surface,
+    so an offset of an offset adds: ``OffsetSurface(OffsetSurface(plasma, 15),
+    2)`` is ``OffsetSurface(plasma, 17)``. Layers built from one flux surface
+    are nested and never cross, even where outward normals meet (the layer is
+    then creased, as a true distance offset is). ``.below`` is the side towards
+    the plasma.
+    
+    Args:
+        base: A FluxSurface or OffsetSurface
+        distance: Signed distance in cm, positive outwards
+        surface_id: Optional surface ID
+        boundary: Boundary condition - None (default, transmission) or 'vacuum'
+        name: Optional surface name
+    
+    Returns:
+        A Surface object representing the offset surface
     """
 
 def Plane(axis: typing.Any, offset: builtins.float = 0.0, surface_id: typing.Optional[builtins.int] = None, boundary: typing.Optional[builtins.str] = None, name: typing.Optional[builtins.str] = None) -> Surface:

@@ -666,11 +666,12 @@ pub(crate) fn transport_particle<T: Tracker>(
             );
         }
 
-        if let Some(mut boundary_hit) = geometry.closest_boundary(
+        if let Some(mut boundary_hit) = geometry.closest_boundary_within(
             cell_index,
             particle.position,
             particle.direction,
             on_surface(particle),
+            dist_collision,
         ) {
             let dist_surface = boundary_hit.distance;
             if dist_surface < dist_collision {
@@ -1190,11 +1191,12 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
                 }
             };
 
-            match geometry.closest_boundary(
+            match geometry.closest_boundary_within(
                 cell_index,
                 particle.position,
                 particle.direction,
                 on_surface(particle),
+                dist_collision,
             ) {
                 Some(mut boundary_hit) if boundary_hit.distance < dist_collision => {
                     // Cross the boundary -- no collision this step.

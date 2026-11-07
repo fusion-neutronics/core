@@ -293,6 +293,7 @@ impl MeshGeometry {
                 volume: vol_measure,
                 fill_role: None,
                 cached_surfaces: Vec::new(), // Not used -- mesh handles boundaries
+                has_free_form: false,
             };
 
             cells.push(cell);
@@ -326,6 +327,7 @@ impl MeshGeometry {
             volume: None,
             fill_role: None,
             cached_surfaces: Vec::new(),
+            has_free_form: false,
         };
         cells.push(ic_cell);
         volume_ids.push(ic_vol);

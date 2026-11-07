@@ -143,7 +143,7 @@ function renderGrid(data, ph, pv) {
   fitCanvas();
   updateLegend(data, ph, pv);
   updateAxisLabels();
-  status.textContent = '';
+  status.textContent = RESAMPLE_NOTICE;
   document.getElementById('pixel-dims').textContent = 'Grid: ' + ph + ' \u00d7 ' + pv + ' px (PNG size)';
 }
 
@@ -413,6 +413,12 @@ async function sample() {
       'This model has mesh-filled cells, which the in-browser sampler cannot ' +
       'resolve. Showing the view rendered by yamc; re-run model.plot(...) with ' +
       'the origin / width / basis you want.';
+    return;
+  }
+  // A surface kind `surfaceEval` cannot evaluate: keep the image yamc rendered,
+  // at the view it shows (RESAMPLE_NOTICE says why).
+  if (RESAMPLE_NOTICE) {
+    restorePresampledView();
     return;
   }
   if (!plotter) return;
@@ -980,6 +986,20 @@ function renderPresampled() {
   }
 }
 
+// Put the view back to the one the pre-rendered image shows, so the axes,
+// controls and tooltip match it, and draw that image.
+function restorePresampledView() {
+  for (const k of ['basis', 'originX', 'originY', 'originZ', 'widthH', 'widthV', 'totalPixels']) {
+    state[k] = INITIAL[k];
+  }
+  writeControls();
+  document.querySelectorAll('#basis-btns button').forEach(b => {
+    b.classList.toggle('active', b.dataset.val === state.basis);
+  });
+  syncSnap();
+  renderPresampled();
+}
+
 // Load WASM (mesh only) and initialize
 async function init() {
   // Render pre-sampled data immediately (before WASM loads)
@@ -997,6 +1017,8 @@ async function init() {
     status.textContent = '';
     return;
   }
+  // Nor when `sample()` keeps the pre-rendered image (RESAMPLE_NOTICE).
+  if (RESAMPLE_NOTICE) return;
   if (GEOMETRY_KIND === 'csg') {
     plotter = new JsCsgPlotter(geo);
   } else {
@@ -1173,9 +1195,9 @@ function surfacesAtPoint(x, y, z, tol) {
 
 // Rust's `Surface::evaluate` at (x, y, z), with the same arithmetic and so the
 // same sign (all region evaluation reads), or NaN for a kind this cannot
-// evaluate. With `distance` set (hover, which compares |f| with half a pixel)
-// it is about the distance to the surface instead: where Rust's value is not
-// one (tori, quadrics, cones), the first-order f / |grad f|.
+// evaluate (e.g. Flux). With `distance` set (hover, which compares |f| with
+// half a pixel) it is about the distance to the surface instead: where Rust's
+// value is not one (tori, quadrics, cones), the first-order f / |grad f|.
 function surfaceEval(surface, x, y, z, distance) {
   const k = surface.kind;
   if (k.Plane) {
@@ -1248,4 +1270,31 @@ function distanceEstimate(f, g) {
   const d = f / g;
   return d * f > 0 ? d : f;
 }
+
+// Kinds (as named in the geometry JSON) of the surfaces in `cells` that
+// `surfaceEval` cannot evaluate, i.e. returns NaN for.
+function unsampledSurfaceKinds(cells) {
+  const kinds = new Set();
+  const visit = (expr) => {
+    if (expr.Halfspace) {
+      const s = expr.Halfspace.Above || expr.Halfspace.Below;
+      if (Number.isNaN(surfaceEval(s, 0, 0, 0))) kinds.add(Object.keys(s.kind)[0]);
+    }
+    const pair = expr.Intersection || expr.Union;
+    if (pair) { visit(pair[0]); visit(pair[1]); }
+    if (expr.Complement) visit(expr.Complement);
+  };
+  for (const cell of cells) visit(cell.region.expr);
+  return [...kinds];
+}
+
+// The browser cannot re-sample a CSG geometry with such a surface kind, so when
+// yamc embedded its rendered image the view stays on that image and this says
+// why ('' otherwise). Without an image the cells those surfaces bound are left
+// blank rather than drawn wrongly.
+const UNSAMPLED_KINDS = GEOMETRY_KIND === 'csg' ? unsampledSurfaceKinds(GEOMETRY_JSON.cells) : [];
+const RESAMPLE_NOTICE = UNSAMPLED_KINDS.length > 0 && PRESAMPLED_B64
+  ? 'This geometry has surface kinds the browser view cannot re-sample (' +
+    UNSAMPLED_KINDS.join(', ') + '); showing the pre-rendered image.'
+  : '';
 

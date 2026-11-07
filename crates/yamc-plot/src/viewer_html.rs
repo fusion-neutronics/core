@@ -870,7 +870,7 @@ function surfaceEval(surface, x, y, z) {
     const v2 = vx*vx + vy*vy + vz*vz;
     return (v2 - s * s) - cone.tan2_theta * s * s;
   }
-  return NaN; // a kind this cannot evaluate
+  return NaN; // a kind this cannot evaluate (e.g. Flux)
 }
 function torusEval(t1, t2, ax, t) {
   const rho = Math.sqrt(t1 * t1 + t2 * t2);

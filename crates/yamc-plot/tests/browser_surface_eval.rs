@@ -41,6 +41,12 @@ fn all_kinds() -> HashSet<String> {
         .collect()
 }
 
+/// Kinds the browser views do not evaluate, by design: a flux surface is a
+/// ray-marched level set of a Fourier boundary, too costly to evaluate per
+/// pixel in JavaScript. Each is NaN in every `surfaceEval` copy and gets no
+/// editor card, which is the unknown-kind behaviour tested below.
+const NOT_IN_BROWSER: &[&str] = &["Flux"];
+
 /// Centre, symmetry axis and size of a surface: where its test points are
 /// drawn, out to three sizes from the centre and along the axis.
 fn frame(kind: &SurfaceKind) -> ([f64; 3], Option<[f64; 3]>, f64) {
@@ -63,6 +69,7 @@ fn frame(kind: &SurfaceKind) -> ([f64; 3], Option<[f64; 3]>, f64) {
         } => ([x0, y0, z0], Some([0.0, 1.0, 0.0]), a + c),
         SurfaceKind::Quadric { .. } => ([0.0; 3], None, 4.0),
         SurfaceKind::Cone { apex, axis, .. } => (apex, Some(axis), 5.0),
+        SurfaceKind::Flux { .. } => unreachable!("flux surfaces are not in the cases"),
     }
 }
 
@@ -450,7 +457,11 @@ console.log(JSON.stringify(CASES.map((c) => c.points.map(([x, y, z]) => {
 fn every_surface_eval_copy_has_rusts_sign_for_every_kind() {
     let cases = cases();
     let covered: HashSet<String> = cases.iter().map(|(s, _)| kind_name(&s.kind)).collect();
-    assert_eq!(covered, all_kinds());
+    let expected: HashSet<String> = all_kinds()
+        .into_iter()
+        .filter(|k| !NOT_IN_BROWSER.contains(&k.as_str()))
+        .collect();
+    assert_eq!(covered, expected);
 
     let mut rng = Rng(505);
     let points: Vec<Vec<[f64; 3]>> = cases.iter().map(|c| points(c, &mut rng).0).collect();

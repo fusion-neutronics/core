@@ -648,9 +648,11 @@ impl PyGeometry {
         // A mesh-filled cell is the exception: the browser sampler
         // cannot resolve a fill body from `geometry_json` (fills serialize as an
         // identity fingerprint), so it would draw the bare CSG frame. Ship the
-        // fill-aware raster and let `viewer.js` refuse to re-sample.
+        // fill-aware raster and let `viewer.js` refuse to re-sample. So is a
+        // surface kind the browser cannot evaluate (e.g. a flux surface):
+        // `viewer.js` then keeps this raster rather than re-sample.
         let has_mesh_fills = self.inner.has_mesh_fills();
-        let presampled_for_html = if has_mesh_fills {
+        let presampled_for_html = if has_mesh_fills || !yamc_plot::browser_can_sample(&csg) {
             Some(&presampled)
         } else {
             None

@@ -312,8 +312,8 @@ function collectSurfaces() {
       group.occurrences.push(surf);
     });
   }
-  // A kind with no editable fields (one Rust has and surfaceSpec does not)
-  // gets no card, so Apply can never write it back as an empty
+  // A kind with no editable fields (one Rust has and surfaceSpec does not,
+  // e.g. Flux) gets no card, so Apply can never write it back as an empty
   // `kind[name] = {}`.
   for (const [key, group] of out) {
     if (group.spec.length === 0) out.delete(key);

@@ -90,6 +90,12 @@ impl PySurface {
             yamc::geo::SurfaceKind::Cone { axis, .. } => {
                 format!("Cone(axis={})", axis_label(axis))
             }
+            yamc::geo::SurfaceKind::Flux { offset, .. } if *offset == 0.0 => {
+                "FluxSurface".to_string()
+            }
+            yamc::geo::SurfaceKind::Flux { offset, .. } => {
+                format!("OffsetSurface(distance={offset:?})")
+            }
         };
         let boundary = match self.inner.boundary {
             BoundaryType::Transmission => "None",
@@ -98,7 +104,23 @@ impl PySurface {
         format!("Surface(id={id}, type={kind}, boundary={boundary})")
     }
 
+    /// Signed distance (cm) of a flux or offset surface from its flux
+    /// surface (0 for a FluxSurface), else None
+    #[getter]
+    pub fn distance(&self) -> Option<f64> {
+        match &self.inner.kind {
+            yamc::geo::SurfaceKind::Flux { offset, .. } => Some(*offset),
+            _ => None,
+        }
+    }
+
     /// Evaluate the surface equation at a point.
+    ///
+    /// For a flux surface the value is the signed distance (cm) from it.
+    /// For an offset surface it is the signed distance from the underlying
+    /// flux surface minus ``distance``: the distance to the layer outside
+    /// it and wherever the layer is not creased, an underestimate inside
+    /// the layer near a crease. The sign is always exact.
     ///
     /// Args:
     ///     point: Tuple of 3 floats (x, y, z)
@@ -106,8 +128,7 @@ impl PySurface {
     /// Returns:
     ///     Float value. Negative means inside/below, positive means outside/above, zero means on surface.
     pub fn evaluate(&self, point: (f64, f64, f64)) -> f64 {
-        // Call the core Rust implementation
-        self.inner.evaluate(point)
+        self.inner.evaluate_exact(point)
     }
 
     /// Offset of a plane perpendicular to the x-axis (axis='x'), else None
@@ -614,6 +635,94 @@ pub fn Torus(
             ));
         }
     };
+    if let Some(nm) = name {
+        surface = surface.with_name(nm);
+    }
+    Ok(PySurface {
+        inner: std::sync::Arc::new(surface),
+    })
+}
+
+/// Create a flux surface of a stellarator plasma shape.
+///
+/// The surface ``rho = const`` of the same Fourier-Zernike shape that drives
+/// ``yamc.sources.stellarator_source``, so a plasma cell and its source share
+/// one shape. ``.below`` is the plasma inside the surface, ``.above`` the rest
+/// of space, as for any other surface.
+///
+/// Args:
+///     shape: The plasma shape, a ``yamc.sources.StellaratorShape``
+///     rho: Flux label in (0, 1]; 1 (the default) is the plasma boundary
+///     surface_id: Optional surface ID
+///     boundary: Boundary condition - None (default, transmission) or 'vacuum'
+///     name: Optional surface name
+///
+/// Returns:
+///     A Surface object representing the flux surface
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[allow(non_snake_case)]
+#[pyo3(signature = (shape, rho = 1.0, surface_id = None, boundary = None, name = None))]
+pub fn FluxSurface(
+    #[gen_stub(override_type(type_repr = "sources.StellaratorShape"))] shape: &Bound<'_, PyAny>,
+    rho: f64,
+    surface_id: Option<usize>,
+    boundary: Option<&str>,
+    name: Option<String>,
+) -> PyResult<PySurface> {
+    let shape: PyRef<'_, yani_python::distribution::PyStellaratorShape> = shape.extract()?;
+    let boundary_validated = parse_boundary(boundary)?;
+    let mut surface = yamc::geometry::flux::stellarator_flux_surface(
+        &shape.inner,
+        rho,
+        surface_id,
+        boundary_validated,
+    )
+    .map_err(PyValueError::new_err)?;
+    if let Some(nm) = name {
+        surface = surface.with_name(nm);
+    }
+    Ok(PySurface {
+        inner: std::sync::Arc::new(surface),
+    })
+}
+
+/// Create the surface at a fixed distance outside (or inside) a flux surface.
+///
+/// The points at signed 3-D distance ``distance`` (cm) from the flux surface
+/// that ``base`` is built on, positive outwards: a first-wall or blanket
+/// layer of uniform thickness. Distances are measured from that flux surface,
+/// so an offset of an offset adds: ``OffsetSurface(OffsetSurface(plasma, 15),
+/// 2)`` is ``OffsetSurface(plasma, 17)``. Layers built from one flux surface
+/// are nested and never cross, even where outward normals meet (the layer is
+/// then creased, as a true distance offset is). ``.below`` is the side towards
+/// the plasma.
+///
+/// Args:
+///     base: A FluxSurface or OffsetSurface
+///     distance: Signed distance in cm, positive outwards
+///     surface_id: Optional surface ID
+///     boundary: Boundary condition - None (default, transmission) or 'vacuum'
+///     name: Optional surface name
+///
+/// Returns:
+///     A Surface object representing the offset surface
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[allow(non_snake_case)]
+#[pyo3(signature = (base, distance, surface_id = None, boundary = None, name = None))]
+pub fn OffsetSurface(
+    base: PyRef<'_, PySurface>,
+    distance: f64,
+    surface_id: Option<usize>,
+    boundary: Option<&str>,
+    name: Option<String>,
+) -> PyResult<PySurface> {
+    let boundary_validated = parse_boundary(boundary)?;
+    let mut surface = base
+        .inner
+        .offset(distance, surface_id, boundary_validated)
+        .map_err(PyValueError::new_err)?;
     if let Some(nm) = name {
         surface = surface.with_name(nm);
     }

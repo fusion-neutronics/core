@@ -156,8 +156,9 @@ pub(super) fn distance_to_geometry_exit(
 /// this test a flight can tunnel through a vacuum boundary, cross
 /// out-of-geometry space, and land in a disjoint body that surface
 /// tracking could never reach. The check is cheap: only the geometry's
-/// few precomputed vacuum surfaces are tested (closed-form
-/// `distance_to_surface` roots), not the cells. A crossing whose far
+/// few precomputed vacuum surfaces are tested, not the cells, and each
+/// search stops at the end of the flight or the nearest crossing found so
+/// far (which keeps free-form surfaces' marches short). A crossing whose far
 /// side is still inside defined geometry is NOT an exit and is skipped
 /// -- e.g. another body's infinite vacuum-plane extension slicing
 /// through the current body must not kill the flight -- so each
@@ -201,14 +202,15 @@ pub(super) fn woodcock_flight_exit(
             start[1] + direction[1] * traveled,
             start[2] + direction[2] * traveled,
         ];
-        // Nearest vacuum-surface root strictly ahead of `pos`.
-        // `distance_to_surface` already discards roots <= 1e-12 and
-        // parallel planes; the tolerance filter below also handles
+        // Nearest vacuum-surface root strictly ahead of `pos`, within the
+        // flight. `distance_to_surface` already discards roots <= 1e-12
+        // and parallel planes; the tolerance filter below also handles
         // particles born within epsilon of a boundary.
         let mut nearest: Option<(f64, usize)> = None;
         for (i, surface) in vacuum_surfaces.iter().enumerate() {
             let offset = (crossed == Some(i)).then_some(SURFACE_TOLERANCE);
-            if let Some(t) = surface.distance_to_surface_on(pos, direction, offset)
+            let cap = nearest.map_or(d_flight - traveled, |(n, _)| n);
+            if let Some(t) = surface.distance_to_surface_capped(pos, direction, offset, cap)
                 && t > SURFACE_TOLERANCE
                 && nearest.is_none_or(|(n, _)| t < n)
             {

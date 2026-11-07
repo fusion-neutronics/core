@@ -1,9 +1,9 @@
 //! Errors returned by the GPU translation layer.
 //!
 //! Every variant represents a feature of yamc's transport that the GPU
-//! kernel doesn't support. The `compute='auto'` dispatch will fall back
-//! to CPU when one of these fires; `compute='gpu'` (explicit) will
-//! propagate it as a Python exception with the variant's display string.
+//! kernel doesn't support. `compute='gpu'` (or a named adapter)
+//! propagates it as a Python `ValueError` with the variant's display
+//! string; the default `compute='cpu'` never translates.
 
 use std::fmt;
 
@@ -14,6 +14,9 @@ pub enum GpuTranslateError {
     /// A CSG cell is filled by a mesh body; the kernel has
     /// no mesh-in-cell tracking.
     MeshFillUnsupported,
+    /// A surface kind the kernel has no arm for yet: flux and offset
+    /// surfaces run on the CPU only for now.
+    SurfaceKindUnsupported { kind: &'static str },
     /// A cell uses a region that the GPU kernel can't represent.
     /// Examples: nested boolean operations beyond an AABB, infinite
     /// extents, regions whose bounding box can't be derived.
@@ -57,6 +60,10 @@ impl fmt::Display for GpuTranslateError {
             Self::MeshFillUnsupported => write!(
                 f,
                 "mesh-filled cells are not supported by the GPU kernel -- run with compute='cpu'"
+            ),
+            Self::SurfaceKindUnsupported { kind } => write!(
+                f,
+                "{kind} surfaces are not supported by the GPU kernel yet -- run with compute='cpu'"
             ),
             Self::CellRegionUnsupported { cell_id, reason } => match cell_id {
                 Some(id) => write!(f, "cell {id}: region not supported on GPU ({reason})"),
