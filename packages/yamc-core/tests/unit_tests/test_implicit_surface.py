@@ -86,6 +86,14 @@ def test_a_search_that_runs_out_finds_no_crossing():
         # Formulas that never change sign.
         ("x^2 + y^2 + z^2 + 1", "is never negative, so nothing would be below"),
         ("-x^2 - 1", "is never positive within 1048576 cm of the origin"),
+        # A formula that is zero wherever x < 0.
+        ("max(x, 0) * y", "is zero, or too small for its sign to mean anything"),
+        # One interval arithmetic cannot show is defined, and how to fix it.
+        (
+            "sqrt(x^2 - 2 * x + 2) - 5",
+            r"could not be shown never to take the square root .* write "
+            r"x\^2 - 2 \* x \+ 2 as \(x - 1\)\^2 \+ 1",
+        ),
     ],
 )
 def test_bad_formulas_fail_with_clear_messages(formula, message):

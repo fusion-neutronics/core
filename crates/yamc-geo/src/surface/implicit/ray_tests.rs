@@ -37,6 +37,11 @@ fn side(v: f64) -> f64 {
     }
 }
 
+/// The value of `tape` at `p`.
+fn value_at(tape: &Tape, p: [f64; 3]) -> f64 {
+    tape.eval(p, &mut Vec::new())
+}
+
 fn normalize(v: [f64; 3]) -> [f64; 3] {
     let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
     v.map(|c| c / n)
@@ -1036,12 +1041,14 @@ fn a_tangent_touch_is_no_crossing() {
 /// in neither half-space. Here `(x - 1) * 1e-320` underflows to 0 for
 /// `|x - 1| < 2.5e-4`; the crossing returned is the first point past that
 /// stretch strictly above, from either end of it, with the hint or not.
+/// (Construction refuses the formula, as it is that small everywhere; the
+/// search must still cope.)
 #[test]
 fn a_crossing_through_exact_zeros_lands_strictly_across() {
-    let f = ImplicitFormula::new("(x - 1) * 1e-320").unwrap();
+    let tape = tape_of("(x - 1) * 1e-320");
     let band = 2.47e-4;
-    assert_eq!(f.evaluate([1.0 + 0.99 * band, 0.0, 0.0]), 0.0);
-    assert!(f.evaluate([1.0 + 1.01 * band, 0.0, 0.0]) > 0.0);
+    assert_eq!(value_at(&tape, [1.0 + 0.99 * band, 0.0, 0.0]), 0.0);
+    assert!(value_at(&tape, [1.0 + 1.01 * band, 0.0, 0.0]) > 0.0);
     let mut rng = Rng(5);
     for _ in 0..200 {
         let o = [
@@ -1051,9 +1058,9 @@ fn a_crossing_through_exact_zeros_lands_strictly_across() {
         ];
         let u = towards(o, [rng.range(1.5, 3.0), rng.range(-1.0, 1.0), 0.0]);
         let hint = (rng.below(2) == 0).then_some(0.0);
-        let got = trace(f.tape(), None, o, u, hint, false, 10.0);
+        let got = trace(&tape, None, o, u, hint, false, 10.0);
         let t = got.crossing.expect("the ray crosses the plane");
-        let mut probe = Probe::new(f.tape(), o, u);
+        let mut probe = Probe::new(&tape, o, u);
         assert!(
             probe.g(t) > 0.0,
             "from {o:?} along {u:?}: {t} is not across"

@@ -13,7 +13,11 @@
 //! where one is possible proves nothing. Where the formula is used it must
 //! also have no pole (a division by a value that can be zero), whose sign
 //! flips with no surface there. An overflow to an infinity of the right
-//! sign is allowed.
+//! sign is allowed. Nor may it be zero throughout some part of the region,
+//! or so small there that its sign is the noise of an underflow (`max(x,
+//! 0) * y`, say, for every `x < 0`), as the points there would be on
+//! neither side of the surface; such a part is refused where interval
+//! arithmetic shows it.
 //!
 //! The box: `f > 0` is proved on the six slabs between the cube
 //! `[-w, w]^3` and the world's faces, for the smallest power of two `w`
@@ -49,6 +53,8 @@ const FAULT_DEPTH: u32 = 40;
 const SIGN_DEPTH: u32 = 12;
 /// Cells either search examines.
 const CHECK_BUDGET: usize = 16_384;
+/// Cells the search for a region where the formula is zero examines.
+const FLAT_BUDGET: usize = 4_096;
 
 /// An axis-aligned box `[lo, hi]`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -314,24 +320,32 @@ pub(super) enum Problem {
         fault: Fault,
         at: [f64; 3],
     },
+    /// Slot `slot` could not be shown never to give NaN or divide by zero
+    /// before the check's budget ran out.
+    Unproved { slot: usize, fault: Fault },
+    /// `f` is zero, or smaller than the smallest normal number, throughout
+    /// a region around `at`.
+    Flat { at: [f64; 3] },
     /// `f >= 0` throughout: nothing is below the surface.
     NeverBelow,
     /// `f <= 0` throughout: nothing is above the surface.
     NeverAbove,
 }
 
-/// Check that `tape` is defined and has no pole throughout `region`, and
-/// takes both signs in it (only negative ones need finding if `above` is
-/// known).
+/// Check that `tape` is defined and has no pole throughout `region`, takes
+/// both signs in it (only negative ones need finding if `above` is known),
+/// and is not zero throughout any part of it found.
 pub(super) fn validate(tape: &Tape, region: Cell, above: bool) -> Result<(), Problem> {
     defined(tape, region)?;
-    signs(tape, region, above)
+    signs(tape, region, above)?;
+    flat(tape, region)
 }
 
 /// Refine an octree, depth first, wherever [`check`] finds a possible NaN
 /// or pole, until every cell is clear; refuse if one is left at the finest
-/// level or when the budget runs out. The cell nearer the region's centre
-/// is refined first, so a fault is reported at a point of it near there.
+/// level (a fault there) or when the budget runs out (none shown, but none
+/// ruled out). The cell nearer the region's centre is refined first, so a
+/// fault is reported at a point of it near there.
 fn defined(tape: &Tape, region: Cell) -> Result<(), Problem> {
     let centre = region.centre();
     let distance = |c: &Cell| {
@@ -347,16 +361,49 @@ fn defined(tape: &Tape, region: Cell) -> Result<(), Problem> {
         let Err((slot, fault)) = check(tape, cell.intervals(), true, &mut s) else {
             continue;
         };
-        if depth == FAULT_DEPTH || examined >= CHECK_BUDGET {
+        if depth == FAULT_DEPTH {
             return Err(Problem::Fault {
                 slot,
                 fault,
                 at: cell.centre(),
             });
         }
+        if examined >= CHECK_BUDGET {
+            return Err(Problem::Unproved { slot, fault });
+        }
         let mut children = cell.children();
         children.sort_by(|a, b| distance(b).total_cmp(&distance(a)));
         stack.extend(children.map(|c| (c, depth + 1)));
+    }
+    Ok(())
+}
+
+/// Look, breadth first, for a cell throughout which `tape` is zero or so
+/// small that its sign is the noise of an underflow (its enclosure holds 0
+/// and is within the smallest normal number of it): points there would be
+/// on neither side of the surface, or on one by chance. Only the cells
+/// whose enclosure holds 0 are refined, and the formula is accepted when
+/// the budget runs out. `tape` is known to be defined throughout `region`,
+/// so its plain enclosures hold.
+fn flat(tape: &Tape, region: Cell) -> Result<(), Problem> {
+    let mut s = Vec::new();
+    let mut queue = VecDeque::from([(region, 0)]);
+    let mut examined = 0;
+    while let Some((cell, depth)) = queue.pop_front() {
+        if examined == FLAT_BUDGET {
+            break;
+        }
+        examined += 1;
+        let f = tape.eval_interval(cell.intervals(), &mut s);
+        if !f.has_zero() {
+            continue;
+        }
+        if f.magnitude() < f64::MIN_POSITIVE {
+            return Err(Problem::Flat { at: cell.centre() });
+        }
+        if depth < FAULT_DEPTH {
+            queue.extend(cell.children().map(|c| (c, depth + 1)));
+        }
     }
     Ok(())
 }

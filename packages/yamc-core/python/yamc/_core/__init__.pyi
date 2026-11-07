@@ -7712,10 +7712,15 @@ def ImplicitSurface(formula: builtins.str, *, surface_id: typing.Optional[builti
     jump in sign would be a crossing with no surface there. A formula is
     refused with a ValueError that says where it goes wrong if it does not
     parse, if it can be undefined (the square root or logarithm of a
-    negative number, ``0 / 0``) or divide by zero where it is used, or if
-    it never changes sign there. It is kept in a canonical form
-    (``Surface.formula``) that reads back to the same surface, and its
-    functions give the same results on every platform.
+    negative number, ``0 / 0``) or divide by zero where it is used, if it is
+    shown never to change sign there, or if it is shown to be zero
+    throughout some part of that region (as ``max(x, 0) * y`` is wherever
+    ``x < 0``), whose points would be on neither side of the surface. These
+    checks use interval arithmetic, which loses track of a square written
+    out: write ``(x - 1)^2 + 1`` rather than ``x^2 - 2 * x + 2``, or the
+    formula can be refused as one not shown to be defined. It is kept in a
+    canonical form (``Surface.formula``) that reads back to the same
+    surface, and its functions give the same results on every platform.
     
     A box holding everything below the surface is proved from the formula
     where possible (``bounding_box_inside``). A formula with none, such as a

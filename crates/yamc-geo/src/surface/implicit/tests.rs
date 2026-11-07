@@ -977,18 +977,84 @@ fn formulas_undefined_where_they_are_used_are_refused() {
     }
     // Where: the point of the pole nearest the middle of the region checked.
     let message = refusal("1 / (x - 1) - 2");
-    let near = message.split("near (").nth(1).unwrap();
-    let at: Vec<f64> = near
+    let at = place(&message, "near (");
+    assert!(
+        (at[0] - 1.0).abs() < 1e-5 && at[1].abs() < 1e-5 && at[2].abs() < 1e-5,
+        "{message}"
+    );
+}
+
+/// The point `message` gives after `marker`, as `(x, y, z)`.
+fn place(message: &str, marker: &str) -> [f64; 3] {
+    let after = message.split(marker).nth(1).unwrap();
+    let at: Vec<f64> = after
         .split(')')
         .next()
         .unwrap()
         .split(", ")
         .map(|v| v.parse().unwrap())
         .collect();
-    assert!(
-        (at[0] - 1.0).abs() < 1e-5 && at[1].abs() < 1e-5 && at[2].abs() < 1e-5,
-        "{message}"
-    );
+    [at[0], at[1], at[2]]
+}
+
+#[test]
+fn formulas_that_cannot_be_shown_to_be_defined_say_so() {
+    // Each is defined everywhere, (x - 1)^2 + 1 and (x - z)^2 + y^2 + 1
+    // written out, but interval arithmetic cannot show it with cells as
+    // coarse as the check can afford: no point is named, and the message
+    // says how to write the formula instead.
+    for formula in [
+        "sqrt(x^2 - 2 * x + 2) - 5",
+        "log(x^2 - 2 * x + 2) - 1",
+        "sqrt(x^2 + y^2 + z^2 - 2 * x * z + 1) - 3",
+    ] {
+        let message = refusal(formula);
+        assert!(
+            message.contains("could not be shown never to")
+                && message.contains("write x^2 - 2 * x + 2 as (x - 1)^2 + 1")
+                && !message.contains("near ("),
+            "{formula}: {message}"
+        );
+    }
+    // Written as sums of squares they are accepted.
+    for formula in ["sqrt((x - 1)^2 + 1) - 5", "sqrt((x - z)^2 + y^2 + 1) - 3"] {
+        if let Err(e) = ImplicitFormula::new(formula) {
+            panic!("{formula}: {e}");
+        }
+    }
+}
+
+#[test]
+fn formulas_zero_throughout_a_region_are_refused() {
+    for formula in [
+        // Zero wherever x < 0.
+        "max(x, 0) * y",
+        // Zero in the shell between radii 1 and 2, below inside it and
+        // above outside it.
+        "max(sqrt(x^2 + y^2 + z^2) - 2, min(sqrt(x^2 + y^2 + z^2) - 1, 0))",
+        // exp underflows to 0 far from the x axis.
+        "x * exp(-(y^2 + z^2))",
+        // Below 2.2e-308 within 2^20 cm of the origin.
+        "(x - 1) * 1e-320",
+    ] {
+        let message = refusal(formula);
+        assert!(
+            message.contains("is zero, or too small for its sign to mean anything"),
+            "{formula}: {message}"
+        );
+        // A point of that region.
+        let at = place(&message, "around (");
+        assert!(
+            value(&tape_of(formula), at).abs() < f64::MIN_POSITIVE,
+            "{formula}: {message}"
+        );
+    }
+    // Zero only on planes, or small everywhere but not that small: fine.
+    for formula in ["x^2 * y", "(x - 1) * 1e-300"] {
+        if let Err(e) = ImplicitFormula::new(formula) {
+            panic!("{formula}: {e}");
+        }
+    }
 }
 
 #[test]

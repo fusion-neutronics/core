@@ -31,8 +31,10 @@
 //!   and free of poles (never a division by zero, whose sign flips with no
 //!   surface there) throughout its bounding box, or, with no box, within
 //!   [`WORLD`] of the origin; an overflow to an infinity is allowed;
-//! - one that is never negative there (nothing below the surface) or, with
-//!   no box, never positive there.
+//! - one shown to be zero, or below the smallest normal number, throughout
+//!   some part of that region, whose points would be on neither side;
+//! - one shown never to be negative there (nothing below the surface) or,
+//!   with no box, never to be positive there.
 //!
 //! The bounding box is proved by interval arithmetic too (see `bounds`);
 //! a periodic field, a plane or a twist gets none, and the cells using it
@@ -120,17 +122,21 @@ impl ImplicitFormula {
             Extent::Unbounded => bounds::validate(tape, Cell::cube(WORLD), false).map(|()| None),
             Extent::Empty => Err(Problem::NeverBelow),
         };
+        // What slot `slot` can do wrong, and the formula node that made it.
+        let explain = |slot: usize, fault: Fault| {
+            let what = match (tape.ops[slot], fault) {
+                (Op::Sqrt(_), _) => "take the square root of a negative number",
+                (Op::Log(_), _) => "take the logarithm of a negative number",
+                (Op::Div(..), Fault::Undefined) => "divide zero by zero",
+                (Op::Pow(..), Fault::Pole) => "raise zero to a negative power",
+                (_, Fault::Pole) => "divide by zero",
+                (_, Fault::Undefined) => "be undefined (NaN) after an overflow",
+            };
+            (what, compiled.origin[slot])
+        };
         let bounding_box = checked.map_err(|problem| match problem {
             Problem::Fault { slot, fault, at: p } => {
-                let node = compiled.origin[slot];
-                let what = match (tape.ops[slot], fault) {
-                    (Op::Sqrt(_), _) => "take the square root of a negative number",
-                    (Op::Log(_), _) => "take the logarithm of a negative number",
-                    (Op::Div(..), Fault::Undefined) => "divide zero by zero",
-                    (Op::Pow(..), Fault::Pole) => "raise zero to a negative power",
-                    (_, Fault::Pole) => "divide by zero",
-                    (_, Fault::Undefined) => "be undefined (NaN) after an overflow",
-                };
+                let (what, node) = explain(slot, fault);
                 parse::locate(
                     formula,
                     at(node),
@@ -144,6 +150,28 @@ impl ImplicitFormula {
                     ),
                 )
             }
+            Problem::Unproved { slot, fault } => {
+                let (what, node) = explain(slot, fault);
+                parse::locate(
+                    formula,
+                    at(node),
+                    &format!(
+                        "{} could not be shown never to {what} (a surface's formula must be \
+                         shown to be defined, with no poles, wherever it is used); interval \
+                         arithmetic, which checks it, loses track of a square written out: \
+                         write x^2 - 2 * x + 2 as (x - 1)^2 + 1, say",
+                        ast.print(node)
+                    ),
+                )
+            }
+            Problem::Flat { at: p } => format!(
+                "{text} is zero, or too small for its sign to mean anything (below \
+                 2.2e-308), throughout a region around ({}, {}, {}), whose points would be on \
+                 neither side of the surface",
+                short(p[0]),
+                short(p[1]),
+                short(p[2])
+            ),
             Problem::NeverBelow => format!(
                 "{text} is never negative, so nothing would be below the surface (below is \
                  where the formula is negative)"
