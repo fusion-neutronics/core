@@ -912,7 +912,7 @@ pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()>
 
 /// `time` as a manifest's `created` holds it, `2026-10-12T23:24:22Z`: UTC to
 /// the second, as the publishing scripts write it.
-fn utc_timestamp(time: SystemTime) -> Result<String, String> {
+pub fn utc_timestamp(time: SystemTime) -> Result<String, String> {
     let seconds = time
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "the release's creation time is before 1970, so the clock is wrong")?
