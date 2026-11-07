@@ -10,13 +10,16 @@
 //! were limited to. It needs no NJOY and takes minutes, so a subset build
 //! never publishes a chain cut down to its subset.
 //!
-//! Decay, reactions and fission yields come from one call, which assembles
-//! the network from the library's own decay, fission yield and neutron
-//! evaluations. Nothing of another library is used: a library without decay
-//! or fission yield data of its own has no chain parts in its recipe.
+//! Decay, reactions and fission yields come from one call, each subsection
+//! from the library's own sublibrary alone: decay from its decay
+//! evaluations, reactions from its neutron evaluations, fission yields from
+//! its yields. Nothing of another library is used.
 //!
 //! Branching comes from a second call, scoped to the parents of the
-//! reactions subsection so its curves line up with the network.
+//! reactions subsection so its curves line up with the network. A library
+//! with no decay data of its own writes its excited product levels as it
+//! gives them, and a run names their isomers against the decay data it is
+//! given.
 //!
 //! The scalar isomeric ratios some chains apply to (n,gamma) from an assumed
 //! reactor spectrum are not applied: a channel's branching is the
@@ -100,33 +103,32 @@ pub fn build(
     let yields = files_of(materials, Sublibrary::FissionYields);
     let mut chain = Chain::default();
 
-    // The network, when a part of it is wanted, and also when only the
-    // branching is, since the network's parents are what the branching is
-    // scoped to.
-    let can_assemble = !neutron.is_empty() && !decay.is_empty() && !yields.is_empty();
+    // The network's subsections, each from its own sublibrary alone, and the
+    // reactions also when only the branching is wanted: their parents are
+    // what the branching is scoped to.
     let mut network: Vec<String> = wanted
         .iter()
         .filter(|p| matches!(p, Part::Decay | Part::Reactions | Part::FissionYields))
         .map(|p| p.name().to_string())
         .collect();
-    if wanted.contains(&Part::Branching)
-        && can_assemble
-        && !network.iter().any(|n| n == Part::Reactions.name())
-    {
+    if wanted.contains(&Part::Branching) && !network.iter().any(|n| n == Part::Reactions.name()) {
         network.push(Part::Reactions.name().to_string());
     }
-    if !network.is_empty() {
-        if !can_assemble {
+    for (part, files, what) in [
+        (Part::Decay, &decay, "decay"),
+        (Part::Reactions, &neutron, "neutron"),
+        (Part::FissionYields, &yields, "fission yield"),
+    ] {
+        if network.iter().any(|n| n == part.name()) && files.is_empty() {
             return Err(format!(
-                "{}: the chain is assembled from neutron, decay and fission yield \
-                 evaluations, and the sources hold {} neutron, {} decay and {} fission \
-                 yield files",
+                "{}: the {} subsection is built from {what} evaluations, and the sources \
+                 hold none",
                 recipe.keyword,
-                neutron.len(),
-                decay.len(),
-                yields.len()
+                part.name()
             ));
         }
+    }
+    if !network.is_empty() {
         chain.nuclides = yani_convert::convert_transmutation_files(
             &strings(&decay),
             &strings(&yields),
@@ -143,25 +145,11 @@ pub fn build(
     }
 
     if wanted.contains(&Part::Branching) {
-        if decay.is_empty() {
-            return Err(format!(
-                "{}: branching maps product levels to isomers with decay data, and the \
-                 sources hold none",
-                recipe.keyword
-            ));
-        }
+        // With no decay data of its own, the library's excited levels are
+        // written as it gives them, and a run names their isomers against the
+        // decay data it is given.
         let reactions = staging.join("reactions").join("reactions.arrow");
-        let parents = if reactions.is_file() {
-            reaction_parents(&reactions)?
-        } else {
-            // No network: every isotopic evaluation is a parent. An element
-            // evaluation (A = 0) has no isomeric products.
-            materials
-                .iter()
-                .filter(|m| m.sublibrary == Sublibrary::Neutron && m.header.za % 1000 != 0)
-                .map(|m| m.name.clone())
-                .collect()
-        };
+        let parents = reaction_parents(&reactions)?;
         let inputs = branching_inputs(materials, &parents, &staging.join("inputs"))?;
         chain.branching_parents = parents.len();
         yani_convert::convert_branching_files(

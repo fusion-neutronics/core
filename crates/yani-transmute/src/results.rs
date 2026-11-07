@@ -350,14 +350,14 @@ impl TransmutationResults {
         let Some(chain) = self.chain_gaps.clone() else {
             return material;
         };
-        let gaps = self
-            .data_gaps
-            .entry(material_id)
-            .or_insert_with(|| crate::data_gaps::DataGaps {
-                decay_library: self.decay_library.clone(),
-                volume: material.volume,
-                ..Default::default()
-            });
+        let gaps =
+            self.data_gaps
+                .entry(material_id)
+                .or_insert_with(|| crate::data_gaps::DataGaps {
+                    decay_library: self.decay_library.clone(),
+                    volume: material.volume,
+                    ..Default::default()
+                });
         let holds_one = chain
             .fate_unknown
             .keys()
@@ -371,7 +371,9 @@ impl TransmutationResults {
         }
         match material.to_sum_mode() {
             Ok(mut summed) => {
-                summed.nuclides.retain(|n, _| !chain.fate_unknown.contains_key(n));
+                summed
+                    .nuclides
+                    .retain(|n, _| !chain.fate_unknown.contains_key(n));
                 if let Some(order) = summed.nuclide_input_order.as_mut() {
                     order.retain(|n| !chain.fate_unknown.contains_key(n));
                 }
@@ -396,7 +398,10 @@ impl TransmutationResults {
 
     /// Add material state after a timestep.
     pub fn add_step(&mut self, material_id: u32, material: Material) {
-        let step = self.materials.get(&material_id).map_or(0, |m| m.len().saturating_sub(1));
+        let step = self
+            .materials
+            .get(&material_id)
+            .map_or(0, |m| m.len().saturating_sub(1));
         let dt = self.timesteps.get(step).copied().unwrap_or(0.0);
         let material = self.record_gaps(material_id, material, dt);
         self.materials

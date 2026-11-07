@@ -1160,10 +1160,12 @@ impl Chain {
         // sublibrary: each part says what its own evaluations say.
         let mut names: BTreeSet<&String> = decay_data.keys().collect();
         names.extend(fpy_data.keys());
+        // An element evaluation (A = 0) has no single residual for a
+        // reaction to leave, so it is no reactions parent.
         names.extend(
             q_values
                 .keys()
-                .filter(|name| zam(name).is_ok_and(|(z, _, _)| z > 0)),
+                .filter(|name| zam(name).is_ok_and(|(z, a, _)| z > 0 && a > 0)),
         );
         let mut parents: Vec<&String> = names.into_iter().collect();
         parents.sort_by_key(|name| zam(name).unwrap_or((0, 0, 0)));
@@ -1176,9 +1178,9 @@ impl Chain {
 
             if let Some(data) = decay_data.get(parent) {
                 nuclide.decay_evaluated = true;
-                let state = zam(parent).ok().and_then(|(z, a, m)| {
-                    isomers.get(&(z as i64, a as i64))?.get(&(m as i64))
-                });
+                let state = zam(parent)
+                    .ok()
+                    .and_then(|(z, a, m)| isomers.get(&(z as i64, a as i64))?.get(&(m as i64)));
                 nuclide.excitation_energy = state.and_then(|s| s.e_iso);
                 nuclide.level_index = state.map(|s| s.lis);
                 let half_life = data.half_life.map(|(t, _)| t).unwrap_or(0.0);

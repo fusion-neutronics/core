@@ -149,7 +149,7 @@ const BRANCH_STATE_COLUMNS: [&str; 9] = [
 
 /// The `level_route` labels the converter writes, one per
 /// `endf::radionuclide_production::LevelRoute`.
-const LEVEL_ROUTES: [&str; 7] = [
+const LEVEL_ROUTES: [&str; 8] = [
     "ground",
     "energy",
     "near_energy",
@@ -157,6 +157,7 @@ const LEVEL_ROUTES: [&str; 7] = [
     "single_isomer",
     "no_isomers",
     "unresolved",
+    "as_evaluated",
 ];
 
 impl<'a> BranchStateColumns<'a> {
@@ -1273,11 +1274,12 @@ pub fn parse_chain_parts_from_bytes(
                     })
                     .collect();
             let excitation = optional("excitation_energy");
-            let level_index = batch
-                .schema()
-                .index_of("level_index")
-                .ok()
-                .and_then(|idx| batch.column(idx).as_any().downcast_ref::<arrow_array::Int32Array>());
+            let level_index = batch.schema().index_of("level_index").ok().and_then(|idx| {
+                batch
+                    .column(idx)
+                    .as_any()
+                    .downcast_ref::<arrow_array::Int32Array>()
+            });
             for i in 0..batch.num_rows() {
                 let name = names.value(i).to_string();
                 let nuc = ensure_nuclide(&mut chain, &name);
@@ -1588,6 +1590,8 @@ fn overlay_branching(
         None => None,
     };
     let index = table.add_source(&section.source, library)?;
+    // The run's isomers, built on the first level that needs them.
+    let mut isomers: Option<endf::radionuclide_production::IsomerTable> = None;
     // The channels the sources before this one supplied, which this one does
     // not reach. Taken before any of its rows, so its own several rows of one
     // channel all land.
@@ -1640,10 +1644,43 @@ fn overlay_branching(
             if energy.is_empty() || energy.len() != values.len() {
                 continue;
             }
-            let (states, normalisation) = match &state_cols {
+            let (mut states, normalisation) = match &state_cols {
                 Some(columns) => columns.row(i, energy.len())?,
                 None => (Vec::new(), None),
             };
+
+            // A level written as the evaluation gives it, by a library with
+            // no decay data of its own, is named here against the decay data
+            // this run was given, with the converter's own rule, and the
+            // route recorded as the converter records it.
+            let mut target = target;
+            if let Some((z, a, lfs)) = endf::radionuclide_production::parse_placeholder(&target) {
+                let isomers = isomers.get_or_insert_with(|| isomer_table(chain));
+                let level_energy = states.first().map(|s| s.level_energy);
+                let energy = level_energy.filter(|&e| e > 0.0);
+                let resolved = endf::radionuclide_production::resolve_level(
+                    z,
+                    a,
+                    lfs,
+                    energy,
+                    isomers,
+                    endf::radionuclide_production::ISOMER_ENERGY_TOLERANCE,
+                );
+                let named = endf::gnds_name(z as u32, a as u32, resolved.liso as u32);
+                let booked = isomers
+                    .get(&(z, a))
+                    .and_then(|t| t.get(&resolved.liso))
+                    .and_then(|isomer| isomer.e_iso);
+                for state in states.iter_mut() {
+                    state.level_route = resolved.route.label().to_string();
+                    state.level_energy_difference = match (energy, booked) {
+                        (Some(e), Some(b)) => Some(e - b),
+                        _ => None,
+                    };
+                }
+                table.rename(index, &target, &named);
+                target = named;
+            }
 
             // Graft the metastable-production channel when the base
             // chain lacks it (see the branching block comment in
@@ -1676,20 +1713,35 @@ fn overlay_branching(
             }
 
             table.set_source(parent, &kind, index);
-            table
+            let curves = table
                 .curves_mut()
                 .entry(parent.to_string())
                 .or_default()
                 .entry(kind)
-                .or_default()
-                .push(BranchCurve {
+                .or_default();
+            // Two levels the run's decay data names as one state are one
+            // curve, summed as the converter sums its own duplicates.
+            match curves
+                .iter_mut()
+                .find(|c| c.target == target && c.quantity == quantity)
+            {
+                Some(existing) => {
+                    let (e, v) = sum_curves(&existing.energy, &existing.values, &energy, &values);
+                    existing.energy = e;
+                    existing.values = v;
+                    let mut merged = existing.states.to_vec();
+                    merged.extend(states);
+                    existing.states = merged.into();
+                }
+                None => curves.push(BranchCurve {
                     target,
                     quantity,
                     energy,
                     values,
                     states: states.into(),
                     normalisation,
-                });
+                }),
+            }
         }
     }
 
@@ -1706,6 +1758,64 @@ fn overlay_branching(
         );
     }
     Ok(())
+}
+
+/// The isomers of the decay data a chain was loaded with, as the converter's
+/// level matching reads them: per `(Z, A)`, each state's level index, half-life
+/// and excitation energy.
+fn isomer_table(
+    chain: &HashMap<String, ChainNuclide>,
+) -> endf::radionuclide_production::IsomerTable {
+    let mut table = endf::radionuclide_production::IsomerTable::new();
+    for nuc in chain.values().filter(|n| n.decay_evaluated) {
+        let Ok((z, a, m)) = endf::zam(&nuc.name) else {
+            continue;
+        };
+        table.entry((z as i64, a as i64)).or_default().insert(
+            m as i64,
+            endf::radionuclide_production::Isomer {
+                lis: nuc.level_index.unwrap_or(-1),
+                half_life: nuc.half_life,
+                e_iso: if m == 0 {
+                    Some(0.0)
+                } else {
+                    nuc.excitation_energy
+                },
+            },
+        );
+    }
+    table
+}
+
+/// Two branching curves summed on the union of their grids, each taken as
+/// zero outside its own range, as the converter sums duplicates. Both are
+/// lin-lin, which the converter makes every curve.
+fn sum_curves(e1: &[f64], v1: &[f64], e2: &[f64], v2: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let at = |e: &[f64], v: &[f64], x: f64| -> f64 {
+        if e.is_empty() || x < e[0] || x > e[e.len() - 1] {
+            return 0.0;
+        }
+        let i = e.partition_point(|&p| p <= x);
+        if i == 0 {
+            return v[0];
+        }
+        if i >= e.len() {
+            return v[e.len() - 1];
+        }
+        let (x0, x1) = (e[i - 1], e[i]);
+        if x1 == x0 {
+            return v[i];
+        }
+        v[i - 1] + (x - x0) / (x1 - x0) * (v[i] - v[i - 1])
+    };
+    let mut grid: Vec<f64> = e1.iter().chain(e2).copied().collect();
+    grid.sort_by(f64::total_cmp);
+    grid.dedup();
+    let values = grid
+        .iter()
+        .map(|&x| at(e1, v1, x) + at(e2, v2, x))
+        .collect();
+    (grid, values)
 }
 
 /// The `library` a subsection's `provenance.json` names, or `None` where it

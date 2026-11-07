@@ -232,30 +232,29 @@ pub(crate) fn candidates(reachable: &HashMap<String, ChainNuclide>) -> Candidate
     parents.sort_by(|a, b| a.0.cmp(b.0));
     let mut verdicts: HashMap<*const FissionYieldSet, Verdict> = HashMap::new();
     for (parent, set) in parents {
-        let verdict =
-            *verdicts
-                .entry(Arc::as_ptr(set))
-                .or_insert_with(|| match plan(set) {
-                    Plan::Draw {
+        let verdict = *verdicts
+            .entry(Arc::as_ptr(set))
+            .or_insert_with(|| match plan(set) {
+                Plan::Draw {
+                    terms,
+                    deviates,
+                    not_carried,
+                } => {
+                    out.evaluations.push(Evaluation {
+                        key: evaluation_key(set),
+                        nominal: Arc::clone(set),
                         terms,
                         deviates,
+                        parents: Vec::new(),
+                    });
+                    Verdict::Draw {
+                        evaluation: out.evaluations.len() - 1,
                         not_carried,
-                    } => {
-                        out.evaluations.push(Evaluation {
-                            key: evaluation_key(set),
-                            nominal: Arc::clone(set),
-                            terms,
-                            deviates,
-                            parents: Vec::new(),
-                        });
-                        Verdict::Draw {
-                            evaluation: out.evaluations.len() - 1,
-                            not_carried,
-                        }
                     }
-                    Plan::Without => Verdict::Without,
-                    Plan::Mismatch => Verdict::Mismatch,
-                });
+                }
+                Plan::Without => Verdict::Without,
+                Plan::Mismatch => Verdict::Mismatch,
+            });
         match verdict {
             Verdict::Draw {
                 evaluation,

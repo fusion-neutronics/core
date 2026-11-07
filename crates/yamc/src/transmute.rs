@@ -497,7 +497,9 @@ impl Model {
         // inventory and what the decay data has no record for.
         results.set_chain(
             Arc::clone(&chain),
-            yamc_nuclide::config::Config::global().transmutation_decay_data.clone(),
+            yamc_nuclide::config::Config::global()
+                .transmutation_decay_data
+                .clone(),
         );
         results.product_screening = screenings;
 

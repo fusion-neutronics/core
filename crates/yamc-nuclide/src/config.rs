@@ -702,9 +702,15 @@ mod transmutation_sources_tests {
         assert!(message.contains("There is no default library"), "{message}");
         assert!(message.contains("a local folder"), "{message}");
         // No package prefix, so it reads the same from either package.
-        assert!(!message.contains("yamc.") && !message.contains("yani."), "{message}");
+        assert!(
+            !message.contains("yamc.") && !message.contains("yani."),
+            "{message}"
+        );
         assert!(!message.contains("irdff-ii"), "{message}");
-        assert!(message.contains("or to False if nothing in the material fissions"), "{message}");
+        assert!(
+            message.contains("or to False if nothing in the material fissions"),
+            "{message}"
+        );
         // A decay calculation has no use for the False of the other two.
         let decay = Config::new()
             .transmutation_sources(ChainUse::Decay)

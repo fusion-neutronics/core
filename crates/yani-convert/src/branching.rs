@@ -924,22 +924,42 @@ impl BranchingExtractor {
                         .push(format!("{parent} MT{mt} level {}: {why}", s.lfs));
                     continue;
                 };
-                let resolved = endf::radionuclide_production::resolve_level(
-                    z,
-                    a,
-                    s.lfs,
-                    s.excitation_energy(),
-                    isomers,
-                    tol_ev,
-                );
+                // A library with no decay data of its own has nothing to name
+                // an excited level's isomer by: the level is written as the
+                // evaluation gives it, and a run names it against the decay
+                // data it is given. Matching it against another library's
+                // decay data here would build that library into this one.
+                let as_evaluated = isomers.is_empty() && s.lfs > 0;
+                let resolved = if as_evaluated {
+                    endf::radionuclide_production::ResolvedLevel {
+                        liso: 0,
+                        route: LevelRoute::AsEvaluated,
+                        conflicting_liso: None,
+                    }
+                } else {
+                    endf::radionuclide_production::resolve_level(
+                        z,
+                        a,
+                        s.lfs,
+                        s.excitation_energy(),
+                        isomers,
+                        tol_ev,
+                    )
+                };
                 let liso = resolved.liso;
-                let target = endf::gnds_name(z as u32, a as u32, liso as u32);
+                let target = if as_evaluated {
+                    endf::radionuclide_production::placeholder(z, a, s.lfs)
+                } else {
+                    endf::gnds_name(z as u32, a as u32, liso as u32)
+                };
                 // The tape's own value, kept as a fact: MF=8's ELFS where it
                 // gives one and QM - QI otherwise. excitation_energy() reads
                 // it (an unstated excited level is None there), which is not
                 // what this column records.
                 let level_energy = s.elfs.unwrap_or(s.qm - s.qi);
-                let booked_energy = if liso == 0 {
+                let booked_energy = if as_evaluated {
+                    None
+                } else if liso == 0 {
                     Some(0.0)
                 } else {
                     isomers
@@ -949,10 +969,10 @@ impl BranchingExtractor {
                 };
                 let level_energy_difference =
                     level_energy_difference(s.lfs, level_energy, booked_energy);
-                if liso > 0 {
+                if liso > 0 || as_evaluated {
                     metastable.insert(target.clone());
                 }
-                if s.lfs > 0 {
+                if s.lfs > 0 && !as_evaluated {
                     *stats
                         .level_routes
                         .entry(resolved.route.label().to_string())

@@ -289,16 +289,12 @@ fn particle(part: Part) -> Option<Particle> {
     }
 }
 
-/// The sublibraries `parts` are built from.
-fn sublibraries(recipe: &Recipe, parts: &[Part]) -> BTreeSet<Sublibrary> {
-    let has_yields = recipe
-        .sources
-        .iter()
-        .any(|s| s.sublibrary == Sublibrary::FissionYields);
+/// The sublibraries `parts` are built from: each part from its own.
+fn sublibraries(_recipe: &Recipe, parts: &[Part]) -> BTreeSet<Sublibrary> {
     let mut out = BTreeSet::new();
     for part in parts {
         match part {
-            Part::Neutron => {
+            Part::Neutron | Part::Reactions | Part::Branching => {
                 out.insert(Sublibrary::Neutron);
             }
             Part::Photon => {
@@ -307,19 +303,11 @@ fn sublibraries(recipe: &Recipe, parts: &[Part]) -> BTreeSet<Sublibrary> {
             Part::Photonuclear => {
                 out.insert(Sublibrary::Photonuclear);
             }
-            Part::Decay | Part::Reactions | Part::FissionYields => {
-                out.extend([
-                    Sublibrary::Neutron,
-                    Sublibrary::Decay,
-                    Sublibrary::FissionYields,
-                ]);
+            Part::Decay => {
+                out.insert(Sublibrary::Decay);
             }
-            Part::Branching => {
-                out.extend([Sublibrary::Neutron, Sublibrary::Decay]);
-                // Scoped to the network's parents, when there is a network.
-                if has_yields {
-                    out.insert(Sublibrary::FissionYields);
-                }
+            Part::FissionYields => {
+                out.insert(Sublibrary::FissionYields);
             }
         }
     }
@@ -566,36 +554,28 @@ mod tests {
     fn parts_default_to_the_release_and_refuse_what_it_does_not_carry() {
         let tendl = recipe::recipe("tendl-2025").unwrap();
         assert_eq!(parts(tendl, None).unwrap(), tendl.parts);
-        // TENDL has no decay data, so it carries no chain part.
-        let err = parts(tendl, Some(&[Part::Reactions])).unwrap_err();
-        assert!(err.contains("no reactions part"), "{err}");
+        // TENDL has no decay data of its own, so it carries no decay part.
+        let err = parts(tendl, Some(&[Part::Decay])).unwrap_err();
+        assert!(err.contains("no decay part"), "{err}");
         let got = parts(
             tendl,
-            Some(&[Part::Photonuclear, Part::Neutron, Part::Neutron]),
+            Some(&[Part::Branching, Part::Neutron, Part::Neutron]),
         )
         .unwrap();
-        assert_eq!(got, [Part::Neutron, Part::Photonuclear]);
+        assert_eq!(got, [Part::Neutron, Part::Branching]);
         assert!(parts(tendl, Some(&[])).is_err());
-        let irdff = recipe::recipe("irdff-ii").unwrap();
-        let err = parts(irdff, None).unwrap_err();
-        assert!(err.contains("takes decay data"), "{err}");
     }
 
     #[test]
-    fn chain_parts_fetch_what_the_chain_is_assembled_from() {
+    fn each_part_fetches_its_own_sublibrary() {
         let endf = recipe::recipe("endf-b8.1").unwrap();
         let got: Vec<_> = sublibraries(endf, &[Part::Branching]).into_iter().collect();
-        assert_eq!(
-            got,
-            [
-                Sublibrary::Neutron,
-                Sublibrary::Decay,
-                Sublibrary::FissionYields
-            ]
-        );
-        let tendl = recipe::recipe("tendl-2025").unwrap();
-        let got: Vec<_> = sublibraries(tendl, tendl.parts).into_iter().collect();
-        assert_eq!(got, [Sublibrary::Neutron, Sublibrary::Photonuclear]);
+        assert_eq!(got, [Sublibrary::Neutron]);
+        let got: Vec<_> = sublibraries(endf, &[Part::Decay]).into_iter().collect();
+        assert_eq!(got, [Sublibrary::Decay]);
+        let irdff = recipe::recipe("irdff-ii").unwrap();
+        let got: Vec<_> = sublibraries(irdff, irdff.parts).into_iter().collect();
+        assert_eq!(got, [Sublibrary::Neutron]);
     }
 
     #[test]

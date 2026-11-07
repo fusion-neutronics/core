@@ -75,7 +75,9 @@ pub struct DataGaps {
 impl DataGaps {
     /// Whether the answer rests on nothing the data lacks.
     pub fn is_empty(&self) -> bool {
-        self.fate_unknown.values().all(|f| f.atoms_per_barn_cm.iter().all(|&a| a == 0.0))
+        self.fate_unknown
+            .values()
+            .all(|f| f.atoms_per_barn_cm.iter().all(|&a| a == 0.0))
             && self.fission_without_yields.is_empty()
     }
 
@@ -169,14 +171,26 @@ impl DataGaps {
     ) {
         for (name, by) in &chain.fate_unknown {
             let atoms = densities.remove(name).unwrap_or(0.0);
-            let entry = self.fate_unknown.entry(name.clone()).or_insert_with(|| FateUnknown {
-                produced_by: by.clone(),
-                ..Default::default()
-            });
+            let entry = self
+                .fate_unknown
+                .entry(name.clone())
+                .or_insert_with(|| FateUnknown {
+                    produced_by: by.clone(),
+                    ..Default::default()
+                });
             if let Some(&before) = entry.atoms_per_barn_cm.last() {
-                let rate = if dt > 0.0 { ((atoms - before) / dt).max(0.0) } else { 0.0 };
+                let rate = if dt > 0.0 {
+                    ((atoms - before) / dt).max(0.0)
+                } else {
+                    0.0
+                };
                 entry.production_rate.push(rate);
-                let bound = entry.activity_bound.last().copied().unwrap_or(0.0).max(rate);
+                let bound = entry
+                    .activity_bound
+                    .last()
+                    .copied()
+                    .unwrap_or(0.0)
+                    .max(rate);
                 entry.activity_bound.push(bound);
             } else {
                 entry.activity_bound.push(0.0);
@@ -212,57 +226,18 @@ impl DataGaps {
         }
         let steps = self.unknown_fission_share.len();
         for (parent, rate) in by_parent {
-            let entry = self.fission_without_yields.entry(parent.to_string()).or_default();
+            let entry = self
+                .fission_without_yields
+                .entry(parent.to_string())
+                .or_default();
             entry.fission_rate.resize(steps, 0.0);
             entry.fission_rate.push(rate);
         }
         for entry in self.fission_without_yields.values_mut() {
             entry.fission_rate.resize(steps + 1, 0.0);
         }
-        self.unknown_fission_share.push(if total > 0.0 { unknown / total } else { 0.0 });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_activity_bound_is_the_largest_production_rate_so_far() {
-        let chain = ChainGaps {
-            fate_unknown: BTreeMap::from([("Lu185".to_string(), vec!["Hf186 (n,np)".to_string()])]),
-            ..Default::default()
-        };
-        let mut gaps = DataGaps::default();
-        let state = |a: f64| HashMap::from([("Lu185".to_string(), a), ("W186".to_string(), 1.0)]);
-        let mut s0 = state(0.0);
-        gaps.record_state(&chain, &mut s0, 0.0);
-        assert!(!s0.contains_key("Lu185"), "taken out of the inventory");
-        gaps.record_state(&chain, &mut state(10.0), 10.0); // 1 per s
-        gaps.record_state(&chain, &mut state(40.0), 10.0); // 3 per s
-        gaps.record_state(&chain, &mut state(45.0), 10.0); // 0.5 per s, cooling
-        let lu = &gaps.fate_unknown["Lu185"];
-        assert_eq!(lu.production_rate, [1.0, 3.0, 0.5]);
-        assert_eq!(lu.activity_bound, [0.0, 1.0, 3.0, 3.0]);
-        assert_eq!(gaps.produced()[0].0, "Lu185");
-        assert!(!gaps.is_empty());
-    }
-
-    #[test]
-    fn fission_without_yields_is_a_share_of_the_whole() {
-        let chain = ChainGaps {
-            without_yields: BTreeSet::from(["U238".to_string()]),
-            ..Default::default()
-        };
-        let rates: EdgeRates = HashMap::from([
-            ("U235".to_string(), HashMap::from([("fission".to_string(), vec![(None, 3.0)])])),
-            ("U238".to_string(), HashMap::from([("fission".to_string(), vec![(None, 1.0)])])),
-        ]);
-        let start = HashMap::from([("U235".to_string(), 1.0), ("U238".to_string(), 1.0)]);
-        let mut gaps = DataGaps::default();
-        gaps.record_fission(&chain, &rates, &start);
-        assert_eq!(gaps.unknown_fission_share, [0.25]);
-        assert_eq!(gaps.fission_without_yields["U238"].fission_rate, [1.0]);
+        self.unknown_fission_share
+            .push(if total > 0.0 { unknown / total } else { 0.0 });
     }
 }
 
@@ -309,7 +284,11 @@ impl crate::results::TransmutationResults {
                         .sum::<f64>()
                 })
                 .unwrap_or(0.0);
-            let share = if activity + bound > 0.0 { bound / (activity + bound) } else { 1.0 };
+            let share = if activity + bound > 0.0 {
+                bound / (activity + bound)
+            } else {
+                1.0
+            };
             if worst.is_none_or(|(w, _)| share > w) {
                 worst = Some((share, *id));
             }
@@ -333,7 +312,11 @@ impl crate::results::TransmutationResults {
                 nuclides.len(),
                 if nuclides.len() == 1 { "" } else { "s" },
                 names.join(", "),
-                if more > 0 { format!(" and {more} more") } else { String::new() },
+                if more > 0 {
+                    format!(" and {more} more")
+                } else {
+                    String::new()
+                },
                 percent(share),
             ));
         }
@@ -344,7 +327,11 @@ impl crate::results::TransmutationResults {
         let mut share = 0.0f64;
         for gaps in self.data_gaps.values() {
             parents.extend(gaps.fission_without_yields.keys().map(String::as_str));
-            share = gaps.unknown_fission_share.iter().copied().fold(share, f64::max);
+            share = gaps
+                .unknown_fission_share
+                .iter()
+                .copied()
+                .fold(share, f64::max);
         }
         if share > 0.0 {
             let names: Vec<&str> = parents.iter().take(SHOWN).copied().collect();
@@ -354,7 +341,11 @@ impl crate::results::TransmutationResults {
                  ({}{}); the products of that fission are not in the results",
                 percent(share),
                 names.join(", "),
-                if more > 0 { format!(" and {more} more") } else { String::new() },
+                if more > 0 {
+                    format!(" and {more} more")
+                } else {
+                    String::new()
+                },
             ));
         }
 
@@ -378,5 +369,54 @@ fn percent(share: f64) -> String {
         format!("{p:.2e}%")
     } else {
         "0%".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_activity_bound_is_the_largest_production_rate_so_far() {
+        let chain = ChainGaps {
+            fate_unknown: BTreeMap::from([("Lu185".to_string(), vec!["Hf186 (n,np)".to_string()])]),
+            ..Default::default()
+        };
+        let mut gaps = DataGaps::default();
+        let state = |a: f64| HashMap::from([("Lu185".to_string(), a), ("W186".to_string(), 1.0)]);
+        let mut s0 = state(0.0);
+        gaps.record_state(&chain, &mut s0, 0.0);
+        assert!(!s0.contains_key("Lu185"), "taken out of the inventory");
+        gaps.record_state(&chain, &mut state(10.0), 10.0); // 1 per s
+        gaps.record_state(&chain, &mut state(40.0), 10.0); // 3 per s
+        gaps.record_state(&chain, &mut state(45.0), 10.0); // 0.5 per s, cooling
+        let lu = &gaps.fate_unknown["Lu185"];
+        assert_eq!(lu.production_rate, [1.0, 3.0, 0.5]);
+        assert_eq!(lu.activity_bound, [0.0, 1.0, 3.0, 3.0]);
+        assert_eq!(gaps.produced()[0].0, "Lu185");
+        assert!(!gaps.is_empty());
+    }
+
+    #[test]
+    fn fission_without_yields_is_a_share_of_the_whole() {
+        let chain = ChainGaps {
+            without_yields: BTreeSet::from(["U238".to_string()]),
+            ..Default::default()
+        };
+        let rates: EdgeRates = HashMap::from([
+            (
+                "U235".to_string(),
+                HashMap::from([("fission".to_string(), vec![(None, 3.0)])]),
+            ),
+            (
+                "U238".to_string(),
+                HashMap::from([("fission".to_string(), vec![(None, 1.0)])]),
+            ),
+        ]);
+        let start = HashMap::from([("U235".to_string(), 1.0), ("U238".to_string(), 1.0)]);
+        let mut gaps = DataGaps::default();
+        gaps.record_fission(&chain, &rates, &start);
+        assert_eq!(gaps.unknown_fission_share, [0.25]);
+        assert_eq!(gaps.fission_without_yields["U238"].fission_rate, [1.0]);
     }
 }

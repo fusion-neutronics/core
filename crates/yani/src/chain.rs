@@ -251,6 +251,10 @@ pub struct BranchSource {
     /// this is what says which evaluation the path holds.
     pub library: Option<String>,
     covariance: Option<Vec<RecordBatch>>,
+    /// The levels it gives as evaluated (`"Ag110@L2"`) and the states the
+    /// run's decay data names them, which its covariance rows still carry the
+    /// first of.
+    renames: HashMap<String, String>,
 }
 
 impl BranchSource {
@@ -262,6 +266,13 @@ impl BranchSource {
     /// stated covariance of the isomeric split.
     pub fn covariance(&self) -> Option<&[RecordBatch]> {
         self.covariance.as_deref()
+    }
+
+    /// The state a target in this source's files is named in the run: the
+    /// one the run's decay data matched it to, for a level the source gives
+    /// as evaluated, and the target itself otherwise.
+    pub fn named<'a>(&'a self, target: &'a str) -> &'a str {
+        self.renames.get(target).map_or(target, String::as_str)
     }
 }
 
@@ -302,6 +313,7 @@ impl BranchTable {
             name: name.to_string(),
             library,
             covariance: None,
+            renames: HashMap::new(),
         });
         Ok(self.sources.len() - 1)
     }
@@ -329,6 +341,14 @@ impl BranchTable {
     }
 
     /// Attach source `index`'s covariance batches.
+    /// Record that source `index`'s level `from`, given as evaluated, is named
+    /// `to` in this run.
+    pub fn rename(&mut self, index: usize, from: &str, to: &str) {
+        if let Some(source) = self.sources.get_mut(index) {
+            source.renames.insert(from.to_string(), to.to_string());
+        }
+    }
+
     pub fn set_covariance(&mut self, index: usize, batches: Vec<RecordBatch>) {
         self.sources[index].covariance = Some(batches);
     }
@@ -1608,6 +1628,28 @@ pub fn reduce_chain(
 
 // ----------------------------- Tests -----------------------------
 
+/// Whether `name` names a nuclide as the chain writes them: an element
+/// symbol, a mass number and an optional `_m<n>` isomer suffix (`Fe56`,
+/// `Am242_m1`). Not a bare neutron (`n1`) or anything else.
+pub fn is_nuclide_name(name: &str) -> bool {
+    let (base, isomer) = match name.split_once("_m") {
+        Some((base, n)) => (base, Some(n)),
+        None => (name, None),
+    };
+    if isomer.is_some_and(|n| n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit())) {
+        return false;
+    }
+    let digits = base.find(|c: char| c.is_ascii_digit());
+    let Some(at) = digits else {
+        return false;
+    };
+    let (symbol, mass) = base.split_at(at);
+    let mut chars = symbol.chars();
+    let first_upper = chars.next().is_some_and(|c| c.is_ascii_uppercase());
+    let rest_lower = chars.clone().count() <= 2 && chars.all(|c| c.is_ascii_lowercase());
+    first_upper && rest_lower && !mass.is_empty() && mass.bytes().all(|b| b.is_ascii_digit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2609,26 +2651,4 @@ mod tests {
             }
         }
     }
-}
-
-/// Whether `name` names a nuclide as the chain writes them: an element
-/// symbol, a mass number and an optional `_m<n>` isomer suffix (`Fe56`,
-/// `Am242_m1`). Not a bare neutron (`n1`) or anything else.
-pub fn is_nuclide_name(name: &str) -> bool {
-    let (base, isomer) = match name.split_once("_m") {
-        Some((base, n)) => (base, Some(n)),
-        None => (name, None),
-    };
-    if isomer.is_some_and(|n| n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit())) {
-        return false;
-    }
-    let digits = base.find(|c: char| c.is_ascii_digit());
-    let Some(at) = digits else {
-        return false;
-    };
-    let (symbol, mass) = base.split_at(at);
-    let mut chars = symbol.chars();
-    let first_upper = chars.next().is_some_and(|c| c.is_ascii_uppercase());
-    let rest_lower = chars.clone().count() <= 2 && chars.all(|c| c.is_ascii_lowercase());
-    first_upper && rest_lower && !mass.is_empty() && mass.bytes().all(|b| b.is_ascii_digit())
 }

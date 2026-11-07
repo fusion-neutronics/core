@@ -405,9 +405,18 @@ pub const TRANSMUTATION_SUBSECTIONS: &[(&str, &[&str])] = &[
     ("tendl-2025", &["reactions", "branching"]),
     ("tendl-2017", &["reactions", "branching"]),
     ("fendl-3.2d", &["reactions", "branching"]),
-    ("endf-b8.1", &["decay", "reactions", "fission_yields", "branching"]),
-    ("jeff-4.0", &["decay", "reactions", "fission_yields", "branching"]),
-    ("jendl-5.0", &["decay", "reactions", "fission_yields", "branching"]),
+    (
+        "endf-b8.1",
+        &["decay", "reactions", "fission_yields", "branching"],
+    ),
+    (
+        "jeff-4.0",
+        &["decay", "reactions", "fission_yields", "branching"],
+    ),
+    (
+        "jendl-5.0",
+        &["decay", "reactions", "fission_yields", "branching"],
+    ),
     ("irdff-ii", &["branching"]),
 ];
 

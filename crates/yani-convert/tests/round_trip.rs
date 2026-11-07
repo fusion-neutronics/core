@@ -483,7 +483,11 @@ fn reaction_q_values_survive() {
 fn every_nuclide_with_yields_has_its_own() {
     let c = convert("aliases");
     for n in c.chain.nuclides.iter().filter(|n| !n.yield_data.is_empty()) {
-        assert!(n.yield_evaluation.is_some(), "{} has yields it does not evaluate", n.name);
+        assert!(
+            n.yield_evaluation.is_some(),
+            "{} has yields it does not evaluate",
+            n.name
+        );
     }
     assert!(!c.dir.join("fission_yields/aliases.arrow").exists());
     let _ = std::fs::remove_dir_all(&c.dir);
@@ -572,12 +576,18 @@ fn convert_transmutation_writes_a_complete_directory() {
         &[],
     )
     .expect("yani reads it");
-    let evaluated = |it: &mut dyn Iterator<Item = (&str, bool)>| -> std::collections::BTreeSet<String> {
-        it.filter(|(_, e)| *e).map(|(n, _)| n.to_string()).collect()
-    };
+    let evaluated =
+        |it: &mut dyn Iterator<Item = (&str, bool)>| -> std::collections::BTreeSet<String> {
+            it.filter(|(_, e)| *e).map(|(n, _)| n.to_string()).collect()
+        };
     assert_eq!(
         evaluated(&mut back.values().map(|n| (n.name.as_str(), n.decay_evaluated))),
-        evaluated(&mut chain.nuclides.iter().map(|n| (n.name.as_str(), n.decay_evaluated))),
+        evaluated(
+            &mut chain
+                .nuclides
+                .iter()
+                .map(|n| (n.name.as_str(), n.decay_evaluated))
+        ),
     );
 
     // data_version is what yamc compares a cached copy against, so an
