@@ -21,6 +21,11 @@
 //! spatial distribution is a [`FluxShell`] sampling
 //! `S(rho) R |tau|` by rejection, and whose energy is the Ballabio spectrum at
 //! the shell's emission-weighted ion temperature.
+//!
+//! [`StellaratorShape::from_vmec`] fits a shape to the flux surfaces of a
+//! VMEC equilibrium.
+
+mod vmec;
 
 use std::f64::consts::TAU;
 use std::sync::Arc;
@@ -67,6 +72,10 @@ pub struct StellaratorShape {
     r_lmn: Vec<f64>,
     z_modes: Vec<[i32; 3]>,
     z_lmn: Vec<f64>,
+    /// How far a shape fitted by [`StellaratorShape::from_vmec`] is from the
+    /// surfaces it was fitted to (cm).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fit_error: Option<f64>,
     /// Largest |n|, kept so evaluation does not rescan the modes.
     #[serde(skip)]
     n_max: usize,
@@ -79,13 +88,24 @@ struct ShapeData {
     r_lmn: Vec<f64>,
     z_modes: Vec<[i32; 3]>,
     z_lmn: Vec<f64>,
+    #[serde(default)]
+    fit_error: Option<f64>,
 }
 
 impl TryFrom<ShapeData> for StellaratorShape {
     type Error = String;
 
     fn try_from(d: ShapeData) -> Result<Self, String> {
-        Self::structural(d.num_field_periods, d.r_modes, d.r_lmn, d.z_modes, d.z_lmn)
+        let mut shape =
+            Self::structural(d.num_field_periods, d.r_modes, d.r_lmn, d.z_modes, d.z_lmn)?;
+        if let Some(error) = d.fit_error {
+            check_finite("fit_error", error)?;
+            if error < 0.0 {
+                return Err(format!("fit_error must not be negative (got {error})"));
+            }
+        }
+        shape.fit_error = d.fit_error;
+        Ok(shape)
     }
 }
 
@@ -179,6 +199,7 @@ impl StellaratorShape {
             r_lmn,
             z_modes,
             z_lmn,
+            fit_error: None,
             n_max: 0,
         };
         shape.n_max = shape.resolution().2;
@@ -203,6 +224,13 @@ impl StellaratorShape {
 
     pub fn z_lmn(&self) -> &[f64] {
         &self.z_lmn
+    }
+
+    /// For a shape fitted by [`StellaratorShape::from_vmec`], the largest
+    /// distance (cm) between it and the VMEC surfaces, over every surface
+    /// and an angular grid.
+    pub fn fit_error(&self) -> Option<f64> {
+        self.fit_error
     }
 
     /// Largest `l`, `|m|` and `|n|` over both series.
