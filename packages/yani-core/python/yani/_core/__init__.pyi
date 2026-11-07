@@ -5,6 +5,11 @@ import builtins
 import os
 import pathlib
 import typing
+from . import data as data
+from . import shapes as shapes
+from . import sources as sources
+from . import _decay_photons as _decay_photons
+from . import materials as materials
 __all__ = [
     "ClearanceResult",
     "Cooldown",
