@@ -95,7 +95,7 @@ impl Material {
             .collect();
         sources.sort();
         sources.dedup();
-        let source = match sources.as_slice() {
+        let source: String = match sources.as_slice() {
             [one] => (*one).clone(),
             [] => return Err("s_alpha_beta needs the material's cross sections to be read from a library or folder".into()),
             _ => return Err(format!(
@@ -105,6 +105,39 @@ impl Material {
             )
             .into()),
         };
+        self.thermal_source = Some(source.clone());
+        self.load_thermal_from(&source)
+    }
+
+    /// The tables are for the material's current temperature and settings:
+    /// read them again if the temperature has changed since they were read.
+    /// A material whose tables were never read, because its nuclear data was
+    /// not read from a library or folder, is an error rather than a material
+    /// that silently scatters off free atoms.
+    pub fn ensure_thermal_current(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.s_alpha_beta.is_empty() {
+            return Ok(());
+        }
+        let kelvin = self.temperature_k();
+        let current = self.thermal.len() == self.s_alpha_beta.len()
+            && self
+                .thermal
+                .iter()
+                .all(|t| (t.kelvin - kelvin).abs() <= 1e-9);
+        if current {
+            return Ok(());
+        }
+        let source = self.thermal_source.clone().ok_or(
+            "this material has s_alpha_beta but its thermal tables were never read: read its \
+             nuclear data from a library keyword or folder (read_nuclear_data)",
+        )?;
+        self.load_thermal_from(&source)?;
+        self.invalidate_xs_cache();
+        Ok(())
+    }
+
+    fn load_thermal_from(&mut self, source: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let source = source.to_string();
         let kelvin = self.temperature_k();
         let mut tables = Vec::with_capacity(self.s_alpha_beta.len());
         for (name, _) in &self.s_alpha_beta {
