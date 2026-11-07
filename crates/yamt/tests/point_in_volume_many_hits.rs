@@ -4,23 +4,25 @@
 use yamt::mesh::topology::{build_tet_aabbs, build_triangle_aabbs};
 use yamt::{build_topology, ArrowMeshData, MeshGeometry};
 
-/// One volume made of `n` unit boxes stacked along z with gaps between them
-/// (box i spans z in [2i, 2i + 1]), as a model of many lumps or channels.
-fn stacked_boxes(n: u32) -> MeshGeometry {
+/// One volume bounded by `n` nested cube surfaces about the origin (cube i
+/// spans [-i, i]^3), as a model of many lumps or channels: shells alternate
+/// in and out of the volume, and a ray from near the centre crosses every
+/// cube once, whichever way it goes.
+fn nested_cubes(n: u32) -> MeshGeometry {
     let mut vertices = Vec::new();
     let mut triangles: Vec<[u32; 3]> = Vec::new();
-    for i in 0..n {
-        let (lo, hi) = (2.0 * f64::from(i), 2.0 * f64::from(i) + 1.0);
+    for i in 1..=n {
+        let (lo, hi) = (-f64::from(i), f64::from(i));
         let o = vertices.len() as u32;
         for &(x, y, z) in &[
-            (0.0, 0.0, lo),
-            (1.0, 0.0, lo),
-            (1.0, 1.0, lo),
-            (0.0, 1.0, lo),
-            (0.0, 0.0, hi),
-            (1.0, 0.0, hi),
-            (1.0, 1.0, hi),
-            (0.0, 1.0, hi),
+            (lo, lo, lo),
+            (hi, lo, lo),
+            (hi, hi, lo),
+            (lo, hi, lo),
+            (lo, lo, hi),
+            (hi, lo, hi),
+            (hi, hi, hi),
+            (lo, hi, hi),
         ] {
             vertices.push([x, y, z]);
         }
@@ -53,15 +55,23 @@ fn stacked_boxes(n: u32) -> MeshGeometry {
 
 #[test]
 fn a_parity_ray_through_many_lumps_keeps_every_crossing() {
-    // From the lowest box straight up, the ray crosses that box's top and
-    // then two faces of each box above it: 65 crossings for 33 boxes.
-    for n in [32, 33, 40] {
-        let geom = stacked_boxes(n);
-        assert!(geom.point_in_volume(0, [0.5, 0.5, 0.5]), "{n} boxes");
-        assert_eq!(geom.find_volume([0.5, 0.5, 0.5]), 0, "{n} boxes");
+    // From inside the smallest cube a ray crosses all n cubes: 65 crossings
+    // for 65 cubes. From between the first two it crosses the n - 1 outer
+    // ones, and the first twice or not at all. The checked count keeps every
+    // crossing too (it leaves through the smallest cube, as an odd count says).
+    for n in [63, 65, 79] {
+        let geom = nested_cubes(n);
+        let centre = [0.1, 0.2, 0.3];
+        assert!(geom.point_in_volume(0, centre), "{n} cubes");
+        assert_eq!(geom.find_volume(centre), 0, "{n} cubes");
+        assert_eq!(
+            geom.point_in_volume_checked(0, centre),
+            Some(true),
+            "{n} cubes"
+        );
         assert!(
-            !geom.point_in_volume(0, [0.5, 0.5, 1.5]),
-            "{n} boxes, in a gap"
+            !geom.point_in_volume(0, [1.5, 0.2, 0.3]),
+            "{n} cubes, in a gap"
         );
     }
 }

@@ -225,6 +225,107 @@ pub fn validate_tet_orientation(
     Ok(())
 }
 
+/// Refuse a volume whose boundary lists the same facet twice.
+///
+/// Two distinct triangles bounding one volume with vertices at the same three
+/// positions (compared by bits, as a CSG mesh fill welds them) are either a
+/// copy, facing the same way relative to the volume, or a contradiction,
+/// facing opposite ways. A copy is counted twice in `volume_measures` and in
+/// the ray parity point location uses, so particles born inside it are lost;
+/// a contradiction says the volume lies on both sides of one face.
+///
+/// The one legitimate pair is two opposite-facing triangles on surfaces with
+/// the volume on both sides, an internal face listed from each side. The same
+/// triangle reached twice through such a surface (once per sense) is one
+/// facet, not a copy.
+///
+/// The implicit complement is not checked: touching solids of a mesh made
+/// without imprinting each put their own coincident facets on its boundary,
+/// and a copy on a solid's boundary is found when that solid is checked.
+pub fn validate_no_duplicate_facets(topo: &MeshTopology) -> Result<(), MeshError> {
+    let mut welded: HashMap<[u64; 3], VertexId> = HashMap::with_capacity(topo.vertices.len());
+    let canonical: Vec<VertexId> = topo
+        .vertices
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let key = [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()];
+            *welded.entry(key).or_insert(i as VertexId)
+        })
+        .collect();
+    drop(welded);
+
+    struct Seen {
+        triangle: TriangleId,
+        surface: SurfaceId,
+        winding: bool,
+        facing: bool,
+        both_sides: bool,
+    }
+    let mut seen: HashMap<[VertexId; 3], Seen> = HashMap::new();
+    for volume in 0..topo.num_volumes {
+        seen.clear();
+        for &(surface, sense) in &topo.volume_surfaces[volume as usize] {
+            let both_sides = topo.surface_volumes[surface as usize] == (Some(volume), Some(volume));
+            for &triangle in &topo.surface_tri_indices[topo.surface_tri_ranges[surface as usize]
+                .start as usize
+                ..topo.surface_tri_ranges[surface as usize].end as usize]
+            {
+                let t = topo.triangles[triangle as usize];
+                let mut key = [
+                    canonical[t[0] as usize],
+                    canonical[t[1] as usize],
+                    canonical[t[2] as usize],
+                ];
+                // The winding is the parity of the sort that orders the key.
+                let mut winding = false;
+                for (i, j) in [(0, 1), (1, 2), (0, 1)] {
+                    if key[i] > key[j] {
+                        key.swap(i, j);
+                        winding = !winding;
+                    }
+                }
+                if key[0] == key[1] || key[1] == key[2] {
+                    continue; // a degenerate triangle has no facing to compare
+                }
+                let facing = winding ^ (sense == Sense::Reverse);
+                match seen.entry(key) {
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(Seen {
+                            triangle,
+                            surface,
+                            winding,
+                            facing,
+                            both_sides,
+                        });
+                    }
+                    std::collections::hash_map::Entry::Occupied(e) => {
+                        let first = e.get();
+                        if first.triangle == triangle {
+                            continue;
+                        }
+                        let same_facing = if first.both_sides || both_sides {
+                            if first.both_sides && both_sides && first.winding != winding {
+                                continue;
+                            }
+                            first.winding == winding
+                        } else {
+                            first.facing == facing
+                        };
+                        return Err(MeshError::DuplicateFacet {
+                            volume,
+                            triangles: [first.triangle, triangle],
+                            surfaces: [first.surface, surface],
+                            same_facing,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Build tet-to-tet adjacency by hashing shared faces.
 ///
 /// For each tet face (4 per tet), hash the sorted vertex triple. When the same

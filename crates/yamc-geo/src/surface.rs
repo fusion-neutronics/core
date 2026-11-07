@@ -61,6 +61,7 @@ pub enum SurfaceKind {
         radius: f64,
     },
     Cylinder {
+        #[serde(deserialize_with = "unit_axis")]
         axis: [f64; 3],
         origin: [f64; 3],
         radius: f64,
@@ -114,6 +115,7 @@ pub enum SurfaceKind {
     /// Double-sheeted; `tan2_theta` is the `r2` coefficient.
     Cone {
         apex: [f64; 3],
+        #[serde(deserialize_with = "unit_axis")]
         axis: [f64; 3],
         tan2_theta: f64,
     },
@@ -144,6 +146,26 @@ impl SurfaceKind {
             SurfaceKind::Flux { .. } => "OffsetSurface",
         }
     }
+}
+
+/// A Cylinder or Cone axis as a model file holds it, made the unit vector
+/// their evaluate and distance assume (as `Surface::new_cylinder` and the
+/// Python factories make it): a hand-written model may give any length. One
+/// already unit to rounding is kept as written, so a saved model loads with
+/// the axes it was saved with. A zero axis has no direction and is refused.
+fn unit_axis<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<[f64; 3], D::Error> {
+    let axis = <[f64; 3]>::deserialize(deserializer)?;
+    let n2 = axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2];
+    if !(n2 > 0.0 && n2.is_finite()) {
+        return Err(serde::de::Error::custom(format!(
+            "a Cylinder or Cone axis must be a non-zero, finite vector, not {axis:?}"
+        )));
+    }
+    if (n2 - 1.0).abs() <= 1e-12 {
+        return Ok(axis);
+    }
+    let n = n2.sqrt();
+    Ok([axis[0] / n, axis[1] / n, axis[2] / n])
 }
 
 /// Implicit torus equation in axis-permuted coordinates:
@@ -753,5 +775,61 @@ mod tests {
         assert_eq!(zhi[0] - zlo[0], 9.6); // 2 (a + c)
         assert_eq!(xhi[1] - xlo[1], 9.6);
         assert_eq!(yhi[0] - ylo[0], 9.6);
+    }
+
+    // ── Loading a Cylinder or Cone axis ──
+
+    fn load(kind: &str) -> Result<Surface, serde_json::Error> {
+        serde_json::from_str(&format!(
+            r#"{{"surface_id": null, "kind": {kind}, "boundary": "Transmission"}}"#
+        ))
+    }
+
+    fn axis(s: &Surface) -> [f64; 3] {
+        match s.kind {
+            SurfaceKind::Cylinder { axis, .. } | SurfaceKind::Cone { axis, .. } => axis,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn loading_makes_a_cylinder_or_cone_axis_a_unit_vector() {
+        // A radius-1 cylinder and a 45 degree cone about z, written with axes
+        // twice the unit length.
+        let cylinder =
+            load(r#"{"Cylinder": {"axis": [0, 0, 2], "origin": [0, 0, 0], "radius": 1}}"#).unwrap();
+        let cone =
+            load(r#"{"Cone": {"apex": [0, 0, 0], "axis": [0, 0, -2], "tan2_theta": 1}}"#).unwrap();
+        assert_eq!(axis(&cylinder), [0.0, 0.0, 1.0]);
+        assert_eq!(axis(&cone), [0.0, 0.0, -1.0]);
+        assert_eq!(cylinder.evaluate((0.5, 0.0, 1.0)), -0.5);
+        assert_eq!(cone.evaluate((1.0, 0.0, 1.0)), 0.0);
+    }
+
+    #[test]
+    fn a_saved_cylinder_axis_loads_bit_for_bit() {
+        // [1, 1, 0] / sqrt(2) is an ulp short of unit length, so normalising
+        // it again would move it.
+        let saved = Surface::new_cylinder([1.0, 1.0, 0.0], [0.0; 3], 1.0, None, None);
+        let a = axis(&saved);
+        let n = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+        assert_ne!([a[0] / n, a[1] / n, a[2] / n], a);
+        let loaded: Surface =
+            serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        assert_eq!(axis(&loaded), a);
+    }
+
+    #[test]
+    fn loading_refuses_a_zero_cylinder_or_cone_axis() {
+        for kind in [
+            r#"{"Cylinder": {"axis": [0, 0, 0], "origin": [0, 0, 0], "radius": 1}}"#,
+            r#"{"Cone": {"apex": [0, 0, 0], "axis": [0, 0, 0], "tan2_theta": 1}}"#,
+        ] {
+            let error = load(kind).unwrap_err().to_string();
+            assert!(
+                error.contains("axis must be a non-zero, finite vector"),
+                "{error}"
+            );
+        }
     }
 }

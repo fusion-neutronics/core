@@ -105,7 +105,8 @@ use yamc::geometry::mesh::MeshGeometry;
 pub struct PyMeshGeometry {
     pub inner: MeshGeometry,
     /// Stored Arrow mesh data for rebuild when graveyard_offset changes.
-    arrow_data: yamt::ArrowMeshData,
+    /// Shared, so cloning the wrapper does not copy it.
+    arrow_data: Arc<yamt::ArrowMeshData>,
     /// Material map stored for rebuild.
     mat_map: HashMap<String, Arc<yamc_materials::material::Material>>,
     /// Implicit complement material stored for rebuild.
@@ -178,7 +179,7 @@ impl PyMeshGeometry {
         let mut data = yamt::read_arrow_mesh(path).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to load Arrow mesh: {e}"))
         })?;
-        let arrow_data = data.clone(); // Store original for rebuild
+        let arrow_data = Arc::new(data.clone()); // Store original for rebuild
         if let Some(offset) = graveyard_offset {
             yamt::add_vacuum_boundary(&mut data, offset);
         }
@@ -405,7 +406,7 @@ impl PyMeshGeometry {
 
     #[setter]
     pub fn set_graveyard_offset(&mut self, offset: Option<f64>) -> PyResult<()> {
-        let mut data = self.arrow_data.clone();
+        let mut data = (*self.arrow_data).clone();
         if let Some(off) = offset {
             yamt::add_vacuum_boundary(&mut data, off);
         }

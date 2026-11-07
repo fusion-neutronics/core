@@ -341,8 +341,8 @@ pub(crate) fn expand_fills(
             allow_clipping,
         } = spec;
         // Partial moves: MeshGeometry is not Drop, so the pub fields can
-        // be taken without cloning the BVH-backed mesh.
-        let mesh = Arc::new(mesh_geometry.mesh);
+        // be taken without cloning them. The mesh is already shared.
+        let mesh = mesh_geometry.mesh;
         let mesh_cells = mesh_geometry.cells;
         let mesh_materials = mesh_geometry.materials;
 
