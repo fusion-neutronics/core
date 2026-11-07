@@ -46,6 +46,7 @@ pub mod maxwell;
 pub mod nbody_phase_space;
 pub mod tabulated_continuous_eout;
 pub mod tabulated_equiprobable;
+pub mod thermal_sab;
 pub mod watt;
 
 use yamc_nuclide::reaction_product::FissionChiFlat;
