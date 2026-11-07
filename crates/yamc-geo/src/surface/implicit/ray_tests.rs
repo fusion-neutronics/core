@@ -911,6 +911,47 @@ fn grazing_a_thin_shell_neither_exhausts_nor_invents_crossings() {
     }
 }
 
+/// A particle leaving the surface skips at most 1e-6 cm past it, and only
+/// where the formula is shown monotone over the stretch skipped, so a wall
+/// thinner than that, crossed just before, is found all the same: through
+/// a shell 1e-7 to 6e-7 cm thick, head on and obliquely, moved 1e-8 cm past
+/// its outer wall as transport moves it, with the hint and without it.
+#[test]
+fn a_wall_thinner_than_the_skip_is_found_after_crossing_the_other() {
+    for h in [1e-7, 3e-7, 6e-7] {
+        let f =
+            ImplicitFormula::new(&format!("abs(sqrt(x^2 + y^2 + z^2) - 4) - {}", 0.5 * h)).unwrap();
+        for b in [0.0, 2.0, 3.0] {
+            let (o, u) = ([10.0, b, 0.0], [-1.0, 0.0, 0.0]);
+            let wall = |r: f64| sphere_roots(r, o, u).map(|(near, _)| near).unwrap();
+            let (outer, inner) = (wall(4.0 + 0.5 * h), wall(4.0 - 0.5 * h));
+            let first = trace(&f.tape, f.bounding_box(), o, u, None, false, 20.0);
+            assert!(
+                first.crossing.is_some_and(|t| (t - outer).abs() < 1e-9),
+                "h {h}, b {b}: {:?}, the outer wall is at {outer}",
+                first.crossing
+            );
+            let at = first.crossing.unwrap() + NUDGE;
+            for hint in [Some(NUDGE), None] {
+                let next = trace(
+                    &f.tape,
+                    f.bounding_box(),
+                    ray_point(o, u, at),
+                    u,
+                    hint,
+                    false,
+                    20.0,
+                );
+                assert!(
+                    next.crossing.is_some_and(|t| (at + t - inner).abs() < 1e-9),
+                    "h {h}, b {b}, hint {hint:?}: {:?} from {at}, the inner wall is at {inner}",
+                    next.crossing
+                );
+            }
+        }
+    }
+}
+
 /// Inigo Quilez's exact signed distances to a capped cylinder and a box add
 /// `sqrt` of a sum of clamped squares, which is 0 on the surface itself,
 /// where the slope of `sqrt` alone is unbounded. With no bound on the slope

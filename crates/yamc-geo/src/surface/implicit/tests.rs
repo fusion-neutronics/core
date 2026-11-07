@@ -1,5 +1,5 @@
 use super::compile::compile;
-use super::parse::{number, parse};
+use super::parse::{number, parse, Ast, BinOp, Func, Kind};
 use super::*;
 
 /// Small deterministic generator (xorshift64*), so the tests need no
@@ -279,6 +279,159 @@ fn canonical_strings_parse_back_to_the_same_tape() {
         }
     }
     assert!(compiled > 500, "{compiled}");
+}
+
+/// The value of a parsed formula at `p`, by walking its tree with the
+/// arithmetic the formula language defines: nothing of the compiler's
+/// arena, its sharing of repeated instructions or its constant folding.
+fn walk(ast: &Ast, p: [f64; 3]) -> f64 {
+    let fmin = |a: f64, b: f64| {
+        if a <= b {
+            a
+        } else if b < a {
+            b
+        } else {
+            f64::NAN
+        }
+    };
+    let fmax = |a: f64, b: f64| {
+        if a >= b {
+            a
+        } else if b > a {
+            b
+        } else {
+            f64::NAN
+        }
+    };
+    let mut v: Vec<f64> = Vec::with_capacity(ast.nodes.len());
+    for node in &ast.nodes {
+        let at = |i: &u32| v[*i as usize];
+        let value = match &node.kind {
+            Kind::Num(c) => *c,
+            Kind::Pi => std::f64::consts::PI,
+            Kind::Var(k) => p[*k],
+            Kind::Neg(a) => -at(a),
+            Kind::Bin(op, a, b) => {
+                let (a, b) = (at(a), at(b));
+                match op {
+                    BinOp::Add => a + b,
+                    BinOp::Sub => a - b,
+                    BinOp::Mul => a * b,
+                    BinOp::Div => a / b,
+                }
+            }
+            Kind::Pow(a, e) => {
+                let (a, e) = (at(a), at(e));
+                if e != e.trunc() {
+                    libm::pow(a, e)
+                } else if e == 0.0 {
+                    1.0
+                } else {
+                    // Square and multiply from the top bit of |e| down.
+                    let n = e.abs() as u64;
+                    let mut r = a;
+                    for bit in (0..63 - n.leading_zeros()).rev() {
+                        r *= r;
+                        if n >> bit & 1 == 1 {
+                            r *= a;
+                        }
+                    }
+                    if e < 0.0 {
+                        1.0 / r
+                    } else {
+                        r
+                    }
+                }
+            }
+            Kind::Call(f, args) => {
+                let x = at(&args[0]);
+                match f {
+                    Func::Sqrt => x.sqrt(),
+                    Func::Abs => x.abs(),
+                    Func::Exp => libm::exp(x),
+                    Func::Log => libm::log(x),
+                    Func::Sin => libm::sin(x),
+                    Func::Cos => libm::cos(x),
+                    Func::Min => args[1..].iter().fold(x, |m, a| fmin(m, at(a))),
+                    Func::Max => args[1..].iter().fold(x, |m, a| fmax(m, at(a))),
+                    Func::SMin | Func::SMax => {
+                        let (y, k) = (at(&args[1]), at(&args[2]));
+                        let h = fmax(k - (x - y).abs(), 0.0);
+                        let bump = h * h / (4.0 * k);
+                        if *f == Func::SMin {
+                            fmin(x, y) - bump
+                        } else {
+                            fmax(x, y) + bump
+                        }
+                    }
+                }
+            }
+        };
+        v.push(value);
+    }
+    v[v.len() - 1]
+}
+
+#[test]
+fn tapes_evaluate_as_a_walk_of_the_formula_does() {
+    // Every pair of operations on the same operands, so that two that the
+    // compiler took for one instruction would give a different value.
+    let binary = [
+        "x + y",
+        "x - y",
+        "y - x",
+        "x * y",
+        "x / y",
+        "y / x",
+        "min(x, y)",
+        "max(x, y)",
+        "smin(x, y, 0.5)",
+        "smax(x, y, 0.5)",
+    ];
+    let unary = [
+        "-x",
+        "sqrt(abs(x))",
+        "abs(x)",
+        "exp(x)",
+        "log(abs(x) + 1)",
+        "sin(x)",
+        "cos(x)",
+        "x^2",
+        "x^3",
+        "x^-2",
+        "abs(x)^2.5",
+        "abs(x)^3.5",
+    ];
+    let mut formulas = vec!["0.1 + 0.2 + x - (0.3 + x)".to_string()];
+    for set in [&binary[..], &unary[..]] {
+        for a in set {
+            for b in set.iter().filter(|b| *b != a) {
+                formulas.push(format!("{a} + 3 * ({b})"));
+            }
+        }
+    }
+    let mut rng = Rng(15);
+    while formulas.len() < 2_000 {
+        let depth = 1 + rng.below(5) as u32;
+        formulas.push(random_formula(&mut rng, depth));
+    }
+    let mut compared = 0;
+    for text in &formulas {
+        let ast = parse(text).unwrap_or_else(|e| panic!("{text}: {}", e.message));
+        let Ok(compiled) = compile(&ast) else {
+            continue;
+        };
+        for _ in 0..20 {
+            let p = random_point(&mut rng);
+            let (got, want) = (value(&compiled.tape, p), walk(&ast, p));
+            assert!(
+                got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()),
+                "{text} at {p:?}: the tape gives {got:e}, the walk {want:e}"
+            );
+            compared += 1;
+        }
+    }
+    assert!(compared > 20_000, "{compared}");
 }
 
 #[test]
@@ -715,6 +868,53 @@ fn interval_operations_hold_at_special_values() {
         }
     }
     assert!(checks > 1_000_000, "{checks}");
+}
+
+/// The enclosures hold the computed values because each bound is moved
+/// out past them: by an ulp for IEEE arithmetic, rounded to nearest, and
+/// by `LIBM_ULPS` for `libm`, which is only within an ulp. Enclosures of
+/// computed values would mostly hold without that (rounding to nearest is
+/// monotone), so this pins the allowances themselves.
+#[test]
+fn enclosures_are_widened_by_their_rounding_allowances() {
+    use super::interval::LIBM_ULPS;
+    let step = |v: f64, n: u32, up: bool| {
+        (0..n).fold(v, |v, _| if up { v.next_up() } else { v.next_down() })
+    };
+    let x = Interval::point(0.7);
+    for (name, got, value) in [
+        ("exp", x.exp(), libm::exp(0.7)),
+        ("log", x.log(), libm::log(0.7)),
+        ("sin", x.sin(), libm::sin(0.7)),
+        ("cos", x.cos(), libm::cos(0.7)),
+        ("pow", x.pow(2.5), libm::pow(0.7, 2.5)),
+    ] {
+        assert_eq!(
+            (got.lo, got.hi),
+            (step(value, LIBM_ULPS, false), step(value, LIBM_ULPS, true)),
+            "{name}"
+        );
+    }
+    let (a, b) = (Interval::point(0.1), Interval::point(0.3));
+    for (name, got, value) in [
+        ("+", a + b, 0.1 + 0.3),
+        ("-", a - b, 0.1 - 0.3),
+        ("*", a * b, 0.1 * 0.3),
+        ("/", a / b, 0.1 / 0.3),
+        ("square", a.square(), 0.1 * 0.1),
+        ("sqrt", a.sqrt(), 0.1_f64.sqrt()),
+    ] {
+        assert_eq!(
+            (got.lo, got.hi),
+            (value.next_down(), value.next_up()),
+            "{name}"
+        );
+    }
+    // A slot that does not change along the direction has no slope along
+    // it, even where its instruction's own is unbounded (sqrt at 0).
+    let tape = tape_of("sqrt(x^2 + y^2) + z");
+    let d = tape.eval_dual([0.0; 3], [0.0, 0.0, 1.0], &mut Vec::new());
+    assert_eq!(d.d, 1.0);
 }
 
 #[test]

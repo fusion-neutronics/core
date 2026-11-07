@@ -440,6 +440,9 @@ impl Ray<'_> {
         self.side = side(first.g);
         if entering && self.side == -1.0 && start > MIN_ROOT {
             // Below already where it enters, with everything before above.
+            // The clip is rounded outward, so the point where it enters is
+            // outside the box, where the formula is proved positive: this
+            // is defence in depth, against a box that breaks its contract.
             return Outcome::Root(start);
         }
         if self.side == 0.0 {
