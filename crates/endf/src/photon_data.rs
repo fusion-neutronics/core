@@ -8,9 +8,9 @@
 //! [`crate::IncidentPhoton`] by atomic number after reading the evaluation,
 //! and so does this.
 //!
-//! Three files in `packages/yamc-core/python/yamc/data`, one per tabulation, each named for what
+//! Three files in `crates/yamc-convert/data`, one per tabulation, each named for what
 //! it holds and where it came from. All plain text, so this crate stays
-//! dependency-free. See `packages/yamc-core/python/yamc/data/README.md` for provenance.
+//! dependency-free. See `crates/yamc-convert/data/README.md` for provenance.
 //!
 //! * `compton_profiles_biggs1975.txt`
 //! * `density_effect_sternheimer1982.txt`
@@ -83,10 +83,23 @@ impl PhotonData {
         density_effect: impl AsRef<Path>,
         bremsstrahlung: impl AsRef<Path>,
     ) -> Result<PhotonData> {
+        PhotonData::from_texts(
+            &std::fs::read_to_string(compton_profiles)?,
+            &std::fs::read_to_string(density_effect)?,
+            &std::fs::read_to_string(bremsstrahlung)?,
+        )
+    }
+
+    /// Read the three tabulations from their text, as the files hold it.
+    pub fn from_texts(
+        compton_profiles: &str,
+        density_effect: &str,
+        bremsstrahlung: &str,
+    ) -> Result<PhotonData> {
         let mut data = PhotonData::default();
-        parse_aux_into(&mut data, &std::fs::read_to_string(compton_profiles)?)?;
-        parse_aux_into(&mut data, &std::fs::read_to_string(density_effect)?)?;
-        data.add_bremsstrahlung(&std::fs::read_to_string(bremsstrahlung)?)?;
+        parse_aux_into(&mut data, compton_profiles)?;
+        parse_aux_into(&mut data, density_effect)?;
+        data.add_bremsstrahlung(bremsstrahlung)?;
         Ok(data)
     }
 }
@@ -286,7 +299,7 @@ mod tests {
         // They are yamc's data, and living inside the Python package is what
         // puts them in the wheel under `yamc/data` rather than in a top-level
         // `crates/` directory in site-packages.
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/yamc-core/python/yamc/data")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../yamc-convert/data")
     }
 
     fn load() -> PhotonData {

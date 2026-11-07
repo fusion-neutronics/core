@@ -414,7 +414,8 @@ mod gpu_guards {
         let s = err_string(&mut m);
         assert!(
             s.contains("use_decay_photons: no transmutation data is configured")
-                && s.contains("transmutation_decay_data and transmutation_reactions are not set"),
+                && s.contains("transmutation_decay_data is not set")
+                && s.contains("transmutation_reactions is not set"),
             "D1S run without decay data should be refused naming its sources, got: {s}"
         );
     }

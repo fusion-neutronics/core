@@ -955,14 +955,13 @@ fn the_photon_route_writes_every_section() {
     }
 
     // The tabulations that ship in the wheel. No evaluation carries them.
-    let data =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/yamc-core/python/yamc/data");
+    let data = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data");
     let compton = data.join("compton_profiles_biggs1975.txt");
     let density = data.join("density_effect_sternheimer1982.txt");
     let brem = data.join("bremsstrahlung_seltzer_berger1986.txt");
     assert!(
         compton.is_file() && density.is_file() && brem.is_file(),
-        "the auxiliary photon tabulations are missing from packages/yamc-core/python/yamc/data"
+        "the auxiliary photon tabulations are missing from crates/yamc-convert/data"
     );
 
     let dir = scratch("photon");

@@ -134,6 +134,9 @@ fn nuclide(name: &str, reactions: Vec<ChainReaction>) -> ChainNuclide {
         half_life_uncertainty: None,
         decay_energy: 0.0,
         decay_energy_uncertainty: None,
+        decay_evaluated: true,
+        excitation_energy: None,
+        level_index: None,
         decay_energy_components: Default::default(),
         reactions,
         decays: vec![],
@@ -181,6 +184,7 @@ fn facts(mt: i32, lfs: i32, complete: bool) -> Arc<[BranchState]> {
         level_route: if lfs == 0 { "ground" } else { "energy" }.to_string(),
         level_energy: 0.0,
         level_energy_difference: Some(0.0),
+        match_energy: None,
         mf3_cross_section: None,
     }])
 }

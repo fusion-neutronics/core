@@ -122,7 +122,7 @@ impl CoupledReplicas {
                 .then(|| crate::decay_branching_uncertainty::candidates(chain)),
             fission_yields: request
                 .wants(Source::FissionYield)
-                .then(|| crate::fission_yield_uncertainty::candidates(chain, chain)),
+                .then(|| crate::fission_yield_uncertainty::candidates(chain)),
             isomer: if request.wants(Source::IsomerBranching) {
                 Some(Arc::new(
                     crate::isomer_branching_uncertainty::CoupledIsomer::new(branch, chain)?,
@@ -535,7 +535,7 @@ impl CoupledReplicas {
             info.not_perturbed.insert(0, "decay energy".to_string());
         }
         if request.wants(Source::FissionYield) {
-            let f = crate::fission_yield_uncertainty::candidates(&reach, chain);
+            let f = crate::fission_yield_uncertainty::candidates(&reach);
             info.fission_yields_perturbed = f.perturbed;
             info.no_fission_yield_uncertainty = f.without;
             info.fission_yield_uncertainty_not_carried = f.not_carried;

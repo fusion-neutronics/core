@@ -11,4 +11,4 @@
 # save it: a full load is about 13 ms, and decompressing 2.4 MB of xz is more
 # than that again. The .xz fixtures under crates/endf/fixtures are a different
 # case, read only by tests through a dev-dependency.
-packages/yamc-core/python/yamc/data/*.txt linguist-generated=true -diff
+crates/yamc-convert/data/*.txt linguist-generated=true -diff

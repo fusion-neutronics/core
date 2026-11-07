@@ -155,7 +155,7 @@ pub fn photon_tabulations() -> endf::PhotonData {
 /// text files that ship inside the wheel, so they are present on a clean
 /// checkout and a test that reads them is still hermetic.
 pub fn photon_tabulation_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/yamc-core/python/yamc/data")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data")
 }
 
 // ---------------------------------------------------------------------------

@@ -396,6 +396,55 @@ pub(crate) const KEYWORDS: &[&str] = &[
     "irdff-ii",
 ];
 
+/// The transmutation subsections each library keyword's release publishes.
+///
+/// Kept equal to the library builder's recipes (`nuclear-data-build`, whose
+/// test checks it), and what the refusals name when a run reads a subsection
+/// that is not set or that the library it names does not publish.
+pub const TRANSMUTATION_SUBSECTIONS: &[(&str, &[&str])] = &[
+    ("tendl-2025", &["reactions", "branching"]),
+    ("tendl-2017", &["reactions", "branching"]),
+    ("fendl-3.2d", &["reactions", "branching"]),
+    (
+        "endf-b8.1",
+        &["decay", "reactions", "fission_yields", "branching"],
+    ),
+    (
+        "jeff-4.0",
+        &["decay", "reactions", "fission_yields", "branching"],
+    ),
+    (
+        "jendl-5.0",
+        &["decay", "reactions", "fission_yields", "branching"],
+    ),
+    ("irdff-ii", &["branching"]),
+];
+
+/// The library keywords whose releases publish the transmutation
+/// `subsection`, in [`TRANSMUTATION_SUBSECTIONS`] order.
+pub fn libraries_with_subsection(subsection: &str) -> Vec<&'static str> {
+    TRANSMUTATION_SUBSECTIONS
+        .iter()
+        .filter(|(_, subs)| subs.contains(&subsection))
+        .map(|(keyword, _)| *keyword)
+        .collect()
+}
+
+/// `"Libraries that publish <what>: a, b, c."`, for a refusal to end with.
+pub fn publishers_of(subsection: &str) -> String {
+    let what = match subsection {
+        "decay" => "decay data",
+        "reactions" => "reactions",
+        "fission_yields" => "fission yields",
+        "branching" => "isomeric branching",
+        other => other,
+    };
+    format!(
+        "Libraries that publish {what}: {}.",
+        libraries_with_subsection(subsection).join(", ")
+    )
+}
+
 /// The keywords of libraries that publish isomeric branching and nothing
 /// else: no cross sections, and no decay, reactions or fission-yield
 /// subsection. Such a library can only be a branching source

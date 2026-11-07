@@ -295,6 +295,11 @@ pub fn branching_branching() -> Schema {
         f64s("level_energy_difference", true),
         f64ss("mf3_cross_section", true),
         utf8("normalisation", true),
+        // Each state's excitation energy as the level matching reads it: ELFS
+        // where it is positive, QM - QI otherwise, null where neither is (an
+        // unstated excited level). Last, and optional to a reader, so a file
+        // written before it still reads.
+        f64s("match_energy", true),
     ])
     .with_metadata(meta([
         ("filetype", "transmutation-branching"),
@@ -742,6 +747,16 @@ pub fn decay_nuclides() -> Schema {
         f64("decay_energy_gamma_uncertainty", true),
         f64("decay_energy_alpha", true),
         f64("decay_energy_alpha_uncertainty", true),
+        // The state's excitation energy in eV, 0.0 for a ground state: its
+        // record's ELIS, or its isomeric transition's Q above the state it
+        // lands on. What a run matches a neutron evaluation's product levels
+        // against to name their isomers.
+        // Nullable and last, so a file written before it still reads, with
+        // no level to match.
+        f64("excitation_energy", true),
+        // Its nuclear level index (LIS), which matching falls back to where an
+        // energy does not settle it. Nullable and last for the same reason.
+        i32("level_index", true),
     ])
     .with_metadata(meta([
         ("filetype", "transmutation-decay"),

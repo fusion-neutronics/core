@@ -342,6 +342,25 @@ pub enum LevelRoute {
     SingleIsomer,
     /// Nothing matched; the level is taken to cascade to ground.
     Unresolved,
+    /// Not matched yet: the level as the evaluation gives it, for a library
+    /// with no decay data to name its isomers by. A run matches it against
+    /// the decay data it is given (see [`placeholder`]).
+    AsEvaluated,
+}
+
+/// The target a production level is written under before any decay data
+/// names its isomer: `"<ground state>@L<level>"`, `"Ag110@L2"`.
+pub fn placeholder(z: i64, a: i64, lfs: i64) -> String {
+    format!("{}@L{lfs}", crate::gnds_name(z as u32, a as u32, 0))
+}
+
+/// The `(Z, A, level)` a [`placeholder`] target names, or `None` for any
+/// other target.
+pub fn parse_placeholder(target: &str) -> Option<(i64, i64, i64)> {
+    let (ground, level) = target.split_once("@L")?;
+    let lfs: i64 = level.parse().ok()?;
+    let (z, a, m) = crate::zam(ground).ok()?;
+    (m == 0 && lfs > 0).then_some((z as i64, a as i64, lfs))
 }
 
 impl LevelRoute {
@@ -355,6 +374,7 @@ impl LevelRoute {
             LevelRoute::LevelIndex => "level_index",
             LevelRoute::SingleIsomer => "single_isomer",
             LevelRoute::Unresolved => "unresolved",
+            LevelRoute::AsEvaluated => "as_evaluated",
         }
     }
 }

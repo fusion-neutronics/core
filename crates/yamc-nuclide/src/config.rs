@@ -384,38 +384,36 @@ impl Config {
 /// Why a calculation of `chain_use` cannot run with the transmutation settings
 /// `unset` (each one it reads and finds unset), saying how to set them.
 fn unset_transmutation_message(unset: &[&str], chain_use: ChainUse) -> String {
-    let named = match unset {
-        [one] => one.to_string(),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-        [] => String::new(),
-    };
-    let (verb, it, each) = if unset.len() == 1 {
-        ("is", "it", "it")
-    } else {
-        ("are", "them", "each")
-    };
-    let examples = unset
-        .iter()
-        .map(|setting| format!("`yamc.{setting} = \"endf-b8.1\"`"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let keywords = crate::url_cache::cross_section_keywords().join(", ");
-    let off = if chain_use == ChainUse::Irradiation
-        && unset
-            .iter()
-            .any(|s| *s == "transmutation_reactions" || *s == "transmutation_fission_yields")
-    {
-        " transmutation_reactions and transmutation_fission_yields also take False, which \
-         leaves that subsection out: no reactions for a material with no reaction rates, no \
-         fission yields for one in which nothing fissions."
-    } else {
-        ""
-    };
+    fn what(setting: &str) -> (&str, &str) {
+        match setting {
+            "transmutation_decay_data" => ("decay data", "decay"),
+            "transmutation_reactions" => ("reactions", "reactions"),
+            "transmutation_fission_yields" => ("fission yields", "fission_yields"),
+            other => (other, other),
+        }
+    }
+    let mut lines = Vec::new();
+    for setting in unset {
+        let (needs, subsection) = what(setting);
+        let off = match (*setting, chain_use) {
+            ("transmutation_reactions", ChainUse::Irradiation) => {
+                ", or to False for a material with no reaction rates"
+            }
+            ("transmutation_fission_yields", ChainUse::Irradiation) => {
+                ", or to False if nothing in the material fissions"
+            }
+            _ => "",
+        };
+        lines.push(format!(
+            "this calculation needs {needs}, and {setting} is not set. {} Set it to one of \
+             them or to a local folder holding it{off}.",
+            crate::url_cache::publishers_of(subsection)
+        ));
+    }
     format!(
-        "no transmutation data is configured: {named} {verb} not set, and this calculation \
-         reads {it}. There is no default library, as there is none for cross sections. Set \
-         {each} to a library keyword ({keywords}) whose release publishes that subsection, or \
-         to a local folder holding it, e.g. {examples} (or `yani.`).{off}"
+        "no transmutation data is configured: {} There is no default library, as there is \
+         none for cross sections.",
+        lines.join(" ")
     )
 }
 
@@ -625,7 +623,7 @@ mod transmutation_sources_tests {
             "transmutation_branch_ratios",
         ]
         .into_iter()
-        .filter(|setting| message.contains(&format!("yamc.{setting} = ")))
+        .filter(|setting| message.contains(&format!("{setting} is not set")))
         .collect()
     }
 
@@ -679,20 +677,40 @@ mod transmutation_sources_tests {
             message.starts_with("no transmutation data is configured"),
             "{message}"
         );
-        assert!(
-            message.contains(
-                "transmutation_decay_data, transmutation_reactions and \
-                 transmutation_fission_yields are not set"
+        for (needs, setting, publishers) in [
+            (
+                "decay data",
+                "transmutation_decay_data",
+                "Libraries that publish decay data: endf-b8.1, jeff-4.0, jendl-5.0.",
             ),
-            "{message}"
-        );
+            (
+                "reactions",
+                "transmutation_reactions",
+                "Libraries that publish reactions: tendl-2025, tendl-2017, fendl-3.2d, \
+                 endf-b8.1, jeff-4.0, jendl-5.0.",
+            ),
+            (
+                "fission yields",
+                "transmutation_fission_yields",
+                "Libraries that publish fission yields: endf-b8.1, jeff-4.0, jendl-5.0.",
+            ),
+        ] {
+            let sentence = format!("this calculation needs {needs}, and {setting} is not set.");
+            assert!(message.contains(&sentence), "{sentence}: {message}");
+            assert!(message.contains(publishers), "{publishers}: {message}");
+        }
         assert!(message.contains("There is no default library"), "{message}");
         assert!(message.contains("a local folder"), "{message}");
-        for keyword in crate::url_cache::cross_section_keywords() {
-            assert!(message.contains(keyword), "{keyword}: {message}");
-        }
+        // No package prefix, so it reads the same from either package.
+        assert!(
+            !message.contains("yamc.") && !message.contains("yani."),
+            "{message}"
+        );
         assert!(!message.contains("irdff-ii"), "{message}");
-        assert!(message.contains("also take False"), "{message}");
+        assert!(
+            message.contains("or to False if nothing in the material fissions"),
+            "{message}"
+        );
         // A decay calculation has no use for the False of the other two.
         let decay = Config::new()
             .transmutation_sources(ChainUse::Decay)

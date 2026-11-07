@@ -92,7 +92,8 @@ def test_unset_subsections_are_refused_not_defaulted():
         _radionuclides(["Fe54", "Fe56"])
     message = str(error.value)
     assert message.startswith("no transmutation data is configured"), message
-    assert "transmutation_decay_data and transmutation_reactions are not set" in message
+    assert "transmutation_decay_data is not set" in message
+    assert "transmutation_reactions is not set" in message
 
 
 def test_missing_subsection_errors_clearly():

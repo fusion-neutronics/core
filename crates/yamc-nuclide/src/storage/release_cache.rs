@@ -1117,8 +1117,9 @@ pub(crate) fn fetch_subsection(
             if e.starts_with(&what) && e.contains("is not available") {
                 format!(
                     "Library '{keyword}' does not provide a '{subsection}' transmutation \
-                     subsection. Point this transmutation part at a library that provides \
-                     '{subsection}' (endf-b8.1 provides all parts) or at a local path.\n\n{e}"
+                     subsection. {} Set that part to one of them or to a local folder \
+                     holding it.\n\n{e}",
+                    super::url_cache::publishers_of(subsection)
                 )
             } else {
                 e

@@ -330,7 +330,12 @@ impl IsomerCovariance {
                         source.name
                     )
                 })?;
-            for b in read {
+            for mut b in read {
+                // A level the source gives as evaluated is named in the run by
+                // the decay data the run was given, as its curve is.
+                for t in [&mut b.target, &mut b.target1].into_iter().flatten() {
+                    *t = source.named(t).to_string();
+                }
                 let owner = b
                     .reaction
                     .as_deref()
@@ -1423,6 +1428,7 @@ mod tests {
             level_route: "ground".to_string(),
             level_energy: 0.0,
             level_energy_difference: None,
+            match_energy: None,
             mf3_cross_section: None,
         }
     }

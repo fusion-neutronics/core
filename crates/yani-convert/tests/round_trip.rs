@@ -130,12 +130,26 @@ fn yani_reads_what_the_converter_writes() {
     )
     .expect("yani reads the converted chain");
 
-    assert_eq!(
-        back.len(),
-        c.chain.nuclides.len(),
-        "the reader lost or invented nuclides"
-    );
-    for written in &c.chain.nuclides {
+    // The nuclides with decay records come back exactly. Every other entry
+    // the reader holds is a product, or a neutron target, the decay data has
+    // no record for: of unknown fate, with no decay and no reactions.
+    let written: std::collections::BTreeSet<&str> = c
+        .chain
+        .nuclides
+        .iter()
+        .filter(|n| n.decay_evaluated)
+        .map(|n| n.name.as_str())
+        .collect();
+    let read: std::collections::BTreeSet<&str> = back
+        .values()
+        .filter(|n| n.decay_evaluated)
+        .map(|n| n.name.as_str())
+        .collect();
+    assert_eq!(read, written, "the reader lost or invented decay records");
+    for n in back.values().filter(|n| !n.decay_evaluated) {
+        assert!(n.decays.is_empty() && n.reactions.is_empty(), "{}", n.name);
+    }
+    for written in c.chain.nuclides.iter().filter(|n| n.decay_evaluated) {
         let read = back
             .get(&written.name)
             .unwrap_or_else(|| panic!("{} did not survive the round trip", written.name));
@@ -463,30 +477,62 @@ fn reaction_q_values_survive() {
     let _ = std::fs::remove_dir_all(&c.dir);
 }
 
-/// A borrowed-yield nuclide is recorded as an alias, not as a copy.
+/// No nuclide's yields stand in for another's: every nuclide with yields
+/// has its own evaluation of them, and no aliases file is written.
 #[test]
-fn borrowed_yields_are_written_as_aliases() {
+fn every_nuclide_with_yields_has_its_own() {
     let c = convert("aliases");
-    let borrowed: Vec<&str> = c
+    for n in c.chain.nuclides.iter().filter(|n| !n.yield_data.is_empty()) {
+        assert!(
+            n.yield_evaluation.is_some(),
+            "{} has yields it does not evaluate",
+            n.name
+        );
+    }
+    assert!(!c.dir.join("fission_yields/aliases.arrow").exists());
+    let _ = std::fs::remove_dir_all(&c.dir);
+}
+
+/// A reaction's product and a decay mode's daughter are named as the
+/// evaluations give them, including where the decay data has no record for
+/// them, and the decay subsection lists only the nuclides it has records for.
+#[test]
+fn products_are_named_as_evaluated_and_never_stood_in() {
+    let c = convert("as-evaluated");
+    let evaluated: std::collections::BTreeSet<&str> = c
         .chain
         .nuclides
         .iter()
-        .filter(|n| n.borrowed_yields_from.is_some())
+        .filter(|n| n.decay_evaluated)
         .map(|n| n.name.as_str())
         .collect();
-
-    let aliases = c.dir.join("fission_yields/aliases.arrow");
-    if borrowed.is_empty() {
-        assert!(
-            !aliases.exists(),
-            "an aliases file was written for a chain with no borrowed yields"
-        );
-    } else {
-        assert!(
-            aliases.exists(),
-            "{} nuclides borrow yields and no aliases file was written",
-            borrowed.len()
-        );
+    let targets: Vec<&str> = c
+        .chain
+        .nuclides
+        .iter()
+        .flat_map(|n| n.reactions.iter().filter_map(|r| r.target.as_deref()))
+        .collect();
+    assert!(
+        targets.iter().any(|t| !evaluated.contains(t)),
+        "the fixtures should give a product the decay data does not have"
+    );
+    // Every reaction product is its parent moved by the reaction's own
+    // change in Z and A: a stand-in would be somewhere else.
+    for n in &c.chain.nuclides {
+        let (z, a, _) = endf::zam(&n.name).unwrap();
+        for r in &n.reactions {
+            let (Some(t), Some(info)) = (&r.target, endf::chain::reaction_info(&r.kind)) else {
+                continue;
+            };
+            let (tz, ta, _) = endf::zam(t).unwrap();
+            assert_eq!(
+                (tz as i64, ta as i64),
+                (z as i64 + info.delta_z, a as i64 + info.delta_a),
+                "{} {} gives {t}",
+                n.name,
+                r.kind
+            );
+        }
     }
     let _ = std::fs::remove_dir_all(&c.dir);
 }
@@ -530,7 +576,19 @@ fn convert_transmutation_writes_a_complete_directory() {
         &[],
     )
     .expect("yani reads it");
-    assert_eq!(back.len(), chain.nuclides.len());
+    let evaluated =
+        |it: &mut dyn Iterator<Item = (&str, bool)>| -> std::collections::BTreeSet<String> {
+            it.filter(|(_, e)| *e).map(|(n, _)| n.to_string()).collect()
+        };
+    assert_eq!(
+        evaluated(&mut back.values().map(|n| (n.name.as_str(), n.decay_evaluated))),
+        evaluated(
+            &mut chain
+                .nuclides
+                .iter()
+                .map(|n| (n.name.as_str(), n.decay_evaluated))
+        ),
+    );
 
     // data_version is what yamc compares a cached copy against, so an
     // unstamped directory is a cache that can never be invalidated.
@@ -1250,7 +1308,15 @@ fn fission_yield_evaluations_are_written_verbatim() {
         assert_eq!(y.energy, tape.energies[i]);
         let nominal = &u235.yield_data[&format!("{}", y.energy)];
         let products: Vec<(String, f64)> = nominal.iter().map(|(k, v)| (k.clone(), *v)).collect();
-        assert_eq!(y.products, products, "nominal yields at {} eV", y.energy);
+        // Every energy is written over the union of products, a product the
+        // evaluation lists only at another energy padded with an exact 0.0.
+        let read: Vec<(String, f64)> = y
+            .products
+            .iter()
+            .filter(|(name, value)| *value != 0.0 || nominal.contains_key(name))
+            .cloned()
+            .collect();
+        assert_eq!(read, products, "nominal yields at {} eV", y.energy);
         assert_eq!(
             y.interpolation.map(|l| l.endf_code() as i64),
             tape.independent_interpolation[i],

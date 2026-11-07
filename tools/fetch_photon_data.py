@@ -13,7 +13,7 @@ Three files inside the dataset carry it:
     doppler/shell-doppler.dat  per element, one "<electrons> <binding/MeV>"
                                line per subshell, terminated by a -1 line
 
-Writes `packages/yamc-core/python/yamc/data/compton_profiles_biggs1975.txt` in
+Writes `crates/yamc-convert/data/compton_profiles_biggs1975.txt` in
 the same format `tools/convert_photon_data.py` produces, so the two are
 interchangeable and either can check the other.
 
@@ -41,7 +41,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 #: Where the tabulation is written.
-DEFAULT_OUTPUT = ROOT / "packages" / "yamc-core" / "python" / "yamc" / "data" / "compton_profiles_biggs1975.txt"
+DEFAULT_OUTPUT = ROOT / "crates" / "yamc-convert" / "data" / "compton_profiles_biggs1975.txt"
 
 #: The G4EMLOW release the vendored data was built from. Pinned rather than
 #: floating: a later release would silently change every profile, and the point

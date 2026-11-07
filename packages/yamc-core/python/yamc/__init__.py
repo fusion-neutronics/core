@@ -1,6 +1,5 @@
 """yamc -- Yet Another Monte Carlo code."""
 
-import pathlib as _pathlib
 import sys
 import types
 
@@ -449,95 +448,6 @@ _inject_signatures()
 # use (``sys``/``types``/``dataclass``) and the private ``_``-prefixed config
 # aliases. Computed (rather than hand-listed) so it tracks new ``_core``
 # exports automatically. ``dir()`` is captured at module scope first because a
-
-# The auxiliary photon tabulations this package ships, so a photon conversion
-# works without the caller locating three text files.
-#
-# None of this data is in ENDF: the photoatomic sublibrary carries no Compton
-# profiles, no bremsstrahlung cross sections and no density effect correction,
-# so a transport code takes them from separate published tabulations. yamc
-# ships them; yani does not, because transmutation is driven by the neutron
-# flux and never needs them. That is why this default lives here and not in the
-# Rust binding, which both wheels share.
-_PHOTON_DATA = _pathlib.Path(__file__).parent / "data"
-
-_convert_photon_core = convert_photon  # noqa: F405  (from _core)
-
-
-def convert_photon(
-    photoatomic_path,
-    output_dir,
-    relaxation_path=None,
-    compton_profiles=None,
-    density_effect=None,
-    bremsstrahlung=None,
-    library="",
-    data_version="",
-    created_utc=None,
-):
-    """Convert a photoatomic evaluation into the per-element photon sections.
-
-    Writes ``element.arrow`` always, and ``subshells.arrow``, ``compton.arrow``
-    and ``bremsstrahlung.arrow`` where there is data for them. No NJOY: a
-    photoatomic evaluation is already pointwise.
-
-    The three auxiliary tabulations default to the copies shipped in this
-    package, so the common case is two arguments. Pass them explicitly to use a
-    different release; they are read as a set, so give all three or none.
-
-    Parameters
-    ----------
-    photoatomic_path : str or Path
-        The photoatomic evaluation. One file may hold several elements, and
-        each is written to its own directory.
-    output_dir : str or Path
-        Directory to write ``{Element}.arrow/`` into.
-    relaxation_path : str or Path, optional
-        The atomic relaxation evaluation for the same element, carrying binding
-        energies, occupancies and the transition cascade. Without it the
-        subshells are written with zero binding energy and no transitions,
-        which is a fluorescence-free atom rather than an error.
-    compton_profiles, density_effect, bremsstrahlung : str or Path, optional
-        Override the bundled tabulations.
-    library, data_version, created_utc
-        Recorded in ``version.json``.
-
-    Returns
-    -------
-    list[str]
-        One path per element written.
-    """
-    given = (compton_profiles, density_effect, bremsstrahlung)
-    if any(g is None for g in given) and any(g is not None for g in given):
-        raise ValueError(
-            "compton_profiles, density_effect and bremsstrahlung are read as one "
-            "set: give all three or none. A partial set would silently drop a "
-            "section rather than fail."
-        )
-    if compton_profiles is None:
-        compton_profiles = _PHOTON_DATA / "compton_profiles_biggs1975.txt"
-        density_effect = _PHOTON_DATA / "density_effect_sternheimer1982.txt"
-        bremsstrahlung = _PHOTON_DATA / "bremsstrahlung_seltzer_berger1986.txt"
-        missing = [p.name for p in (compton_profiles, density_effect, bremsstrahlung)
-                   if not p.is_file()]
-        if missing:
-            raise FileNotFoundError(
-                f"the bundled photon tabulations are missing from the installed "
-                f"package ({', '.join(missing)} under {_PHOTON_DATA}). Pass the "
-                f"three paths explicitly, or reinstall."
-            )
-    return _convert_photon_core(
-        str(photoatomic_path),
-        str(output_dir),
-        relaxation_path=None if relaxation_path is None else str(relaxation_path),
-        compton_profiles=str(compton_profiles),
-        density_effect=str(density_effect),
-        bremsstrahlung=str(bremsstrahlung),
-        library=library,
-        data_version=data_version,
-        created_utc=created_utc,
-    )
-
 
 # comprehension has its own scope in Python 3.
 _public_names = dir()

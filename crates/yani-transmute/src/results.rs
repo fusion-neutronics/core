@@ -129,6 +129,17 @@ pub struct TransmutationResults {
     /// material, and a transport-coupled solve for every transmutable
     /// material it irradiates. Empty on results built by hand.
     pub product_screening: HashMap<u32, crate::screening::ProductScreening>,
+    /// Material ID -> what its answer rests on that the nuclear data does not
+    /// give: products whose decay the decay library has no record for, kept
+    /// out of `materials` and recorded with a bound on their activity, and
+    /// fission whose products the library gives no yields for (see
+    /// [`crate::data_gaps`]). Empty when the chain was not set before the
+    /// steps, which is what results built by hand are.
+    pub data_gaps: HashMap<u32, crate::data_gaps::DataGaps>,
+    /// The chain's gaps, worked out once by [`Self::set_chain`].
+    chain_gaps: Option<std::sync::Arc<crate::data_gaps::ChainGaps>>,
+    /// The decay data the run read, as configured, for the gap record.
+    decay_library: Option<String>,
 }
 
 /// How much of a spectrum solve's collapse work was shared.
@@ -297,6 +308,9 @@ impl TransmutationResults {
             data_releases: Default::default(),
             displacement_damage: HashMap::new(),
             product_screening: HashMap::new(),
+            data_gaps: HashMap::new(),
+            chain_gaps: None,
+            decay_library: None,
         }
     }
 
@@ -308,11 +322,65 @@ impl TransmutationResults {
             self.timesteps.len(),
             "one source rate per timestep"
         );
+        let material = self.record_gaps(material_id, material, 0.0);
         self.materials
             .entry(material_id)
             .or_default()
             .push(material);
         self.source_rates.insert(material_id, source_rates);
+    }
+
+    /// Set the chain the solve is driven with, before its first state is
+    /// added, and the decay data it was configured with. Works out the
+    /// chain's gaps once, so every state added after is taken apart into the
+    /// inventory and what the data does not give (see [`Self::data_gaps`]).
+    pub fn set_chain(
+        &mut self,
+        chain: std::sync::Arc<HashMap<String, yani::ChainNuclide>>,
+        decay_library: Option<String>,
+    ) {
+        self.chain_gaps = Some(std::sync::Arc::new(crate::data_gaps::ChainGaps::of(&chain)));
+        self.chain = Some(chain);
+        self.decay_library = decay_library;
+    }
+
+    /// Take the products of unknown fate out of a state and record them, after
+    /// a step of length `dt` (0.0 for the initial composition).
+    fn record_gaps(&mut self, material_id: u32, material: Material, dt: f64) -> Material {
+        let Some(chain) = self.chain_gaps.clone() else {
+            return material;
+        };
+        let gaps =
+            self.data_gaps
+                .entry(material_id)
+                .or_insert_with(|| crate::data_gaps::DataGaps {
+                    decay_library: self.decay_library.clone(),
+                    volume: material.volume,
+                    ..Default::default()
+                });
+        let holds_one = chain
+            .fate_unknown
+            .keys()
+            .any(|n| material.nuclides.contains_key(n));
+        let Ok(mut densities) = material.get_atoms_per_barn_cm() else {
+            return material;
+        };
+        gaps.record_state(&chain, &mut densities, dt);
+        if !holds_one {
+            return material;
+        }
+        match material.to_sum_mode() {
+            Ok(mut summed) => {
+                summed
+                    .nuclides
+                    .retain(|n, _| !chain.fate_unknown.contains_key(n));
+                if let Some(order) = summed.nuclide_input_order.as_mut() {
+                    order.retain(|n| !chain.fate_unknown.contains_key(n));
+                }
+                summed
+            }
+            Err(_) => material,
+        }
     }
 
     /// The rate each step drove `material_id` at, indexed as `timesteps`.
@@ -330,6 +398,12 @@ impl TransmutationResults {
 
     /// Add material state after a timestep.
     pub fn add_step(&mut self, material_id: u32, material: Material) {
+        let step = self
+            .materials
+            .get(&material_id)
+            .map_or(0, |m| m.len().saturating_sub(1));
+        let dt = self.timesteps.get(step).copied().unwrap_or(0.0);
+        let material = self.record_gaps(material_id, material, dt);
         self.materials
             .entry(material_id)
             .or_default()
@@ -354,6 +428,16 @@ impl TransmutationResults {
     /// Called once per material per step, in step order, alongside
     /// [`Self::add_step`].
     pub fn add_step_rates(&mut self, material_id: u32, rates: EdgeRates) {
+        if let Some(chain) = self.chain_gaps.clone()
+            && let Some(start) = self
+                .materials
+                .get(&material_id)
+                .and_then(|m| m.last())
+                .and_then(|m| m.get_atoms_per_barn_cm().ok())
+            && let Some(gaps) = self.data_gaps.get_mut(&material_id)
+        {
+            gaps.record_fission(&chain, &rates, &start);
+        }
         self.reaction_rates
             .entry(material_id)
             .or_default()
@@ -958,6 +1042,9 @@ mod tests {
                     half_life_uncertainty: None,
                     decay_energy: 0.0,
                     decay_energy_uncertainty: None,
+                    decay_evaluated: true,
+                    excitation_energy: None,
+                    level_index: None,
                     decay_energy_components: Default::default(),
                     reactions,
                     decays,
@@ -1067,6 +1154,9 @@ mod tests {
             half_life_uncertainty: None,
             decay_energy: 0.0,
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
             reactions,
             decays: Vec::new(),

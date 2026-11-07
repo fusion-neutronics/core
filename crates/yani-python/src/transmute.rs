@@ -200,5 +200,5 @@ pub fn transmute(
         .map_err(|e| e.to_string())
     });
     let results = results.map_err(PyValueError::new_err)?;
-    Ok(PyTransmutationResults { inner: results })
+    PyTransmutationResults::from_run(py, results)
 }

@@ -1899,7 +1899,7 @@ impl PyModel {
                     .map_err(|e| e.to_string())
             });
             match result {
-                Ok(results) => Ok(PyTransmutationResults { inner: results }),
+                Ok(results) => PyTransmutationResults::from_run(py, results),
                 Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
             }
         });

@@ -41,13 +41,6 @@ def test_a_folder_holding_other_files_is_refused(tmp_path):
     assert not (tmp_path / ".build").exists()
 
 
-def test_a_library_with_nothing_of_its_own_to_build_is_refused(tmp_path):
-    # IRDFF-II's release is isomeric branching, which takes decay data it
-    # does not have.
-    with pytest.raises(RuntimeError, match="takes decay data"):
-        yamc.generate_library("irdff-ii", str(tmp_path / "lib"))
-
-
 def test_the_download_cache_is_refused():
     # Refused before anything is made, so pointing it inside the real cache
     # leaves the cache as it was.

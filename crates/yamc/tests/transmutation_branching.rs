@@ -31,6 +31,7 @@ fn facts(target: &str, complete: bool) -> Arc<[BranchState]> {
         level_route: "energy".to_string(),
         level_energy: 0.0,
         level_energy_difference: Some(0.0),
+        match_energy: None,
         mf3_cross_section: None,
     }])
 }
@@ -93,6 +94,9 @@ fn stable(name: &str) -> ChainNuclide {
         sources: Vec::new(),
         half_life_uncertainty: None,
         decay_energy_uncertainty: None,
+        decay_evaluated: true,
+        excitation_energy: None,
+        level_index: None,
         decay_energy_components: Default::default(),
     }
 }
@@ -131,6 +135,9 @@ fn synthetic_chain() -> Arc<HashMap<String, ChainNuclide>> {
             sources: Vec::new(),
             half_life_uncertainty: None,
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
         },
     );
@@ -332,6 +339,9 @@ fn coupled_branching_folds_parents_outside_material() {
             sources: Vec::new(),
             half_life_uncertainty: None,
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
         },
     );
@@ -358,6 +368,9 @@ fn coupled_branching_folds_parents_outside_material() {
             sources: Vec::new(),
             half_life_uncertainty: None,
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
         },
     );
@@ -575,6 +588,9 @@ fn coupled_bound_keeps_grafted_metastable_reactions() {
             sources: Vec::new(),
             half_life_uncertainty: None,
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
+            level_index: None,
             decay_energy_components: Default::default(),
         },
     );

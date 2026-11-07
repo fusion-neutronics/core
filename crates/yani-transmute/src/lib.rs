@@ -20,6 +20,7 @@ pub mod covariance_sample;
 pub mod cross_material;
 pub mod d1s_uncertainty;
 pub mod damage;
+pub mod data_gaps;
 mod decay_branching_uncertainty;
 pub mod derived;
 mod fission_yield_uncertainty;

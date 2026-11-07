@@ -30,7 +30,7 @@ conversion is exact rather than nearly exact.
 
     python tools/convert_photon_data.py
 
-Writes one file per tabulation into `packages/yamc-core/python/yamc/data`, each
+Writes one file per tabulation into `crates/yamc-convert/data`, each
 named for what it holds and where it came from, because the two HDF5 files hold
 unrelated measurements and only shared a container:
 
@@ -39,7 +39,7 @@ unrelated measurements and only shared a container:
 
 The HDF5 originals are not in this repository. Point `--from` at a checkout of
 shimwell/endf-python, whose `src/endf/datafiles` holds them for the Python
-reader. See `packages/yamc-core/python/yamc/data/README.md`.
+reader. See `crates/yamc-convert/data/README.md`.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 #: Where the converted tabulations are written.
-DATA = ROOT / "packages" / "yamc-core" / "python" / "yamc" / "data"
+DATA = ROOT / "crates" / "yamc-convert" / "data"
 
 #: The data covers Z = 1 to 100.
 MAX_Z = 100

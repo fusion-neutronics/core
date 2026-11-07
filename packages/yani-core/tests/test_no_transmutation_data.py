@@ -33,7 +33,11 @@ def test_an_irradiation_names_every_unset_source():
     message = str(error.value)
     assert message.startswith("no transmutation data is configured"), message
     for setting in _SOURCES:
-        assert f'{setting} = "endf-b8.1"' in message, message
+        assert f"{setting} is not set" in message, message
+    # Each part names the libraries that publish it, and no package prefix,
+    # so the message reads the same from yamc.
+    assert "Libraries that publish fission yields: endf-b8.1, jeff-4.0, jendl-5.0." in message
+    assert "yani." not in message and "yamc." not in message, message
 
 
 def test_a_decay_quantity_names_the_decay_data_alone():

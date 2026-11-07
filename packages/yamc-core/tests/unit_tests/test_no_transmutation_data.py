@@ -40,7 +40,7 @@ def _assert_names(error, *unset):
     assert "There is no default library" in message, message
     assert "local folder" in message, message
     for setting in _SOURCES:
-        line = f'yamc.{setting} = "endf-b8.1"'
+        line = f"{setting} is not set"
         assert (line in message) == (setting in unset), f"{setting}: {message}"
 
 
@@ -83,7 +83,7 @@ def test_an_irradiation_names_every_unset_source():
     with pytest.raises(ValueError) as error:
         _iron().transmute(_irradiation())
     _assert_names(error, *_SOURCES)
-    assert "also take False" in str(error.value)
+    assert "or to False" in str(error.value)
 
 
 def test_only_the_unset_source_is_named():
@@ -155,4 +155,5 @@ def test_decay_photon_transport_refuses_before_any_data_loads():
         model.simulate_transport(total_particles=10)
     message = str(error.value)
     assert message.startswith("use_decay_photons: no transmutation data"), message
-    assert "transmutation_decay_data and transmutation_reactions are not set" in message
+    assert "transmutation_decay_data is not set" in message
+    assert "transmutation_reactions is not set" in message
