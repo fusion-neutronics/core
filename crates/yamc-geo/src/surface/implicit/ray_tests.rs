@@ -88,12 +88,12 @@ impl<'a> Probe<'a> {
             .eval_dual(ray_point(self.o, self.u, t), self.u, &mut self.duals)
     }
 
-    /// The first point in `(a, b]` on side `to`, scanning with step `h`
-    /// and bisecting.
+    /// The first point in `(a, b]` on side `to`, scanning with step `h` (at
+    /// least a float) and bisecting.
     fn first_on(&mut self, a: f64, b: f64, h: f64, to: f64) -> Option<f64> {
         let mut x = a;
         while x < b {
-            let y = (x + h).min(b);
+            let y = (x + h).max(x.next_up()).min(b);
             if side(self.g(y)) == to {
                 let (mut lo, mut hi) = (x, y);
                 loop {
@@ -115,13 +115,13 @@ impl<'a> Probe<'a> {
     }
 
     /// The first point in `(a, b]` across from side `from`: a scan with
-    /// step `h`, rescanning 1000 times finer between samples where `|g|`
-    /// is small next to the slope.
+    /// step `h` (at least a float), rescanning 1000 times finer between
+    /// samples where `|g|` is small next to the slope.
     fn next(&mut self, a: f64, b: f64, h: f64, from: f64) -> Option<f64> {
         let to = -from;
         let (mut x, mut dx) = (a, self.dual(a));
         while x < b {
-            let y = (x + h).min(b);
+            let y = (x + h).max(x.next_up()).min(b);
             let dy = self.dual(y);
             if side(dy.v) == to {
                 return self.first_on(x, y, (y - x) / 64.0, to);
@@ -553,6 +553,16 @@ fn run_shape(name: &'static str, n: usize, mean: f64) {
         );
         clean(&format!("{} {set}", s.name), &t, mean, 250);
     }
+}
+
+/// The oracle's scans step by at least a float, so one whose step is below
+/// an ulp of where it is still ends.
+#[test]
+fn the_oracle_scans_always_move_on() {
+    let tape = tape_of("x - 10");
+    let mut probe = Probe::new(&tape, [0.0; 3], [1.0, 0.0, 0.0]);
+    assert_eq!(probe.first_on(1.0, 1.0 + 1e-15, 1e-18, 1.0), None);
+    assert_eq!(probe.next(1.0, 1.0 + 1e-15, 1e-18, -1.0), None);
 }
 
 #[test]
