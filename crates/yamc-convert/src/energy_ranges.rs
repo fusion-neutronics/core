@@ -36,6 +36,16 @@ use crate::reaction_ranges::{hash_ranges, message_len, schema_offset};
 /// holding two grids would be indexed by its first and fetched whole, so the
 /// index would lie about what a range holds.
 pub fn index_energy(energy: &Path) -> Result<EnergyRanges, Box<dyn Error>> {
+    index_temperature_batches(energy, "energy.arrow")
+}
+
+/// Index any section written one row and one record batch per temperature,
+/// keyed by its `temperature` column: `energy.arrow`, and the per-temperature
+/// thermal scattering sections. `section` names the file in errors.
+pub fn index_temperature_batches(
+    energy: &Path,
+    section: &str,
+) -> Result<EnergyRanges, Box<dyn Error>> {
     let bytes = std::fs::read(energy)?;
 
     // The footer's Block array is the authority on where each batch starts;
@@ -44,7 +54,7 @@ pub fn index_energy(energy: &Path) -> Result<EnergyRanges, Box<dyn Error>> {
     let footer_len_at = bytes
         .len()
         .checked_sub(10)
-        .ok_or("energy.arrow is too short to hold an Arrow footer")?;
+        .ok_or_else(|| format!("{section} is too short to hold an Arrow footer"))?;
     let footer_len = u32::from_le_bytes(bytes[footer_len_at..footer_len_at + 4].try_into()?);
     let footer_at = footer_len_at
         .checked_sub(usize::try_from(footer_len)?)
@@ -62,12 +72,12 @@ pub fn index_energy(energy: &Path) -> Result<EnergyRanges, Box<dyn Error>> {
         let block = blocks.get(i);
         let labels = batch
             .column_by_name("temperature")
-            .ok_or("an energy batch has no `temperature` column")?
+            .ok_or_else(|| format!("a {section} batch has no `temperature` column"))?
             .as_string_opt::<i32>()
             .ok_or("`temperature` is not a StringArray")?;
         if labels.len() != 1 {
             return Err(format!(
-                "an energy batch carries {} rows; the index needs one row per batch",
+                "a {section} batch carries {} rows; the index needs one row per batch",
                 labels.len()
             )
             .into());
@@ -80,11 +90,11 @@ pub fn index_energy(energy: &Path) -> Result<EnergyRanges, Box<dyn Error>> {
         {
             // Two batches for one temperature would make the index lossy: a
             // reader asking for it would silently get half the grid.
-            return Err(format!("{label} appears in more than one energy batch").into());
+            return Err(format!("{label} appears in more than one {section} batch").into());
         }
     }
     if temperatures.is_empty() {
-        return Err("energy.arrow carries no temperature".into());
+        return Err(format!("{section} carries no temperature").into());
     }
 
     let schema_at = schema_offset(&bytes)?;

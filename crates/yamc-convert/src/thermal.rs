@@ -1,0 +1,617 @@
+//! Thermal scattering tables: one `thermal/<name>.arrow/` folder per bound
+//! nuclide in a material (`c_H_in_H2O`), from a thermal scattering law
+//! evaluation and the neutron evaluation of its principal atom.
+//!
+//! The inelastic part goes through NJOY (`endf::njoy::make_ace_thermal`):
+//! S(alpha, beta) cannot be sampled as tabulated, and THERMR's integration
+//! turns it into outgoing energy and cosine distributions. The elastic part is
+//! closed form and is taken straight from MF=7 MT=2. The tabulated law itself
+//! is kept too (`sab.arrow`).
+//!
+//! Every per-temperature section is one row and one record batch per
+//! temperature, and `version.json` records where each batch sits
+//! (`temperature_ranges`), so a reader fetches only the temperature it uses.
+
+use std::error::Error;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use arrow_array::builder::{Float32Builder, ListBuilder};
+use arrow_array::ArrayRef;
+use endf::data::temperature_str;
+use endf::thermal_ace::InelasticDistribution;
+use endf::thermal_scattering::SecondaryModel;
+use endf::{Material, ThermalAce, ThermalElastic, ThermalScattering};
+
+use crate::entry::Provenance;
+use crate::sections::{
+    bools, float_list, float_list_lists, float_lists, floats, int_list, ints, opt_floats,
+    opt_strings, string_list, strings, write_section, write_section_per_row,
+};
+
+/// The per-temperature sections, in the order `temperature_ranges` lists them.
+pub const PER_TEMPERATURE_SECTIONS: [&str; 3] = ["inelastic.arrow", "elastic.arrow", "sab.arrow"];
+
+/// What a thermal table is built from.
+#[derive(Debug, Clone)]
+pub struct ThermalSource<'a> {
+    /// The table's name, which is also its folder: `c_H_in_H2O`.
+    pub name: &'a str,
+    /// The thermal scattering law evaluation. Several files when a library
+    /// publishes one file per temperature (JEFF-4.0's fuel tables); they are
+    /// merged into one table, and must agree on everything but temperature.
+    pub thermal: &'a [PathBuf],
+    /// The incident-neutron evaluation of the principal atom.
+    pub neutron: &'a Path,
+    /// The nuclides of the neutron library the table applies to.
+    pub bound_nuclides: &'a [String],
+    /// The ZA values ACER records, and its six-character table name.
+    pub zaids: &'a [i64],
+    pub ace_name: &'a str,
+    /// ACER's number of atom types in a mixed moderator.
+    pub nmix: u32,
+    pub njoy_exec: &'a str,
+}
+
+/// One temperature of a table, everything its rows need.
+struct Temperature {
+    label: String,
+    kelvin: f64,
+    ace: ThermalAce,
+    /// Index of this temperature in `law`'s own list.
+    index: usize,
+    law: usize,
+}
+
+/// A table ready to write: its laws (one per source file) and temperatures,
+/// sorted.
+pub struct Prepared {
+    pub name: String,
+    pub bound_nuclides: Vec<String>,
+    pub source: String,
+    laws: Vec<ThermalScattering>,
+    temperatures: Vec<Temperature>,
+}
+
+fn same(a: f64, b: f64) -> bool {
+    (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0)
+}
+
+impl Prepared {
+    /// Pair each law's temperatures with the ACE tables NJOY wrote for them,
+    /// in order, and check the laws describe one table.
+    pub fn new(
+        name: &str,
+        bound_nuclides: &[String],
+        source: &str,
+        laws: Vec<ThermalScattering>,
+        aces: Vec<Vec<ThermalAce>>,
+    ) -> Result<Self, Box<dyn Error>> {
+        let first = laws
+            .first()
+            .ok_or("a thermal table needs at least one evaluation")?;
+        if first.inelastic.is_none() {
+            return Err(format!(
+                "{name}: the principal atom has an analytic law (no tabulated S(alpha, beta)), \
+                 which this converter does not process"
+            )
+            .into());
+        }
+        for law in &laws[1..] {
+            let kind = |l: &ThermalScattering| l.elastic.as_ref().map(|e| e.lthr());
+            if law.mat != first.mat
+                || !same(law.awr, first.awr)
+                || !same(law.energy_max, first.energy_max)
+                || !same(law.principal_count, first.principal_count)
+                || kind(law) != kind(first)
+            {
+                return Err(format!(
+                    "{name}: its evaluation files disagree on more than temperature \
+                     (material, mass, energy_max, M0 or elastic kind), so they are not \
+                     one table"
+                )
+                .into());
+            }
+        }
+        if aces.len() != laws.len() {
+            return Err("one ACE file per evaluation file is needed".into());
+        }
+        let mut temperatures = Vec::new();
+        for (l, (law, tables)) in laws.iter().zip(aces).enumerate() {
+            if tables.len() != law.temperatures.len() {
+                return Err(format!(
+                    "{name}: NJOY wrote {} tables for {} temperatures",
+                    tables.len(),
+                    law.temperatures.len()
+                )
+                .into());
+            }
+            for (index, (ace, &kelvin)) in tables.into_iter().zip(&law.temperatures).enumerate() {
+                if (ace.temperature - kelvin).abs() > 1e-3 * kelvin {
+                    return Err(format!(
+                        "{name}: the ACE table at {} K was paired with the {kelvin} K law",
+                        ace.temperature
+                    )
+                    .into());
+                }
+                temperatures.push(Temperature {
+                    label: temperature_str(kelvin),
+                    kelvin,
+                    ace,
+                    index,
+                    law: l,
+                });
+            }
+        }
+        temperatures.sort_by(|a, b| a.kelvin.total_cmp(&b.kelvin));
+        for pair in temperatures.windows(2) {
+            if pair[0].label == pair[1].label {
+                return Err(
+                    format!("{name}: two temperatures share the label {}", pair[0].label).into(),
+                );
+            }
+        }
+        Ok(Prepared {
+            name: name.to_string(),
+            bound_nuclides: bound_nuclides.to_vec(),
+            source: source.to_string(),
+            laws,
+            temperatures,
+        })
+    }
+
+    /// Temperature labels, in order.
+    pub fn labels(&self) -> Vec<String> {
+        self.temperatures.iter().map(|t| t.label.clone()).collect()
+    }
+
+    /// Write every section into `dir`.
+    pub fn write(&self, dir: &Path) -> Result<(), Box<dyn Error>> {
+        std::fs::create_dir_all(dir)?;
+        self.write_header(dir)?;
+        self.write_inelastic(dir)?;
+        if self.laws[0].elastic.is_some() {
+            self.write_elastic(dir)?;
+        }
+        self.write_sab(dir)?;
+        Ok(())
+    }
+
+    fn write_header(&self, dir: &Path) -> Result<(), Box<dyn Error>> {
+        let law = &self.laws[0];
+        let inelastic = law.inelastic.as_ref().expect("checked in new");
+        let model = |m: SecondaryModel| match m {
+            SecondaryModel::ShortCollisionTime => "short_collision_time",
+            SecondaryModel::FreeGas => "free_gas",
+            SecondaryModel::Diffusive => "diffusive",
+        };
+        let kind = law.elastic.as_ref().map(|e| {
+            match e {
+                ThermalElastic::Coherent(_) => "coherent",
+                ThermalElastic::Incoherent(_) => "incoherent",
+                ThermalElastic::Mixed { .. } => "mixed",
+            }
+            .to_string()
+        });
+        let kelvin: Vec<f64> = self.temperatures.iter().map(|t| t.kelvin).collect();
+        let kts: Vec<f64> = self.temperatures.iter().map(|t| t.ace.kt).collect();
+        write_section(
+            &dir.join("thermal.arrow"),
+            "thermal.arrow",
+            vec![
+                strings(std::slice::from_ref(&self.name)),
+                opt_strings(std::slice::from_ref(&law.zsymam)),
+                ints(&[law.mat]),
+                string_list(&self.bound_nuclides),
+                floats(&[law.awr]),
+                floats(&[law.free_atom_xs]),
+                floats(&[law.energy_max]),
+                floats(&[law.epsilon]),
+                floats(&[law.principal_count]),
+                ints(&[law.lat as i32]),
+                bools(&[law.symmetric]),
+                ints(&[law.lln as i32]),
+                string_list(
+                    &law.secondary
+                        .iter()
+                        .map(|s| model(s.model).to_string())
+                        .collect::<Vec<_>>(),
+                ),
+                float_list(
+                    &law.secondary
+                        .iter()
+                        .map(|s| s.free_atom_xs)
+                        .collect::<Vec<_>>(),
+                ),
+                float_list(&law.secondary.iter().map(|s| s.awr).collect::<Vec<_>>()),
+                float_list(&law.secondary.iter().map(|s| s.count).collect::<Vec<_>>()),
+                string_list(&self.labels()),
+                float_list(&kelvin),
+                float_list(&kts),
+                opt_strings(&[kind]),
+                int_list(&inelastic.alpha_breakpoints),
+                int_list(&inelastic.alpha_interpolation),
+                int_list(&inelastic.beta_breakpoints),
+                int_list(&inelastic.beta_interpolation),
+                strings(std::slice::from_ref(&self.source)),
+            ],
+        )
+    }
+
+    fn write_inelastic(&self, dir: &Path) -> Result<(), Box<dyn Error>> {
+        let mut rows = Vec::with_capacity(self.temperatures.len());
+        for t in &self.temperatures {
+            let InelasticDistribution::Continuous(dist) = &t.ace.inelastic else {
+                return Err(format!(
+                    "{}: the {} table has equally probable outgoing energies; the \
+                     continuous form (ACER iwt=2) is the one this format stores",
+                    self.name, t.label
+                )
+                .into());
+            };
+            let n_mu = dist.first().map_or(0, |d| d.n_mu);
+            if dist.iter().any(|d| d.n_mu != n_mu) {
+                return Err(
+                    format!("{}: {} has a varying cosine count", self.name, t.label).into(),
+                );
+            }
+            rows.push(vec![
+                strings(std::slice::from_ref(&t.label)),
+                floats(&[t.ace.kt]),
+                float_list(&t.ace.inelastic_energy),
+                float_list(&t.ace.inelastic_xs),
+                float_list_lists(&[dist.iter().map(|d| d.energy_out.clone()).collect()]),
+                float_list_lists(&[dist.iter().map(|d| d.pdf.clone()).collect()]),
+                float_list_lists(&[dist.iter().map(|d| d.cdf.clone()).collect()]),
+                f32_list_list(dist.iter().map(|d| d.mu.as_slice())),
+                ints(&[n_mu as i32]),
+            ]);
+        }
+        write_section_per_row(&dir.join("inelastic.arrow"), "inelastic.arrow", rows)
+    }
+
+    fn write_elastic(&self, dir: &Path) -> Result<(), Box<dyn Error>> {
+        let mut rows = Vec::with_capacity(self.temperatures.len());
+        for t in &self.temperatures {
+            let law = &self.laws[t.law];
+            let elastic = law
+                .elastic
+                .as_ref()
+                .expect("the first law has elastic, so all do");
+            let coherent = |c: &endf::thermal_scattering::CoherentElastic| {
+                c.temperatures
+                    .iter()
+                    .position(|&k| same(k, t.kelvin))
+                    .map(|i| (c.bragg_edges.clone(), c.factors[i].clone()))
+                    .ok_or_else(|| {
+                        format!(
+                            "{}: the coherent elastic data has no {} K, which the inelastic \
+                             law has",
+                            self.name, t.kelvin
+                        )
+                    })
+            };
+            let incoherent = |i: &endf::thermal_scattering::IncoherentElastic| {
+                let x = &i.debye_waller.x;
+                if x.is_empty()
+                    || t.kelvin < x[0] * (1.0 - 1e-9)
+                    || t.kelvin > x[x.len() - 1] * (1.0 + 1e-9)
+                {
+                    return Err(format!(
+                        "{}: {} K is outside the Debye-Waller table",
+                        self.name, t.kelvin
+                    ));
+                }
+                // SB per principal atom, as THERMR takes it.
+                Ok((
+                    i.bound_xs / law.principal_count,
+                    i.debye_waller.eval(t.kelvin),
+                ))
+            };
+            let (kind, bragg, inc) = match elastic {
+                ThermalElastic::Coherent(c) => ("coherent", Some(coherent(c)?), None),
+                ThermalElastic::Incoherent(i) => ("incoherent", None, Some(incoherent(i)?)),
+                ThermalElastic::Mixed {
+                    coherent: c,
+                    incoherent: i,
+                } => ("mixed", Some(coherent(c)?), Some(incoherent(i)?)),
+            };
+            let (edges, factors) = match bragg {
+                Some((e, f)) => (vec![e], vec![f]),
+                None => (vec![], vec![]),
+            };
+            rows.push(vec![
+                strings(std::slice::from_ref(&t.label)),
+                strings(&[kind.to_string()]),
+                nullable_list(&edges),
+                nullable_list(&factors),
+                opt_floats(&[inc.map(|(b, _)| b)]),
+                opt_floats(&[inc.map(|(_, w)| w)]),
+            ]);
+        }
+        write_section_per_row(&dir.join("elastic.arrow"), "elastic.arrow", rows)
+    }
+
+    fn write_sab(&self, dir: &Path) -> Result<(), Box<dyn Error>> {
+        let mut rows = Vec::with_capacity(self.temperatures.len());
+        for t in &self.temperatures {
+            let law = &self.laws[t.law];
+            let inelastic = law.inelastic.as_ref().expect("checked in new");
+            let teff = law
+                .effective_temperature
+                .first()
+                .map_or(t.kelvin, |f| f.eval(t.kelvin));
+            rows.push(vec![
+                strings(std::slice::from_ref(&t.label)),
+                floats(&[t.kelvin]),
+                float_list(&inelastic.alpha),
+                float_list(&inelastic.beta),
+                float_list(&inelastic.s[t.index]),
+                ints(&[inelastic.temperature_interpolation[t.index] as i32]),
+                floats(&[teff]),
+            ]);
+        }
+        write_section_per_row(&dir.join("sab.arrow"), "sab.arrow", rows)
+    }
+}
+
+/// A one-row `list<double>` column, null when `rows` is empty.
+fn nullable_list(rows: &[Vec<f64>]) -> ArrayRef {
+    if rows.is_empty() {
+        crate::sections::float_lists_or_null(&[vec![]])
+    } else {
+        float_lists(rows)
+    }
+}
+
+/// A one-row `list<list<float32>>` column.
+fn f32_list_list<'a>(inner: impl Iterator<Item = &'a [f64]>) -> ArrayRef {
+    let mut b = ListBuilder::new(ListBuilder::new(Float32Builder::new()));
+    for values in inner {
+        for &v in values {
+            b.values().values().append_value(v as f32);
+        }
+        b.values().append(true);
+    }
+    b.append(true);
+    Arc::new(b.finish())
+}
+
+/// Write `version.json` with the temperature index of every per-temperature
+/// section present. Written last: its presence is what says the folder is
+/// finished.
+pub fn write_version(dir: &Path, provenance: &Provenance) -> Result<(), Box<dyn Error>> {
+    let mut ranges = serde_json::Map::new();
+    for section in PER_TEMPERATURE_SECTIONS {
+        let path = dir.join(section);
+        if path.exists() {
+            let index = crate::energy_ranges::index_temperature_batches(&path, section)?;
+            ranges.insert(section.to_string(), index.to_json());
+        }
+    }
+    let marker = serde_json::json!({
+        "format_version": nuclear_data_schema::FORMAT_VERSION,
+        "library": provenance.library,
+        "data_version": provenance.data_version,
+        "converter_version": concat!("yamc-convert ", env!("CARGO_PKG_VERSION")),
+        "created_utc": provenance.created_utc,
+        "particle": "thermal",
+        "temperature_ranges": ranges,
+    });
+    let tmp = dir.join("version.json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&marker)?)?;
+    std::fs::rename(tmp, dir.join("version.json"))?;
+    Ok(())
+}
+
+/// Convert one thermal table into `output_dir/<name>.arrow/`, running NJOY on
+/// every evaluation file at all of its temperatures. Returns the folder.
+pub fn convert_thermal(
+    source: &ThermalSource,
+    output_dir: &Path,
+    provenance: &Provenance,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let neutron = Material::from_file(source.neutron)
+        .map_err(|e| format!("{}: {e}", source.neutron.display()))?;
+    std::fs::create_dir_all(output_dir)?;
+    let mut laws = Vec::new();
+    let mut aces = Vec::new();
+    for file in source.thermal {
+        let material = Material::from_file(file).map_err(|e| format!("{}: {e}", file.display()))?;
+        let law = ThermalScattering::from_endf(&material)?;
+        // NJOY works in a directory of its own inside the output directory,
+        // removed when `work` drops (see `entry::read` for why not /tmp).
+        let work = endf::njoy::Scratch::new_in(output_dir, source.name)?;
+        let options = endf::njoy::ThermalAceOptions {
+            table_name: source.ace_name.to_string(),
+            zaids: source.zaids.to_vec(),
+            nmix: source.nmix,
+            output_dir: work.path().to_path_buf(),
+            njoy_exec: source.njoy_exec.to_string(),
+            ..Default::default()
+        };
+        let ace = endf::njoy::make_ace_thermal(source.neutron, &neutron, file, &material, &options)
+            .map_err(|e| format!("NJOY failed on {}: {e}", file.display()))?;
+        let text = std::fs::read_to_string(&ace)?;
+        let tables = endf::ace::tables_from_str(&text, None)?
+            .iter()
+            .map(ThermalAce::from_ace)
+            .collect::<Result<Vec<_>, _>>()?;
+        laws.push(law);
+        aces.push(tables);
+    }
+    let names: Vec<String> = source
+        .thermal
+        .iter()
+        .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_string))
+        .collect();
+    let prepared = Prepared::new(
+        source.name,
+        source.bound_nuclides,
+        &names.join(","),
+        laws,
+        aces,
+    )?;
+    let dir = output_dir.join(format!("{}.arrow", source.name));
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
+    }
+    prepared.write(&dir)?;
+    write_version(&dir, provenance)?;
+    Ok(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow_array::cast::AsArray;
+    use arrow_array::Array;
+    use arrow_ipc::reader::FileReader;
+
+    fn xz(bytes: &[u8]) -> String {
+        let mut out = Vec::new();
+        lzma_rs::xz_decompress(&mut std::io::BufReader::new(bytes), &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    const SIO2: &[u8] = include_bytes!("../../endf/fixtures/tsl-SiO2-beta.endf.xz");
+    const ZR_ZRH: &[u8] = include_bytes!("../../endf/fixtures/tsl-ZrinZrH.endf.xz");
+    const SYNTHETIC: &[u8] = include_bytes!("../../endf/fixtures/synthetic-thermal.ace.xz");
+
+    /// The synthetic continuous table, given each of `law`'s temperatures in
+    /// turn, standing in for what NJOY would write.
+    fn aces_for(law: &ThermalScattering) -> Vec<ThermalAce> {
+        let tables = endf::ace::tables_from_str(&xz(SYNTHETIC), None).unwrap();
+        law.temperatures
+            .iter()
+            .map(|&t| {
+                let mut table = tables[0].clone();
+                table.kt = endf::data::K_BOLTZMANN * t / 1e6;
+                ThermalAce::from_ace(&table).unwrap()
+            })
+            .collect()
+    }
+
+    fn law(fixture: &[u8]) -> ThermalScattering {
+        ThermalScattering::from_endf(&Material::from_str(&xz(fixture)).unwrap()).unwrap()
+    }
+
+    fn rows(path: &Path) -> Vec<arrow_array::RecordBatch> {
+        FileReader::try_new(std::fs::File::open(path).unwrap(), None)
+            .unwrap()
+            .map(|b| b.unwrap())
+            .collect()
+    }
+
+    fn write(fixture: &[u8]) -> (tempfile::TempDir, PathBuf, ThermalScattering) {
+        let l = law(fixture);
+        let aces = aces_for(&l);
+        let prepared = Prepared::new(
+            "c_Test",
+            &["Si28".into()],
+            "t.endf",
+            vec![l.clone()],
+            vec![aces],
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("c_Test.arrow");
+        prepared.write(&dir).unwrap();
+        write_version(
+            &dir,
+            &Provenance {
+                library: "test".into(),
+                data_version: "2026-11-07".into(),
+                created_utc: "now".into(),
+            },
+        )
+        .unwrap();
+        (tmp, dir, l)
+    }
+
+    #[test]
+    fn a_coherent_table_writes_every_section_one_batch_per_temperature() {
+        let (_tmp, dir, l) = write(SIO2);
+        let n = l.temperatures.len();
+        for section in ["inelastic.arrow", "elastic.arrow", "sab.arrow"] {
+            let batches = rows(&dir.join(section));
+            assert_eq!(batches.len(), n, "{section}");
+            assert!(batches.iter().all(|b| b.num_rows() == 1), "{section}");
+        }
+        let header = &rows(&dir.join("thermal.arrow"))[0];
+        let labels = header
+            .column_by_name("temperatures")
+            .unwrap()
+            .as_list::<i32>()
+            .value(0);
+        let labels = labels.as_string::<i32>();
+        assert_eq!(labels.len(), n);
+        assert_eq!(
+            header
+                .column_by_name("elastic_kind")
+                .unwrap()
+                .as_string::<i32>()
+                .value(0),
+            "coherent"
+        );
+        // The coherent factors are the evaluation's at that temperature.
+        let elastic = &rows(&dir.join("elastic.arrow"))[1];
+        let factors = elastic
+            .column_by_name("factors")
+            .unwrap()
+            .as_list::<i32>()
+            .value(0);
+        let factors = factors.as_primitive::<arrow_array::types::Float64Type>();
+        let ThermalElastic::Coherent(c) = l.elastic.as_ref().unwrap() else {
+            panic!()
+        };
+        assert_eq!(factors.values().to_vec(), c.factors[1]);
+        // The index names every temperature of every section.
+        let version: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("version.json")).unwrap())
+                .unwrap();
+        for section in PER_TEMPERATURE_SECTIONS {
+            let index = nuclear_data_schema::energy_ranges::EnergyRanges::from_json(
+                &version["temperature_ranges"][section],
+            )
+            .unwrap();
+            assert_eq!(index.temperatures.len(), n, "{section}");
+        }
+    }
+
+    #[test]
+    fn an_incoherent_table_stores_the_bound_xs_per_principal_atom() {
+        let (_tmp, dir, l) = write(ZR_ZRH);
+        let ThermalElastic::Incoherent(i) = l.elastic.as_ref().unwrap() else {
+            panic!()
+        };
+        let elastic = &rows(&dir.join("elastic.arrow"))[0];
+        let bound = elastic
+            .column_by_name("bound_xs")
+            .unwrap()
+            .as_primitive::<arrow_array::types::Float64Type>()
+            .value(0);
+        assert_eq!(bound, i.bound_xs / l.principal_count);
+        let w = elastic
+            .column_by_name("debye_waller")
+            .unwrap()
+            .as_primitive::<arrow_array::types::Float64Type>()
+            .value(0);
+        assert_eq!(w, i.debye_waller.eval(l.temperatures[0]));
+    }
+
+    #[test]
+    fn mismatched_ace_and_law_temperatures_are_refused() {
+        let l = law(ZR_ZRH);
+        let mut aces = aces_for(&l);
+        aces.pop();
+        assert!(Prepared::new("c", &[], "s", vec![l], vec![aces]).is_err());
+    }
+
+    #[test]
+    fn two_files_that_are_not_one_table_are_refused() {
+        let (a, b) = (law(SIO2), law(ZR_ZRH));
+        let (aa, ab) = (aces_for(&a), aces_for(&b));
+        assert!(Prepared::new("c", &[], "s", vec![a, b], vec![aa, ab]).is_err());
+    }
+}
