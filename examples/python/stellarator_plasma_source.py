@@ -17,7 +17,8 @@ import yamc
 #   Z =      a rho sin(theta) - e rho sin(theta - N zeta)
 # Each (l, m, n) is a Zernike mode in (rho, theta) times a Fourier mode in
 # zeta; m < 0 and n < 0 select sines. A DESC equilibrium's R_basis.modes /
-# R_lmn (and Z) can be passed in the same way, times 100 for cm.
+# R_lmn (and Z) can be passed in the same way, times 100 for cm, and
+# StellaratorShape.from_vmec fits a shape to a VMEC wout file's coefficients.
 a, e = 150.0, 50.0
 shape = yamc.sources.StellaratorShape(
     num_field_periods=5,
