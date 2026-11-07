@@ -72,6 +72,7 @@ fn options<'a>(
         memory_budget: None,
         workers: Some(2),
         stop: None,
+        progress: None,
     }
 }
 

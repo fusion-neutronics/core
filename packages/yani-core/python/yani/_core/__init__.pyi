@@ -37,6 +37,7 @@ __all__ = [
     "convert_transmutation",
     "cooldown_steps",
     "enriched",
+    "generate_library",
     "get_cross_section_data",
     "get_transmutation_branch_ratios",
     "get_transmutation_decay_data",
@@ -4630,6 +4631,79 @@ def enriched(fraction: builtins.float, *, target: builtins.str, percent: builtin
     
     Returns:
         Enriched: An enrichment specification.
+    """
+
+def generate_library(keyword: builtins.str, path: builtins.str, *, parts: typing.Optional[typing.Sequence[builtins.str]] = None, nuclides: typing.Optional[typing.Sequence[builtins.str]] = None, temperatures: typing.Optional[typing.Sequence[builtins.float]] = None, njoy_exec: typing.Optional[builtins.str] = None, downloads: typing.Optional[builtins.str] = None) -> dict:
+    r"""
+    Build a whole nuclear-data library from its evaluated sources into a folder.
+    
+    Downloads the library's source archives (each checked against the size and
+    sha256 it is pinned to), unpacks them, converts every evaluation, builds the
+    transmutation chain, checks the result and writes ``manifest.json`` last. The
+    folder is laid out as a published release, so it serves every setting:
+    
+    .. code-block:: python
+    
+        generate_library("endf-b8.1", "/data/endf-b8.1")
+        cross_section_data = "/data/endf-b8.1"
+        transmutation_decay_data = "/data/endf-b8.1"
+    
+    Running it again resumes: finished folders are kept and only the rest are
+    converted. A folder holds one library built by one version of this package.
+    
+    Some hosts serve their archives only to a web browser (the IAEA's FENDL and
+    IRDFF-II files, JAEA's JENDL-5 files). The error then lists each file with
+    its link; download them with a browser and run again. They are found in the
+    Downloads folder, in ``downloads``, or in ``<path>/.build/downloads/``.
+    
+    Parameters
+    ----------
+    keyword : str
+        The library: ``"endf-b8.1"``, ``"jeff-4.0"``, ``"jendl-5.0"``,
+        ``"tendl-2025"``, ``"tendl-2017"``, ``"fendl-3.2d"`` or ``"irdff-ii"``.
+    path : str
+        The folder to build in, created if absent. It must be new, empty or an
+        earlier build of the same library, and not inside :func:`cache_dir`.
+    parts : list of str, optional
+        What to build, of ``"neutron"``, ``"photon"``, ``"photonuclear"``,
+        ``"decay"``, ``"reactions"``, ``"fission_yields"`` and ``"branching"``.
+        The default is every part the library's published release carries. Only
+        ``"neutron"`` runs NJOY, so a chain alone builds in minutes.
+    nuclides : list of str, optional
+        Only these nuclides (``"Fe56"``, ``"Am242_m1"``) and elements (``"Fe"``,
+        meaning every Fe evaluation and the Fe photon data). The transmutation
+        chain is always built whole. A name the library does not have is refused.
+    temperatures : list of float, optional
+        Neutron temperatures in Kelvin. The default is 250, 293.6, 600, 900, 1200
+        and 2500 K. The 0 K grid is always kept.
+    njoy_exec : str, optional
+        The NJOY executable. The default is the ``njoy`` installed beside this
+        Python (``pip install njoy2016``), then the one on PATH. FENDL needs the
+        IAEA-NDS fork of NJOY, and a refusal says how to build it.
+    downloads : str, optional
+        A folder of source archives fetched by hand, searched first.
+    
+    Returns
+    -------
+    dict
+        ``keyword``, ``release`` (the date the build started, the folder's
+        release stamp), ``path``, ``parts``, ``converted`` and ``reused`` (sorted
+        ``"<particle>/<Name>"`` keys), ``not_converted`` (the evaluations the
+        library's recipe declares NJOY cannot process, with the reason each
+        failed), ``stale_declarations`` (declared ones that converted after all),
+        ``njoy`` (the NJOY version used, or ``None``), ``chain_nuclides``,
+        ``manifest_sha256``, ``file_count`` and ``total_bytes``.
+    
+    Raises
+    ------
+    ValueError
+        An unknown keyword or part, or bad temperatures.
+    RuntimeError
+        The build cannot start (the folder, the NJOY, the disk space, or source
+        files that need a browser), or did not finish: evaluations that failed
+        and are not declared, a gate that failed, or Ctrl-C. Nothing finished is
+        lost, and running again retries only what is left. Each failed
+        evaluation's reason is in ``<path>/.build/failed/``.
     """
 
 def get_cross_section_data() -> typing.Any:

@@ -108,6 +108,9 @@ pub struct Options<'a> {
     /// Set from another thread (the binding's Ctrl-C check) to start nothing
     /// more. Conversions already running finish.
     pub stop: Option<&'a AtomicBool>,
+    /// Told one line as each conversion finishes, such as
+    /// `"[12/557] neutron/Fe56"` or `"[13/557] neutron/U235 failed: ..."`.
+    pub progress: Option<&'a (dyn Fn(&str) + Sync)>,
 }
 
 /// What a run did, by `"<particle>/<Name>"`.
@@ -211,8 +214,24 @@ pub fn convert(materials: &[Material], path: &Path, options: &Options) -> Result
         .workers
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
         .max(1);
+    let done = std::sync::atomic::AtomicUsize::new(0);
     let results = run_pool(&todo, workers, budget, options.stop, |job| {
-        run_job(job, path, options)
+        let result = run_job(job, path, options);
+        if let Some(progress) = options.progress {
+            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+            let keys: Vec<String> = job.keys().collect();
+            let line = match &result {
+                Ok(()) => format!("[{n}/{}] {}", todo.len(), keys.join(", ")),
+                Err(e) => format!(
+                    "[{n}/{}] {} failed: {}",
+                    todo.len(),
+                    keys.join(", "),
+                    e.lines().next().unwrap_or("")
+                ),
+            };
+            progress(&line);
+        }
+        result
     });
 
     for (job, result) in todo.iter().zip(results) {
@@ -479,12 +498,12 @@ fn convert_one(job: &Job, path: &Path, options: &Options) -> Result<(), String> 
 // about 4 GB at the peak of an ENDF/B-VIII.1 build whose largest file is
 // 40.5 MB. The constant is what a worker holds before it reads anything; the
 // slope is the evaluation and NJOY's work on it.
-const BASE_BYTES: u64 = 200 * 1024 * 1024;
+pub(crate) const BASE_BYTES: u64 = 200 * 1024 * 1024;
 const BYTES_PER_SOURCE_BYTE: f64 = 0.115 * 1024.0;
 
 /// Of the free memory, the share the pool reserves. The rest is headroom for
 /// the estimate being low, which is the direction that kills a build.
-const SAFETY_PERCENT: u64 = 80;
+pub(crate) const SAFETY_PERCENT: u64 = 80;
 
 /// The estimated peak working set of converting `input`.
 fn cost(input: &Path) -> u64 {
@@ -495,7 +514,7 @@ fn cost(input: &Path) -> u64 {
 /// Memory free for the build to use, in bytes: what the system reports as
 /// available, not the installed total, since the build is not alone on the
 /// machine.
-fn available_memory() -> u64 {
+pub(crate) fn available_memory() -> u64 {
     let mut system = sysinfo::System::new();
     system.refresh_memory();
     system.available_memory()
@@ -506,7 +525,7 @@ fn available_memory() -> u64 {
 /// the whole budget runs when nothing else is running, so it is never
 /// skipped. Returns each job's result in order, or `None` for a job not
 /// started because `stop` was set.
-fn run_pool<J: HasCost + Sync, R: Send>(
+pub(crate) fn run_pool<J: HasCost + Sync, R: Send>(
     jobs: &[J],
     workers: usize,
     budget: u64,
@@ -564,7 +583,7 @@ fn run_pool<J: HasCost + Sync, R: Send>(
 }
 
 /// What the pool reserves for a job.
-trait HasCost {
+pub(crate) trait HasCost {
     fn cost(&self) -> u64;
 }
 
