@@ -302,15 +302,19 @@ impl crate::results::TransmutationResults {
             largest.dedup_by(|a, b| a.1 == b.1);
             let names: Vec<&str> = largest.iter().take(SHOWN).map(|(_, n)| *n).collect();
             let more = nuclides.len().saturating_sub(names.len());
+            let (s, its, it_is, their) = if nuclides.len() == 1 {
+                ("", "its", "it is", "Its")
+            } else {
+                ("s", "their", "they are", "Their")
+            };
             lines.push(format!(
-                "  decay data   {} has no decay record for {} nuclide{} this run produces \
-                 ({}{}); their fate is unknown, so they are counted as produced and kept \
-                 out of the inventory. Their activity is at most {} of the total at the \
-                 end (material {id}), and their daughters and emissions are not in the \
+                "  decay data   {} has no decay record for {} nuclide{s} this run produces \
+                 ({}{}); {its} fate is unknown, so {it_is} counted as produced and kept \
+                 out of the inventory. {their} activity is at most {} of the total at the \
+                 end (material {id}), and {its} daughters and emissions are not in the \
                  results",
                 library.unwrap_or("the decay data"),
                 nuclides.len(),
-                if nuclides.len() == 1 { "" } else { "s" },
                 names.join(", "),
                 if more > 0 {
                     format!(" and {more} more")
