@@ -1886,7 +1886,16 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
                     yamc_particle::particle::urr_to_option(particle.urr_random),
                     rng,
                 ),
-                Some(p) => {
+                Some(mut p) => {
+                    // A bound nuclide below its thermal table's energy_max:
+                    // the elastic partial is the bound one, the same algebra
+                    // the material's cross sections use, so the partials sum
+                    // to the total the flight was sampled against.
+                    if let Some(bound_el) =
+                        material.bound_elastic_xs(nuclide_name, particle.energy, p.sigma_e)
+                    {
+                        p.sigma_e = bound_el;
+                    }
                     // Analog: the denominator is the full total, mirroring
                     // shared.rs (sel_denom == sigma_t). Survival biasing
                     // narrows it to the scatter cross section, which makes the

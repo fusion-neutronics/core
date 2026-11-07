@@ -61,6 +61,25 @@ pub(super) fn scatter_elastic(
     let e_in = particle.energy;
     let [dx, dy, dz] = particle.direction;
 
+    // A nuclide bound by a thermal scattering table, below its energy_max,
+    // scatters by the table (see `sample_bound`), unless the draw picks the
+    // free share of a partly bound nuclide.
+    if let Some(bound) = nuclide
+        .name
+        .as_deref()
+        .and_then(|n| material.thermal_for(n))
+        .filter(|b| e_in < b.table.energy_max)
+        && let Some((e_out, mu)) =
+            sample_bound(bound, nuclide, material, constituent_reaction, e_in, pcg)
+    {
+        // The lab azimuth, the last draw of every elastic collision.
+        let phi = std::f64::consts::TAU * next_xi(pcg);
+        particle.energy = if e_out > 1e-20 { e_out } else { 1e-11 };
+        particle.direction = rotate_direction_fast(dx, dy, dz, mu, phi);
+        let _ = (xi3, particle_idx);
+        return true;
+    }
+
     // Locate the elastic neutron product's CM angular distribution (if any),
     // then fetch the per-nuclide flat table (built + cached on first use).
     let angle = constituent_reaction
@@ -148,6 +167,123 @@ pub(super) fn scatter_elastic(
     }
     let _ = particle_idx; // used only under `debug_collision`
     true
+}
+
+/// Scatter off a bound nuclide by its thermal scattering table, returning
+/// `(E', mu_lab)`, or `None` when the free share of a partly bound nuclide was
+/// drawn (the caller then scatters it as a free atom).
+///
+/// Draw schedule, before the sampler's own draws (see
+/// `yamc_physics::gpu::flat::thermal_sab`) and the caller's azimuth:
+/// 1. bound or free, with probability f (sigma_el,b + sigma_inel,b) over the
+///    elastic cross section, only when the bound fraction f is below 1;
+/// 2. the upper of the two table temperatures with probability equal to its
+///    blend weight, only when the material sits between two (decision 2 of
+///    #263: the cross sections blend, the distribution is one table's);
+/// 3. elastic or inelastic in proportion to that table's cross sections, only
+///    when the table has an elastic part;
+/// 4. coherent or incoherent in proportion, only for mixed elastic.
+fn sample_bound(
+    bound: &yamc_materials::material::BoundThermal,
+    nuclide: &Nuclide,
+    material: &Material,
+    elastic: &Reaction,
+    e_in: f64,
+    pcg: &mut u64,
+) -> Option<(f64, f64)> {
+    use yamc_nuclide::thermal_scattering::Elastic;
+    use yamc_physics::gpu::flat::thermal_sab;
+    use yamc_rng::next_xi;
+
+    if bound.fraction < 1.0 {
+        let thermal = bound.fraction * (bound.elastic_xs(e_in) + bound.inelastic_xs(e_in));
+        let free = free_elastic_xs(nuclide, material, elastic, e_in);
+        let total = thermal + (1.0 - bound.fraction) * free;
+        if total <= 0.0 || next_xi(pcg) * total >= thermal {
+            return None;
+        }
+    }
+    let table = match bound.bracket() {
+        (lo, None) => lo,
+        (lo, Some((hi, w))) => {
+            if next_xi(pcg) < w {
+                hi
+            } else {
+                lo
+            }
+        }
+    };
+    let inelastic_xs =
+        yamc_nuclide::interpolate_linear(&table.inelastic.energy, &table.inelastic.xs, e_in);
+    let elastic_xs = table.elastic.as_ref().map_or(0.0, |e| e.xs(e_in));
+    let choose_elastic =
+        elastic_xs > 0.0 && next_xi(pcg) * (elastic_xs + inelastic_xs) < elastic_xs;
+    if choose_elastic {
+        let el = table.elastic.as_ref().expect("elastic_xs > 0");
+        return Some(match el {
+            Elastic::Coherent {
+                bragg_edges,
+                factors,
+            } => thermal_sab::coherent_elastic(e_in, bragg_edges, factors, pcg),
+            Elastic::Incoherent { debye_waller, .. } => {
+                thermal_sab::incoherent_elastic(e_in, *debye_waller, pcg)
+            }
+            Elastic::Mixed {
+                bragg_edges,
+                factors,
+                bound_xs,
+                debye_waller,
+            } => {
+                let n = bragg_edges.partition_point(|&e| e <= e_in);
+                let coh = if n == 0 { 0.0 } else { factors[n - 1] / e_in };
+                let x = 2.0 * e_in * debye_waller;
+                let inc = if x == 0.0 {
+                    *bound_xs
+                } else {
+                    bound_xs / 2.0 * -(-2.0 * x).exp_m1() / x
+                };
+                if coh > 0.0 && next_xi(pcg) * (coh + inc) < coh {
+                    thermal_sab::coherent_elastic(e_in, bragg_edges, factors, pcg)
+                } else {
+                    thermal_sab::incoherent_elastic(e_in, *debye_waller, pcg)
+                }
+            }
+        });
+    }
+    let inelastic = &table.inelastic;
+    Some(thermal_sab::incoherent_inelastic(
+        e_in,
+        &inelastic.energy,
+        |l| {
+            let d = &inelastic.distributions[l];
+            thermal_sab::Outgoing {
+                energy_out: &d.energy_out,
+                pdf: &d.pdf,
+                cdf: &d.cdf,
+                mu: &d.mu,
+                n_mu: inelastic.n_mu,
+            }
+        },
+        pcg,
+    ))
+}
+
+/// The free-atom elastic cross section of `nuclide` at `e_in`, at the
+/// material's temperature, from its MT 2 reaction.
+fn free_elastic_xs(nuclide: &Nuclide, material: &Material, elastic: &Reaction, e_in: f64) -> f64 {
+    let Some(grid) = nuclide
+        .energy
+        .as_ref()
+        .and_then(|m| m.get(material.temperature()))
+    else {
+        return 0.0;
+    };
+    let start = elastic.threshold_idx.min(grid.len());
+    let energies = &grid[start..];
+    if energies.len() != elastic.cross_section.len() || energies.is_empty() {
+        return 0.0;
+    }
+    yamc_nuclide::interpolate_linear(energies, &elastic.cross_section, e_in)
 }
 
 /// Inelastic scatter (MT 50-91) and level-specific (n,2n) (MT 875-890):
