@@ -133,6 +133,8 @@ struct BranchStateColumns<'a> {
     level_energy_difference: &'a ListArray,
     mf3_cross_section: &'a ListArray,
     normalisation: &'a StringArray,
+    /// Optional: a file written before it has none.
+    match_energy: Option<&'a ListArray>,
 }
 
 const BRANCH_STATE_COLUMNS: [&str; 9] = [
@@ -187,6 +189,7 @@ impl<'a> BranchStateColumns<'a> {
             level_energy_difference: col(batch, "level_energy_difference")?,
             mf3_cross_section: col(batch, "mf3_cross_section")?,
             normalisation: col(batch, "normalisation")?,
+            match_energy: optional_col::<ListArray>(batch, "match_energy")?,
         }))
     }
 
@@ -243,6 +246,10 @@ impl<'a> BranchStateColumns<'a> {
         let difference: Float64Array =
             items(self.level_energy_difference, i, "level_energy_difference")?;
         let mf3: ListArray = items(self.mf3_cross_section, i, "mf3_cross_section")?;
+        let matched: Option<Float64Array> = match self.match_energy {
+            Some(list) if !list.is_null(i) => Some(items(list, i, "match_energy")?),
+            _ => None,
+        };
         let n = mt.len();
         let lengths = [
             lfs.len(),
@@ -313,6 +320,10 @@ impl<'a> BranchStateColumns<'a> {
                 level_route: route.value(j).to_string(),
                 level_energy: energy.value(j),
                 level_energy_difference: option(&difference, j).then(|| difference.value(j)),
+                match_energy: matched
+                    .as_ref()
+                    .filter(|m| j < m.len() && option(*m, j))
+                    .map(|m| m.value(j)),
                 mf3_cross_section,
             });
         }
@@ -603,6 +614,7 @@ fn anything_curve(
         // state is the format's "not stated".
         level_energy: 0.0,
         level_energy_difference: (lfs == 0).then_some(0.0),
+        match_energy: None,
         mf3_cross_section: None,
     };
     Ok(Some(BranchCurve {
@@ -1656,8 +1668,11 @@ fn overlay_branching(
             let mut target = target;
             if let Some((z, a, lfs)) = endf::radionuclide_production::parse_placeholder(&target) {
                 let isomers = isomers.get_or_insert_with(|| isomer_table(chain));
-                let level_energy = states.first().map(|s| s.level_energy);
-                let energy = level_energy.filter(|&e| e > 0.0);
+                // The energy the converter's matching reads, stored with the
+                // level; a file without it gives the level energy alone.
+                let energy = states
+                    .first()
+                    .and_then(|s| s.match_energy.or(Some(s.level_energy).filter(|&e| e > 0.0)));
                 let resolved = endf::radionuclide_production::resolve_level(
                     z,
                     a,

@@ -133,41 +133,8 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ui::PyInteractivePlot>()?;
     m.add_class::<ui::PyInteractiveTallyPlot>()?;
     m.add_class::<simulation::PyModel>()?;
-    // The converters. They are implemented in `yani-python` because the
-    // standalone transmutation wheel needs them too, and registered here as
-    // well because THIS is the package that ships the auxiliary photon
-    // tabulations: `yamc.convert_photon` can default to them, where
-    // `yani.convert_photon` has to be given their paths. yani never needs
-    // photon data, since transmutation is driven by the neutron flux.
-    m.add_function(wrap_pyfunction!(
-        yani_python::convert::convert_transmutation,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        yani_python::convert::convert_branching,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        yani_python::convert::radionuclide_production,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        yani_python::convert::convert_neutron_xs,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        yani_python::convert::convert_neutron_transport,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(yani_python::convert::convert_photon, m)?)?;
-    m.add_function(wrap_pyfunction!(
-        yani_python::convert::convert_photonuclear,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        yani_python::read::read_photonuclear_from_arrow,
-        m
-    )?)?;
+    // The converters and readers come with `yani_python::register_classes`
+    // above, as they do for the yani wheel, so both behave the same.
     m.add_function(wrap_pyfunction!(simulation::combine_results, m)?)?;
     m.add_function(wrap_pyfunction!(simulation::simulate_shutdown_dose, m)?)?;
     m.add_function(wrap_pyfunction!(tally_reduce::reduce_mesh_tally_block, m)?)?;

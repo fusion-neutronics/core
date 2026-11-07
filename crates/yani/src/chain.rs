@@ -194,6 +194,10 @@ pub struct BranchState {
     /// to, in eV; `None` where that isomer's energy is unknown or
     /// `level_energy` is not a stated energy.
     pub level_energy_difference: Option<f64>,
+    /// The level's excitation energy as the level matching reads it: ELFS
+    /// where positive, QM - QI otherwise. `None` where neither is, and from a
+    /// file written before it was stored.
+    pub match_energy: Option<f64>,
     /// The evaluation's MF=3 for `mt` on the curve's `energy` nodes, in barns:
     /// the tape's value where a node is one of its points and its own law
     /// between them, not a copy of MF=3. `None` where the file has no MF=3

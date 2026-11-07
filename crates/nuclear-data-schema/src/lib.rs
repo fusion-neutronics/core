@@ -295,6 +295,11 @@ pub fn branching_branching() -> Schema {
         f64s("level_energy_difference", true),
         f64ss("mf3_cross_section", true),
         utf8("normalisation", true),
+        // Each state's excitation energy as the level matching reads it: ELFS
+        // where it is positive, QM - QI otherwise, null where neither is (an
+        // unstated excited level). Last, and optional to a reader, so a file
+        // written before it still reads.
+        f64s("match_energy", true),
     ])
     .with_metadata(meta([
         ("filetype", "transmutation-branching"),

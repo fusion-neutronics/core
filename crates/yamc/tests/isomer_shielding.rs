@@ -208,6 +208,7 @@ fn branch() -> Arc<BranchTable> {
             level_route: if lfs == 0 { "ground" } else { "energy" }.to_string(),
             level_energy: 0.0,
             level_energy_difference: Some(0.0),
+            match_energy: None,
             mf3_cross_section: None,
         }])
     };

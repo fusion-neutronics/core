@@ -113,6 +113,10 @@ pub struct StateFacts {
     /// energy is unknown to the decay data, or when `level_energy` is not a
     /// stated energy (zero for an excited level, or negative).
     pub level_energy_difference: Option<f64>,
+    /// The level's excitation energy as the level matching reads it (see
+    /// [`endf::radionuclide_production::RadionuclideState::excitation_energy`]):
+    /// what a run matches a level written as evaluated against.
+    pub match_energy: Option<f64>,
     /// The evaluation's own MF=3 for `mt`, as stated. `None` when the file
     /// has no MF=3 section for that MT, even where it gives the same total
     /// through component MTs. Shared between the states of one MT, since a
@@ -1056,6 +1060,7 @@ impl BranchingExtractor {
                             level_route: resolved.route,
                             level_energy,
                             level_energy_difference,
+                            match_energy: s.excitation_energy(),
                             mf3: mf3.clone(),
                         }],
                         normalisation: normalisation.clone(),
@@ -1665,6 +1670,7 @@ pub fn write_branching(rows: &[BranchingRow], dir: &Path) -> Result<(), Box<dyn 
     let mut level_route = ListBuilder::new(StringBuilder::new());
     let mut level_energy = ListBuilder::new(Float64Builder::new());
     let mut level_energy_difference = ListBuilder::new(Float64Builder::new());
+    let mut match_energy = ListBuilder::new(Float64Builder::new());
     let mut mf3 = ListBuilder::new(ListBuilder::new(Float64Builder::new()));
     for row in rows {
         for state in &row.states {
@@ -1681,6 +1687,7 @@ pub fn write_branching(rows: &[BranchingRow], dir: &Path) -> Result<(), Box<dyn 
             level_energy_difference
                 .values()
                 .append_option(state.level_energy_difference);
+            match_energy.values().append_option(state.match_energy);
             match &state.mf3 {
                 Some(curve) => {
                     for value in sampled_on(curve, &row.energy) {
@@ -1698,6 +1705,7 @@ pub fn write_branching(rows: &[BranchingRow], dir: &Path) -> Result<(), Box<dyn 
         level_route.append(true);
         level_energy.append(true);
         level_energy_difference.append(true);
+        match_energy.append(true);
         mf3.append(true);
     }
 
@@ -1720,6 +1728,7 @@ pub fn write_branching(rows: &[BranchingRow], dir: &Path) -> Result<(), Box<dyn 
             Arc::new(level_energy_difference.finish()),
             Arc::new(mf3.finish()),
             opt_strings(&normalisation),
+            Arc::new(match_energy.finish()),
         ],
     )
 }

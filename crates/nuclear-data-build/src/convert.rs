@@ -96,9 +96,9 @@ pub struct Options<'a> {
     /// nuclide (`"Fe56"`, `"Am242_m1"`) or an element symbol, which means
     /// every evaluation of that element in every particle (`"Fe"`).
     pub nuclides: Option<&'a [String]>,
-    /// The Compton profiles, density effect and bremsstrahlung tables a
-    /// photon folder carries beside its evaluation. Required when photons are
-    /// converted, so a library is never published without them.
+    /// Other copies of the Compton profile, density effect and
+    /// bremsstrahlung tables a photon folder carries beside its evaluation;
+    /// `None` uses the ones compiled into the converter.
     pub tabulations: Option<PhotonTabulations<'a>>,
     /// The memory the pool may reserve, in bytes. `None` measures what is
     /// free when the run starts.
@@ -152,18 +152,10 @@ impl Job {
 /// release folder `path`.
 ///
 /// Refuses before converting anything when a name in `options.nuclides`
-/// matches no material, when photons are asked for without the tabulations,
-/// or when a photo-atomic file's elements are split across more than one
-/// atomic relaxation file.
+/// matches no material, or when a photo-atomic file's elements are split
+/// across more than one atomic relaxation file.
 pub fn convert(materials: &[Material], path: &Path, options: &Options) -> Result<Outcome, String> {
     let particles: BTreeSet<Particle> = options.particles.iter().copied().collect();
-    if particles.contains(&Particle::Photon) && options.tabulations.is_none() {
-        return Err(
-            "photon data needs the Compton profile, density effect and bremsstrahlung \
-             tabulations, and none were given"
-                .to_string(),
-        );
-    }
     let selected = select(materials, options.nuclides)?;
     let jobs = jobs(&selected, &particles)?;
 

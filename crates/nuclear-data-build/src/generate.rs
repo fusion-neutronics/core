@@ -25,7 +25,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use serde_json::{json, Value};
-use yamc_convert::entry::PhotonTabulations;
 use yamc_nuclide::storage::release;
 
 use crate::convert::{self, Particle};
@@ -146,12 +145,6 @@ pub fn generate(request: &Request) -> Result<Report, String> {
     let materials = identify::identify(&folders)?;
 
     let particles: Vec<Particle> = parts.iter().filter_map(|p| particle(*p)).collect();
-    let tabulations_dir = build.join("tabulations");
-    let tabulations = if particles.contains(&Particle::Photon) {
-        Some(write_tabulations(&tabulations_dir)?)
-    } else {
-        None
-    };
     if !particles.is_empty() {
         let names: Vec<&str> = particles.iter().map(|p| p.dir()).collect();
         say(&format!(
@@ -167,7 +160,7 @@ pub fn generate(request: &Request) -> Result<Report, String> {
         temperatures,
         particles: &particles,
         nuclides: request.nuclides,
-        tabulations: tabulations.as_ref().map(|t| t.borrowed()),
+        tabulations: None,
         memory_budget: None,
         workers: None,
         stop: request.stop,
@@ -499,53 +492,6 @@ fn provenance(
     p
 }
 
-/// The tabulations a photon folder carries beside its evaluation, which are
-/// in no ENDF sublibrary: Compton profiles (Biggs et al. 1975), the density
-/// effect (Sternheimer et al. 1982) and bremsstrahlung (Seltzer and Berger
-/// 1986). Compiled in, so every wheel builds photon data the same way.
-const COMPTON: &[u8] =
-    include_bytes!("../../../packages/yamc-core/python/yamc/data/compton_profiles_biggs1975.txt");
-const DENSITY: &[u8] = include_bytes!(
-    "../../../packages/yamc-core/python/yamc/data/density_effect_sternheimer1982.txt"
-);
-const BREMSSTRAHLUNG: &[u8] = include_bytes!(
-    "../../../packages/yamc-core/python/yamc/data/bremsstrahlung_seltzer_berger1986.txt"
-);
-
-/// The written tabulation files.
-struct Tabulations {
-    compton: PathBuf,
-    density: PathBuf,
-    bremsstrahlung: PathBuf,
-}
-
-impl Tabulations {
-    fn borrowed(&self) -> PhotonTabulations<'_> {
-        PhotonTabulations {
-            compton_profiles: &self.compton,
-            density_effect: &self.density,
-            bremsstrahlung: &self.bremsstrahlung,
-        }
-    }
-}
-
-fn write_tabulations(dir: &Path) -> Result<Tabulations, String> {
-    fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-    let put = |name: &str, body: &[u8]| -> Result<PathBuf, String> {
-        let path = dir.join(name);
-        if fs::read(&path).is_ok_and(|b| b == body) {
-            return Ok(path);
-        }
-        fs::write(&path, body).map_err(|e| format!("could not write {}: {e}", path.display()))?;
-        Ok(path)
-    };
-    Ok(Tabulations {
-        compton: put("compton_profiles_biggs1975.txt", COMPTON)?,
-        density: put("density_effect_sternheimer1982.txt", DENSITY)?,
-        bremsstrahlung: put("bremsstrahlung_seltzer_berger1986.txt", BREMSSTRAHLUNG)?,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,16 +530,5 @@ mod tests {
         assert!(check_temperatures(&[0.0]).is_err());
         assert!(check_temperatures(&[]).is_err());
         assert!(check_temperatures(&[f64::NAN]).is_err());
-    }
-
-    #[test]
-    fn the_tabulations_are_the_files_yamc_ships() {
-        let data =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/yamc-core/python/yamc/data");
-        assert_eq!(
-            fs::read(data.join("compton_profiles_biggs1975.txt")).unwrap(),
-            COMPTON
-        );
-        assert!(DENSITY.len() > 1000 && BREMSSTRAHLUNG.len() > 1_000_000);
     }
 }

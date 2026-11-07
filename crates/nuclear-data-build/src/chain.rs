@@ -15,8 +15,8 @@
 //! evaluations, reactions from its neutron evaluations, fission yields from
 //! its yields. Nothing of another library is used.
 //!
-//! Branching comes from a second call, scoped to the parents of the
-//! reactions subsection so its curves line up with the network. A library
+//! Branching comes from a second call, over every isotopic neutron
+//! evaluation. A library
 //! with no decay data of its own writes its excited product levels as it
 //! gives them, and a run names their isomers against the decay data it is
 //! given.
@@ -103,17 +103,12 @@ pub fn build(
     let yields = files_of(materials, Sublibrary::FissionYields);
     let mut chain = Chain::default();
 
-    // The network's subsections, each from its own sublibrary alone, and the
-    // reactions also when only the branching is wanted: their parents are
-    // what the branching is scoped to.
-    let mut network: Vec<String> = wanted
+    // The network's subsections, each from its own sublibrary alone.
+    let network: Vec<String> = wanted
         .iter()
         .filter(|p| matches!(p, Part::Decay | Part::Reactions | Part::FissionYields))
         .map(|p| p.name().to_string())
         .collect();
-    if wanted.contains(&Part::Branching) && !network.iter().any(|n| n == Part::Reactions.name()) {
-        network.push(Part::Reactions.name().to_string());
-    }
     for (part, files, what) in [
         (Part::Decay, &decay, "decay"),
         (Part::Reactions, &neutron, "neutron"),
@@ -148,8 +143,15 @@ pub fn build(
         // With no decay data of its own, the library's excited levels are
         // written as it gives them, and a run names their isomers against the
         // decay data it is given.
-        let reactions = staging.join("reactions").join("reactions.arrow");
-        let parents = reaction_parents(&reactions)?;
+        // Every isotopic evaluation is a parent: an element evaluation (A = 0)
+        // has no isomeric products, and an evaluation that gives isomer
+        // production in MF=9/10 without the MF=3 reactions a network follows
+        // (IRDFF-II's Hg199 (n,n')) is a parent all the same.
+        let parents: BTreeSet<String> = materials
+            .iter()
+            .filter(|m| m.sublibrary == Sublibrary::Neutron && m.header.za % 1000 != 0)
+            .map(|m| m.name.clone())
+            .collect();
         let inputs = branching_inputs(materials, &parents, &staging.join("inputs"))?;
         chain.branching_parents = parents.len();
         yani_convert::convert_branching_files(
@@ -202,32 +204,6 @@ fn strings(paths: &[PathBuf]) -> Vec<String> {
         .iter()
         .map(|p| p.to_string_lossy().into_owned())
         .collect()
-}
-
-/// The distinct parents of a reactions subsection.
-fn reaction_parents(reactions: &Path) -> Result<BTreeSet<String>, String> {
-    use arrow_array::{Array, StringArray};
-    let what = |e: String| format!("{}: {e}", reactions.display());
-    let file = fs::File::open(reactions).map_err(|e| what(e.to_string()))?;
-    let reader =
-        arrow_ipc::reader::FileReader::try_new(file, None).map_err(|e| what(e.to_string()))?;
-    let mut parents = BTreeSet::new();
-    for batch in reader {
-        let batch = batch.map_err(|e| what(e.to_string()))?;
-        let column = batch
-            .column_by_name("nuclide")
-            .ok_or_else(|| what("has no nuclide column".to_string()))?;
-        let names = column
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| what("its nuclide column is not text".to_string()))?;
-        for i in 0..names.len() {
-            if names.is_valid(i) {
-                parents.insert(names.value(i).to_string());
-            }
-        }
-    }
-    Ok(parents)
 }
 
 /// The neutron files holding the evaluations of `parents`. A file is used

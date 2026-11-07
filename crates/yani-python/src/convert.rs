@@ -590,10 +590,11 @@ pub fn convert_photonuclear(
 ///     energies, occupancies and the transition cascade. Without it the
 ///     subshells are written with zero binding energy and no transitions,
 ///     which is a fluorescence-free atom rather than an error.
-/// compton_profiles, density_effect, bremsstrahlung : str, optional
-///     The auxiliary tabulations, which no evaluation carries. All three must
-///     be given together or none of them; without them ``compton.arrow`` and
-///     ``bremsstrahlung.arrow`` are absent.
+/// compton_profiles, density_effect, bremsstrahlung : str or path, optional
+///     Other copies of the auxiliary tabulations, which no evaluation carries
+///     (Compton profiles, the density effect and bremsstrahlung). The default
+///     is the copies compiled into this package, the same in yamc and yani.
+///     Give all three or none.
 /// library, data_version, created_utc
 ///     Recorded in ``version.json``.
 ///
@@ -617,21 +618,21 @@ pub fn convert_photonuclear(
 #[allow(clippy::too_many_arguments)]
 pub fn convert_photon(
     py: Python<'_>,
-    photoatomic_path: &str,
-    output_dir: &str,
-    relaxation_path: Option<&str>,
-    compton_profiles: Option<&str>,
-    density_effect: Option<&str>,
-    bremsstrahlung: Option<&str>,
+    photoatomic_path: PathBuf,
+    output_dir: PathBuf,
+    relaxation_path: Option<PathBuf>,
+    compton_profiles: Option<PathBuf>,
+    density_effect: Option<PathBuf>,
+    bremsstrahlung: Option<PathBuf>,
     library: &str,
     data_version: &str,
     created_utc: Option<&str>,
 ) -> PyResult<Vec<String>> {
-    let photoatomic = PathBuf::from(photoatomic_path);
-    let relaxation = relaxation_path.map(PathBuf::from);
+    let photoatomic = photoatomic_path;
+    let relaxation = relaxation_path;
 
     let tabulation_paths = match (compton_profiles, density_effect, bremsstrahlung) {
-        (Some(c), Some(d), Some(b)) => Some((PathBuf::from(c), PathBuf::from(d), PathBuf::from(b))),
+        (Some(c), Some(d), Some(b)) => Some((c, d, b)),
         (None, None, None) => None,
         _ => {
             return Err(PyValueError::new_err(
@@ -661,7 +662,7 @@ pub fn convert_photon(
             &photoatomic,
             relaxation.as_deref(),
             tabulations.as_ref(),
-            &PathBuf::from(output_dir),
+            &output_dir,
             &provenance,
         )
     })

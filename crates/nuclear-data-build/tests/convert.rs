@@ -53,7 +53,7 @@ fn photon_h(scratch: &Scratch) -> Vec<Material> {
 }
 
 fn tabulation_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/yamc-core/python/yamc/data")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../yamc-convert/data")
 }
 
 fn options<'a>(
@@ -204,16 +204,18 @@ fn a_nuclide_list_converts_only_what_it_names_and_refuses_a_name_it_cannot_find(
 }
 
 #[test]
-fn photons_without_the_tabulations_are_refused_before_anything_runs() {
+fn photons_without_tabulations_given_use_the_bundled_ones() {
     let scratch = Scratch::new("convert-no-tabs");
     let found = photon_h(&scratch);
     let root = scratch.dir("lib");
     let tabs = tabulation_dir();
     let mut opts = options(&[Particle::Photon], &tabs, "njoy");
     opts.tabulations = None;
-    let err = convert::convert(&found, &root, &opts).unwrap_err();
-    assert!(err.contains("tabulations"), "{err}");
-    assert!(!root.join("photon").exists());
+    let got = convert::convert(&found, &root, &opts).unwrap();
+    assert_eq!(got.converted, keys(&["photon/H"]));
+    for table in ["compton.arrow", "bremsstrahlung.arrow"] {
+        assert!(root.join("photon/H.arrow").join(table).is_file(), "{table}");
+    }
 }
 
 #[test]

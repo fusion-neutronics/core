@@ -1428,6 +1428,7 @@ mod tests {
             level_route: "ground".to_string(),
             level_energy: 0.0,
             level_energy_difference: None,
+            match_energy: None,
             mf3_cross_section: None,
         }
     }

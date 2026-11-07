@@ -7508,6 +7508,7 @@ dependencies = [
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
+ "endf",
  "faer",
  "nuclear-data-schema",
  "num-complex",

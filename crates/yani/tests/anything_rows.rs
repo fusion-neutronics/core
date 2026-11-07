@@ -49,6 +49,7 @@ fn curve(target: &str, share: bool, lfs: i32, values: &[f64]) -> BranchCurve {
             level_route: if lfs == 0 { "ground" } else { "level_index" }.to_string(),
             level_energy: 0.0,
             level_energy_difference: (lfs == 0).then_some(0.0),
+            match_energy: None,
             mf3_cross_section: None,
         }]),
         normalisation: None,

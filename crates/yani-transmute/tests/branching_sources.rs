@@ -180,6 +180,7 @@ fn isomer_row(parent: &str, reaction: &str, mt: i32, target: &str, lfs: i64) -> 
             level_route: LevelRoute::Energy,
             level_energy: 1.0e5,
             level_energy_difference: Some(0.0),
+            match_energy: None,
             mf3: None,
         }],
         normalisation: None,
