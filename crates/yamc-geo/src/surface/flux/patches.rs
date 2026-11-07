@@ -810,6 +810,28 @@ impl Patches {
         out
     }
 
+    /// Whether the segment `origin + t direction`, `t` in `[t0, t1]`, meets
+    /// a patch box (if not, it meets no part of the surface).
+    pub fn segment_meets(&self, origin: [f64; 3], direction: [f64; 3], t0: f64, t1: f64) -> bool {
+        let mut stack = vec![0u32];
+        while let Some(n) = stack.pop() {
+            let node = &self.nodes[n as usize];
+            if !node
+                .bx
+                .clip(origin, direction)
+                .is_some_and(|(a, b)| a <= t1 && b >= t0)
+            {
+                continue;
+            }
+            if node.left == u32::MAX {
+                return true;
+            }
+            stack.push(node.left);
+            stack.push(node.right);
+        }
+        false
+    }
+
     /// Largest curvature bending towards a point on `side` (+1 outside,
     /// -1 inside) over the patches within `radius` of `(i, j)`.
     pub fn curvature_near(&self, centre: (usize, usize), radius: usize, side: f64) -> f64 {

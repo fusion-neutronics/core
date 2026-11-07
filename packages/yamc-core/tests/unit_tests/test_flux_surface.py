@@ -3,6 +3,8 @@
 import math
 import random
 
+import warnings
+
 import pytest
 
 import yamc
@@ -57,6 +59,29 @@ def test_offset_layers_are_true_distances_that_add_up():
     # point is the closest point in 3-D.
     assert first_wall.evaluate((815.0, 0.0, 0.0)) == pytest.approx(0.0, abs=1e-9)
     assert back.evaluate((815.0, 0.0, 0.0)) == pytest.approx(-2.0, abs=1e-9)
+
+
+def test_layers_beyond_the_crease_free_distance_warn():
+    # A circular torus, R = 600 + 150 cos(theta), Z = 150 sin(theta): its
+    # layers are smooth out to 450 cm, where the inboard side reaches the axis.
+    torus = yamc.sources.StellaratorShape(
+        num_field_periods=1,
+        r_modes=[(0, 0, 0), (1, 1, 0)],
+        r_lmn=[600.0, 150.0],
+        z_modes=[(1, -1, 0)],
+        z_lmn=[150.0],
+    )
+    plasma = yamc.FluxSurface(torus)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        yamc.OffsetSurface(plasma, 440.0)
+        yamc.OffsetSurface(yamc.OffsetSurface(plasma, 300.0), 140.0)
+    with pytest.warns(UserWarning, match=r"offset of 460\.00 cm .*\(about 450\.00 cm"):
+        layer = yamc.OffsetSurface(plasma, 460.0)
+    assert layer.distance == 460.0
+    # Offsets of offsets add, so 300.1 + 150.1 cm is past it too.
+    with pytest.warns(UserWarning, match=r"offset of 450\.20 cm .* exactly 450\.20 cm"):
+        yamc.OffsetSurface(yamc.OffsetSurface(plasma, 300.1), 150.1)
 
 
 def test_bad_inputs_fail_with_clear_messages():
