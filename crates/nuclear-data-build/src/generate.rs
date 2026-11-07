@@ -116,14 +116,14 @@ pub fn generate(request: &Request) -> Result<Report, String> {
     }
 
     let neutron = parts.contains(&Part::Neutron);
-    let njoy = if neutron {
+    let njoy = if neutron || parts.contains(&Part::Thermal) {
         let found =
             endf::njoy::require(request.njoy_exec, recipe.njoy).map_err(|e| e.to_string())?;
         Some(found.to_string())
     } else {
         None
     };
-    if neutron && request.nuclides.is_none() {
+    if (neutron || parts.contains(&Part::Thermal)) && request.nuclides.is_none() {
         check_disk(root, recipe.disk_bytes)?;
     }
 
@@ -244,6 +244,9 @@ fn parts(recipe: &Recipe, asked: Option<&[Part]>) -> Result<Vec<Part>, String> {
         .filter(|p| !recipe.parts.contains(p))
         .map(|p| p.name())
         .collect();
+    if unknown == ["thermal"] {
+        return Err(yamc_nuclide::url_cache::no_thermal_tables(recipe.keyword));
+    }
     if !unknown.is_empty() {
         let has: Vec<&str> = recipe.parts.iter().map(|p| p.name()).collect();
         return Err(format!(
@@ -278,6 +281,7 @@ fn particle(part: Part) -> Option<Particle> {
         Part::Neutron => Some(Particle::Neutron),
         Part::Photon => Some(Particle::Photon),
         Part::Photonuclear => Some(Particle::Photonuclear),
+        Part::Thermal => Some(Particle::Thermal),
         _ => None,
     }
 }
@@ -301,6 +305,10 @@ fn sublibraries(_recipe: &Recipe, parts: &[Part]) -> BTreeSet<Sublibrary> {
             }
             Part::FissionYields => {
                 out.insert(Sublibrary::FissionYields);
+            }
+            // THERMR reads the principal atom's neutron evaluation.
+            Part::Thermal => {
+                out.extend([Sublibrary::ThermalScattering, Sublibrary::Neutron]);
             }
         }
     }

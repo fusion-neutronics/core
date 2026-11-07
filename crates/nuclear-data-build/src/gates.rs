@@ -200,6 +200,16 @@ fn check_folder(particle: Particle, path: &Path) -> Result<(), String> {
                 return Err("an empty element table".to_string());
             }
         }
+        Particle::Thermal => {
+            let summary =
+                yamc_convert::thermal::inspect_thermal(path).map_err(|e| e.to_string())?;
+            if summary.name != expected {
+                return Err(format!("the data declares {:?}", summary.name));
+            }
+            if summary.bound_nuclides.is_empty() {
+                return Err("a table bound to no nuclide".to_string());
+            }
+        }
         Particle::Photonuclear => {
             let summary = yamc_convert::photonuclear::inspect_photonuclear(path)
                 .map_err(|e| e.to_string())?;
