@@ -2658,6 +2658,8 @@ mod tests {
             half_life_uncertainty: Some(1.8),
             decay_energy: 1.0e6,
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
             decay_energy_components: Default::default(),
             reactions: vec![],
             decays: vec![],
@@ -2707,6 +2709,8 @@ mod tests {
             half_life_uncertainty: None,
             decay_energy: 0.0,
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
             decay_energy_components: Default::default(),
             reactions: vec![],
             decays: vec![],
@@ -3111,6 +3115,8 @@ mod tests {
             half_life_uncertainty: Some(0.0),
             decay_energy: 2.8e6,
             decay_energy_uncertainty: Some(0.0),
+            decay_evaluated: true,
+            excitation_energy: None,
             decay_energy_components: [
                 Some(yani::DecayEnergyComponent {
                     energy: 2.8e6,

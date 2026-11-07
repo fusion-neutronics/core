@@ -9,12 +9,9 @@
 //! Written against [`endf::Chain`] rather than [`yani`]'s own chain types, for
 //! two reasons that are not stylistic:
 //!
-//! * `endf::chain::ReactionPath` carries `q_value` and
-//!   `endf::chain::Nuclide` carries `borrowed_yields_from`. The yani types
-//!   carry neither, so a converter built on them could not write the `Q` column
-//!   `reactions/reactions.arrow` declares, nor `fission_yields/aliases.arrow`
-//!   at all: it would have to expand every alias into a full copy of its
-//!   parent's yields and lose the relationship.
+//! * `endf::chain::ReactionPath` carries `q_value`, which the yani types do
+//!   not, so a converter built on them could not write the `Q` column
+//!   `reactions/reactions.arrow` declares.
 //! * `yani::export_chain_parts` exists to round-trip a chain yani already
 //!   holds. That is a different job from converting an evaluation, and the
 //!   fields above are exactly the ones such a round trip has no source for.
@@ -283,8 +280,13 @@ pub fn write_decay(
     // [component][nuclide], (energy, sigma).
     let mut component_energies: [Vec<Option<f64>>; 3] = Default::default();
     let mut component_sigmas: [Vec<Option<f64>>; 3] = Default::default();
-    for n in &chain.nuclides {
+    let mut excitation = Vec::new();
+    // Only the nuclides the decay evaluations have records for: a reaction
+    // target or a product the library has no decay data for is not stable,
+    // and listing it here would say it is.
+    for n in chain.nuclides.iter().filter(|n| n.decay_evaluated) {
         names.push(n.name.clone());
+        excitation.push(n.excitation_energy);
         half_lives.push(n.half_life);
         decay_energies.push(n.decay_energy);
         half_life_sigmas.push(n.half_life_uncertainty);
@@ -309,6 +311,7 @@ pub fn write_decay(
             opt_floats(&component_sigmas[1]),
             opt_floats(&component_energies[2]),
             opt_floats(&component_sigmas[2]),
+            opt_floats(&excitation),
         ],
     )?;
 
@@ -479,13 +482,9 @@ pub fn write_reactions(
     )
 }
 
-/// Write the `fission_yields/` subsection.
-///
-/// A nuclide with no yields of its own borrows another's, and that is recorded
-/// as an alias rather than by copying the parent's product and yield vectors
-/// into every inheritor. The copy is what the format is trying to avoid: it
-/// destroys the relationship and multiplies the file size by the number of
-/// inheritors.
+/// Write the `fission_yields/` subsection: the yields the library evaluates,
+/// for the nuclides it evaluates them for. No nuclide's yields stand in for
+/// another's.
 pub fn write_fission_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Error>> {
     std::fs::create_dir_all(dir)?;
 
@@ -494,15 +493,7 @@ pub fn write_fission_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Err
     let mut products: Vec<Vec<String>> = Vec::new();
     let mut yields: Vec<Vec<f64>> = Vec::new();
     let mut laws: Vec<Option<i32>> = Vec::new();
-    let mut alias_nuc = Vec::new();
-    let mut alias_parent = Vec::new();
-
     for n in &chain.nuclides {
-        if let Some(parent) = &n.borrowed_yields_from {
-            alias_nuc.push(n.name.clone());
-            alias_parent.push(parent.clone());
-            continue;
-        }
         // Every energy carries the same product list, padded with zeros where
         // the evaluation lists a product at one incident energy and not
         // another. The values are unchanged either way, since a padded entry is
@@ -555,15 +546,8 @@ pub fn write_fission_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Err
         )?,
         None => remove_stale(&dir.join("evaluated_yields.arrow"))?,
     }
-    if alias_nuc.is_empty() {
-        remove_stale(&dir.join("aliases.arrow"))?;
-    } else {
-        write_section(
-            &dir.join("aliases.arrow"),
-            "fission_yields/aliases.arrow",
-            vec![strings(&alias_nuc), strings(&alias_parent)],
-        )?;
-    }
+    // A directory written before yields stopped being borrowed may hold one.
+    remove_stale(&dir.join("aliases.arrow"))?;
     Ok(())
 }
 
@@ -608,11 +592,10 @@ fn remove_stale(path: &Path) -> Result<(), Box<dyn Error>> {
 /// evaluation exactly as its tape gives it, both MT=454 and MT=459, with DY.
 /// `None` when no nuclide has an evaluation, so no file is written.
 ///
-/// Nothing here is derived. Where `fission_yields.arrow` maps products onto
-/// the decay library and sums the ones that meet, this keeps the tape's
+/// Nothing here is derived. Where `fission_yields.arrow` sums the products
+/// the tape lists more than once under one name, this keeps the tape's
 /// products, values and uncertainties as they are, so an evaluator's 0.0 DY is
-/// written as 0.0. Only owners get rows: a nuclide that borrows its yields is
-/// in `aliases.arrow`, as it is for the nominal yields.
+/// written as 0.0.
 ///
 /// Every row is at an energy the owner has a nominal row for, since a reader
 /// attaches it there. An evaluation that breaks that (cumulative yields with
@@ -628,9 +611,6 @@ fn evaluated_yields_columns(chain: &Chain) -> Result<Option<Vec<ArrayRef>>, Box<
     let mut sigmas: Vec<Vec<f64>> = Vec::new();
 
     for n in &chain.nuclides {
-        if n.borrowed_yields_from.is_some() {
-            continue;
-        }
         let Some(evaluation) = &n.yield_evaluation else {
             continue;
         };
@@ -879,12 +859,12 @@ pub fn convert_transmutation(
     if wants("decay") {
         write_decay(&chain, &sources, &out.join("decay"))?;
     }
-    // MT=5's products, named against the same decay data as every other
-    // reaction's, for the parents the chain carries.
+    // MT=5's products, for the parents the chain carries, named as every
+    // other reaction's are: as the evaluation gives them.
     let named = if wants("reactions") {
         let parents: std::collections::BTreeSet<String> =
             chain.nuclides.iter().map(|n| n.name.clone()).collect();
-        anything::name_all(inputs.anything, &anything::DecayIndex::new(decay), &parents)
+        anything::name_all(inputs.anything, &parents)
     } else {
         anything::Named::default()
     };

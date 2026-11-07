@@ -493,6 +493,12 @@ impl Model {
 
         // Initialize results
         let mut results = TransmutationResults::new(timesteps.to_vec());
+        // Before the first state, so each one is taken apart into the
+        // inventory and what the decay data has no record for.
+        results.set_chain(
+            Arc::clone(&chain),
+            yamc_nuclide::config::Config::global().transmutation_decay_data.clone(),
+        );
         results.product_screening = screenings;
 
         // Track full compositions (including all chain products) across steps.
@@ -1533,6 +1539,8 @@ mod tests {
                 sources: Vec::new(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_evaluated: true,
+                excitation_energy: None,
                 decay_energy_components: Default::default(),
             },
         )]);

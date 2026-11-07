@@ -202,7 +202,8 @@ fn tapes_convert_to_what_their_split_files_convert_to() {
         &[],
     )
     .expect("yani reads the chain converted from tapes");
-    assert_eq!(chain.len(), DECAY.len(), "decay materials were lost");
+    let evaluated = chain.values().filter(|n| n.decay_evaluated).count();
+    assert_eq!(evaluated, DECAY.len(), "decay materials were lost");
     assert!(
         chain.contains_key("Nb93_m1"),
         "the last decay material was lost"
@@ -216,9 +217,11 @@ fn tapes_convert_to_what_their_split_files_convert_to() {
     )
     .expect("json");
     let parents = |subsection: &str| manifest["subsections"][subsection]["parents"].clone();
+    // Every neutron evaluation is a reactions parent, with or without a decay
+    // record of its own (the fixtures' decay data has Nb93_m1 and not Nb93).
     assert_eq!(
         parents("reactions"),
-        serde_json::json!(["In115", "U235", "Xe136"])
+        serde_json::json!(["In115", "Nb93", "U235", "Xe136"])
     );
     assert_eq!(
         parents("branching"),

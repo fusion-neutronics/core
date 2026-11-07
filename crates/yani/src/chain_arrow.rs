@@ -739,6 +739,8 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
                     half_life_uncertainty,
                     decay_energy,
                     decay_energy_uncertainty,
+                    decay_evaluated: true,
+                    excitation_energy: None,
                     decay_energy_components: Default::default(),
                     reactions: Vec::new(),
                     decays: Vec::new(),
@@ -966,8 +968,50 @@ fn ensure_nuclide<'a>(
             fission_yields: None,
             sources: Vec::new(),
             decay_energy_uncertainty: None,
+            // Set where the decay subsection has a record for it; a nuclide
+            // first named by a reaction, a decay mode or a yield has none.
+            decay_evaluated: false,
+            excitation_energy: None,
             decay_energy_components: Default::default(),
         })
+}
+
+/// Give every nuclide the chain names, as a reaction's product, a decay mode's
+/// daughter or a fission product, an entry, and make every nuclide the decay
+/// data has no record for a sink: no decay (nothing about it is known) and no
+/// reactions or fission (its behaviour is not in the data the run was given).
+/// A solve then counts how much of each is produced, and its fate is
+/// reported as unknown rather than its atoms vanishing, which is what a
+/// product with no row in the solve did before.
+///
+/// Products are never booked onto another nuclide: a gap in the decay data is
+/// that library's, and is reported as such.
+fn close_over_products(chain: &mut HashMap<String, ChainNuclide>) {
+    let mut named: Vec<String> = Vec::new();
+    for nuc in chain.values() {
+        let targets = nuc
+            .reactions
+            .iter()
+            .chain(&nuc.decays)
+            .filter_map(|r| r.target.clone());
+        named.extend(targets);
+        if let Some(set) = &nuc.fission_yields {
+            for point in &set.yields {
+                named.extend(point.products.iter().map(|(p, _)| p.clone()));
+            }
+        }
+    }
+    for name in named {
+        if !chain.contains_key(&name) && crate::chain::is_nuclide_name(&name) {
+            ensure_nuclide(chain, &name);
+        }
+    }
+    for nuc in chain.values_mut() {
+        if !nuc.decay_evaluated {
+            nuc.reactions.clear();
+            nuc.fission_yields = None;
+        }
+    }
 }
 
 /// Parse a transmutation chain from separate v2 subsection directories.
@@ -978,7 +1022,7 @@ fn ensure_nuclide<'a>(
 /// - `decay_dir`: `nuclides.arrow` (name, half_life, decay_energy) plus optional
 ///   `decay_modes.arrow` and `sources.arrow`.
 /// - `reactions_dir`: optional `reactions.arrow`.
-/// - `fpy_dir`: optional `fission_yields.arrow`, `aliases.arrow` and
+/// - `fpy_dir`: optional `fission_yields.arrow` and
 ///   `evaluated_yields.arrow`.
 ///
 /// The three directories may come from different libraries. Nuclides that
@@ -1226,9 +1270,14 @@ pub fn parse_chain_parts_from_bytes(
                         )
                     })
                     .collect();
+            let excitation = optional("excitation_energy");
             for i in 0..batch.num_rows() {
                 let name = names.value(i).to_string();
                 let nuc = ensure_nuclide(&mut chain, &name);
+                nuc.decay_evaluated = true;
+                nuc.excitation_energy = excitation
+                    .filter(|column| !column.is_null(i))
+                    .map(|column| column.value(i));
                 for (c, (energy, sigma)) in components.iter().enumerate() {
                     nuc.decay_energy_components[c] = energy
                         .filter(|column| !column.is_null(i))
@@ -1445,29 +1494,12 @@ pub fn parse_chain_parts_from_bytes(
         );
     }
 
-    // fission_yields/aliases.arrow -- inheritors copy a parent's yields.
-    if let Some(bytes) = parts.fission_yields.get("aliases.arrow") {
-        let mut refs: Vec<(String, String)> = Vec::new();
-        for batch in read_section_bytes(
-            bytes,
-            "fission_yields/aliases.arrow",
-            "fission_yields/aliases.arrow",
-        )? {
-            let nuclides = col::<StringArray>(&batch, "nuclide")?;
-            let parents = col::<StringArray>(&batch, "fission_yield_parent")?;
-            for i in 0..batch.num_rows() {
-                refs.push((nuclides.value(i).to_string(), parents.value(i).to_string()));
-            }
-        }
-        for (name, parent) in refs {
-            let parent_yields = chain.get(&parent).and_then(|p| p.fission_yields.clone());
-            if let Some(yields) = parent_yields {
-                ensure_nuclide(&mut chain, &name).fission_yields = Some(yields);
-            }
-        }
-    }
+    // A fission_yields/aliases.arrow (an older converter's yields borrowed
+    // from another nuclide) is not read: a nuclide's fission products are its
+    // own evaluation's, or unknown.
 
     report_unstated_yield_laws(&chain);
+    close_over_products(&mut chain);
 
     // branching/branching.arrow -- optional isomeric-branching overlay, one
     // per branching source, laid over in order by `overlay_branching`.
@@ -1569,7 +1601,9 @@ fn overlay_branching(
         let state_cols = BranchStateColumns::from_batch(&batch)?;
         for i in 0..batch.num_rows() {
             let parent = nuclides.value(i);
-            if !chain.contains_key(parent) {
+            // A parent the decay data has no record for is a product of
+            // unknown fate, which does not react (see `close_over_products`).
+            if !chain.get(parent).is_some_and(|n| n.decay_evaluated) {
                 continue;
             }
             let kind = reactions.value(i).to_string();
@@ -1605,6 +1639,11 @@ fn overlay_branching(
             // chain lacks it (see the branching block comment in
             // `parse_chain_parts_from_bytes` and `should_graft` for the guard
             // rationale).
+            // A state the decay data has no record for is still where the
+            // evaluation sends its share: produced, of unknown fate.
+            if !chain.contains_key(&target) && crate::chain::is_nuclide_name(&target) {
+                ensure_nuclide(chain, &target);
+            }
             let target_is_nuclide = chain.contains_key(&target);
             let nuc = chain.get_mut(parent).expect("parent present");
             let kind_present = nuc.reactions.iter().any(|r| r.kind == kind);
@@ -1936,9 +1975,13 @@ pub fn export_chain_parts<P: AsRef<Path>>(
         let mut hl_sigma_b = Float64Builder::new();
         let mut de_sigma_b = Float64Builder::new();
         let mut component_b: [(Float64Builder, Float64Builder); 3] = Default::default();
-        for name in &names {
+        let mut excitation_b = Float64Builder::new();
+        // Only the nuclides with a decay record: a product of unknown fate is
+        // not stable, and a row for it here would say it is.
+        for name in names.iter().filter(|n| chain[**n].decay_evaluated) {
             let nuc = &chain[*name];
             name_b.append_value(&nuc.name);
+            excitation_b.append_option(nuc.excitation_energy);
             for (part, (energy_b, sigma_b)) in nuc
                 .decay_energy_components
                 .iter()
@@ -1975,6 +2018,7 @@ pub fn export_chain_parts<P: AsRef<Path>>(
             columns.push(Arc::new(energy_b.finish()));
             columns.push(Arc::new(sigma_b.finish()));
         }
+        columns.push(Arc::new(excitation_b.finish()));
         let batch = RecordBatch::try_new(schema.clone(), columns)?;
         write_arrow_file(&decay_dir.join("nuclides.arrow"), schema, batch)?;
     }
@@ -2607,6 +2651,8 @@ mod tests {
                 half_life_uncertainty: Some(1.21e4),
                 decay_energy: 2.5e6,
                 decay_energy_uncertainty: Some(3.4e3),
+                decay_evaluated: true,
+                excitation_energy: None,
                 decay_energy_components: Default::default(),
                 reactions: Vec::new(),
                 decays: Vec::new(),
@@ -2626,6 +2672,8 @@ mod tests {
                 fission_yields: None,
                 sources: Vec::new(),
                 decay_energy_uncertainty: None,
+                decay_evaluated: true,
+                excitation_energy: None,
                 decay_energy_components: Default::default(),
             },
         );
@@ -2661,6 +2709,8 @@ mod tests {
                 half_life_uncertainty: None,
                 decay_energy: 2.5e6,
                 decay_energy_uncertainty: None,
+                decay_evaluated: true,
+                excitation_energy: None,
                 decay_energy_components: Default::default(),
                 reactions: Vec::new(),
                 decays: Vec::new(),
@@ -2701,6 +2751,8 @@ mod tests {
             half_life_uncertainty: Some(0.0),
             decay_energy: 2.0e6,
             decay_energy_uncertainty: Some(0.0),
+            decay_evaluated: true,
+            excitation_energy: None,
             decay_energy_components: [
                 Some(DecayEnergyComponent {
                     energy: 2.0e6,
@@ -2981,6 +3033,8 @@ mod tests {
                 ],
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_evaluated: true,
+                excitation_energy: None,
                 decay_energy_components: Default::default(),
             },
         );
@@ -3074,6 +3128,8 @@ mod tests {
                     half_life_uncertainty: None,
                     decay_energy: 6.2e6,
                     decay_energy_uncertainty: None,
+                    decay_evaluated: true,
+                    excitation_energy: None,
                     decay_energy_components: Default::default(),
                     reactions: Vec::new(),
                     decays: Vec::new(),
@@ -3149,6 +3205,8 @@ mod tests {
                 half_life_uncertainty: None,
                 decay_energy: 2.6e6,
                 decay_energy_uncertainty: None,
+                decay_evaluated: true,
+                excitation_energy: None,
                 decay_energy_components: Default::default(),
                 reactions: Vec::new(),
                 decays: Vec::new(),
@@ -3230,6 +3288,8 @@ mod tests {
                     half_life_uncertainty: None,
                     decay_energy: 0.0,
                     decay_energy_uncertainty: None,
+                    decay_evaluated: true,
+                    excitation_energy: None,
                     decay_energy_components: Default::default(),
                     reactions: Vec::new(),
                     decays: Vec::new(),
@@ -3294,6 +3354,8 @@ mod tests {
                     half_life_uncertainty: None,
                     decay_energy: 0.0,
                     decay_energy_uncertainty: None,
+                    decay_evaluated: true,
+                    excitation_energy: None,
                     decay_energy_components: Default::default(),
                     reactions: Vec::new(),
                     decays: Vec::new(),
@@ -3357,6 +3419,8 @@ mod tests {
                     half_life_uncertainty: None,
                     decay_energy: 6.2e6,
                     decay_energy_uncertainty: None,
+                    decay_evaluated: true,
+                    excitation_energy: None,
                     decay_energy_components: Default::default(),
                     reactions: Vec::new(),
                     decays: Vec::new(),
@@ -3418,6 +3482,8 @@ mod tests {
                 half_life_uncertainty: None,
                 decay_energy: 2.6e6,
                 decay_energy_uncertainty: None,
+                decay_evaluated: true,
+                excitation_energy: None,
                 decay_energy_components: Default::default(),
                 reactions: Vec::new(),
                 decays: Vec::new(),
@@ -3527,6 +3593,8 @@ mod tests {
             half_life_uncertainty: None,
             decay_energy: 0.0,
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
             decay_energy_components: Default::default(),
             reactions: Vec::new(),
             decays: Vec::new(),
@@ -3986,6 +4054,8 @@ mod tests {
                 half_life_uncertainty: None,
                 decay_energy: 0.0,
                 decay_energy_uncertainty: None,
+                decay_evaluated: true,
+                excitation_energy: None,
                 decay_energy_components: Default::default(),
                 reactions: Vec::new(),
                 decays: Vec::new(),
@@ -4137,6 +4207,8 @@ mod tests {
             half_life_uncertainty: None,
             decay_energy: 0.0,
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
             decay_energy_components: Default::default(),
             reactions,
             decays: Vec::new(),

@@ -232,8 +232,9 @@ fn photoatomic_data_is_reachable() {
 /// derived from, both MT=454 and MT=459 with DY, as the tape gives it.
 ///
 /// With only Cs137 beside U235 in the decay library, most products have no
-/// decay data, so the derived yields differ from the tape's. The evaluation
-/// must not.
+/// decay data. They keep their own names in the derived yields all the same:
+/// a product the decay data lacks is that library's gap, never booked onto
+/// another nuclide.
 #[test]
 fn a_chain_keeps_the_yield_evaluation_it_was_built_from() {
     let decay: Vec<Material> = ["dec-092_U_235.endf.xz", "dec-055_Cs_137.endf.xz"]
@@ -251,15 +252,12 @@ fn a_chain_keeps_the_yield_evaluation_it_was_built_from() {
     assert!(!tape.cumulative.is_empty(), "the fixture has MT=459");
     assert_eq!(u235.yield_energies(), tape.energies);
 
-    // Cs137 has decay data, so its derived yield is the tape's own value.
+    // Every product keeps the tape's value under its own name, with or
+    // without decay data.
     let thermal = &u235.yield_data["0.0253"];
-    let cs137 = tape.independent[0]
-        .iter()
-        .find(|p| p.name == "Cs137")
-        .unwrap();
-    assert_eq!(thermal["Cs137"], cs137.yield_.0);
-    // Xe135_m1 has none, so it is not in the derived yields under its own
-    // name, and the evaluation is the only place its DY survives.
-    assert!(!thermal.contains_key("Xe135_m1"));
-    assert!(tape.independent[0].iter().any(|p| p.name == "Xe135_m1"));
+    for p in &tape.independent[0] {
+        assert_eq!(thermal[&p.name], p.yield_.0, "{}", p.name);
+    }
+    assert!(thermal.contains_key("Xe135_m1"));
+    assert!(!chain.get("Xe135_m1").is_some_and(|n| n.decay_evaluated));
 }

@@ -742,6 +742,12 @@ pub fn decay_nuclides() -> Schema {
         f64("decay_energy_gamma_uncertainty", true),
         f64("decay_energy_alpha", true),
         f64("decay_energy_alpha_uncertainty", true),
+        // The state's excitation energy in eV as its decay record gives it
+        // (MF=1 MT=451 ELIS), 0.0 for a ground state: what a run matches a
+        // neutron evaluation's product levels against to name their isomers.
+        // Nullable and last, so a file written before it still reads, with
+        // no level to match.
+        f64("excitation_energy", true),
     ])
     .with_metadata(meta([
         ("filetype", "transmutation-decay"),

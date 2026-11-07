@@ -810,6 +810,17 @@ pub struct ChainNuclide {
     /// conversion and Auger electrons), electromagnetic (gammas and x-rays),
     /// heavy particles (alphas, protons, neutrons, fission fragments).
     pub decay_energy_components: [Option<DecayEnergyComponent>; 3],
+    /// Whether the decay data the chain was loaded with has a record for this
+    /// nuclide. `false` for a product or a reaction target it has none for:
+    /// such a nuclide is not stable, its fate is unknown, and a solve counts
+    /// how much of it is produced rather than treating it as part of the
+    /// inventory (see [`crate::chain_arrow`]).
+    pub decay_evaluated: bool,
+    /// The excitation energy of this nuclide's state in eV, as its decay
+    /// record gives it (0.0 for a ground state): what a neutron evaluation's
+    /// product levels are matched against to name their isomers. `None`
+    /// without a decay record, or from a file that predates the column.
+    pub excitation_energy: Option<f64>,
     /// Neutron-induced reactions
     pub reactions: Vec<ChainReaction>,
     /// Radioactive decay modes
@@ -1622,6 +1633,8 @@ mod tests {
             half_life_uncertainty: None,
             decay_energy: 0.0,
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
             decay_energy_components: Default::default(),
             reactions: vec![],
             decays: vec![],
@@ -1731,6 +1744,8 @@ mod tests {
             fission_yields: None,
             sources: Vec::new(),
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
             decay_energy_components: Default::default(),
         }
     }
@@ -2589,4 +2604,26 @@ mod tests {
             }
         }
     }
+}
+
+/// Whether `name` names a nuclide as the chain writes them: an element
+/// symbol, a mass number and an optional `_m<n>` isomer suffix (`Fe56`,
+/// `Am242_m1`). Not a bare neutron (`n1`) or anything else.
+pub fn is_nuclide_name(name: &str) -> bool {
+    let (base, isomer) = match name.split_once("_m") {
+        Some((base, n)) => (base, Some(n)),
+        None => (name, None),
+    };
+    if isomer.is_some_and(|n| n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit())) {
+        return false;
+    }
+    let digits = base.find(|c: char| c.is_ascii_digit());
+    let Some(at) = digits else {
+        return false;
+    };
+    let (symbol, mass) = base.split_at(at);
+    let mut chars = symbol.chars();
+    let first_upper = chars.next().is_some_and(|c| c.is_ascii_uppercase());
+    let rest_lower = chars.clone().count() <= 2 && chars.all(|c| c.is_ascii_lowercase());
+    first_upper && rest_lower && !mass.is_empty() && mass.bytes().all(|b| b.is_ascii_digit())
 }

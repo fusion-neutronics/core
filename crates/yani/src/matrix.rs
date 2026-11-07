@@ -782,6 +782,8 @@ mod tests {
             fission_yields: None,
             sources: Vec::new(),
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
             decay_energy_components: Default::default(),
         }
     }
@@ -1092,6 +1094,8 @@ mod tests {
                 sources: Vec::new(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_evaluated: true,
+                excitation_energy: None,
                 decay_energy_components: Default::default(),
             },
         );
@@ -1152,6 +1156,8 @@ mod tests {
                 sources: Vec::new(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_evaluated: true,
+                excitation_energy: None,
                 decay_energy_components: Default::default(),
             },
         );
@@ -1490,6 +1496,8 @@ mod tests {
                 sources: Vec::new(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_evaluated: true,
+                excitation_energy: None,
                 decay_energy_components: Default::default(),
             },
         );
@@ -1628,6 +1636,8 @@ mod tests {
                 sources: Vec::new(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_evaluated: true,
+                excitation_energy: None,
                 decay_energy_components: Default::default(),
             },
         );
@@ -1699,6 +1709,8 @@ mod tests {
                 sources: Vec::new(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_evaluated: true,
+                excitation_energy: None,
                 decay_energy_components: Default::default(),
             },
         );

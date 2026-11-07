@@ -51,9 +51,8 @@
 //!   section, where a missing residual leaves them carrying a few percent.
 //! * `no_product_data`: MT=5 in MF=3 with no MF=6 MT=5 at all, written as the
 //!   same null-target row.
-//! * `unnamed_products`: a residual with neither decay data nor a stand-in
-//!   ([`endf::chain::replace_missing_in`], the rule every other reaction's
-//!   product goes by), left out.
+//! * `unnamed_products`: a product that names no nuclide (a ZAP or LIP the
+//!   format does not allow), left out.
 //! * `mf10_mt5`: MF=9 or MF=10 MT=5 radionuclide production, which is not
 //!   read. Where both are given (ENDF/B-VIII.1's Cr and W isotopes, Pt190,
 //!   Pt192, Al27, Si29 and U235) MF=10 repeats MF=6's yield times MT=5 for the
@@ -66,7 +65,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use endf::decay::Decay;
 use endf::function::Tabulated1D;
 use endf::Material;
 
@@ -366,10 +364,10 @@ fn is_light(p: &Product) -> bool {
     p.lip == 0 && LIGHT.iter().any(|(za, _)| *za == p.zap)
 }
 
-/// What a product is called in the chain: the light particle's name, the
-/// residual's own name where the decay library has it, or the stand-in every
-/// other reaction's product gets. `None` where there is neither.
-fn chain_name(p: &Product, decay: &DecayIndex) -> Option<String> {
+/// What a product is called in the chain: the light particle's name, or the
+/// residual's own name with the isomer its LIP gives, whether or not a decay
+/// library has it. `None` for a product that names no nuclide.
+fn chain_name(p: &Product) -> Option<String> {
     if let Some((_, name)) = LIGHT.iter().find(|(za, _)| *za == p.zap && p.lip == 0) {
         return Some(name.to_string());
     }
@@ -377,69 +375,7 @@ fn chain_name(p: &Product, decay: &DecayIndex) -> Option<String> {
     if z <= 0 || a <= 0 || p.lip < 0 {
         return None;
     }
-    let name = endf::gnds_name(z as u32, a as u32, p.lip as u32);
-    if decay.names.contains(&name) {
-        return Some(name);
-    }
-    endf::chain::replace_missing_in(
-        &name,
-        |n| decay.names.contains(n),
-        decay
-            .library
-            .iter()
-            .map(|(n, stable, t)| (n.as_str(), *stable, *t)),
-    )
-}
-
-/// The decay library's nuclides, as `replace_missing` reads them.
-pub struct DecayIndex {
-    names: BTreeSet<String>,
-    /// `(name, stable, half-life [s])`, ascending by name.
-    library: Vec<(String, bool, f64)>,
-}
-
-impl DecayIndex {
-    /// A decay library given by its nuclides, `(name, stable, half-life [s])`,
-    /// for a caller that holds the library some other way than as
-    /// evaluations (a test, or a chain already read).
-    pub fn from_library(entries: impl IntoIterator<Item = (String, bool, f64)>) -> DecayIndex {
-        let by_name: BTreeMap<String, (bool, f64)> = entries
-            .into_iter()
-            .map(|(name, stable, t)| (name, (stable, t)))
-            .collect();
-        DecayIndex {
-            names: by_name.keys().cloned().collect(),
-            library: by_name
-                .into_iter()
-                .map(|(name, (stable, t))| (name, stable, t))
-                .collect(),
-        }
-    }
-
-    /// Index the decay evaluations a chain is built from, skipping the
-    /// neutron's own as `Chain::from_endf` does.
-    pub fn new(decay: &[Material]) -> DecayIndex {
-        let mut by_name: BTreeMap<String, (bool, f64)> = BTreeMap::new();
-        for material in decay {
-            let Ok(data) = Decay::from_material(material) else {
-                continue;
-            };
-            if data.nuclide.atomic_number == 0 {
-                continue;
-            }
-            by_name.insert(
-                data.nuclide.name.clone(),
-                (data.nuclide.stable, data.half_life.map_or(0.0, |(t, _)| t)),
-            );
-        }
-        DecayIndex {
-            names: by_name.keys().cloned().collect(),
-            library: by_name
-                .into_iter()
-                .map(|(name, (stable, t))| (name, stable, t))
-                .collect(),
-        }
-    }
+    Some(endf::gnds_name(z as u32, a as u32, p.lip as u32))
 }
 
 /// The isomeric state a chain name carries, 0 for a ground state.
@@ -447,17 +383,13 @@ fn state_of(name: &str) -> i32 {
     endf::zam(name).map_or(0, |(_, _, m)| m as i32)
 }
 
-/// Name every evaluation's products against the decay library and build the
-/// rows, with the record of everything found on the way.
+/// Name every evaluation's products and build the rows, with the record of
+/// everything found on the way.
 ///
-/// `parents` are the nuclides the chain carries (it has decay data for), so
-/// an evaluation of something the chain cannot hold writes nothing, as its
-/// other reactions do not either.
-pub fn name_all(
-    evaluations: &BTreeMap<String, Evaluation>,
-    decay: &DecayIndex,
-    parents: &BTreeSet<String>,
-) -> Named {
+/// `parents` are the nuclides the chain carries, so an evaluation of
+/// something the chain does not hold writes nothing, as its other reactions
+/// do not either.
+pub fn name_all(evaluations: &BTreeMap<String, Evaluation>, parents: &BTreeSet<String>) -> Named {
     let mut out = Named::default();
     let mut conservation_all = serde_json::Map::new();
     let mut not_conserving = Vec::new();
@@ -565,7 +497,7 @@ pub fn name_all(
                 zero_curves += 1;
                 continue;
             }
-            let Some(target) = chain_name(p, decay) else {
+            let Some(target) = chain_name(p) else {
                 unnamed.push(serde_json::json!({
                     "nuclide": parent,
                     "zap": p.zap,

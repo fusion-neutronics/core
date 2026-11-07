@@ -2,19 +2,16 @@
 //! independent yield.
 //!
 //! The solver does not read the tape's yields. It reads `products`, which the
-//! converter derived from them: a product with no decay data is replaced by a
-//! stand-in (`endf::chain::replace_missing`) and products landing on the same
-//! name are summed. A summed yield has no DY of its own, since that would need
-//! the correlation of its parts, so the draw is made on the tape's own
-//! products, one lognormal per stated DY, and the draws are summed onto the
-//! solver's products the way the converter summed the nominal yields.
+//! converter derived from them by summing the products the tape lists more
+//! than once under one name. A summed yield has no DY of its own, since that
+//! would need the correlation of its parts, so the draw is made on the tape's
+//! own products, one lognormal per stated DY, and the draws are summed onto
+//! the solver's products the way the converter summed the nominal yields.
 //!
-//! That needs the mapping the converter used, which the chain does not store.
-//! It is recomputed with the converter's own rule
-//! (`endf::chain::replace_missing_in`), walking each missing product towards
-//! stability to the first of the solver's products it reaches, and checked:
-//! the nominal tape yields summed through it must give `products` back. A
-//! parent where they do not is held at nominal and named, rather than drawn
+//! Each tape product is the solver's product of the same name, and that is
+//! checked: the nominal tape yields summed by name must give `products` back.
+//! A parent where they do not (yields written by a converter that booked
+//! products onto stand-ins) is held at nominal and named, rather than drawn
 //! through a mapping that is not the one its yields were built with.
 //!
 //! No evaluation publishes a correlation between yields (ENDF/B-VIII.1,
@@ -24,10 +21,8 @@
 //! statement. Cumulative yields (MT=459) are not solved with and are not
 //! drawn.
 //!
-//! An alias, an actinide that borrows another's yields, shares that
-//! evaluation's draw, since it is the same evaluation. The stream is keyed on
-//! the yields themselves, so the same evaluation draws the same numbers
-//! whichever of its users a material reaches.
+//! The stream is keyed on the yields themselves, so the same evaluation draws
+//! the same numbers whichever material reaches it.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -120,67 +115,6 @@ fn evaluation_key(set: &FissionYieldSet) -> u32 {
     h
 }
 
-/// The isotopes of each element in `library`, as `(name, stable, half-life)`
-/// in ascending name order, which is what `replace_missing_in` searches for
-/// the direction of stability. A chain stores no half-life for a stable
-/// nuclide, which is where the converter left it out.
-struct Isotopes<'a> {
-    by_symbol: HashMap<&'a str, Vec<(&'a str, bool, f64)>>,
-}
-
-impl<'a> Isotopes<'a> {
-    fn new(library: &'a HashMap<String, ChainNuclide>) -> Self {
-        let mut by_symbol: HashMap<&str, Vec<(&str, bool, f64)>> = HashMap::new();
-        for (name, cn) in library {
-            by_symbol.entry(symbol(name)).or_default().push((
-                name.as_str(),
-                cn.half_life.is_none(),
-                cn.half_life.unwrap_or(0.0),
-            ));
-        }
-        for isotopes in by_symbol.values_mut() {
-            isotopes.sort_by(|a, b| a.0.cmp(b.0));
-        }
-        Self { by_symbol }
-    }
-
-    /// The name the converter gave a tape `product` among the solver's
-    /// `listed` products: itself where it is listed, otherwise the first
-    /// listed nuclide on its walk towards stability. `None` for a product
-    /// with no stand-in (a bare neutron), which the converter drops.
-    ///
-    /// Stopping at the first LISTED nuclide, rather than the first one the
-    /// loaded decay library knows, is what lets this work when the yields were
-    /// converted against another decay library than the one loaded: the
-    /// converter's stand-in received a yield, so it is listed, and every
-    /// nuclide its walk passed before it was one the converter's library
-    /// lacked, so none of them is. With the same library on both sides the
-    /// two rules agree. Only the direction of the walk is read from the loaded
-    /// library, and a parent where that differs fails [`maps_back`].
-    fn name(&self, product: &str, listed: &std::collections::HashSet<&str>) -> Option<String> {
-        if listed.contains(product) {
-            return Some(product.to_string());
-        }
-        let isotopes = self
-            .by_symbol
-            .get(symbol(product))
-            .map_or(&[][..], Vec::as_slice);
-        endf::chain::replace_missing_in(
-            product,
-            |name| listed.contains(name),
-            isotopes.iter().copied(),
-        )
-    }
-}
-
-/// The element symbol a nuclide name starts with.
-fn symbol(name: &str) -> &str {
-    let end = name
-        .find(|c: char| !c.is_ascii_alphabetic())
-        .unwrap_or(name.len());
-    &name[..end]
-}
-
 /// What one parent's yields allow: the evaluation to draw, or why not.
 enum Plan {
     Draw {
@@ -192,7 +126,7 @@ enum Plan {
     Mismatch,
 }
 
-fn plan(set: &FissionYieldSet, isotopes: &Isotopes) -> Plan {
+fn plan(set: &FissionYieldSet) -> Plan {
     let mut terms = Vec::with_capacity(set.yields.len());
     let mut deviates = 0usize;
     let mut any_evaluated = false;
@@ -211,7 +145,7 @@ fn plan(set: &FissionYieldSet, isotopes: &Isotopes) -> Plan {
         let names: Vec<Option<String>> = ev
             .products
             .iter()
-            .map(|product| isotopes.name(product, &listed))
+            .map(|product| listed.contains(product.as_str()).then(|| product.clone()))
             .collect();
         if !maps_back(point, ev, &names) {
             return Plan::Mismatch;
@@ -276,16 +210,10 @@ fn maps_back(point: &FissionYield, ev: &yani::EvaluatedYields, names: &[Option<S
             .all(|(name, y)| *y == 0.0 || sums.contains_key(name))
 }
 
-/// Sort the fissioning parents of `reachable` by what can be drawn for them,
-/// naming products with the converter's rule over `library`, the whole chain
-/// the run loaded: the rule searches every isotope of an element, so a pruned
-/// chain could send a product another way.
-pub(crate) fn candidates(
-    reachable: &HashMap<String, ChainNuclide>,
-    library: &HashMap<String, ChainNuclide>,
-) -> Candidates {
+/// Sort the fissioning parents of `reachable` by what can be drawn for them.
+pub(crate) fn candidates(reachable: &HashMap<String, ChainNuclide>) -> Candidates {
     /// What one set allows, decided once and shared by every parent reading
-    /// it: an alias shares its owner's `Arc`, and so its verdict.
+    /// it.
     #[derive(Clone, Copy)]
     enum Verdict {
         Draw {
@@ -296,7 +224,6 @@ pub(crate) fn candidates(
         Mismatch,
     }
 
-    let isotopes = Isotopes::new(library);
     let mut out = Candidates::default();
     let mut parents: Vec<(&String, &Arc<FissionYieldSet>)> = reachable
         .iter()
@@ -308,7 +235,7 @@ pub(crate) fn candidates(
         let verdict =
             *verdicts
                 .entry(Arc::as_ptr(set))
-                .or_insert_with(|| match plan(set, &isotopes) {
+                .or_insert_with(|| match plan(set) {
                     Plan::Draw {
                         terms,
                         deviates,
@@ -407,6 +334,8 @@ mod tests {
             half_life_uncertainty: None,
             decay_energy: 0.0,
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
             decay_energy_components: Default::default(),
             reactions: Vec::new(),
             decays: Vec::new(),
@@ -415,14 +344,20 @@ mod tests {
         }
     }
 
-    /// One energy of U235 yields from the tape: Kr85, Kr85_m1 (which the
-    /// library lacks, so it lands on Kr85) and Xe135, with `dy` the relative
-    /// DY on each. `products` is what the converter derives from them.
+    /// One energy of U235 yields from the tape: Kr85, Kr85_m1 and Xe135, with
+    /// `dy` the relative DY on each. `products` is what the converter derives
+    /// from them: each under its own name. `kr85` is the Kr85 the solver
+    /// reads, 0.002 as the tape gives it; anything else is yields a converter
+    /// summed onto a stand-in, which no longer map.
     fn point(dy: [f64; 3], kr85: f64) -> FissionYield {
         let tape = [("Kr85", 0.002), ("Kr85_m1", 0.011), ("Xe135", 0.003)];
         FissionYield {
             energy: 0.0253,
-            products: vec![("Kr85".to_string(), kr85), ("Xe135".to_string(), 0.003)],
+            products: vec![
+                ("Kr85".to_string(), kr85),
+                ("Kr85_m1".to_string(), 0.011),
+                ("Xe135".to_string(), 0.003),
+            ],
             independent: Some(yani::EvaluatedYields {
                 products: tape.iter().map(|(n, _)| n.to_string()).collect(),
                 yields: tape.iter().map(|(_, y)| *y).collect(),
@@ -450,12 +385,12 @@ mod tests {
         set.yields[0].products[0].1
     }
 
-    /// The tape's products are drawn and summed onto the solver's: Kr85 moves
-    /// as its two tape parents in quadrature, centred on the nominal sum.
+    /// Each tape product is drawn under its own name: Kr85 moves by its own
+    /// DY, centred on the tape's value.
     #[test]
-    fn draws_land_on_the_products_the_converter_summed_them_onto() {
-        let chain = library(FissionYieldSet::new(vec![point([0.1, 0.2, 0.05], 0.013)]));
-        let c = candidates(&chain, &chain);
+    fn each_product_is_drawn_under_its_own_name() {
+        let chain = library(FissionYieldSet::new(vec![point([0.1, 0.2, 0.05], 0.002)]));
+        let c = candidates(&chain);
         assert_eq!(c.perturbed, BTreeSet::from(["U235".to_string()]));
         assert!(c.mapping_mismatch.is_empty() && c.without.is_empty());
 
@@ -463,17 +398,17 @@ mod tests {
         let draws: Vec<f64> = (0..n).map(|r| kr85(&sample(&c, 4, r)["U235"])).collect();
         let mean = draws.iter().sum::<f64>() / n as f64;
         let sd = (draws.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1) as f64).sqrt();
-        let want = ((0.002_f64 * 0.1).powi(2) + (0.011_f64 * 0.2).powi(2)).sqrt();
-        assert!((mean / 0.013 - 1.0).abs() < 0.003, "mean {mean}");
+        let want = 0.002_f64 * 0.1;
+        assert!((mean / 0.002 - 1.0).abs() < 0.003, "mean {mean}");
         assert!((sd / want - 1.0).abs() < 0.03, "sigma {sd} against {want}");
 
         let drawn = sample(&c, 4, 0);
         let set = &drawn["U235"];
         assert_eq!(set.yields[0].energy, 0.0253);
         assert!(set.yields[0].independent.is_none());
-        assert_ne!(set.yields[0].products[1].1, 0.003, "Xe135 moved too");
+        assert_ne!(set.yields[0].products[2].1, 0.003, "Xe135 moved too");
         // The nominal set is untouched.
-        assert_eq!(kr85(chain["U235"].fission_yields.as_ref().unwrap()), 0.013);
+        assert_eq!(kr85(chain["U235"].fission_yields.as_ref().unwrap()), 0.002);
     }
 
     /// A drawn set reads its energies with the evaluation's laws, so a
@@ -482,12 +417,12 @@ mod tests {
     /// the same sets.
     #[test]
     fn a_drawn_set_keeps_the_laws_between_its_energies() {
-        let mut fast = point([0.1, 0.2, 0.05], 0.013);
+        let mut fast = point([0.1, 0.2, 0.05], 0.002);
         fast.energy = 1.4e7;
         fast.interpolation = Some(yani::YieldInterpolation::Histogram);
-        let nominal = FissionYieldSet::new(vec![point([0.1, 0.2, 0.05], 0.013), fast]);
+        let nominal = FissionYieldSet::new(vec![point([0.1, 0.2, 0.05], 0.002), fast]);
         let chain = library(nominal.clone());
-        let c = candidates(&chain, &chain);
+        let c = candidates(&chain);
         for replica in 0..4 {
             let drawn = &sample(&c, 5, replica)["U235"];
             assert_eq!(drawn.laws(), nominal.laws());
@@ -495,12 +430,13 @@ mod tests {
         }
     }
 
-    /// Products that do not sum back to the solver's are a mapping this rule
-    /// did not make, and the parent is held, never drawn through it.
+    /// Yields that do not sum back to the solver's by name (a converter
+    /// booked Kr85_m1 onto a Kr85 stand-in) are a mapping this rule does not
+    /// make, and the parent is held, never drawn through it.
     #[test]
     fn a_mapping_that_does_not_give_the_products_back_is_held() {
-        let chain = library(FissionYieldSet::new(vec![point([0.1, 0.2, 0.05], 0.012)]));
-        let c = candidates(&chain, &chain);
+        let chain = library(FissionYieldSet::new(vec![point([0.1, 0.2, 0.05], 0.013)]));
+        let c = candidates(&chain);
         assert!(c.is_empty());
         assert_eq!(c.mapping_mismatch, BTreeSet::from(["U235".to_string()]));
     }
@@ -508,16 +444,16 @@ mod tests {
     /// No DY, or no evaluated yields at all, is "no uncertainty", reported.
     #[test]
     fn yields_with_no_stated_dy_are_listed_without() {
-        let chain = library(FissionYieldSet::new(vec![point([0.0, 0.0, 0.0], 0.013)]));
-        let c = candidates(&chain, &chain);
+        let chain = library(FissionYieldSet::new(vec![point([0.0, 0.0, 0.0], 0.002)]));
+        let c = candidates(&chain);
         assert!(c.is_empty());
         assert_eq!(c.without, BTreeSet::from(["U235".to_string()]));
 
-        let mut bare = point([0.1, 0.1, 0.1], 0.013);
+        let mut bare = point([0.1, 0.1, 0.1], 0.002);
         bare.independent = None;
         let chain = library(FissionYieldSet::new(vec![bare]));
         assert_eq!(
-            candidates(&chain, &chain).without,
+            candidates(&chain).without,
             BTreeSet::from(["U235".to_string()])
         );
     }
@@ -526,64 +462,30 @@ mod tests {
     /// named, while its other yields are still drawn.
     #[test]
     fn a_dy_on_a_zero_yield_is_named_and_the_rest_still_drawn() {
-        let mut p = point([0.1, 0.2, 0.05], 0.013);
+        let mut p = point([0.1, 0.2, 0.05], 0.002);
         let ev = p.independent.as_mut().unwrap();
         ev.products.push("Cs135".to_string());
         ev.yields.push(0.0);
         ev.uncertainties.push(Some(1.0e-5));
         p.products.push(("Cs135".to_string(), 0.0));
         let chain = library(FissionYieldSet::new(vec![p]));
-        let c = candidates(&chain, &chain);
+        let c = candidates(&chain);
         assert_eq!(c.perturbed, BTreeSet::from(["U235".to_string()]));
         assert_eq!(c.not_carried, BTreeSet::from(["U235".to_string()]));
-        assert_eq!(sample(&c, 1, 0)["U235"].yields[0].products[2].1, 0.0);
-    }
-
-    /// An actinide borrowing another's yields shares the evaluation and so
-    /// its draw, in every replica.
-    #[test]
-    fn an_alias_shares_its_owners_draw() {
-        let mut chain = library(FissionYieldSet::new(vec![point([0.1, 0.2, 0.05], 0.013)]));
-        let mut u238 = nuclide("U238", Some(1.4e17));
-        u238.fission_yields = chain["U235"].fission_yields.clone();
-        chain.insert("U238".to_string(), u238);
-        let c = candidates(&chain, &chain);
-        assert_eq!(
-            c.perturbed,
-            BTreeSet::from(["U235".to_string(), "U238".to_string()])
-        );
-        for replica in 0..8 {
-            let drawn = sample(&c, 2, replica);
-            assert!(Arc::ptr_eq(&drawn["U235"], &drawn["U238"]));
-        }
+        assert_eq!(sample(&c, 1, 0)["U235"].yields[0].products[3].1, 0.0);
     }
 
     /// A product draws the same deviate whatever its neighbours state.
     #[test]
     fn a_yield_draws_the_same_deviate_whatever_its_neighbours_state() {
-        let a = library(FissionYieldSet::new(vec![point([0.0, 0.0, 0.05], 0.013)]));
-        let b = library(FissionYieldSet::new(vec![point([0.1, 0.2, 0.05], 0.013)]));
+        let a = library(FissionYieldSet::new(vec![point([0.0, 0.0, 0.05], 0.002)]));
+        let b = library(FissionYieldSet::new(vec![point([0.1, 0.2, 0.05], 0.002)]));
         // Different yields would key a different stream; the DY is not part of
         // the key, so these two share one.
-        let (ca, cb) = (candidates(&a, &a), candidates(&b, &b));
+        let (ca, cb) = (candidates(&a), candidates(&b));
         for replica in 0..8 {
-            let xe = |c: &Candidates| sample(c, 3, replica)["U235"].yields[0].products[1].1;
+            let xe = |c: &Candidates| sample(c, 3, replica)["U235"].yields[0].products[2].1;
             assert_eq!(xe(&ca), xe(&cb));
         }
-    }
-
-    /// Yields converted against another decay library than the one loaded
-    /// still map: here the loaded library has Kr85_m1, which the converter's
-    /// did not, so the converter summed it onto Kr85, and the walk stops at
-    /// the first product the converter listed rather than at the first
-    /// nuclide the loaded library knows.
-    #[test]
-    fn yields_converted_against_another_decay_library_still_map() {
-        let mut chain = library(FissionYieldSet::new(vec![point([0.1, 0.2, 0.05], 0.013)]));
-        chain.insert("Kr85_m1".to_string(), nuclide("Kr85_m1", Some(1.6e4)));
-        chain.remove("Xe135");
-        let c = candidates(&chain, &chain);
-        assert!(c.mapping_mismatch.is_empty(), "{c:?}");
-        assert_eq!(c.perturbed, BTreeSet::from(["U235".to_string()]));
     }
 }

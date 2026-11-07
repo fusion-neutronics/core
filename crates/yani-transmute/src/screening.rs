@@ -273,6 +273,8 @@ mod tests {
             half_life_uncertainty: None,
             decay_energy: 0.0,
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
             decay_energy_components: Default::default(),
             reactions: vec![yani::ChainReaction {
                 kind: "(n,gamma)".to_string(),

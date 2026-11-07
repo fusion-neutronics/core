@@ -2465,9 +2465,9 @@ fn compare(name: &str, ours: &BTreeMap<String, Value>, theirs: &BTreeMap<String,
     }
 }
 
-/// The decay evaluations the chain golden is built from. Between them these
-/// close every path the chain follows, so no product needs a stand-in except
-/// Cs137's, which is deliberate: barium is absent, so the stand-in walk runs.
+/// The decay evaluations the chain golden is built from. Barium is absent on
+/// purpose, so Cs137's daughter is one the decay data has no record for: the
+/// chain names it as the decay gives it (Ba137), with no stand-in.
 const CHAIN_DECAY: [&str; 10] = [
     "dec-048_Cd_116.endf.xz",
     "dec-049_In_115.endf.xz",
@@ -2487,9 +2487,8 @@ const CHAIN_NEUTRON: [&str; 2] = [
     "n-054_Xe_136_trimmed.endf.xz",
 ];
 
-/// Capture only. The fixtures do not close the (n,2n) and charged-particle
-/// paths, and an unclosed path exercises the stand-in walk rather than the
-/// chain, which is what the decay fixtures are already for.
+/// Capture only, to keep the golden small: the fixtures do not close the
+/// (n,2n) and charged-particle paths.
 const CHAIN_REACTIONS: [&str; 1] = ["(n,gamma)"];
 
 /// The header of the chain golden, as [`build`] takes it.

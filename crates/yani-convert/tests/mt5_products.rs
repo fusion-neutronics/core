@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use endf::Material;
-use yani_convert::anything::{self, DecayIndex, Evaluation, Row};
+use yani_convert::anything::{self, Evaluation, Row};
 
 macro_rules! local_fixture {
     ($name:literal) => {
@@ -25,30 +25,10 @@ fn material(compressed: &[u8]) -> Material {
     Material::from_str(&String::from_utf8(out).expect("UTF-8")).expect("fixture parses")
 }
 
-/// Every ground state from H to Zn as a nuclide with decay data, and the
-/// isomers named, so each product is named as itself unless left out here.
-fn decay(isomers: &[&str]) -> DecayIndex {
-    let mut names: Vec<(String, bool, f64)> = Vec::new();
-    for z in 1..=30u32 {
-        for a in z..=(3 * z + 10) {
-            names.push((endf::gnds_name(z, a, 0), false, 1.0));
-        }
-    }
-    names.extend(isomers.iter().map(|n| (n.to_string(), false, 1.0)));
-    DecayIndex::from_library(names)
-}
-
-fn named(
-    evaluation: Evaluation,
-    decay: &DecayIndex,
-) -> (Vec<Row>, serde_json::Map<String, serde_json::Value>) {
+fn named(evaluation: Evaluation) -> (Vec<Row>, serde_json::Map<String, serde_json::Value>) {
     let parent = evaluation.parent.clone();
     let parents = BTreeSet::from([parent.clone()]);
-    let out = anything::name_all(
-        &BTreeMap::from([(parent.clone(), evaluation)]),
-        decay,
-        &parents,
-    );
+    let out = anything::name_all(&BTreeMap::from([(parent.clone(), evaluation)]), &parents);
     (
         out.rows
             .get(&parent)
@@ -83,7 +63,7 @@ fn fe54_residuals_are_shares_and_its_particles_multiplicities() {
     )))
     .expect("Fe54 has MT=5");
     assert_eq!(evaluation.parent, "Fe54");
-    let (rows, record) = named(evaluation, &decay(&[]));
+    let (rows, record) = named(evaluation);
 
     for (target, share, value) in [
         ("Mn53", true, 0.844948),
@@ -124,7 +104,7 @@ fn conservation_is_recorded_for_every_parent() {
         "n-026_Fe_054_endfb81_mt5.endf.xz"
     )))
     .expect("Fe54 has MT=5");
-    let (_, record) = named(evaluation, &decay(&[]));
+    let (_, record) = named(evaluation);
     assert_eq!(record["parents"], 1);
     let balance = &record["conservation"]["Fe54"];
     assert_eq!(balance["charge"].as_f64().unwrap(), 1.0, "{balance}");
@@ -149,7 +129,7 @@ fn a_residual_not_given_is_written_as_such() {
         .map(|product| product.zap)
         .collect();
     assert_eq!(zaps, [1, 1003, 2003, 2004]);
-    let (rows, record) = named(evaluation, &decay(&[]));
+    let (rows, record) = named(evaluation);
     let marker: Vec<&Row> = rows.iter().filter(|r| r.target.is_none()).collect();
     assert_eq!(marker.len(), 1);
     assert_eq!((marker[0].lip, marker[0].share), (None, None));
@@ -197,7 +177,7 @@ fn tm_and_zr_source_evaluations_do_not_supply_mt5_residuals() {
         );
         let evaluation = anything::read(&material).expect("source has nonzero MT=5");
         assert_eq!(evaluation.parent, parent);
-        let (rows, record) = named(evaluation, &decay(&[parent]));
+        let (rows, record) = named(evaluation);
         assert!(rows.iter().any(|row| row.target.is_none()), "{parent}");
         let entry = &record["residual_not_given"][0];
         assert_eq!(entry["nuclide"], parent);
@@ -206,31 +186,20 @@ fn tm_and_zr_source_evaluations_do_not_supply_mt5_residuals() {
     }
 }
 
-/// TENDL-2025's Ni58 gives Co58 at LIP 0 and 1. With Co58_m1 in the decay
-/// data each is its own row; without it the isomer goes where every other
-/// reaction's product with no decay data goes, the ground state, and the row
-/// is their sum.
+/// TENDL-2025's Ni58 gives Co58 at LIP 0 and 1, and each is its own row: the
+/// isomer is the evaluation's, named from its LIP, with no decay data asked.
 #[test]
 fn an_isomer_comes_from_lip() {
-    let fixture = || {
-        anything::read(&material(local_fixture!(
-            "n-028_Ni_058_tendl2025_mt5.endf.xz"
-        )))
-        .expect("Ni58 has MT=5")
-    };
-    let (rows, _) = named(fixture(), &decay(&["Co58_m1"]));
+    let evaluation = anything::read(&material(local_fixture!(
+        "n-028_Ni_058_tendl2025_mt5.endf.xz"
+    )))
+    .expect("Ni58 has MT=5");
+    let (rows, _) = named(evaluation);
     let (ground, isomer) = (find(&rows, "Co58"), find(&rows, "Co58_m1"));
     assert_eq!(ground.lip, Some(0));
     assert_eq!(isomer.lip, Some(1));
     let (g, m) = (at(ground, 4.0e7), at(isomer, 4.0e7));
     assert!(g > 0.0 && m > 0.0, "{g} {m}");
-
-    let (merged, _) = named(fixture(), &decay(&[]));
-    assert!(merged
-        .iter()
-        .all(|r| r.target.as_deref() != Some("Co58_m1")));
-    let sum = at(find(&merged, "Co58"), 4.0e7);
-    assert!((sum - (g + m)).abs() < 1e-12 * sum, "{sum} vs {}", g + m);
 }
 
 /// The rows go through the writer and come back through yani's reader with
@@ -256,7 +225,7 @@ fn the_rows_reach_yanis_reader() {
             .unwrap(),
         ),
     ]);
-    let named = anything::name_all(&evaluations, &decay(&[]), &parents);
+    let named = anything::name_all(&evaluations, &parents);
     let chain = endf::Chain {
         nuclides: ["Fe54", "Zr96"]
             .iter()
@@ -269,22 +238,28 @@ fn the_rows_reach_yanis_reader() {
     // The reader needs a decay index; one nuclide is enough to make a chain.
     let decay_dir = dir.join("decay");
     std::fs::create_dir_all(&decay_dir).unwrap();
+    // Both parents have decay records, as every nuclide whose reactions a run
+    // follows must: a nuclide without one is of unknown fate and reacts with
+    // nothing.
+    let stub = |name: &str| yani::ChainNuclide {
+        name: name.to_string(),
+        half_life: None,
+        half_life_uncertainty: None,
+        decay_energy: 0.0,
+        decay_energy_uncertainty: None,
+        decay_evaluated: true,
+        excitation_energy: None,
+        decay_energy_components: Default::default(),
+        reactions: Vec::new(),
+        decays: Vec::new(),
+        fission_yields: None,
+        sources: Vec::new(),
+    };
     yani::export_chain_parts(
-        &std::collections::HashMap::from([(
-            "Fe54".to_string(),
-            yani::ChainNuclide {
-                name: "Fe54".to_string(),
-                half_life: None,
-                half_life_uncertainty: None,
-                decay_energy: 0.0,
-                decay_energy_uncertainty: None,
-                decay_energy_components: Default::default(),
-                reactions: Vec::new(),
-                decays: Vec::new(),
-                fission_yields: None,
-                sources: Vec::new(),
-            },
-        )]),
+        &std::collections::HashMap::from([
+            ("Fe54".to_string(), stub("Fe54")),
+            ("Zr96".to_string(), stub("Zr96")),
+        ]),
         dir.join("stub"),
         None,
     )

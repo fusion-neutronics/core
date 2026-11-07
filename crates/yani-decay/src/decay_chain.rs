@@ -379,6 +379,8 @@ mod tests {
             sources,
             half_life_uncertainty: None,
             decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
             decay_energy_components: Default::default(),
         }
     }
