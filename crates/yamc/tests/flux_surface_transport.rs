@@ -8,13 +8,16 @@
 //! ray crossings). The same layers on a circular tokamak, as flux surfaces
 //! and as ZTorus surfaces, give the same tallies from the same seed, also
 //! with the outermost layer as the vacuum boundary in place of the world
-//! sphere. The source's plasma lies inside the plasma's flux surface.
-//! Self-skips if the endf-b8.1 Fe56 fixture is absent.
+//! sphere. The source's plasma lies inside the plasma's flux surface, and
+//! a cell's flux searches stopped at its bounding box still find the
+//! nearest crossing. The transport tests self-skip if the endf-b8.1 Fe56
+//! fixture is absent.
 
 use std::collections::HashMap;
+use std::f64::consts::TAU;
 use std::sync::Arc;
 
-use yamc::geo::{BoundaryType, HalfspaceType, Region, Surface};
+use yamc::geo::{BoundaryType, HalfspaceType, Region, Surface, SurfaceKind};
 use yamc::geometry::cell::Cell;
 use yamc::geometry::flux::{flux_surface, PlasmaShape};
 use yamc::geometry::Geometry;
@@ -335,6 +338,151 @@ fn the_source_plasma_is_inside_the_plasma_surface() {
             "rho 1 at {x:?} is off the surface"
         );
     }
+}
+
+/// Small deterministic generator (xorshift64*).
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> f64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        (self.0.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    fn range(&mut self, lo: f64, hi: f64) -> f64 {
+        lo + (hi - lo) * self.next()
+    }
+
+    fn direction(&mut self) -> [f64; 3] {
+        let mu = self.range(-1.0, 1.0);
+        let phi = self.range(0.0, TAU);
+        let s = (1.0 - mu * mu).sqrt();
+        [s * phi.cos(), s * phi.sin(), mu]
+    }
+}
+
+/// What `Cell::closest_surface_within` answers, from each surface's own
+/// first crossing beyond 1e-10 cm: the nearest flux crossing if it is
+/// nearer than the cap and every closed-form crossing, else the nearest
+/// closed-form one, else the cap.
+fn nearest_crossing(
+    cell: &Cell,
+    p: [f64; 3],
+    u: [f64; 3],
+    cap: f64,
+) -> Option<(BoundaryType, f64, Option<usize>)> {
+    let surfaces = cell.region.surfaces_with_sense();
+    let mut closed: Option<(f64, &Surface)> = None;
+    let mut free: Option<(f64, &Surface)> = None;
+    for (surface, _) in &surfaces {
+        let Some(d) = surface.distance_to_surface(p, u).filter(|&d| d > 1e-10) else {
+            continue;
+        };
+        let best = if surface.is_free_form() {
+            &mut free
+        } else {
+            &mut closed
+        };
+        if best.is_none_or(|(b, _)| d < b) {
+            *best = Some((d, surface));
+        }
+    }
+    let nearest_closed = closed.map_or(f64::INFINITY, |(d, _)| d);
+    match (free, closed) {
+        (Some((d, s)), _) if d < nearest_closed.min(cap) => {
+            Some((s.boundary.clone(), d, s.surface_id))
+        }
+        (_, Some((d, s))) => Some((s.boundary.clone(), d, s.surface_id)),
+        _ if cap < f64::INFINITY => Some((BoundaryType::Transmission, cap, None)),
+        _ => None,
+    }
+}
+
+/// A cell's flux searches stop where the ray leaves the cell's bounding
+/// box, and the cell still finds the nearest crossing: from points in the
+/// cell (where the box decides), in its box but not in the cell (where the
+/// searches can run on past the box) and outside the box, with and without
+/// a cap.
+#[test]
+fn cells_stop_flux_searches_at_their_bounding_box() {
+    let plasma = flux_surface(PlasmaShape::Stellarator(&shape()), 1.0, Some(1), None).unwrap();
+    let boundary = match &plasma.kind {
+        SurfaceKind::Flux { boundary, .. } => Arc::clone(boundary),
+        _ => unreachable!(),
+    };
+    let wall = Arc::new(plasma.offset(15.0, Some(2), None).unwrap());
+    let plasma = Arc::new(plasma);
+    let top = Arc::new(Surface::z_plane(60.0, Some(3), None));
+    let bottom = Arc::new(Surface::z_plane(-60.0, Some(4), None));
+    // A slice of the scrape-off layer.
+    let region = above(&plasma)
+        .intersection(&below(&wall))
+        .intersection(&below(&top))
+        .intersection(&above(&bottom));
+    let cell = Cell::new(Some(1), region, None, None);
+    let bx = cell.region.bounding_box();
+    assert!(bx.is_finite());
+    let exit = |p: [f64; 3], u: [f64; 3]| {
+        (0..3)
+            .filter(|&i| u[i] != 0.0)
+            .map(|i| {
+                let face = if u[i] > 0.0 {
+                    bx.upper_right[i]
+                } else {
+                    bx.lower_left[i]
+                };
+                (face - p[i]) / u[i]
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    let mut rng = Rng(2026);
+    let (mut in_box, mut past_box) = (0, 0);
+    for k in 0..300 {
+        let p = match k % 3 {
+            0 => {
+                let (theta, zeta) = (rng.range(0.0, TAU), rng.range(0.0, TAU));
+                let (x, n) = (boundary.point(theta, zeta), boundary.normal(theta, zeta));
+                let d = rng.range(0.5, 14.5);
+                [x[0] + d * n[0], x[1] + d * n[1], x[2] + d * n[2]]
+            }
+            1 => std::array::from_fn(|i| rng.range(bx.lower_left[i], bx.upper_right[i])),
+            _ => [
+                rng.range(-800.0, 800.0),
+                rng.range(-800.0, 800.0),
+                rng.range(61.0, 200.0),
+            ],
+        };
+        let u = rng.direction();
+        let cap = if k % 2 == 0 {
+            f64::INFINITY
+        } else {
+            rng.range(0.0, 400.0)
+        };
+        let got = cell.closest_surface_within(p, u, None, cap);
+        let want = nearest_crossing(&cell, p, u, cap);
+        let same = match (&got, &want) {
+            (None, None) => true,
+            (Some((bg, dg, ig)), Some((bw, dw, iw))) => {
+                bg == bw && ig == iw && (dg - dw).abs() <= 1e-9 * dw.max(1.0)
+            }
+            _ => false,
+        };
+        assert!(
+            same,
+            "from {p:?} along {u:?}, cap {cap}: {got:?}, want {want:?}"
+        );
+        let inside = (0..3).all(|i| p[i] >= bx.lower_left[i] && p[i] <= bx.upper_right[i]);
+        if inside && exit(p, u) < cap {
+            match got {
+                Some((_, d, _)) if d <= exit(p, u) => in_box += 1,
+                _ => past_box += 1,
+            }
+        }
+    }
+    // Both ways out of the box-limited search are taken.
+    assert!(in_box > 50 && past_box > 0, "{in_box} {past_box}");
 }
 
 /// The million-history checks quoted in the pull requests; run them in

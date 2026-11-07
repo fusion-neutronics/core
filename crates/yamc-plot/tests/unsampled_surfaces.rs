@@ -1,4 +1,5 @@
-//! Surface kinds the browser samplers cannot evaluate (e.g. a flux surface).
+//! Surface kinds the browser samplers cannot evaluate (e.g. a flux or an
+//! implicit surface).
 //!
 //! `browser_can_sample` tells the plot paths to embed yamc's raster for such
 //! a geometry, and every JS `surfaceEval` copy must answer NaN (unknown)
@@ -11,7 +12,7 @@ use std::sync::Arc;
 use yamc_geo::cell::GeoCell;
 use yamc_geo::geometry::CsgGeometry;
 use yamc_geo::region::{HalfspaceType, Region, RegionExpr};
-use yamc_geo::surface::{BoundaryType, FluxBoundary, Surface, SurfaceKind};
+use yamc_geo::surface::{BoundaryType, FluxBoundary, ImplicitFormula, Surface, SurfaceKind};
 use yamc_plot::{
     browser_can_sample, build_interactive_html, build_interactive_tally_html, EmbeddedSlice,
     InteractiveTallyParams, InteractiveViewParams, MeshMeta,
@@ -117,6 +118,14 @@ fn browser_can_sample_only_the_kinds_surface_eval_knows() {
     assert!(!browser_can_sample(&geometry(vec![
         below(sphere()),
         below(x_torus)
+    ])));
+    let formula = ImplicitFormula::new("sqrt(x^2 + y^2 + z^2) - 900").unwrap();
+    let implicit = surface(SurfaceKind::Implicit {
+        formula: Arc::new(formula),
+    });
+    assert!(!browser_can_sample(&geometry(vec![
+        below(sphere()),
+        RegionExpr::Complement(Box::new(below(implicit)))
     ])));
 }
 

@@ -10,7 +10,9 @@
 //! second-order steps, rules out a pair of crossings between two samples
 //! and certifies a bracket as holding a single crossing. Approaching a
 //! crossing, a probe just past Newton's estimate forms the bracket, which
-//! safeguarded Newton then narrows; a bracket is never returned unrefined.
+//! the refinement shared with the other free-form kinds
+//! ([`search::bracket`]) narrows by safeguarded Newton, with the curvature
+//! bound as its certificate; a bracket is never returned unrefined.
 //!
 //! Beyond the reach (an offset layer past its fold, or past half a thin
 //! part) only the Lipschitz steps apply. A single crossing is still never
@@ -20,26 +22,11 @@
 
 use super::distance::Signed;
 use super::Engine;
+use crate::surface::search::{
+    self, bracket, leaving, midpoint, minimal, tolerance, Budget, Line, Outcome, Trace, H_MIN,
+    MIN_ROOT, ON_BAND, ROOT_TOL,
+};
 
-/// Roots at or below this ray distance are dropped and the search goes
-/// on: `Cell::closest_surface` ignores distances up to 1e-10 cm, so
-/// returning one would hide this surface's next crossing.
-pub(super) const MIN_ROOT: f64 = 1e-10;
-/// A pair of crossings closer together than this (cm) may be missed; a
-/// ray would have to graze the surface within about 1e-9 rad of tangency
-/// for it to matter.
-const H_MIN: f64 = 1e-9;
-/// Evaluations per query before giving up. A transmission surface then
-/// returns the root-free point reached, which spatial relocation resolves;
-/// a vacuum surface, where a returned crossing kills the particle, gets the
-/// far larger budget and reports no crossing only if that runs out too.
-const BUDGET: usize = 4_000;
-const VACUUM_BUDGET: usize = 400_000;
-/// Distance from the level set within which a particle counts as on it
-/// (well above the 1e-8 cm crossing nudge).
-const ON_BAND: f64 = 1e-7;
-/// A crossing is located to this (cm), far below the 1e-8 cm nudge.
-const ROOT_TOL: f64 = 1e-11;
 /// The probe lands this far past Newton's estimate, relatively.
 const OVERSHOOT: f64 = 0.25;
 /// Only probe when Newton's estimate is within this many safe steps.
@@ -82,20 +69,26 @@ struct Sample {
     d: f64,
 }
 
+impl search::Point for Sample {
+    fn t(&self) -> f64 {
+        self.t
+    }
+
+    fn g(&self) -> f64 {
+        self.g
+    }
+
+    fn slope(&self) -> f64 {
+        self.slope
+    }
+}
+
 struct Ray<'a> {
     engine: &'a Engine,
     origin: [f64; 3],
     direction: [f64; 3],
     offset: f64,
-    evaluations: usize,
-    budget: usize,
-}
-
-enum Outcome {
-    Root(f64),
-    Miss,
-    /// The budget ran out; no crossing lies before this ray distance.
-    Exhausted(f64),
+    budget: Budget,
 }
 
 impl Ray<'_> {
@@ -107,10 +100,6 @@ impl Ray<'_> {
         ]
     }
 
-    fn spent(&self) -> bool {
-        self.evaluations >= self.budget
-    }
-
     fn sample(&self, t: f64, s: Signed) -> Sample {
         Sample {
             t,
@@ -118,12 +107,6 @@ impl Ray<'_> {
             slope: dot(s.normal, self.direction),
             d: s.d,
         }
-    }
-
-    fn exact(&mut self, t: f64) -> Sample {
-        self.evaluations += 1;
-        let s = self.engine.signed(self.at(t));
-        self.sample(t, s)
     }
 
     /// Bound on `|g''|` while the signed distance stays in `[lo, hi]`, if
@@ -184,10 +167,6 @@ impl Ray<'_> {
         }
     }
 
-    fn tolerance(t: f64) -> f64 {
-        (4.0 * f64::EPSILON * t.abs()).max(ROOT_TOL)
-    }
-
     /// Bound on `|g''|` over `[a, b]`, if that stretch is inside the reach.
     fn curvature_between(&self, a: &Sample, b: &Sample) -> Option<f64> {
         let half = 0.5 * (b.t - a.t);
@@ -209,103 +188,13 @@ impl Ray<'_> {
         clearance(a.g.abs(), sign * a.slope, k) + clearance(b.g.abs(), -sign * b.slope, k) > width
     }
 
-    /// The first crossing in `[a, b]`, both ends of the same sign and `a`
-    /// root-free; `Ok(None)` if there is none (pairs closer than `H_MIN`
-    /// may be missed, and beyond the reach, where only the Lipschitz bound
-    /// holds and ruling a pair out would take `O(width / |g|)` evaluations,
-    /// none is looked for), `Err(t)` if the budget ran out with no crossing
-    /// before `t`.
-    fn scan(&mut self, a: Sample, b: Sample) -> Result<Option<f64>, f64> {
-        if b.t - a.t <= H_MIN || self.excluded(&a, &b) || self.curvature_between(&a, &b).is_none() {
-            return Ok(None);
-        }
-        if self.spent() {
-            return Err(a.t);
-        }
-        let m = self.exact(0.5 * (a.t + b.t));
-        if m.g == 0.0 {
-            return Ok(Some(m.t));
-        }
-        if m.g.signum() != a.g.signum() {
-            return self.bracket(a, m).map(Some);
-        }
-        match self.scan(a, m)? {
-            Some(root) => Ok(Some(root)),
-            None => self.scan(m, b),
-        }
-    }
-
-    /// The first crossing in `(a, b]` given a sign change and a root-free
-    /// `a`, located to the tolerance (at or just past it), or `Err(t)` if
-    /// the budget ran out with no crossing before `t`.
-    fn bracket(&mut self, mut a: Sample, mut b: Sample) -> Result<f64, f64> {
-        // Newton runs from the end evaluated last while it keeps halving
-        // the bracket; otherwise the step bisects.
-        let mut from_b = true;
-        let mut halving = true;
-        loop {
-            let width = b.t - a.t;
-            let tol = Self::tolerance(b.t);
-            if width <= tol {
-                return Ok(b.t);
-            }
-            // A floor on |g'| over the bracket: if positive, g is monotone
-            // there, the crossing is the only one, and it lies within
-            // |g| / floor of either end.
-            let floor = self
-                .curvature_between(&a, &b)
-                .map_or(0.0, |k| a.slope.abs().max(b.slope.abs()) - k * width);
-            if floor > 0.0 {
-                if b.g.abs() <= tol * floor {
-                    return Ok(b.t);
-                }
-                if a.g.abs() <= tol * floor {
-                    return Ok((a.t + a.g.abs() / floor).min(b.t));
-                }
-            }
-            if self.spent() {
-                return Err(a.t);
-            }
-            let from = if from_b { &b } else { &a };
-            let newton = from.t - from.g / from.slope;
-            let tm = if halving && newton > a.t && newton < b.t {
-                newton
-            } else {
-                0.5 * (a.t + b.t)
-            };
-            let m = self.exact(tm);
-            if m.g == 0.0 {
-                return Ok(m.t);
-            }
-            if m.g.signum() != a.g.signum() {
-                b = m;
-                from_b = true;
-            } else {
-                if floor <= 0.0
-                    && let Some(root) = self.scan(a, m)?
-                {
-                    return Ok(root);
-                }
-                a = m;
-                from_b = false;
-            }
-            halving = b.t - a.t <= 0.5 * width;
-        }
-    }
-
-    /// Turn a found crossing into the outcome, or the ray distance to
-    /// resume from when it is at or below `MIN_ROOT` (see there).
+    /// [`search::settle`], searching on from past the chord within which
+    /// the level set cannot be met again.
     fn settle(&mut self, found: Result<f64, f64>) -> Result<Outcome, f64> {
-        match found {
-            Ok(root) if root > MIN_ROOT => Ok(Outcome::Root(root)),
-            Ok(root) => {
-                // Past the chord within which the level set cannot be met
-                // again.
-                let s = self.exact(root);
-                Err(root + self.chord(&s).max(H_MIN))
-            }
-            Err(safe) => Ok(Outcome::Exhausted(safe)),
-        }
+        search::settle(found, |root| {
+            let s = self.exact(root);
+            root + self.chord(&s).max(H_MIN)
+        })
     }
 
     /// March from `start` (with the exact sample there, if taken) to `end`.
@@ -331,7 +220,7 @@ impl Ray<'_> {
                 Some(s) => s,
                 None if prev.is_some_and(|p| p.g.abs() < loose_below) => self.exact(t),
                 None => {
-                    self.evaluations += 1;
+                    self.budget.spend();
                     let x = self.at(t);
                     let (cut, lo, hi) = self.engine.bounds(x);
                     let (glo, ghi) = (lo - self.offset, hi - self.offset);
@@ -356,7 +245,7 @@ impl Ray<'_> {
                             && p.g.signum() != sign
                         {
                             let s = self.exact(t);
-                            let found = self.bracket(p, s);
+                            let found = bracket(self, p, s);
                             match self.settle(found) {
                                 Ok(outcome) => return outcome,
                                 Err(resume) => {
@@ -385,7 +274,7 @@ impl Ray<'_> {
                 Some(Ok(t))
             } else {
                 match prev {
-                    Some(p) if p.g.signum() != s.g.signum() => Some(self.bracket(p, s)),
+                    Some(p) if p.g.signum() != s.g.signum() => Some(bracket(self, p, s)),
                     _ => None,
                 }
             };
@@ -404,7 +293,7 @@ impl Ray<'_> {
             let away = s.g.signum() * s.slope;
             if away < 0.0 {
                 let newton = s.g.abs() / -away;
-                let found = if newton <= Self::tolerance(t + newton) {
+                let found = if newton <= tolerance(t + newton) {
                     Some(Ok(t + newton))
                 } else {
                     // Probe just past Newton's estimate to form a bracket.
@@ -414,7 +303,7 @@ impl Ray<'_> {
                         if probe.g == 0.0 {
                             Some(Ok(probe.t))
                         } else if probe.g.signum() != s.g.signum() {
-                            Some(self.bracket(s, probe))
+                            Some(bracket(self, s, probe))
                         } else if self.excluded(&s, &probe) {
                             // Nothing up to the probe: carry on from there.
                             prev = Some(s);
@@ -448,21 +337,57 @@ impl Ray<'_> {
     }
 }
 
-/// A ray query's answer and what it cost.
-pub(super) struct Trace {
-    pub crossing: Option<f64>,
-    /// The evaluation budget ran out.
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by the tests"))]
-    pub exhausted: bool,
-    /// Bound and exact distance evaluations.
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by the tests"))]
-    pub evaluations: usize,
+impl Line for Ray<'_> {
+    type Point = Sample;
+
+    fn exact(&mut self, t: f64) -> Sample {
+        self.budget.spend();
+        let s = self.engine.signed(self.at(t));
+        self.sample(t, s)
+    }
+
+    fn spent(&self) -> bool {
+        self.budget.spent()
+    }
+
+    /// From the curvature bound, where the bracket is inside the reach.
+    fn floor(&self, a: &Sample, b: &Sample) -> f64 {
+        self.curvature_between(a, b)
+            .map_or(0.0, |k| a.slope.abs().max(b.slope.abs()) - k * (b.t - a.t))
+    }
+
+    /// The first crossing in `[a, b]`, both ends of the same sign and `a`
+    /// root-free; `Ok(None)` if there is none (pairs closer than `H_MIN`
+    /// may be missed, and beyond the reach, where only the Lipschitz bound
+    /// holds and ruling a pair out would take `O(width / |g|)` evaluations,
+    /// none is looked for), `Err(t)` if the budget ran out with no crossing
+    /// before `t`.
+    fn scan(&mut self, a: Sample, b: Sample) -> Result<Option<f64>, f64> {
+        if minimal(a.t, b.t) || self.excluded(&a, &b) || self.curvature_between(&a, &b).is_none() {
+            return Ok(None);
+        }
+        if self.spent() {
+            return Err(a.t);
+        }
+        let m = self.exact(midpoint(a.t, b.t));
+        if m.g == 0.0 {
+            return Ok(Some(m.t));
+        }
+        if m.g.signum() != a.g.signum() {
+            return bracket(self, a, m).map(Some);
+        }
+        match self.scan(a, m)? {
+            Some(root) => Ok(Some(root)),
+            None => self.scan(m, b),
+        }
+    }
 }
 
 impl Engine {
     /// Distance along the ray (`direction` of unit length) to the first
-    /// crossing of the level set `D = offset` beyond `MIN_ROOT`, or `None`
-    /// (also when the crossing is beyond `t_max`, where the search stops).
+    /// crossing of the level set `D = offset` beyond `MIN_ROOT`, or none
+    /// (also when the crossing is beyond `t_max`, where the search stops),
+    /// and what the query cost.
     ///
     /// A particle within `ON_BAND` of the level set and moving off it (it
     /// has just crossed, `on_surface` says so, or it was left there) starts
@@ -470,22 +395,8 @@ impl Engine {
     /// one moving towards it marches from where it is, so the crossing just
     /// ahead is returned. If the evaluation budget runs out, a transmission
     /// surface returns the root-free point reached (spatial relocation
-    /// resolves it) and a vacuum surface `None`; the vacuum budget is large
+    /// resolves it) and a vacuum surface none; the vacuum budget is large
     /// enough that this does not happen in practice.
-    pub(super) fn ray(
-        &self,
-        origin: [f64; 3],
-        direction: [f64; 3],
-        offset: f64,
-        on_surface: Option<f64>,
-        vacuum: bool,
-        t_max: f64,
-    ) -> Option<f64> {
-        self.trace_ray(origin, direction, offset, on_surface, vacuum, t_max)
-            .crossing
-    }
-
-    /// [`Engine::ray`] with what the query cost.
     pub(super) fn trace_ray(
         &self,
         origin: [f64; 3],
@@ -495,11 +406,7 @@ impl Engine {
         vacuum: bool,
         t_max: f64,
     ) -> Trace {
-        let none = Trace {
-            crossing: None,
-            exhausted: false,
-            evaluations: 0,
-        };
+        let none = Outcome::Miss.trace(vacuum, 0);
         let mut bx = self.patches.extents;
         bx.inflate(offset.max(0.0) + self.margin);
         let Some((t0, t1)) = bx.clip(origin, direction) else {
@@ -514,20 +421,19 @@ impl Engine {
             origin,
             direction,
             offset,
-            evaluations: 0,
-            budget: if vacuum { VACUUM_BUDGET } else { BUDGET },
+            budget: Budget::new(vacuum),
         };
         let mut start = t0.max(0.0);
         let mut here = None;
         if t0 <= 0.0 {
             let near = on_surface.is_some() || {
-                ray.evaluations += 1;
+                ray.budget.spend();
                 let (_, lo, hi) = self.bounds(origin);
                 lo - offset <= ON_BAND && hi - offset >= -ON_BAND
             };
             if near {
                 let s = ray.exact(0.0);
-                if s.g.abs() <= ON_BAND && s.g * s.slope >= 0.0 {
+                if leaving(s.g.abs(), s.g, s.slope) {
                     start = ray.chord(&s).max(H_MIN);
                 } else {
                     here = Some(s);
@@ -535,16 +441,6 @@ impl Engine {
             }
         }
         let outcome = ray.run(start, end, here);
-        let (crossing, exhausted) = match outcome {
-            Outcome::Root(t) => (Some(t), false),
-            Outcome::Miss => (None, false),
-            Outcome::Exhausted(_) if vacuum => (None, true),
-            Outcome::Exhausted(t) => (Some(t.max(2.0 * MIN_ROOT)), true),
-        };
-        Trace {
-            crossing,
-            exhausted,
-            evaluations: ray.evaluations,
-        }
+        outcome.trace(vacuum, ray.budget.used())
     }
 }

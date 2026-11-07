@@ -95,6 +95,10 @@ harness = false
 name = "flux_surface"
 harness = false
 
+[[bench]]
+name = "implicit_surface"
+harness = false
+
 # Probe examples are entirely `#![cfg(feature = "gpu")]`; declare the
 # feature requirement so cargo skips them (rather than compiling an
 # empty crate with no `main`) when `gpu` is off.

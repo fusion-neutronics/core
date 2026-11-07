@@ -14,8 +14,8 @@ pub enum GpuTranslateError {
     /// A CSG cell is filled by a mesh body; the kernel has
     /// no mesh-in-cell tracking.
     MeshFillUnsupported,
-    /// A surface kind the kernel has no arm for yet: flux and offset
-    /// surfaces run on the CPU only for now.
+    /// A surface kind the kernel has no arm for yet: flux, offset and
+    /// implicit surfaces run on the CPU only for now.
     SurfaceKindUnsupported { kind: &'static str },
     /// A cell uses a region that the GPU kernel can't represent.
     /// Examples: nested boolean operations beyond an AABB, infinite

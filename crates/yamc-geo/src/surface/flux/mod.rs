@@ -24,6 +24,7 @@ mod series;
 #[cfg(test)]
 mod tests;
 
+use crate::surface::search::{along_unit, Trace};
 use crate::surface::{BoundaryType, Surface, SurfaceKind};
 use distance::MAX_POLY;
 use patches::Patches;
@@ -313,9 +314,11 @@ impl FluxBoundary {
     }
 
     /// Ray parameter `t` of the first crossing of the level set at
-    /// `offset` along `point + t * direction`, if before `t_max`; `None`
-    /// for a zero or non-finite direction or a non-finite point.
-    pub(crate) fn distance(
+    /// `offset` along `point + t * direction`, if before `t_max`; none for
+    /// a zero or non-finite direction or a non-finite point. The search's
+    /// answer, with whether it ran out of evaluations (see
+    /// [`Engine::trace_ray`]).
+    pub(super) fn trace(
         &self,
         point: [f64; 3],
         direction: [f64; 3],
@@ -323,16 +326,12 @@ impl FluxBoundary {
         on_surface: Option<f64>,
         vacuum: bool,
         t_max: f64,
-    ) -> Option<f64> {
+    ) -> Trace {
         // The march measures arc length, so it runs on the unit direction.
-        let len = direction.iter().map(|v| v * v).sum::<f64>().sqrt();
-        if !(len.is_finite() && len > 0.0) || !point.iter().all(|v| v.is_finite()) {
-            return None;
-        }
-        let unit = direction.map(|v| v / len);
-        self.engine
-            .ray(point, unit, offset, on_surface, vacuum, t_max * len)
-            .map(|t| t / len)
+        along_unit(point, direction, t_max, |unit, t_max| {
+            self.engine
+                .trace_ray(point, unit, offset, on_surface, vacuum, t_max)
+        })
     }
 
     /// Box containing the points within `offset` of the boundary (for a
@@ -570,11 +569,23 @@ impl Surface {
         surface_id: Option<usize>,
         boundary_type: Option<BoundaryType>,
     ) -> Result<Self, String> {
-        let SurfaceKind::Flux { boundary, offset } = &self.kind else {
-            return Err(format!(
-                "only flux surfaces (FluxSurface or OffsetSurface) can be offset, not a {}",
-                self.kind.name()
-            ));
+        let (boundary, offset) = match &self.kind {
+            SurfaceKind::Flux { boundary, offset } => (boundary, *offset),
+            SurfaceKind::Implicit { .. } => {
+                return Err(
+                    "an ImplicitSurface cannot be offset: a layer of uniform thickness needs \
+                     its formula to be a signed distance, which is not tracked yet. For a \
+                     formula f that is one, the surface d cm outside it is the formula \
+                     \"(f) - d\""
+                        .to_string(),
+                );
+            }
+            _ => {
+                return Err(format!(
+                    "only flux surfaces (FluxSurface or OffsetSurface) can be offset, not a {}",
+                    self.kind.name()
+                ));
+            }
         };
         let total = offset + distance;
         boundary.check_offset(total)?;

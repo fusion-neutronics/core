@@ -938,15 +938,12 @@ pub(crate) fn translate_region_program(cells: &[Cell]) -> Vec<u32> {
 }
 
 /// Refuse surface kinds the kernel has no arm for, before the cell
-/// translation could fail on them with a less clear message.
+/// translation could fail on them with a less clear message. Which kinds
+/// those are is decided once, by [`encode_surface`]'s exhaustive match.
 pub(crate) fn reject_unsupported_surfaces(cells: &[Cell]) -> Result<(), GpuTranslateError> {
     for cell in cells {
         for (surface, _sense) in &cell.cached_surfaces {
-            if let SurfaceKind::Flux { .. } = surface.kind {
-                return Err(GpuTranslateError::SurfaceKindUnsupported {
-                    kind: surface.kind.name(),
-                });
-            }
+            encode_surface(&surface.kind)?;
         }
     }
     Ok(())
@@ -957,8 +954,8 @@ pub(crate) fn reject_unsupported_surfaces(cells: &[Cell]) -> Result<(), GpuTrans
 /// dispatches on the type discriminant; unused tail slots are zero.
 /// The match is exhaustive over every `SurfaceKind`, so a future
 /// variant added without an encoding here is a compile error rather
-/// than a silent wrong answer; kinds without a kernel arm (flux and
-/// offset surfaces) are refused.
+/// than a silent wrong answer; kinds without a kernel arm (flux, offset
+/// and implicit surfaces) are refused.
 fn encode_surface(kind: &SurfaceKind) -> Result<(u32, [f64; 10]), GpuTranslateError> {
     Ok(match *kind {
         SurfaceKind::Sphere { x0, y0, z0, radius } => (
@@ -1024,7 +1021,7 @@ fn encode_surface(kind: &SurfaceKind) -> Result<(u32, [f64; 10]), GpuTranslateEr
                 apex[0], apex[1], apex[2], axis[0], axis[1], axis[2], tan2_theta, 0.0, 0.0, 0.0,
             ],
         ),
-        SurfaceKind::Flux { .. } => {
+        SurfaceKind::Flux { .. } | SurfaceKind::Implicit { .. } => {
             return Err(GpuTranslateError::SurfaceKindUnsupported { kind: kind.name() });
         }
     })
@@ -2596,7 +2593,7 @@ mod tests {
     }
 
     #[test]
-    fn flux_surfaces_are_refused_with_a_clear_error() {
+    fn free_form_surfaces_are_refused_with_a_clear_error() {
         let boundary = std::sync::Arc::new(
             crate::geo::FluxBoundary::new(
                 1,
@@ -2609,7 +2606,14 @@ mod tests {
         );
         let plasma = crate::geo::Surface::new_flux(boundary, Some(1), None);
         let layer = plasma.offset(10.0, Some(2), None).unwrap();
-        for (surface, kind) in [(plasma, "FluxSurface"), (layer, "OffsetSurface")] {
+        let quartic = crate::geo::ImplicitFormula::new("x^4 + y^4 + z^4 - 16").unwrap();
+        let implicit =
+            crate::geo::Surface::new_implicit(std::sync::Arc::new(quartic), Some(3), None);
+        for (surface, kind) in [
+            (plasma, "FluxSurface"),
+            (layer, "OffsetSurface"),
+            (implicit, "ImplicitSurface"),
+        ] {
             let expected = GpuTranslateError::SurfaceKindUnsupported { kind };
             assert_eq!(encode_surface(&surface.kind).unwrap_err(), expected);
             let region = crate::geo::Region::new_from_halfspace(crate::geo::HalfspaceType::Below(

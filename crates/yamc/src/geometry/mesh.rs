@@ -294,6 +294,7 @@ impl MeshGeometry {
                 fill_role: None,
                 cached_surfaces: Vec::new(), // Not used -- mesh handles boundaries
                 has_free_form: false,
+                search_box: None,
             };
 
             cells.push(cell);
@@ -328,6 +329,7 @@ impl MeshGeometry {
             fill_role: None,
             cached_surfaces: Vec::new(),
             has_free_form: false,
+            search_box: None,
         };
         cells.push(ic_cell);
         volume_ids.push(ic_vol);

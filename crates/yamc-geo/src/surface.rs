@@ -1,15 +1,19 @@
 mod cone;
 mod cylinder;
 mod flux;
+mod implicit;
 mod plane;
 mod quadric;
 mod roots;
+mod search;
 mod sphere;
 mod torus;
 
 use crate::region::{HalfspaceType, RegionExpr};
 pub use flux::FluxBoundary;
+pub use implicit::ImplicitFormula;
 pub use roots::quartic_real_roots;
+use search::Trace;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use torus::{torus_distance, torus_evaluate};
@@ -128,6 +132,12 @@ pub enum SurfaceKind {
         boundary: Arc<FluxBoundary>,
         offset: f64,
     },
+    /// The zero set of a formula `f(x, y, z)` (cm), `f < 0` below it; see
+    /// [`ImplicitFormula`]. Stored as the formula's canonical string.
+    Implicit {
+        #[serde(deserialize_with = "implicit::deserialize_shared")]
+        formula: Arc<ImplicitFormula>,
+    },
 }
 
 impl SurfaceKind {
@@ -144,6 +154,7 @@ impl SurfaceKind {
             SurfaceKind::Cone { .. } => "Cone",
             SurfaceKind::Flux { offset, .. } if *offset == 0.0 => "FluxSurface",
             SurfaceKind::Flux { .. } => "OffsetSurface",
+            SurfaceKind::Implicit { .. } => "ImplicitSurface",
         }
     }
 }
@@ -168,14 +179,13 @@ fn unit_axis<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<[f64; 
     Ok([axis[0] / n, axis[1] / n, axis[2] / n])
 }
 
-/// Implicit torus equation in axis-permuted coordinates:
-/// `(rho - a)^2 / c^2 + ax^2 / b^2 - 1`, with `t1, t2` the transverse
-/// displacements from the centre and `ax` the axial one. Shared by
-/// X/Y/ZTorus.
-// Regular Rust implementation
 impl Surface {
     /// Compute the distance from a point along a direction to the surface.
     /// Returns Some(distance) if intersection exists and distance > 0, else None.
+    /// A free-form surface (see [`Surface::is_free_form`]) searches for it,
+    /// and if its search runs out of evaluations first, as it can far
+    /// along a ray through an implicit lattice with no bounding box, it has
+    /// found none and returns `None` too.
     pub fn distance_to_surface(&self, point: [f64; 3], direction: [f64; 3]) -> Option<f64> {
         self.distance_to_surface_on(point, direction, None)
     }
@@ -187,24 +197,86 @@ impl Surface {
     /// surface; 0 for a particle exactly on it), `None` otherwise. The
     /// tori then treat the crossing as an exact root and drop it, rather
     /// than solve for it in round-off (which can return it as a tiny
-    /// positive distance). The other surfaces ignore it: a quadratic's
-    /// root at the crossing comes back accurately, behind the particle.
+    /// positive distance), and a free-form surface takes it to mean the
+    /// particle is on it (it also finds that out for itself, as a surface
+    /// without an id never gets the hint). The other surfaces ignore it: a
+    /// quadratic's root at the crossing comes back accurately, behind the
+    /// particle.
     pub fn distance_to_surface_on(
         &self,
         point: [f64; 3],
         direction: [f64; 3],
         on_surface: Option<f64>,
     ) -> Option<f64> {
+        let found = self.first_crossing(point, direction, on_surface, f64::INFINITY);
+        found.crossing.filter(|_| !found.exhausted)
+    }
+
+    /// Whether the surface is free-form (a flux, offset or implicit
+    /// surface), whose crossings are searched for iteratively rather than
+    /// solved in closed form.
+    pub fn is_free_form(&self) -> bool {
+        match self.kind {
+            SurfaceKind::Plane { .. }
+            | SurfaceKind::Sphere { .. }
+            | SurfaceKind::Cylinder { .. }
+            | SurfaceKind::ZTorus { .. }
+            | SurfaceKind::XTorus { .. }
+            | SurfaceKind::YTorus { .. }
+            | SurfaceKind::Quadric { .. }
+            | SurfaceKind::Cone { .. } => false,
+            SurfaceKind::Flux { .. } | SurfaceKind::Implicit { .. } => true,
+        }
+    }
+
+    /// [`Surface::distance_to_surface_on`] for transport, which only needs
+    /// crossings nearer than `t_max`: a free-form surface stops searching
+    /// there and returns `None` for a crossing beyond it. Closed-form kinds
+    /// ignore the cap. If a free-form search runs out of evaluations, a
+    /// transmission surface returns the point it reached, before which
+    /// there is no crossing (spatial relocation resolves it), and a vacuum
+    /// surface `None`.
+    pub fn distance_to_surface_capped(
+        &self,
+        point: [f64; 3],
+        direction: [f64; 3],
+        on_surface: Option<f64>,
+        t_max: f64,
+    ) -> Option<f64> {
+        self.first_crossing(point, direction, on_surface, t_max)
+            .crossing
+    }
+
+    /// The crossing of the surface along `point + t * direction` that
+    /// [`Surface::distance_to_surface_capped`] returns, and whether a
+    /// free-form search ran out of evaluations first.
+    fn first_crossing(
+        &self,
+        point: [f64; 3],
+        direction: [f64; 3],
+        on_surface: Option<f64>,
+        t_max: f64,
+    ) -> Trace {
+        let solved = |crossing| Trace {
+            crossing,
+            exhausted: false,
+            evaluations: 0,
+        };
+        let vacuum = self.boundary == BoundaryType::Vacuum;
         match &self.kind {
-            SurfaceKind::Plane { a, b, c, d } => plane::distance(point, direction, *a, *b, *c, *d),
+            SurfaceKind::Plane { a, b, c, d } => {
+                solved(plane::distance(point, direction, *a, *b, *c, *d))
+            }
             SurfaceKind::Sphere { x0, y0, z0, radius } => {
-                sphere::distance(point, direction, *x0, *y0, *z0, *radius)
+                solved(sphere::distance(point, direction, *x0, *y0, *z0, *radius))
             }
             SurfaceKind::Cylinder {
                 axis,
                 origin,
                 radius,
-            } => cylinder::distance(point, direction, *axis, *origin, *radius),
+            } => solved(cylinder::distance(
+                point, direction, *axis, *origin, *radius,
+            )),
             SurfaceKind::ZTorus {
                 x0,
                 y0,
@@ -212,7 +284,7 @@ impl Surface {
                 a,
                 b,
                 c,
-            } => torus_distance(
+            } => solved(torus_distance(
                 point[0] - x0,
                 point[1] - y0,
                 point[2] - z0,
@@ -223,7 +295,7 @@ impl Surface {
                 *b,
                 *c,
                 on_surface,
-            ),
+            )),
             SurfaceKind::XTorus {
                 x0,
                 y0,
@@ -231,7 +303,7 @@ impl Surface {
                 a,
                 b,
                 c,
-            } => torus_distance(
+            } => solved(torus_distance(
                 point[1] - y0,
                 point[2] - z0,
                 point[0] - x0,
@@ -242,7 +314,7 @@ impl Surface {
                 *b,
                 *c,
                 on_surface,
-            ),
+            )),
             SurfaceKind::YTorus {
                 x0,
                 y0,
@@ -250,7 +322,7 @@ impl Surface {
                 a,
                 b,
                 c,
-            } => torus_distance(
+            } => solved(torus_distance(
                 point[0] - x0,
                 point[2] - z0,
                 point[1] - y0,
@@ -261,7 +333,7 @@ impl Surface {
                 *b,
                 *c,
                 on_surface,
-            ),
+            )),
             SurfaceKind::Quadric {
                 a,
                 b,
@@ -273,46 +345,20 @@ impl Surface {
                 h,
                 j,
                 k,
-            } => quadric::distance(point, direction, *a, *b, *c, *d, *e, *f, *g, *h, *j, *k),
+            } => solved(quadric::distance(
+                point, direction, *a, *b, *c, *d, *e, *f, *g, *h, *j, *k,
+            )),
             SurfaceKind::Cone {
                 apex,
                 axis,
                 tan2_theta,
-            } => cone::distance(point, direction, *apex, *axis, *tan2_theta),
-            SurfaceKind::Flux { .. } => {
-                self.distance_to_surface_capped(point, direction, on_surface, f64::INFINITY)
+            } => solved(cone::distance(point, direction, *apex, *axis, *tan2_theta)),
+            SurfaceKind::Flux { boundary, offset } => {
+                boundary.trace(point, direction, *offset, on_surface, vacuum, t_max)
             }
-        }
-    }
-
-    /// Whether the surface is free-form (a flux or offset surface), whose
-    /// crossings are searched for iteratively rather than solved in closed
-    /// form.
-    pub fn is_free_form(&self) -> bool {
-        matches!(self.kind, SurfaceKind::Flux { .. })
-    }
-
-    /// [`Surface::distance_to_surface_on`] for a caller that only needs
-    /// crossings nearer than `t_max`: a free-form surface stops searching
-    /// there and returns `None` for a crossing beyond it. Closed-form kinds
-    /// ignore the cap.
-    pub fn distance_to_surface_capped(
-        &self,
-        point: [f64; 3],
-        direction: [f64; 3],
-        on_surface: Option<f64>,
-        t_max: f64,
-    ) -> Option<f64> {
-        match &self.kind {
-            SurfaceKind::Flux { boundary, offset } => boundary.distance(
-                point,
-                direction,
-                *offset,
-                on_surface,
-                self.boundary == BoundaryType::Vacuum,
-                t_max,
-            ),
-            _ => self.distance_to_surface_on(point, direction, on_surface),
+            SurfaceKind::Implicit { formula } => {
+                formula.trace(point, direction, on_surface, vacuum, t_max)
+            }
         }
     }
     /// Builder-style setter for the optional `name` metadata field.
@@ -398,6 +444,7 @@ impl Surface {
             SurfaceKind::Flux { boundary, offset } => {
                 boundary.evaluate([point.0, point.1, point.2], *offset)
             }
+            SurfaceKind::Implicit { formula } => formula.evaluate([point.0, point.1, point.2]),
         }
     }
 
@@ -408,13 +455,22 @@ impl Surface {
     /// distance (cm) from the flux surface. That is the distance to an
     /// offset layer outside it and wherever the layer is not creased; near
     /// a crease, inside the layer, the layer is farther than that. Other
-    /// kinds return `evaluate` unchanged.
+    /// kinds return `evaluate` unchanged: for an implicit surface that is
+    /// the formula's value, a distance only if the formula is one.
     pub fn evaluate_exact(&self, point: (f64, f64, f64)) -> f64 {
         match &self.kind {
+            SurfaceKind::Plane { .. }
+            | SurfaceKind::Sphere { .. }
+            | SurfaceKind::Cylinder { .. }
+            | SurfaceKind::ZTorus { .. }
+            | SurfaceKind::XTorus { .. }
+            | SurfaceKind::YTorus { .. }
+            | SurfaceKind::Quadric { .. }
+            | SurfaceKind::Cone { .. }
+            | SurfaceKind::Implicit { .. } => self.evaluate(point),
             SurfaceKind::Flux { boundary, offset } => {
                 boundary.signed_distance([point.0, point.1, point.2]) - offset
             }
-            _ => self.evaluate(point),
         }
     }
 
@@ -434,6 +490,14 @@ impl Surface {
             // outside is not.
             SurfaceKind::Flux { boundary, offset } => {
                 halfspace_below.then(|| boundary.bounding_box(*offset))
+            }
+            // The box proved for the formula, if one could be.
+            SurfaceKind::Implicit { formula } => {
+                if halfspace_below {
+                    formula.bounding_box()
+                } else {
+                    None
+                }
             }
             SurfaceKind::Plane { .. } => {
                 // Planes contribute constraints through axis_constraint(), not bounding_box()

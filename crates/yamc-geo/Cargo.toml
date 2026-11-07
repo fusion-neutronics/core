@@ -9,6 +9,9 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
+# Pure-Rust libm: the implicit surfaces' sin, cos, exp, log and pow give the
+# same bits on every platform (std's are platform-dependent).
+libm = "0.2.16"
 wasm-bindgen = { version = "0.2", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 

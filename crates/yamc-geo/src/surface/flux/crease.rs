@@ -142,7 +142,8 @@ impl Engine {
             {
                 return f64::INFINITY;
             }
-            self.ray(sp.x, normal, 0.0, Some(0.0), true, t_max)
+            self.trace_ray(sp.x, normal, 0.0, Some(0.0), true, t_max)
+                .crossing
                 .unwrap_or(f64::INFINITY)
         };
         let half_chord = self

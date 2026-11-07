@@ -31,6 +31,7 @@ __all__ = [
     "Geometry",
     "GeometrySliceData",
     "Halfspace",
+    "ImplicitSurface",
     "InteractivePlot",
     "InteractiveTallyPlot",
     "LineEstimate",
@@ -5004,6 +5005,12 @@ class Surface:
         surface (0 for a FluxSurface), else None
         """
     @property
+    def formula(self) -> typing.Optional[builtins.str]:
+        r"""
+        The formula of an ImplicitSurface as it is stored, which parses back
+        to the same surface, else None
+        """
+    @property
     def x0(self) -> typing.Optional[builtins.float]:
         r"""
         Offset of a plane perpendicular to the x-axis (axis='x'), else None
@@ -5072,7 +5079,9 @@ class Surface:
         For an offset surface it is the signed distance from the underlying
         flux surface minus ``distance``: the distance to the layer outside
         it and wherever the layer is not creased, an underestimate inside
-        the layer near a crease. The sign is always exact.
+        the layer near a crease. The sign is always exact. For an implicit
+        surface it is the formula's value, a distance only if the formula is
+        one.
         
         Args:
             point: Tuple of 3 floats (x, y, z)
@@ -5083,7 +5092,12 @@ class Surface:
     def distance_to_surface(self, point: tuple[builtins.float, builtins.float, builtins.float], direction: tuple[builtins.float, builtins.float, builtins.float]) -> typing.Optional[builtins.float]:
         r"""
         Compute the distance to the surface from a point in a direction.
-        Returns the distance as a float, or None if no intersection.
+        Returns the distance as a float, or None if no intersection is
+        found. A flux, offset or implicit surface searches for it, and finds
+        none if its search runs out of evaluations first, as it can far
+        along a ray through an implicit lattice with no bounding box (which
+        is searched only within 1048576 cm, 2^20 cm, of the origin on each
+        axis).
         """
     def bounding_box_inside(self) -> typing.Optional[BoundingBox]:
         r"""
@@ -7668,6 +7682,90 @@ def FluxSurface(shape: sources.StellaratorShape | sources.TokamakShape, rho: bui
     
     Returns:
         A Surface object representing the flux surface
+    """
+
+def ImplicitSurface(formula: builtins.str, *, surface_id: typing.Optional[builtins.int] = None, boundary: typing.Optional[builtins.str] = None, name: typing.Optional[builtins.str] = None) -> Surface:
+    r"""
+    Create a surface from a formula: the points where ``formula`` is zero.
+    
+    ``.below`` is where the formula is negative and ``.above`` where it is
+    positive, and they combine with ``&``, ``|`` and ``~`` like the
+    half-spaces of any other surface. Coordinates are in cm. ``evaluate``
+    returns the formula's value, which is a distance only if the formula is
+    written as one (``sqrt(x^2 + y^2 + z^2) - 5`` is, ``x^2 + y^2 + z^2 - 25``
+    is not); transport reads only its sign.
+    
+    A formula is made of:
+    
+    - numbers (``2``, ``0.5``, ``1e-3``), ``x``, ``y``, ``z`` and ``pi``;
+    - ``+``, ``-``, ``*``, ``/``, unary ``-`` and ``^`` with a constant
+      exponent. An integer power is a product (``x^3`` is ``x^2 * x`` and
+      ``x^-2`` is ``1 / x^2``); any other power needs a base that cannot be
+      negative, as in ``abs(x)^2.5``;
+    - ``sqrt``, ``abs``, ``exp``, ``log``, ``sin`` and ``cos``, and ``min``
+      and ``max`` of two or more arguments;
+    - ``smin(a, b, k)`` and ``smax(a, b, k)``: the minimum and maximum
+      blended over a distance ``k > 0`` (a polynomial blend), which round
+      the edge where two shapes meet.
+    
+    There are no comparisons or jumps (``floor``, ``mod``, ``atan2``): a
+    jump in sign would be a crossing with no surface there. A formula is
+    refused with a ValueError that says where it goes wrong if it does not
+    parse, if it can be undefined (the square root or logarithm of a
+    negative number, ``0 / 0``) or divide by zero where it is used, if it is
+    shown never to change sign there, or if it is shown to be zero
+    throughout some part of that region (as ``max(x, 0) * y`` is wherever
+    ``x < 0``), whose points would be on neither side of the surface. These
+    checks use interval arithmetic, which loses track of a square written
+    out: write ``(x - 1)^2 + 1`` rather than ``x^2 - 2 * x + 2``, or the
+    formula can be refused as one not shown to be defined. It is kept in a
+    canonical form (``Surface.formula``) that reads back to the same
+    surface, and its functions give the same results on every platform.
+    
+    A box holding everything below the surface is proved from the formula
+    where possible (``bounding_box_inside``). A formula with none, such as a
+    periodic lattice, a plane or a twist, must be bounded by the other
+    surfaces of each cell that uses it, within 1048576 cm (2^20 cm) of the
+    origin, where formulas are checked. Implicit surfaces run on the CPU
+    only (not with ``compute='gpu'``), cannot be offset with
+    ``OffsetSurface`` (a layer of even thickness needs a distance), and the
+    browser views show yamc's own image of them.
+    
+    Args:
+        formula: The formula, in x, y and z (cm)
+        surface_id: Optional surface ID
+        boundary: Boundary condition - None (default, transmission) or 'vacuum'
+        name: Optional surface name
+    
+    Returns:
+        A Surface object representing the implicit surface
+    
+    Examples:
+        >>> import yamc
+        >>> # A sphere of radius 5 cm, as its signed distance.
+        >>> ball = yamc.ImplicitSurface("sqrt(x^2 + y^2 + z^2) - 5")
+        >>> # A gyroid lattice of period 2 cm in a 10 cm box of planes.
+        >>> gyroid = yamc.ImplicitSurface(
+        ...     "sin(pi * x) * cos(pi * y) + sin(pi * y) * cos(pi * z)"
+        ...     " + sin(pi * z) * cos(pi * x) - 0.3"
+        ... )
+        >>> box = yamc.Plane("x", -5.0).above & yamc.Plane("x", 5.0).below
+        >>> box = box & yamc.Plane("y", -5.0).above & yamc.Plane("y", 5.0).below
+        >>> box = box & yamc.Plane("z", -5.0).above & yamc.Plane("z", 5.0).below
+        >>> struts = yamc.Cell(region=box & gyroid.below)
+        >>> pores = yamc.Cell(region=box & gyroid.above)
+        >>> # A port through a blanket shell, cut by a superellipsoid: a box
+        >>> # 120 by 60 by 100 cm with rounded edges, across the shell.
+        >>> port = yamc.ImplicitSurface(
+        ...     "((x - 225) / 60)^4 + (y / 30)^4 + (z / 50)^4 - 1"
+        ... )
+        >>> shell = yamc.Sphere(radius=200.0).above & yamc.Sphere(radius=250.0).below
+        >>> blanket = yamc.Cell(region=shell & port.above)
+        >>> opening = yamc.Cell(region=shell & port.below)
+        >>> # Two spheres 8 cm apart, blended with a 2 cm fillet where they meet.
+        >>> pair = yamc.ImplicitSurface(
+        ...     "smin(sqrt((x - 4)^2 + y^2 + z^2) - 5, sqrt((x + 4)^2 + y^2 + z^2) - 5, 2)"
+        ... )
     """
 
 def OffsetSurface(base: Surface, distance: builtins.float, surface_id: typing.Optional[builtins.int] = None, boundary: typing.Optional[builtins.str] = None, name: typing.Optional[builtins.str] = None) -> Surface:
