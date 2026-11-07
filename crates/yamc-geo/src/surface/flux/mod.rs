@@ -302,21 +302,6 @@ impl FluxBoundary {
         })
     }
 
-    /// The crossing [`FluxBoundary::trace`] finds, for the tests.
-    #[cfg(test)]
-    pub(crate) fn distance(
-        &self,
-        point: [f64; 3],
-        direction: [f64; 3],
-        offset: f64,
-        on_surface: Option<f64>,
-        vacuum: bool,
-        t_max: f64,
-    ) -> Option<f64> {
-        self.trace(point, direction, offset, on_surface, vacuum, t_max)
-            .crossing
-    }
-
     /// Box containing the points within `offset` of the boundary (for a
     /// positive offset) or inside it.
     pub(crate) fn bounding_box(&self, offset: f64) -> ([f64; 3], [f64; 3]) {

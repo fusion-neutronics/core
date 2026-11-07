@@ -600,7 +600,9 @@ fn the_reach_stops_at_half_a_thin_part() {
             assert!(boundary.check_offset(-w).is_err());
             // Up through the bar from just above its bottom face.
             let o = [1000.0, 0.0, -w + 0.01 * scale];
-            let t = boundary.distance(o, [0.0, 0.0, 1.0], 0.0, None, false, f64::INFINITY);
+            let t = boundary
+                .trace(o, [0.0, 0.0, 1.0], 0.0, None, false, f64::INFINITY)
+                .crossing;
             assert!(
                 (t.unwrap() - (2.0 * w - 0.01 * scale)).abs() < 1e-9,
                 "w {w}: {t:?}"
@@ -700,7 +702,10 @@ fn shallow_crossings_far_from_the_boundary_are_found() {
     let re = rotating_ellipse();
     let o = [503.5718055698, 8.117318195608, -150.4026246763];
     let u = normalize([0.7448347420947, -0.6642340783366, -0.06335847334877]);
-    let t = re.distance(o, u, 60.0, None, true, f64::INFINITY).unwrap();
+    let t = re
+        .trace(o, u, 60.0, None, true, f64::INFINITY)
+        .crossing
+        .unwrap();
     assert!((t - 35.00135837).abs() < 1e-6, "{t}");
     let cases = [
         (
@@ -732,7 +737,10 @@ fn shallow_crossings_far_from_the_boundary_are_found() {
     let be = bean();
     let o = [-410.21558722345276, 303.055408290895, 151.3971638744561];
     let u = normalize([0.7404007893171879, 0.6522989420850496, -0.1622120875064814]);
-    let t = be.distance(o, u, 0.0, None, false, f64::INFINITY).unwrap();
+    let t = be
+        .trace(o, u, 0.0, None, false, f64::INFINITY)
+        .crossing
+        .unwrap();
     assert!((t - 282.8767171).abs() < 1e-6, "{t}");
 }
 
@@ -767,13 +775,19 @@ fn directions_are_normalised_and_checked() {
     let o = [503.5718055698, 8.117318195608, -150.4026246763];
     let u = normalize([0.7448347420947, -0.6642340783366, -0.06335847334877]);
     let unit = boundary
-        .distance(o, u, 60.0, None, false, f64::INFINITY)
+        .trace(o, u, 60.0, None, false, f64::INFINITY)
+        .crossing
         .unwrap();
     let long = boundary
-        .distance(o, u.map(|v| 7.0 * v), 60.0, None, false, f64::INFINITY)
+        .trace(o, u.map(|v| 7.0 * v), 60.0, None, false, f64::INFINITY)
+        .crossing
         .unwrap();
     assert!((7.0 * long - unit).abs() < 1e-9 * unit, "{unit} {long}");
-    let none = |o: [f64; 3], u: [f64; 3]| boundary.distance(o, u, 0.0, None, false, f64::INFINITY);
+    let none = |o: [f64; 3], u: [f64; 3]| {
+        boundary
+            .trace(o, u, 0.0, None, false, f64::INFINITY)
+            .crossing
+    };
     assert_eq!(none(o, [0.0; 3]), None);
     assert_eq!(none(o, [f64::NAN, 0.0, 1.0]), None);
     assert_eq!(none([f64::INFINITY, 0.0, 0.0], u), None);
