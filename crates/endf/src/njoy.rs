@@ -464,6 +464,269 @@ pub fn make_ace(filename: &Path, material: &Material, options: &AceOptions) -> R
     Ok(())
 }
 
+/// What to ask NJOY for when processing a thermal scattering law.
+///
+/// The cards follow the NJOY2016 manual (LA-UR-17-20093): THERMR runs twice,
+/// once for the free-gas cross section of the principal atom (MT 221) and once
+/// for the bound law read from the thermal tape (MT 222, with elastic in
+/// MT 223 when the evaluation has MF=7 MT=2), and ACER writes one thermal
+/// table (`iopt=2`) per temperature.
+#[derive(Debug, Clone)]
+pub struct ThermalAceOptions {
+    /// Temperatures in Kelvin. Empty means every temperature of the
+    /// evaluation's MF=7 MT=4.
+    pub temperatures: Vec<f64>,
+    /// Fractional tolerance for reconstruction, broadening and THERMR.
+    pub error: f64,
+    /// Equiprobable cosines per outgoing energy (THERMR `nbin`).
+    pub nbin: u32,
+    /// Bins for incoherent elastic scattering (ACER `nbint`).
+    pub nbint: u32,
+    /// ACER's weighting option: 0 variable, 1 constant, 2 tabulated.
+    pub iwt: i32,
+    /// The thermal ZAID name ACER writes, six characters at most.
+    pub table_name: String,
+    /// The ZA values of the nuclides the table applies to (ACER card 8a).
+    pub zaids: Vec<i64>,
+    /// The number of atom types in a mixed moderator (ACER `nmix`).
+    pub nmix: u32,
+    /// Where the concatenated ACE file goes. Defaults to `output_dir/ace`.
+    pub ace: Option<PathBuf>,
+    /// Where the xsdir goes. Defaults to sitting beside the ACE file.
+    pub xsdir: Option<PathBuf>,
+    pub output_dir: PathBuf,
+    pub njoy_exec: String,
+    /// Where to keep a copy of the input deck, for a person to read.
+    pub input_filename: Option<PathBuf>,
+}
+
+impl Default for ThermalAceOptions {
+    fn default() -> Self {
+        ThermalAceOptions {
+            temperatures: Vec::new(),
+            error: 0.001,
+            nbin: 16,
+            nbint: 64,
+            iwt: 2,
+            table_name: String::new(),
+            zaids: Vec::new(),
+            nmix: 1,
+            ace: None,
+            xsdir: None,
+            output_dir: PathBuf::from("."),
+            njoy_exec: "njoy".to_string(),
+            input_filename: None,
+        }
+    }
+}
+
+/// The temperatures, in Kelvin, of a thermal scattering law's MF=7 MT=4.
+pub fn thermal_temperatures(thermal: &Material) -> Result<Vec<f64>> {
+    Ok(crate::ThermalScattering::from_endf(thermal)?.temperatures)
+}
+
+/// Compose the NJOY input deck for a thermal scattering law.
+///
+/// `neutron` is the incident-neutron evaluation of the principal atom, which
+/// THERMR adds the thermal data to; `thermal` is the thermal scattering law.
+pub fn thermal_ace_deck(
+    neutron_file: &Path,
+    neutron: &Material,
+    thermal_file: &Path,
+    thermal: &Material,
+    options: &ThermalAceOptions,
+) -> Result<Deck> {
+    let n_meta = neutron.mf1_mt451().ok_or(Error::Unsupported {
+        what: "a neutron evaluation with no MF=1 MT=451 to process",
+    })?;
+    let t_meta = thermal.mf1_mt451().ok_or(Error::Unsupported {
+        what: "a thermal scattering law with no MF=1 MT=451 to process",
+    })?;
+    if t_meta.nsub != 12 {
+        return Err(Error::Unsupported {
+            what: "a thermal scattering law whose NSUB is not 12",
+        });
+    }
+    if options.table_name.is_empty() || options.table_name.len() > 6 {
+        return Err(Error::Unsupported {
+            what: "a thermal table name that is empty or longer than six characters",
+        });
+    }
+    if options.zaids.is_empty() || options.zaids.len() > 16 {
+        return Err(Error::Unsupported {
+            what: "a thermal table with no ZA values, or more than the sixteen ACER takes",
+        });
+    }
+    let law = crate::ThermalScattering::from_endf(thermal)?;
+    let mat = neutron.mat;
+    let mat_thermal = thermal.mat;
+    let zsymam = n_meta.zsymam.clone().unwrap_or_default();
+    let zsymam_thermal = t_meta.zsymam.clone().unwrap_or_default();
+    let zsymam_thermal = zsymam_thermal.trim();
+    let library = format!(
+        "{}-{}.{}",
+        library_name(n_meta.nlib),
+        n_meta.nver,
+        n_meta.lrel
+    );
+    let library_thermal = format!(
+        "{}-{}.{}",
+        library_name(t_meta.nlib),
+        t_meta.nver,
+        t_meta.lrel
+    );
+
+    let temperatures = if options.temperatures.is_empty() {
+        law.temperatures.clone()
+    } else {
+        options.temperatures.clone()
+    };
+    let temps = temperatures
+        .iter()
+        .map(|t| crate::data::python_float_str(*t))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let num_temp = temperatures.len();
+    let error = options.error;
+    let energy_max = crate::data::python_float_str(law.energy_max);
+    let natom = law.principal_count.round() as i64;
+    // Elastic, when the evaluation has it: ACER's ielas is LTHR - 1
+    // (0 coherent, 1 incoherent, 2 mixed).
+    let (icoh, mt_elastic, ielas) = match &law.elastic {
+        Some(e) => (1, 223, e.lthr() - 1),
+        None => (0, 0, 0),
+    };
+    let nbin = options.nbin;
+    let nbint = options.nbint;
+    let iwt = options.iwt;
+    let nmix = options.nmix;
+    let tname = &options.table_name;
+    let nza = options.zaids.len();
+    let zaids = options
+        .zaids
+        .iter()
+        .map(|z| z.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let (nendf, nthermal, npendf) = (20, 21, 22);
+    let nbroadr = npendf + 1;
+    let nfree = nbroadr + 1;
+    let nbound = nfree + 1;
+    let mut deck = Deck {
+        tapein: BTreeMap::from([
+            (nendf, neutron_file.to_path_buf()),
+            (nthermal, thermal_file.to_path_buf()),
+        ]),
+        temperatures: temperatures.clone(),
+        isomeric_state: 0,
+        ..Default::default()
+    };
+    deck.commands.push_str(&format!(
+        "
+reconr / %%%%%%%%%%%%%%%%%%% Reconstruct XS for neutrons %%%%%%%%%%%%%%%%%%%%%%%
+{nendf} {npendf}
+'{library} PENDF for {zsymam}'/
+{mat} 2/
+{error}/ err
+'{library}: {zsymam}'/
+'Processed by NJOY'/
+0/
+
+broadr / %%%%%%%%%%%%%%%%%%%%%%% Doppler broaden XS %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+{nendf} {npendf} {nbroadr}
+{mat} {num_temp} 0 0 0. /
+{error}/ errthn
+{temps}
+0/
+
+thermr / %%%%%%%%%%%%%%%% Add thermal scattering data (free gas) %%%%%%%%%%%%%%%
+0 {nbroadr} {nfree}
+0 {mat} {nbin} {num_temp} 1 0 0 1 221 1/
+{temps}
+{error} {energy_max}
+
+thermr / %%%%%%%%%%%%%%%% Add thermal scattering data (bound) %%%%%%%%%%%%%%%%%%
+{nthermal} {nfree} {nbound}
+{mat_thermal} {mat} {nbin} {num_temp} 2 {icoh} 0 {natom} 222 1/
+{temps}
+{error} {energy_max}
+"
+    ));
+    for (i, &temperature) in temperatures.iter().enumerate() {
+        let nace = nbound + 1 + 2 * i as i32;
+        let ndir = nace + 1;
+        let ext = format!("{:02}", i + 1);
+        let t = crate::data::python_float_str(temperature);
+        deck.commands.push_str(&format!(
+            "
+acer / %%%%%%%%%%%%%%%%%%%%%%%% Write out in ACE format %%%%%%%%%%%%%%%%%%%%%%%%
+{nendf} {nbound} 0 {nace} {ndir}
+2 0 1 .{ext}/
+'{library_thermal}: {zsymam_thermal} processed by NJOY'/
+{mat} {t} '{tname}' {nza} /
+{zaids} /
+222 {nbint} {mt_elastic} {ielas} {nmix} {energy_max} {iwt}/
+"
+        ));
+        deck.tapeout.insert(
+            nace,
+            options.output_dir.join(format!("ace_{temperature:.1}")),
+        );
+        deck.tapeout.insert(
+            ndir,
+            options.output_dir.join(format!("xsdir_{temperature:.1}")),
+        );
+    }
+    deck.commands.push_str("stop\n");
+    Ok(deck)
+}
+
+/// Generate a thermal scattering ACE file, running NJOY to do it.
+///
+/// One table per temperature, concatenated into one ACE file and one xsdir.
+pub fn make_ace_thermal(
+    neutron_file: &Path,
+    neutron: &Material,
+    thermal_file: &Path,
+    thermal: &Material,
+    options: &ThermalAceOptions,
+) -> Result<PathBuf> {
+    if !options.output_dir.is_dir() {
+        return Err(Error::Unsupported {
+            what: "an output directory that is not a directory",
+        });
+    }
+    let deck = thermal_ace_deck(neutron_file, neutron, thermal_file, thermal, options)?;
+    run(
+        &deck,
+        &options.njoy_exec,
+        options.input_filename.as_deref(),
+        &options.output_dir,
+    )?;
+    let ace = options
+        .ace
+        .clone()
+        .unwrap_or_else(|| options.output_dir.join("ace"));
+    let xsdir = options
+        .xsdir
+        .clone()
+        .unwrap_or_else(|| ace.parent().unwrap_or(Path::new(".")).join("xsdir"));
+    let mut ace_text = String::new();
+    let mut xsdir_text = String::new();
+    for &temperature in &deck.temperatures {
+        let a = options.output_dir.join(format!("ace_{temperature:.1}"));
+        let d = options.output_dir.join(format!("xsdir_{temperature:.1}"));
+        ace_text.push_str(&std::fs::read_to_string(&a)?);
+        xsdir_text.push_str(&std::fs::read_to_string(&d)?);
+        let _ = std::fs::remove_file(a);
+        let _ = std::fs::remove_file(d);
+    }
+    std::fs::write(&ace, ace_text)?;
+    std::fs::write(&xsdir, xsdir_text)?;
+    Ok(ace)
+}
+
 /// Mark a metastable target in the ZAID an ACE table opens with.
 ///
 /// ACER does not record the isomeric state, so 400 is added to the mass
@@ -862,6 +1125,104 @@ mod tests {
     /// The deck the Python `make_ace` composes for the same evaluation and the
     /// same options, captured with its `run` stubbed out.
     const REFERENCE_DECK: &[u8] = include_bytes!("../tests/reference/njoy-deck.txt.xz");
+
+    const CH4: &[u8] = include_bytes!("../fixtures/tsl-s-CH4.endf.xz");
+    const SIO2: &[u8] = include_bytes!("../fixtures/tsl-SiO2-beta.endf.xz");
+
+    fn thermal_deck(tsl: &[u8], options: &ThermalAceOptions) -> Result<Deck> {
+        let neutron = Material::from_str(&crate::testdata::text(AM244)).unwrap();
+        let thermal = Material::from_str(&crate::testdata::text(tsl)).unwrap();
+        thermal_ace_deck(
+            Path::new("n.endf"),
+            &neutron,
+            Path::new("t.endf"),
+            &thermal,
+            options,
+        )
+    }
+
+    fn options(name: &str, zaids: &[i64]) -> ThermalAceOptions {
+        ThermalAceOptions {
+            table_name: name.to_string(),
+            zaids: zaids.to_vec(),
+            output_dir: PathBuf::from("out"),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn thermal_deck_runs_thermr_twice_and_acer_per_temperature() {
+        let deck = thermal_deck(SIO2, &options("sio2-b", &[8016, 14028])).unwrap();
+        let neutron = Material::from_str(&crate::testdata::text(AM244)).unwrap();
+        let thermal = Material::from_str(&crate::testdata::text(SIO2)).unwrap();
+        let law = crate::ThermalScattering::from_endf(&thermal).unwrap();
+        let (mat, mat_t) = (neutron.mat, thermal.mat);
+        let emax = crate::data::python_float_str(law.energy_max);
+        let lines: Vec<&str> = deck.commands.lines().collect();
+        let after = |head: &str, n: usize| -> Vec<&str> {
+            let at = lines.iter().position(|l| l.starts_with(head)).unwrap();
+            lines[at + 1..at + 1 + n].to_vec()
+        };
+        // Free gas first, from the broadened tape; then the bound law from
+        // the thermal tape (unit 21), coherent elastic on (SiO2 is LTHR=1).
+        let free = after(
+            "thermr / %%%%%%%%%%%%%%%% Add thermal scattering data (free",
+            2,
+        );
+        assert_eq!(
+            free,
+            vec!["0 23 24", &format!("0 {mat} 16 2 1 0 0 1 221 1/")]
+        );
+        let bound = after(
+            "thermr / %%%%%%%%%%%%%%%% Add thermal scattering data (bound",
+            4,
+        );
+        assert_eq!(bound[0], "21 24 25");
+        assert_eq!(bound[1], format!("{mat_t} {mat} 16 2 2 1 0 1 222 1/"));
+        assert_eq!(bound[3], format!("0.001 {emax}"));
+        // Two temperatures, two ACER runs with iopt=2, elastic in MT 223 as
+        // coherent (ielas 0).
+        let acers: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.starts_with("acer"))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(acers.len(), 2);
+        assert_eq!(lines[acers[0] + 1], "20 25 0 26 27");
+        assert_eq!(lines[acers[0] + 2], "2 0 1 .01/");
+        assert_eq!(lines[acers[0] + 5], "8016 14028 /");
+        assert_eq!(lines[acers[0] + 6], format!("222 64 223 0 1 {emax} 2/"));
+        assert_eq!(lines[acers[1] + 1], "20 25 0 28 29");
+        assert_eq!(deck.tapein[&21], PathBuf::from("t.endf"));
+        assert_eq!(deck.temperatures, law.temperatures);
+    }
+
+    #[test]
+    fn thermal_deck_with_incoherent_elastic_and_four_principal_atoms() {
+        // CH4 (solid): incoherent elastic (icoh 1, ielas 1), and the four H
+        // of the molecule are the principal atoms (natom = M0 = 4).
+        let deck = thermal_deck(CH4, &options("sch4", &[1001])).unwrap();
+        assert!(deck.commands.contains(" 2 1 0 4 222 1/"));
+        assert!(deck.commands.contains("222 64 223 1 1 "));
+    }
+
+    #[test]
+    fn thermal_deck_refuses_a_bad_table_name_or_no_zaids() {
+        assert!(thermal_deck(CH4, &options("", &[1001])).is_err());
+        assert!(thermal_deck(CH4, &options("toolongname", &[1001])).is_err());
+        assert!(thermal_deck(CH4, &options("sch4", &[])).is_err());
+        let neutron = Material::from_str(&crate::testdata::text(AM244)).unwrap();
+        // A neutron evaluation given as the thermal one is refused.
+        assert!(thermal_ace_deck(
+            Path::new("n"),
+            &neutron,
+            Path::new("t"),
+            &neutron,
+            &options("x", &[1001])
+        )
+        .is_err());
+    }
 
     fn am244() -> Material {
         Material::from_str(&crate::testdata::text(AM244)).unwrap()

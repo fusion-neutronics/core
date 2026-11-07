@@ -155,6 +155,7 @@ data, U235 is 36 MB whole and 451 KB with ten sections kept.
 | `Li6.ace` | An ACE Type 1 table; AND in all three shapes, DLW laws 3, 33 and 44, 15 reactions with photon production |
 | `synthetic-urr.ace` | The unresolved resonance block, which no small real table has |
 | `synthetic-laws.ace` | DLW laws 2, 4, 7, 9, 11, 61 and 66 |
+| `synthetic-thermal.ace` | thermal tables (`tools/make_thermal_ace.py`): continuous and discrete inelastic, and coherent, incoherent and mixed elastic |
 | `synthetic-denormal.ace` | The float form NJOY writes for a denormal, `6.10562372605-318` |
 | `synthetic-nfy.endf` | MF8 MT=454 and MT=459, the fission product yields |
 | `synthetic-shapes.endf` | MF2 LRF=2 Breit-Wigner, MF5 LF=12 Madland-Nix, MF6 LANG=2 and LAW=6, MF13 |

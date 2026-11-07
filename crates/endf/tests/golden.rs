@@ -1448,12 +1448,93 @@ fn ace_xss_indices(n: usize, jxs: &[i64]) -> Vec<usize> {
     idx.into_iter().collect()
 }
 
+fn dump_thermal_ace(d: &mut Dump, path: &str, t: &ace::Table) {
+    use endf::thermal_ace::{AceElastic, InelasticDistribution};
+    let th = endf::ThermalAce::from_ace(t).unwrap();
+    d.float(format!("{path}/kT"), th.kt);
+    d.ints(format!("{path}/zaids"), th.zaids.clone());
+    d.floats(
+        format!("{path}/inelastic/energy"),
+        th.inelastic_energy.clone(),
+    );
+    d.floats(format!("{path}/inelastic/xs"), th.inelastic_xs.clone());
+    match &th.inelastic {
+        InelasticDistribution::Continuous(dist) => {
+            for (i, o) in dist.iter().enumerate() {
+                let p = format!("{path}/inelastic/continuous/{i}");
+                d.floats(format!("{p}/energy_out"), o.energy_out.clone());
+                d.floats(format!("{p}/pdf"), o.pdf.clone());
+                d.floats(format!("{p}/cdf"), o.cdf.clone());
+                d.floats(format!("{p}/mu"), o.mu.clone());
+                d.int(format!("{p}/n_mu"), o.n_mu as i64);
+            }
+        }
+        InelasticDistribution::Discrete {
+            energy_out,
+            mu,
+            n_mu,
+            skewed,
+        } => {
+            d.int(format!("{path}/inelastic/discrete/n_mu"), *n_mu as i64);
+            d.int(format!("{path}/inelastic/discrete/skewed"), *skewed as i64);
+            for (i, (e, m)) in energy_out.iter().zip(mu).enumerate() {
+                let p = format!("{path}/inelastic/discrete/{i}");
+                d.floats(format!("{p}/energy_out"), e.clone());
+                d.floats(format!("{p}/mu"), m.clone());
+            }
+        }
+    }
+    let incoherent = |d: &mut Dump, energy: &[f64], xs: &[f64], mu: &[f64], n_mu: usize| {
+        d.floats(format!("{path}/elastic/incoherent/energy"), energy.to_vec());
+        d.floats(format!("{path}/elastic/incoherent/xs"), xs.to_vec());
+        d.floats(format!("{path}/elastic/incoherent/mu"), mu.to_vec());
+        d.int(format!("{path}/elastic/incoherent/n_mu"), n_mu as i64);
+    };
+    match &th.elastic {
+        None => {}
+        Some(AceElastic::Coherent {
+            bragg_edges,
+            factors,
+        }) => {
+            d.floats(
+                format!("{path}/elastic/coherent/bragg_edges"),
+                bragg_edges.clone(),
+            );
+            d.floats(format!("{path}/elastic/coherent/factors"), factors.clone());
+        }
+        Some(AceElastic::Incoherent {
+            energy,
+            xs,
+            mu,
+            n_mu,
+        }) => incoherent(d, energy, xs, mu, *n_mu),
+        Some(AceElastic::Mixed {
+            bragg_edges,
+            factors,
+            energy,
+            xs,
+            mu,
+            n_mu,
+        }) => {
+            d.floats(
+                format!("{path}/elastic/coherent/bragg_edges"),
+                bragg_edges.clone(),
+            );
+            d.floats(format!("{path}/elastic/coherent/factors"), factors.clone());
+            incoherent(d, energy, xs, mu, *n_mu);
+        }
+    }
+}
+
 fn dump_ace_table(d: &mut Dump, path: &str, t: &ace::Table) {
     d.text(format!("{path}/name"), &t.name);
     d.float(format!("{path}/atomic_weight_ratio"), t.atomic_weight_ratio);
     d.float(format!("{path}/kT"), t.kt);
     d.float(format!("{path}/temperature"), t.temperature());
-    d.int(format!("{path}/zaid"), t.zaid().unwrap());
+    // A thermal table is named for its material (`lwtr.10t`), not a ZAID.
+    if t.data_type().ok() != Some(ace::TableType::ThermalScattering) {
+        d.int(format!("{path}/zaid"), t.zaid().unwrap());
+    }
     d.text(
         format!("{path}/data_type"),
         &t.data_type().unwrap().suffix().to_string(),
@@ -1476,6 +1557,11 @@ fn dump_ace_table(d: &mut Dump, path: &str, t: &ace::Table) {
         idx.iter().map(|&i| i as i64).collect(),
     );
     d.floats(format!("{path}/xss_val"), values);
+
+    if t.data_type().ok() == Some(ace::TableType::ThermalScattering) {
+        dump_thermal_ace(d, &format!("{path}/thermal"), t);
+        return;
+    }
 
     dump_ace_angle(d, &format!("{path}/and"), t);
     dump_ace_dlw(d, &format!("{path}/dlw"), t);
