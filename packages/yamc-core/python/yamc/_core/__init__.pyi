@@ -7777,9 +7777,14 @@ def OffsetSurface(base: Surface, distance: builtins.float, surface_id: typing.Op
     layer of uniform thickness. Distances are measured from that flux surface,
     so an offset of an offset adds: ``OffsetSurface(OffsetSurface(plasma, 15),
     2)`` is ``OffsetSurface(plasma, 17)``. Layers built from one flux surface
-    are nested and never cross, even where outward normals meet (the layer is
-    then creased, as a true distance offset is). ``.below`` is the side towards
-    the plasma.
+    are nested and never cross. ``.below`` is the side towards the plasma.
+    
+    Layers farther out than the flux surface's crease-free distance (the
+    smaller of its tightest concave radius of curvature and half its narrowest
+    gap outside, such as across the central hole) keep their exact distance
+    from it, but have creases (sharp edges) where offset fronts from different
+    parts of the flux surface meet, as a true distance offset does; building
+    one gives a ``UserWarning`` saying so.
     
     Args:
         base: A FluxSurface or OffsetSurface

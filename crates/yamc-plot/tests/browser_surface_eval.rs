@@ -42,10 +42,11 @@ fn all_kinds() -> HashSet<String> {
 }
 
 /// Kinds the browser views do not evaluate, by design: a flux surface is a
-/// ray-marched level set of a Fourier boundary, too costly to evaluate per
-/// pixel in JavaScript. Each is NaN in every `surfaceEval` copy and gets no
-/// editor card, which is the unknown-kind behaviour tested below.
-const NOT_IN_BROWSER: &[&str] = &["Flux"];
+/// level set of a Fourier boundary and an implicit surface a user formula,
+/// both searched for along a ray in Rust and not reproduced in JavaScript.
+/// Each is NaN in every `surfaceEval` copy and gets no editor card, which is
+/// the unknown-kind behaviour tested below.
+const NOT_IN_BROWSER: &[&str] = &["Flux", "Implicit"];
 
 /// Centre, symmetry axis and size of a surface: where its test points are
 /// drawn, out to three sizes from the centre and along the axis.
@@ -69,7 +70,9 @@ fn frame(kind: &SurfaceKind) -> ([f64; 3], Option<[f64; 3]>, f64) {
         } => ([x0, y0, z0], Some([0.0, 1.0, 0.0]), a + c),
         SurfaceKind::Quadric { .. } => ([0.0; 3], None, 4.0),
         SurfaceKind::Cone { apex, axis, .. } => (apex, Some(axis), 5.0),
-        SurfaceKind::Flux { .. } => unreachable!("flux surfaces are not in the cases"),
+        SurfaceKind::Flux { .. } | SurfaceKind::Implicit { .. } => {
+            unreachable!("kinds the browser does not evaluate are not in the cases")
+        }
     }
 }
 
