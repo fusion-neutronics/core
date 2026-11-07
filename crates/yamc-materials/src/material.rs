@@ -395,6 +395,60 @@ pub struct Material {
     /// The URR queries' view of the nuclides, resolved once per cross-section
     /// build; see [`UrrLookup`]. Built and dropped with `fast_xs`.
     pub urr_lookup: Option<UrrLookup>,
+    /// The thermal scattering tables this material uses, by name
+    /// (`c_H_in_H2O`), each with the fraction of its nuclides that is bound
+    /// (1.0 unless only part of them is). Set through
+    /// [`Material::set_s_alpha_beta`].
+    s_alpha_beta: Vec<(String, f64)>,
+    /// The tables loaded for `s_alpha_beta` by `read_nuclear_data`, with the
+    /// nuclides each applies to and the temperature they were read at.
+    pub thermal: Vec<BoundThermal>,
+}
+
+/// A thermal scattering table as one material uses it.
+#[derive(Debug, Clone)]
+pub struct BoundThermal {
+    pub table: Arc<yamc_nuclide::thermal_scattering::ThermalTable>,
+    /// The fraction of each bound nuclide's atoms that the table describes.
+    pub fraction: f64,
+    /// The material's nuclides the table applies to: the table's bound
+    /// nuclides that the material has.
+    pub nuclides: Vec<String>,
+    /// The material temperature it was read for, in Kelvin.
+    pub kelvin: f64,
+}
+
+/// Which table, if any, binds each of `nuclides`, refusing a table that binds
+/// none of them and a nuclide two tables claim. Returns, per table, the
+/// material nuclides it applies to.
+pub fn bind_thermal(
+    tables: &[(&str, &[String])],
+    nuclides: &[String],
+) -> Result<Vec<Vec<String>>, String> {
+    let mut claimed: HashMap<String, &str> = HashMap::new();
+    let mut out = Vec::with_capacity(tables.len());
+    for (name, bound) in tables {
+        let hits: Vec<String> = nuclides
+            .iter()
+            .filter(|n| bound.contains(n))
+            .cloned()
+            .collect();
+        if hits.is_empty() {
+            return Err(format!(
+                "thermal table {name} applies to {}, and the material has none of them",
+                bound.join(", ")
+            ));
+        }
+        for n in &hits {
+            if let Some(other) = claimed.insert(n.clone(), name) {
+                return Err(format!(
+                    "{n} is bound by both {other} and {name}; a nuclide takes one thermal table"
+                ));
+            }
+        }
+        out.push(hits);
+    }
+    Ok(out)
 }
 
 /// What the per-step URR queries read, resolved once when the macroscopic
@@ -524,6 +578,8 @@ pub struct MaterialSerde {
     pub volume: Option<f64>,
     pub temperature: String,
     pub transmutable: bool,
+    #[serde(default)]
+    pub s_alpha_beta: Vec<(String, f64)>,
 }
 
 impl From<Material> for MaterialSerde {
@@ -539,6 +595,7 @@ impl From<Material> for MaterialSerde {
             volume: m.volume,
             temperature: m.temperature,
             transmutable: m.transmutable,
+            s_alpha_beta: m.s_alpha_beta,
         }
     }
 }
@@ -560,6 +617,7 @@ impl TryFrom<MaterialSerde> for Material {
         m.volume = spec.volume;
         m.set_temperature(&spec.temperature);
         m.transmutable = spec.transmutable;
+        m.set_s_alpha_beta(spec.s_alpha_beta)?;
         Ok(m)
     }
 }
@@ -659,6 +717,8 @@ impl Material {
             macroscopic_xs_mt_numbers: Vec::new(),
             macroscopic_xs_flat: Vec::new(),
             urr_lookup: None,
+            s_alpha_beta: Vec::new(),
+            thermal: Vec::new(),
         })
     }
 
@@ -723,6 +783,8 @@ impl Material {
             macroscopic_xs_mt_numbers: Vec::new(),
             macroscopic_xs_flat: Vec::new(),
             urr_lookup: None,
+            s_alpha_beta: Vec::new(),
+            thermal: Vec::new(),
         }
     }
 
@@ -820,6 +882,39 @@ impl Material {
     }
 
     /// Clear all cached cross section data
+    /// The thermal scattering tables this material uses, with the bound
+    /// fraction of each.
+    pub fn s_alpha_beta(&self) -> &[(String, f64)] {
+        &self.s_alpha_beta
+    }
+
+    /// Use these thermal scattering tables (`c_H_in_H2O`), each with the
+    /// fraction of its nuclides that is bound, in (0, 1].
+    ///
+    /// The tables are loaded by the next `read_nuclear_data`, from the
+    /// library the material's cross sections come from; which nuclides each
+    /// applies to is the table's own data.
+    pub fn set_s_alpha_beta(&mut self, tables: Vec<(String, f64)>) -> Result<(), String> {
+        let mut seen = std::collections::HashSet::new();
+        for (name, fraction) in &tables {
+            if name.trim().is_empty() {
+                return Err("a thermal table name is empty".into());
+            }
+            if !(fraction.is_finite() && *fraction > 0.0 && *fraction <= 1.0) {
+                return Err(format!(
+                    "the bound fraction for {name} is {fraction}; it must be in (0, 1]"
+                ));
+            }
+            if !seen.insert(name.clone()) {
+                return Err(format!("{name} is listed twice in s_alpha_beta"));
+            }
+        }
+        self.s_alpha_beta = tables;
+        self.thermal.clear();
+        self.invalidate_xs_cache();
+        Ok(())
+    }
+
     pub fn invalidate_xs_cache(&mut self) {
         self.macroscopic_xs_neutron.clear();
         self.macroscopic_xs_neutron_total_by_nuclide = None;
@@ -2219,6 +2314,7 @@ mod tests {
             volume: None,
             temperature: String::new(),
             transmutable: false,
+            s_alpha_beta: Vec::new(),
         };
         assert!(Material::try_from(bad).is_err());
     }

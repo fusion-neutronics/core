@@ -43,7 +43,6 @@ pub use storage::{in_memory_storage, nuclide_loader, url_cache};
 pub mod arrow;
 #[cfg(feature = "arrow")]
 pub use arrow::{arrow_helpers, nuclide_arrow};
-#[cfg(feature = "arrow")]
 pub mod thermal_scattering;
 
 pub use buffer::F64Buffer;
