@@ -54,6 +54,17 @@ def test_an_implicit_surface_is_an_ordinary_surface():
     assert yamc.ImplicitSurface(surface.formula).formula == surface.formula
 
 
+def test_a_search_that_runs_out_finds_no_crossing():
+    # x^2 - x^2 is 0, which interval arithmetic cannot see, so a search
+    # parallel to this plane runs out of evaluations long before 2^20 cm:
+    # there is no crossing to report, rather than the point it reached.
+    plane = yamc.ImplicitSurface("x^2 - x^2 + y - 1")
+    assert plane.distance_to_surface((0.0, 0.0, 0.0), (1.0, 0.0, 0.0)) is None
+    assert plane.distance_to_surface((0.0, 0.0, 0.0), (0.0, 1.0, 0.0)) == (
+        pytest.approx(1.0, abs=1e-10)
+    )
+
+
 @pytest.mark.parametrize(
     ("formula", "message"),
     [

@@ -96,7 +96,6 @@ pub(super) enum Outcome {
 pub(super) struct Trace {
     pub crossing: Option<f64>,
     /// The evaluation budget ran out.
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by the tests"))]
     pub exhausted: bool,
     /// Evaluations spent.
     #[cfg_attr(not(test), expect(dead_code, reason = "read by the tests"))]
@@ -269,20 +268,28 @@ pub(super) fn bracket<L: Line>(line: &mut L, mut a: L::Point, mut b: L::Point) -
 /// Run `search` on the ray `point + t * direction` along the unit
 /// direction, as the constants here are lengths: `search` is given the
 /// unit direction and the cap `t_max` in its units and answers in them;
-/// the answer comes back in the units of `direction`. `None` for a zero or
-/// non-finite direction or a non-finite point.
+/// the crossing comes back in the units of `direction`. No crossing for a
+/// zero or non-finite direction or a non-finite point.
 pub(super) fn along_unit(
     point: [f64; 3],
     direction: [f64; 3],
     t_max: f64,
-    search: impl FnOnce([f64; 3], f64) -> Option<f64>,
-) -> Option<f64> {
+    search: impl FnOnce([f64; 3], f64) -> Trace,
+) -> Trace {
     let len = direction.iter().map(|v| v * v).sum::<f64>().sqrt();
     if !(len.is_finite() && len > 0.0) || !point.iter().all(|v| v.is_finite()) {
-        return None;
+        return Trace {
+            crossing: None,
+            exhausted: false,
+            evaluations: 0,
+        };
     }
     let unit = direction.map(|v| v / len);
-    search(unit, t_max * len).map(|t| t / len)
+    let trace = search(unit, t_max * len);
+    Trace {
+        crossing: trace.crossing.map(|t| t / len),
+        ..trace
+    }
 }
 
 #[cfg(test)]
@@ -512,19 +519,27 @@ mod tests {
         let seen = std::cell::Cell::new(([0.0; 3], 0.0));
         let t = along_unit([1.0, 2.0, 3.0], [0.0, 0.0, 2.0], 10.0, |unit, t_max| {
             seen.set((unit, t_max));
-            Some(4.0)
+            Outcome::Exhausted(4.0).trace(false, 7)
         });
         assert_eq!(seen.get(), ([0.0, 0.0, 1.0], 20.0));
-        assert_eq!(t, Some(2.0));
-        let never = |_: [f64; 3], _: f64| -> Option<f64> { unreachable!() };
-        assert_eq!(along_unit([0.0; 3], [0.0; 3], 1.0, never), None);
         assert_eq!(
-            along_unit([f64::NAN, 0.0, 0.0], [1.0, 0.0, 0.0], 1.0, never),
-            None
+            (t.crossing, t.exhausted, t.evaluations),
+            (Some(2.0), true, 7)
         );
-        assert_eq!(
-            along_unit([0.0; 3], [f64::INFINITY, 0.0, 0.0], 1.0, never),
-            None
-        );
+        let never = |_: [f64; 3], _: f64| -> Trace { unreachable!() };
+        let none = |t: Trace| t.crossing.is_none() && !t.exhausted && t.evaluations == 0;
+        assert!(none(along_unit([0.0; 3], [0.0; 3], 1.0, never)));
+        assert!(none(along_unit(
+            [f64::NAN, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            1.0,
+            never
+        )));
+        assert!(none(along_unit(
+            [0.0; 3],
+            [f64::INFINITY, 0.0, 0.0],
+            1.0,
+            never
+        )));
     }
 }

@@ -1232,7 +1232,8 @@ fn an_unbounded_search_ends() {
         let o = uniform_in(&mut rng, ([-3.0; 3], [3.0; 3]));
         let u = rng.direction();
         let t = gyroid
-            .distance(o, u, None, false, f64::INFINITY)
+            .trace(o, u, None, false, f64::INFINITY)
+            .crossing
             .expect("a gyroid is crossed within a period or two");
         let mut probe = Probe::new(gyroid.tape(), o, u);
         let (_, first) = probe.crossings(MIN_ROOT, t + 2e-3, 1e-3, 0.0, 1);
@@ -1306,6 +1307,37 @@ fn an_implicit_surface_is_an_ordinary_surface() {
     }
     let bad = serde_json::from_str::<Surface>(&json.replace("x^2", "x^")).unwrap_err();
     assert!(bad.to_string().contains("column"), "{bad}");
+}
+
+/// A search that runs out of evaluations has found no crossing. Transport,
+/// whose cell caps the search, gets the point it reached on a transmission
+/// surface, but a query with no cap gets no crossing rather than a point
+/// the surface does not cross: here along a twisted bar the ray never
+/// meets, and along a plane in a formula that interval arithmetic cannot
+/// see is flat.
+#[test]
+fn an_uncapped_search_that_runs_out_finds_no_crossing() {
+    for (formula, o, u) in [
+        (
+            "((x * cos(0.6 * z) + y * sin(0.6 * z)) / 2.5)^4 \
+             + ((y * cos(0.6 * z) - x * sin(0.6 * z)) / 2.5)^4 - 1",
+            [6.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ),
+        ("x^2 - x^2 + y - 1", [0.0; 3], [1.0, 0.0, 0.0]),
+    ] {
+        let f = Arc::new(ImplicitFormula::new(formula).unwrap());
+        let reached = trace(&f.tape, None, o, u, None, false, f64::INFINITY);
+        assert!(reached.exhausted && reached.crossing.is_some(), "{formula}");
+        let s = Surface::new_implicit(f, Some(1), None);
+        assert_eq!(s.distance_to_surface(o, u), None, "{formula}");
+        assert_eq!(s.distance_to_surface_on(o, u, None), None, "{formula}");
+        assert_eq!(
+            s.distance_to_surface_capped(o, u, None, f64::INFINITY),
+            reached.crossing,
+            "{formula}"
+        );
+    }
 }
 
 /// Single-thread cost per query on each shape, for transport-like and

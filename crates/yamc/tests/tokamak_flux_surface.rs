@@ -347,7 +347,8 @@ fn rays_grazing_a_thin_flux_surface_find_its_crossings() {
     // Leaving the surface within 1e-4 to 1e-2 rad of its toroidal tangent,
     // a ray from the inboard side comes back across it within 20 cm.
     // Every crossing returned is on the surface: a march that ran out of
-    // budget would return the point it had reached instead.
+    // budget would return the point it had reached instead, from the capped
+    // query that transport makes (`distance_to_surface` would find none).
     let shape = tokamak(900.0, 100.0, 2.0, -1.0, -49.0);
     let thin = surface(&shape, 0.02);
     let SurfaceKind::Flux { boundary, .. } = &thin.kind else {
@@ -363,7 +364,7 @@ fn rays_grazing_a_thin_flux_surface_find_its_crossings() {
         let o = [x[0] + 1e-8 * n[0], x[1], x[2] + 1e-8 * n[2]];
         let g: f64 = rng.random_range(1e-4..1e-2);
         let u = [g * n[0], (1.0 - g * g).sqrt(), g * n[2]];
-        if let Some(t) = thin.distance_to_surface(o, u) {
+        if let Some(t) = thin.distance_to_surface_capped(o, u, None, f64::INFINITY) {
             let p = (o[0] + t * u[0], o[1] + t * u[1], o[2] + t * u[2]);
             let off = thin.evaluate_exact(p);
             assert!(

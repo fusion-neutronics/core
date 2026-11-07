@@ -58,7 +58,7 @@ mod tape;
 #[cfg(test)]
 mod tests;
 
-use crate::surface::search::along_unit;
+use crate::surface::search::{along_unit, Trace};
 use crate::surface::{BoundaryType, Surface, SurfaceKind};
 pub use bounds::WORLD;
 use bounds::{Cell, Extent, Fault, Problem};
@@ -198,17 +198,19 @@ impl ImplicitFormula {
     }
 
     /// Ray parameter `t` of the first crossing of the surface along
-    /// `point + t * direction` beyond 1e-10 cm, if before `t_max`; `None`
-    /// for a zero or non-finite direction or a non-finite point. A search
-    /// with no bounding box to stop it stops `WORLD` from the origin.
-    pub(crate) fn distance(
+    /// `point + t * direction` beyond 1e-10 cm, if before `t_max`; none for
+    /// a zero or non-finite direction or a non-finite point. A search with
+    /// no bounding box to stop it stops `WORLD` from the origin. The
+    /// search's answer, with whether it ran out of evaluations (see
+    /// `ray::trace`).
+    pub(super) fn trace(
         &self,
         point: [f64; 3],
         direction: [f64; 3],
         on_surface: Option<f64>,
         vacuum: bool,
         t_max: f64,
-    ) -> Option<f64> {
+    ) -> Trace {
         // The search measures length, so it runs on the unit direction.
         along_unit(point, direction, t_max, |unit, t_max| {
             ray::trace(
@@ -220,7 +222,6 @@ impl ImplicitFormula {
                 vacuum,
                 t_max,
             )
-            .crossing
         })
     }
 }

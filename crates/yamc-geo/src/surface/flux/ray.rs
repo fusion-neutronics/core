@@ -385,8 +385,9 @@ impl Line for Ray<'_> {
 
 impl Engine {
     /// Distance along the ray (`direction` of unit length) to the first
-    /// crossing of the level set `D = offset` beyond `MIN_ROOT`, or `None`
-    /// (also when the crossing is beyond `t_max`, where the search stops).
+    /// crossing of the level set `D = offset` beyond `MIN_ROOT`, or none
+    /// (also when the crossing is beyond `t_max`, where the search stops),
+    /// and what the query cost.
     ///
     /// A particle within `ON_BAND` of the level set and moving off it (it
     /// has just crossed, `on_surface` says so, or it was left there) starts
@@ -394,22 +395,8 @@ impl Engine {
     /// one moving towards it marches from where it is, so the crossing just
     /// ahead is returned. If the evaluation budget runs out, a transmission
     /// surface returns the root-free point reached (spatial relocation
-    /// resolves it) and a vacuum surface `None`; the vacuum budget is large
+    /// resolves it) and a vacuum surface none; the vacuum budget is large
     /// enough that this does not happen in practice.
-    pub(super) fn ray(
-        &self,
-        origin: [f64; 3],
-        direction: [f64; 3],
-        offset: f64,
-        on_surface: Option<f64>,
-        vacuum: bool,
-        t_max: f64,
-    ) -> Option<f64> {
-        self.trace_ray(origin, direction, offset, on_surface, vacuum, t_max)
-            .crossing
-    }
-
-    /// [`Engine::ray`] with what the query cost.
     pub(super) fn trace_ray(
         &self,
         origin: [f64; 3],

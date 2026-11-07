@@ -22,7 +22,7 @@ mod series;
 #[cfg(test)]
 mod tests;
 
-use crate::surface::search::along_unit;
+use crate::surface::search::{along_unit, Trace};
 use crate::surface::{BoundaryType, Surface, SurfaceKind};
 use distance::MAX_POLY;
 use patches::Patches;
@@ -282,8 +282,28 @@ impl FluxBoundary {
     }
 
     /// Ray parameter `t` of the first crossing of the level set at
-    /// `offset` along `point + t * direction`, if before `t_max`; `None`
-    /// for a zero or non-finite direction or a non-finite point.
+    /// `offset` along `point + t * direction`, if before `t_max`; none for
+    /// a zero or non-finite direction or a non-finite point. The search's
+    /// answer, with whether it ran out of evaluations (see
+    /// [`Engine::trace_ray`]).
+    pub(super) fn trace(
+        &self,
+        point: [f64; 3],
+        direction: [f64; 3],
+        offset: f64,
+        on_surface: Option<f64>,
+        vacuum: bool,
+        t_max: f64,
+    ) -> Trace {
+        // The march measures arc length, so it runs on the unit direction.
+        along_unit(point, direction, t_max, |unit, t_max| {
+            self.engine
+                .trace_ray(point, unit, offset, on_surface, vacuum, t_max)
+        })
+    }
+
+    /// The crossing [`FluxBoundary::trace`] finds, for the tests.
+    #[cfg(test)]
     pub(crate) fn distance(
         &self,
         point: [f64; 3],
@@ -293,11 +313,8 @@ impl FluxBoundary {
         vacuum: bool,
         t_max: f64,
     ) -> Option<f64> {
-        // The march measures arc length, so it runs on the unit direction.
-        along_unit(point, direction, t_max, |unit, t_max| {
-            self.engine
-                .ray(point, unit, offset, on_surface, vacuum, t_max)
-        })
+        self.trace(point, direction, offset, on_surface, vacuum, t_max)
+            .crossing
     }
 
     /// Box containing the points within `offset` of the boundary (for a

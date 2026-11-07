@@ -5092,9 +5092,12 @@ class Surface:
     def distance_to_surface(self, point: tuple[builtins.float, builtins.float, builtins.float], direction: tuple[builtins.float, builtins.float, builtins.float]) -> typing.Optional[builtins.float]:
         r"""
         Compute the distance to the surface from a point in a direction.
-        Returns the distance as a float, or None if no intersection. An
-        implicit surface with no bounding box is searched only within
-        1048576 cm (2^20 cm) of the origin on each axis.
+        Returns the distance as a float, or None if no intersection is
+        found. A flux, offset or implicit surface searches for it, and finds
+        none if its search runs out of evaluations first, as it can far
+        along a ray through an implicit lattice with no bounding box (which
+        is searched only within 1048576 cm, 2^20 cm, of the origin on each
+        axis).
         """
     def bounding_box_inside(self) -> typing.Optional[BoundingBox]:
         r"""
