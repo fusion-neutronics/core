@@ -59,3 +59,16 @@ def test_cell_complement_region():
     cell = csg.Cell(id=102, region=region_complement, name="complement")
     assert not cell.contains(0.0, 0.0, 0.0)  # inside original sphere
     assert cell.contains(3.0, 0.0, 0.0)  # outside original sphere
+
+
+def test_cell_contains_deeply_nested_region():
+    # Issue #510: `new & old` in a loop nests the region one level per step,
+    # which used to overflow the 64-slot evaluation stack and panic.
+    spheres = [csg.Sphere(radius=float(i + 1)) for i in range(200)]
+    region = spheres[0].below
+    for s in spheres[1:]:
+        region = s.below & region
+    cell = csg.Cell(region=region)
+    assert cell.contains(0.0, 0.0, 0.0)
+    assert not cell.contains(0.0, 0.0, 1.5)
+    assert region.contains((0.0, 0.0, 0.0))
