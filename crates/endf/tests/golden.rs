@@ -1803,7 +1803,7 @@ fn dump_section(d: &mut Dump, path: &str, section: &Section) {
                     let tp = format!("{path}/beta_data/{i}/{}", j + 1);
                     d.float(format!("{tp}/T"), o.t);
                     d.float(format!("{tp}/beta"), o.beta);
-                    d.int(format!("{tp}/LT"), o.lt);
+                    d.int(format!("{tp}/LI"), o.li);
                     d.floats(format!("{tp}/S"), o.s.clone());
                 }
             }
