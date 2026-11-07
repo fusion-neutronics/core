@@ -257,8 +257,7 @@ impl Material {
         // cross section even when only the total was asked for: computed
         // here, used below, and dropped again if it was not asked for.
         let thermal_here = temperature == self.temperature && !self.thermal.is_empty();
-        let elastic_added = thermal_here
-            && mt_set_opt.as_mut().is_some_and(|set| set.insert(2));
+        let elastic_added = thermal_here && mt_set_opt.as_mut().is_some_and(|set| set.insert(2));
         for nuclide_name in self.nuclides.keys() {
             if let Some(nuclide_data) = self.nuclide_data.get(nuclide_name) {
                 let mut nuclide_reactions_map: HashMap<i32, Vec<f64>> = HashMap::new();
