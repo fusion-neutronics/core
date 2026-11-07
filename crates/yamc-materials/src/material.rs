@@ -50,6 +50,7 @@ mod id;
 mod loading;
 mod macro_xs;
 mod photon;
+pub mod thermal;
 
 /// Fast O(1) energy grid lookup using logarithmic binning.
 /// Instead of O(log n) binary search, this uses a pre-computed grid that maps
@@ -403,6 +404,9 @@ pub struct Material {
     /// The tables loaded for `s_alpha_beta` by `read_nuclear_data`, with the
     /// nuclides each applies to and the temperature they were read at.
     pub thermal: Vec<BoundThermal>,
+    /// Where the tables were read from, so a change of temperature can read
+    /// them again.
+    thermal_source: Option<String>,
 }
 
 /// A thermal scattering table as one material uses it.
@@ -719,6 +723,7 @@ impl Material {
             urr_lookup: None,
             s_alpha_beta: Vec::new(),
             thermal: Vec::new(),
+            thermal_source: None,
         })
     }
 
@@ -785,6 +790,7 @@ impl Material {
             urr_lookup: None,
             s_alpha_beta: Vec::new(),
             thermal: Vec::new(),
+            thermal_source: None,
         }
     }
 

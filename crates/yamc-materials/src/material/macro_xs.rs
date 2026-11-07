@@ -170,6 +170,10 @@ impl Material {
             panic!("{e}");
         }
 
+        if store && let Err(e) = self.ensure_thermal_current() {
+            panic!("{e}");
+        }
+
         // If not cached, build the grid
         let mut all_energies = Vec::new();
         let _particle = "neutron"; // This is now specifically for neutrons
@@ -182,6 +186,16 @@ impl Material {
                 {
                     all_energies.extend(energy_grid);
                 }
+            }
+        }
+
+        // The bound tables' own points, at this material's temperature (the
+        // only one they were loaded for), so their cross sections interpolate
+        // faithfully on the union grid.
+        if temperature == self.temperature && !self.thermal.is_empty() {
+            let low = all_energies.iter().copied().fold(f64::INFINITY, f64::min);
+            for bound in &self.thermal {
+                all_energies.extend(bound.grid_points(low));
             }
         }
 
@@ -278,6 +292,12 @@ impl Material {
                     micro_xs.insert(nuclide_name.clone(), nuclide_reactions_map);
                 }
             }
+        }
+        // Bound thermal scattering replaces free elastic below each table's
+        // energy_max. The tables were read at the material's own temperature,
+        // so only that temperature's cross sections carry them.
+        if temperature == self.temperature {
+            super::thermal::apply_bound_xs(&self.thermal, &grid, &mut micro_xs);
         }
         micro_xs
     }
