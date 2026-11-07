@@ -209,6 +209,9 @@ fn check_folder(particle: Particle, path: &Path) -> Result<(), String> {
             if summary.bound_nuclides.is_empty() {
                 return Err("a table bound to no nuclide".to_string());
             }
+            // Every temperature through the reader transport uses.
+            yamc_nuclide::thermal_scattering::read_thermal_from_arrow(path, None)
+                .map_err(|e| e.to_string())?;
         }
         Particle::Photonuclear => {
             let summary = yamc_convert::photonuclear::inspect_photonuclear(path)

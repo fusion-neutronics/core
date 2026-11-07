@@ -1648,3 +1648,103 @@ fn without_hashes_a_prefetch_plans_the_indexed_sections_whole() {
         assert!(!dir.join("temperatures").exists());
     }
 }
+
+const THERMAL_LABELS: [&str; 4] = ["296K", "400K", "500K", "600K"];
+
+/// A thermal table whose per-temperature sections are indexed under
+/// `temperature_ranges`, each entry hashed, as the converter writes them.
+fn publish_thermal(origin: &Origin, release: &str, name: &str) {
+    let keys: Vec<String> = THERMAL_LABELS.iter().map(|s| s.to_string()).collect();
+    let mut ranges = serde_json::Map::new();
+    let mut files = Vec::new();
+    let dir = format!("thermal/{name}.arrow");
+    for section in ["inelastic.arrow", "elastic.arrow"] {
+        let (bytes, schema, entries) = indexed_section(name, &keys);
+        let mut index = EnergyRanges {
+            schema,
+            temperatures: entries.into_iter().collect(),
+            sha256: Hashes::new(),
+        };
+        index.sha256 = hashes_of(
+            &bytes,
+            std::iter::once(index.schema).chain(index.temperatures.values().copied()),
+        );
+        ranges.insert(section.to_string(), index.to_json());
+        files.push((format!("{dir}/{section}"), bytes));
+    }
+    let version = serde_json::json!({
+        "format_version": 2,
+        "particle": "thermal",
+        "temperature_ranges": ranges,
+    });
+    files.push((
+        format!("{dir}/version.json"),
+        serde_json::to_vec_pretty(&version).unwrap(),
+    ));
+    files.push((
+        format!("{dir}/thermal.arrow"),
+        message(name, "thermal", 100),
+    ));
+    let refs: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(p, b)| (p.as_str(), b.as_slice()))
+        .collect();
+    origin.publish("endf-b8.1", release, &refs);
+}
+
+fn fetch_thermal(reg: &Registry, name: &str, temperature: &str) -> Result<PathBuf, String> {
+    let scope = LoadScope::full().with_temperatures(Some([temperature.to_string()].into()));
+    fetch_particle(reg, "endf-b8.1", name, DataKind::Thermal, &scope)
+}
+
+/// A material at one table temperature fetches that temperature's batch of
+/// each per-temperature section alone; one between two fetches both; and the
+/// tabulated law (`sab.arrow`) is never fetched by transport.
+#[test]
+fn a_thermal_table_is_fetched_one_temperature_at_a_time() {
+    let origin = Origin::start();
+    publish_thermal(&origin, "2026-11-07", "c_Graphite");
+    let root = Scratch::new("thermal-ranged");
+    let reg = registry(&origin.url, &root);
+
+    let dir = fetch_thermal(&reg, "c_Graphite", "400").expect("ranged thermal download");
+    assert!(dir.join("thermal.arrow").exists() && dir.join("version.json").exists());
+    assert!(
+        !dir.join("inelastic.arrow").exists(),
+        "only a ranged copy is kept"
+    );
+    let base = "endf-b8.1/2026-11-07/thermal/c_Graphite.arrow";
+    let version: serde_json::Value =
+        serde_json::from_slice(&published(&origin, &format!("{base}/version.json"))).unwrap();
+    for section in ["inelastic", "elastic"] {
+        let index =
+            EnergyRanges::from_json(&version["temperature_ranges"][format!("{section}.arrow")])
+                .unwrap();
+        let whole = published(&origin, &format!("{base}/{section}.arrow"));
+        assert_eq!(
+            fs::read(dir.join(format!("temperatures/{section}.arrow"))).unwrap(),
+            spliced(&whole, &[index.schema, index.temperatures["400K"]]),
+            "{section}: the 400K batch after the schema, and nothing else"
+        );
+    }
+    assert!(!dir.join("sab.arrow").exists());
+
+    // Between two table temperatures: both are fetched, the 400K batch kept.
+    let dir = fetch_thermal(&reg, "c_Graphite", "450").expect("bracketing download");
+    let labels: Vec<String> =
+        serde_json::from_slice(&fs::read(dir.join("temperatures/inelastic.json")).unwrap())
+            .unwrap();
+    assert_eq!(labels, ["400K", "500K"]);
+}
+
+/// Below the table's lowest temperature is refused before anything is
+/// fetched, naming what the table has.
+#[test]
+fn a_thermal_table_is_not_extrapolated() {
+    let origin = Origin::start();
+    publish_thermal(&origin, "2026-11-07", "c_Graphite");
+    let root = Scratch::new("thermal-outside");
+    let reg = registry(&origin.url, &root);
+    let err = fetch_thermal(&reg, "c_Graphite", "250").unwrap_err();
+    assert!(err.contains("296K"), "{err}");
+}

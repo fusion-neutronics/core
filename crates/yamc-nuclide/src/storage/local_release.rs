@@ -130,6 +130,7 @@ impl LocalRelease {
         let entry = match kind {
             DataKind::Neutron => format!("neutron/{name}.arrow"),
             DataKind::Photon => format!("photon/{name}.arrow"),
+            DataKind::Thermal => format!("thermal/{name}.arrow"),
         };
         check_sizes(&self.root, &self.release.manifest, &entry)?;
         self.record_use();
