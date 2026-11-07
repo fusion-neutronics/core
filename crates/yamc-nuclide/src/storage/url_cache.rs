@@ -445,6 +445,27 @@ pub fn publishers_of(subsection: &str) -> String {
     )
 }
 
+/// The library keywords whose releases publish thermal scattering tables
+/// (`thermal/<name>.arrow/`), kept equal to the library builder's recipes by a
+/// test there.
+///
+/// A material's thermal tables come from the library its cross sections come
+/// from, never another one: a table is processed on top of its own library's
+/// neutron evaluation, and borrowing one would mix libraries. A library not
+/// listed here has no thermal scattering sublibrary at all.
+pub const THERMAL_LIBRARIES: &[&str] = &["endf-b8.1", "jeff-4.0"];
+
+/// Why `keyword` has no thermal scattering tables, naming the libraries that
+/// do.
+pub fn no_thermal_tables(keyword: &str) -> String {
+    format!(
+        "'{keyword}' publishes no thermal scattering tables, so s_alpha_beta cannot be \
+         used with it, and tables are never taken from another library. Libraries that \
+         publish thermal scattering tables: {}.",
+        THERMAL_LIBRARIES.join(", ")
+    )
+}
+
 /// The keywords of libraries that publish isomeric branching and nothing
 /// else: no cross sections, and no decay, reactions or fission-yield
 /// subsection. Such a library can only be a branching source

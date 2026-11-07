@@ -39,6 +39,9 @@ pub enum Particle {
     Photon,
     /// The photonuclear sublibrary, kept as evaluated (no NJOY).
     Photonuclear,
+    /// The thermal scattering sublibrary, through NJOY with the principal
+    /// atom's neutron evaluation, one folder per table (`c_H_in_H2O`).
+    Thermal,
 }
 
 impl Particle {
@@ -48,6 +51,7 @@ impl Particle {
             Particle::Neutron => "neutron",
             Particle::Photon => "photon",
             Particle::Photonuclear => "photonuclear",
+            Particle::Thermal => "thermal",
         }
     }
 
@@ -66,6 +70,7 @@ impl Particle {
             ],
             Particle::Photon => &["element.arrow"],
             Particle::Photonuclear => &["photonuclear.arrow", "photonuclear_sections.arrow"],
+            Particle::Thermal => &["thermal.arrow", "inelastic.arrow", "sab.arrow"],
         }
     }
 
@@ -75,6 +80,7 @@ impl Particle {
     fn required_indexes(self) -> &'static [&'static str] {
         match self {
             Particle::Neutron => &["reaction_ranges", "energy_ranges"],
+            Particle::Thermal => &["temperature_ranges"],
             Particle::Photon | Particle::Photonuclear => &[],
         }
     }
@@ -133,6 +139,9 @@ struct Job {
     input: PathBuf,
     /// The atomic relaxation file, for a photon job.
     relaxation: Option<PathBuf>,
+    /// What a thermal job processes; `input` is then the principal atom's
+    /// neutron evaluation.
+    thermal: Option<ThermalJob>,
     /// The names of the folders it writes. One, except for a photo-atomic
     /// file of several elements (FENDL bundles them).
     names: Vec<String>,
@@ -148,6 +157,20 @@ impl Job {
     }
 }
 
+/// A thermal table's evaluation files and binding.
+#[derive(Debug, Clone)]
+struct ThermalJob {
+    files: Vec<PathBuf>,
+    binding: crate::thermal::Binding,
+    bound: Vec<String>,
+    zaids: Vec<i64>,
+}
+
+/// The thermal bindings of the library being built.
+fn bindings(options: &Options) -> &'static [crate::thermal::Binding] {
+    crate::recipe::recipe(options.library).map_or(&[], |r| r.thermal)
+}
+
 /// Convert every material of `materials` that `options` asks for into the
 /// release folder `path`.
 ///
@@ -156,8 +179,12 @@ impl Job {
 /// across more than one atomic relaxation file.
 pub fn convert(materials: &[Material], path: &Path, options: &Options) -> Result<Outcome, String> {
     let particles: BTreeSet<Particle> = options.particles.iter().copied().collect();
-    let selected = select(materials, options.nuclides)?;
-    let jobs = jobs(&selected, &particles)?;
+    let bindings = bindings(options);
+    let selected = select(materials, options.nuclides, bindings)?;
+    let mut jobs = jobs(&selected, &particles)?;
+    if particles.contains(&Particle::Thermal) {
+        jobs.extend(thermal_jobs(materials, &selected, bindings)?);
+    }
 
     let mut outcome = Outcome::default();
     let mut todo = Vec::new();
@@ -265,6 +292,7 @@ fn failure_file(particle: Particle, name: &str) -> String {
 fn select<'m>(
     materials: &'m [Material],
     nuclides: Option<&[String]>,
+    bindings: &[crate::thermal::Binding],
 ) -> Result<Vec<&'m Material>, String> {
     let Some(wanted) = nuclides else {
         return Ok(materials.iter().collect());
@@ -272,6 +300,26 @@ fn select<'m>(
     let mut matched = BTreeSet::new();
     let mut out = Vec::new();
     for m in materials {
+        if m.sublibrary == Sublibrary::ThermalScattering {
+            // A table is asked for by its name, or by a nuclide or element it
+            // binds to (`"H"` selects every table binding hydrogen).
+            let Some(b) = crate::thermal::binding(bindings, &m.name) else {
+                continue;
+            };
+            let hit = wanted.iter().find(|w| {
+                **w == b.name
+                    || b.bound.iter().any(|n| {
+                        *n == w.as_str()
+                            || crate::thermal::element(n) == w.as_str()
+                            || crate::thermal::element(w) == *n
+                    })
+            });
+            if let Some(w) = hit {
+                matched.insert(w.as_str());
+                out.push(m);
+            }
+            continue;
+        }
         let element = element_of(m);
         let hit = wanted
             .iter()
@@ -322,6 +370,7 @@ fn jobs(materials: &[&Material], particles: &BTreeSet<Particle>) -> Result<Vec<J
                     particle: Particle::Neutron,
                     input: m.path.clone(),
                     relaxation: None,
+                    thermal: None,
                     names: vec![m.name.clone()],
                     cost: cost(&m.path),
                 });
@@ -331,6 +380,7 @@ fn jobs(materials: &[&Material], particles: &BTreeSet<Particle>) -> Result<Vec<J
                     particle: Particle::Photonuclear,
                     input: m.path.clone(),
                     relaxation: None,
+                    thermal: None,
                     names: vec![m.name.clone()],
                     cost: cost(&m.path),
                 });
@@ -361,11 +411,126 @@ fn jobs(materials: &[&Material], particles: &BTreeSet<Particle>) -> Result<Vec<J
             particle: Particle::Photon,
             input: file.to_path_buf(),
             relaxation: paired.into_iter().next().map(Path::to_path_buf),
+            thermal: None,
             names: elements.iter().map(|m| m.name.clone()).collect(),
             cost: cost(file),
         });
     }
     Ok(jobs)
+}
+
+/// One job per thermal table of the selected thermal materials, its files
+/// gathered by stem. Every file must have a binding, its bound nuclides and
+/// principal atom must be in the library's neutron sublibrary (from all of
+/// `materials`, whatever was selected), and where the evaluation names its
+/// atoms (MF=7 MT=451) they must be the bound elements.
+fn thermal_jobs(
+    materials: &[Material],
+    selected: &[&Material],
+    bindings: &[crate::thermal::Binding],
+) -> Result<Vec<Job>, String> {
+    let neutrons: BTreeMap<&str, &Path> = materials
+        .iter()
+        .filter(|m| m.sublibrary == Sublibrary::Neutron)
+        .map(|m| (m.name.as_str(), m.path.as_path()))
+        .collect();
+    let names: BTreeSet<String> = neutrons.keys().map(|n| n.to_string()).collect();
+    let mut tables: BTreeMap<&str, Vec<&Material>> = BTreeMap::new();
+    for m in selected
+        .iter()
+        .filter(|m| m.sublibrary == Sublibrary::ThermalScattering)
+    {
+        tables.entry(m.name.as_str()).or_default().push(m);
+    }
+    let mut problems = Vec::new();
+    let mut jobs = Vec::new();
+    for (stem, files) in tables {
+        let Some(binding) = crate::thermal::binding(bindings, stem) else {
+            problems.push(format!(
+                "{stem} ({}) has no thermal binding in this library's recipe",
+                files[0].path.display()
+            ));
+            continue;
+        };
+        let bound = match crate::thermal::bound_nuclides(binding, &names) {
+            Ok(b) => b,
+            Err(e) => {
+                problems.push(e);
+                continue;
+            }
+        };
+        let Some(neutron) = neutrons.get(binding.principal) else {
+            problems.push(format!(
+                "{}: its principal atom {} is not in the neutron sublibrary",
+                binding.name, binding.principal
+            ));
+            continue;
+        };
+        if let Some(stated) = mt451_elements(&files[0].path)? {
+            let ours: BTreeSet<&str> = bound.iter().map(|n| crate::thermal::element(n)).collect();
+            let stated: BTreeSet<&str> = stated.iter().map(String::as_str).collect();
+            if ours != stated {
+                problems.push(format!(
+                    "{}: binds {ours:?} where its MF=7 MT=451 names {stated:?}",
+                    binding.name
+                ));
+                continue;
+            }
+        }
+        let zaids = crate::thermal::zaids(&bound)?;
+        let mut paths: Vec<PathBuf> = files.iter().map(|m| m.path.clone()).collect();
+        paths.sort();
+        let size: u64 = paths
+            .iter()
+            .map(|p| std::fs::metadata(p).map_or(0, |m| m.len()))
+            .sum();
+        jobs.push(Job {
+            particle: Particle::Thermal,
+            input: neutron.to_path_buf(),
+            relaxation: None,
+            thermal: Some(ThermalJob {
+                files: paths,
+                binding: *binding,
+                bound,
+                zaids,
+            }),
+            names: vec![binding.name.to_string()],
+            cost: thermal_cost(size),
+        });
+    }
+    if problems.is_empty() {
+        Ok(jobs)
+    } else {
+        Err(format!(
+            "{} thermal table problem{}:\n  - {}",
+            problems.len(),
+            if problems.len() == 1 { "" } else { "s" },
+            problems.join("\n  - ")
+        ))
+    }
+}
+
+/// The element symbols MF=7 MT=451 names, or `None` when the evaluation has
+/// no such section.
+fn mt451_elements(path: &Path) -> Result<Option<BTreeSet<String>>, String> {
+    let material =
+        endf::Material::from_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let Some(zas) = endf::ThermalScattering::from_endf(&material)
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .atom_zas()
+    else {
+        return Ok(None);
+    };
+    Ok(Some(
+        zas.iter()
+            .filter_map(|za| {
+                usize::try_from(za / 1000)
+                    .ok()
+                    .and_then(|z| endf::data::ATOMIC_SYMBOL.get(z))
+                    .map(|s| s.to_string())
+            })
+            .collect(),
+    ))
 }
 
 /// Whether `dir` is a folder a resume may keep: `version.json` is there and
@@ -448,6 +613,26 @@ fn convert_one(job: &Job, path: &Path, options: &Options) -> Result<(), String> 
                     .map_err(|e| e.to_string())?,
             ]
         }
+        Particle::Thermal => {
+            let t = job
+                .thermal
+                .as_ref()
+                .ok_or("a thermal job without its table")?;
+            let source = yamc_convert::thermal::ThermalSource {
+                name: t.binding.name,
+                thermal: &t.files,
+                neutron: &job.input,
+                bound_nuclides: &t.bound,
+                zaids: &t.zaids,
+                ace_name: t.binding.ace,
+                nmix: t.binding.nmix,
+                njoy_exec: options.njoy_exec,
+            };
+            vec![
+                yamc_convert::thermal::convert_thermal(&source, &out, &provenance)
+                    .map_err(|e| e.to_string())?,
+            ]
+        }
     };
 
     // The converter names its folder from the evaluation it read. A folder
@@ -496,6 +681,18 @@ const BYTES_PER_SOURCE_BYTE: f64 = 0.115 * 1024.0;
 /// Of the free memory, the share the pool reserves. The rest is headroom for
 /// the estimate being low, which is the direction that kills a build.
 pub(crate) const SAFETY_PERCENT: u64 = 80;
+
+/// The estimated peak working set of converting a thermal table whose
+/// evaluation files total `source_bytes`: NJOY's own (about 0.4 GB, measured
+/// on the largest), and the ACE tables the converter reads back, which run to
+/// about 30 times the evaluation (2.6 GB of ACE text for H in H2O's 87 MB at
+/// 94 temperatures) and are held together with what is read from them.
+fn thermal_cost(source_bytes: u64) -> u64 {
+    BASE_BYTES + 400 * 1024 * 1024 + source_bytes.saturating_mul(THERMAL_BYTES_PER_SOURCE_BYTE)
+}
+
+/// See [`thermal_cost`].
+const THERMAL_BYTES_PER_SOURCE_BYTE: u64 = 80;
 
 /// The estimated peak working set of converting `input`.
 fn cost(input: &Path) -> u64 {

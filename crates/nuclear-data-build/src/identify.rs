@@ -56,6 +56,26 @@ pub fn identify(folders: &[(Sublibrary, PathBuf)]) -> Result<Vec<Material>, Stri
                     ));
                     continue;
                 }
+                // A thermal scattering law is named for its material, not a
+                // nuclide, so it goes by its file (see `crate::thermal`), and
+                // the files of one table at several temperatures share a name.
+                if *sub == Sublibrary::ThermalScattering {
+                    let file = path
+                        .file_name()
+                        .and_then(|f| f.to_str())
+                        .unwrap_or_default();
+                    let name = crate::thermal::table_stem(file);
+                    found.insert(
+                        (*sub, format!("{name}\u{0}{}", path.display())),
+                        Material {
+                            sublibrary: *sub,
+                            name,
+                            path: path.clone(),
+                            header,
+                        },
+                    );
+                    continue;
+                }
                 let Some(name) = header.name() else {
                     problems.push(format!(
                         "{}: MAT {} (ZA {}) has no name",

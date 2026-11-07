@@ -24,6 +24,7 @@ pub mod index;
 pub mod os_downloads;
 pub mod recipe;
 pub mod sources;
+pub mod thermal;
 
 use std::path::Path;
 

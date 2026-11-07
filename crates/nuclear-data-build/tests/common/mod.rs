@@ -68,6 +68,7 @@ pub fn source(name: &str, url: &str, body: &[u8], sublibrary: Sublibrary) -> Sou
 
 pub fn recipe(keyword: &str, sources: Vec<Source>) -> Recipe<'static> {
     Recipe {
+        thermal: &[],
         keyword: leak(keyword.to_string()),
         sources: Box::leak(sources.into_boxed_slice()),
         parts: &[],

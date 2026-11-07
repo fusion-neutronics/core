@@ -60,6 +60,7 @@ pub fn write(root: &Path, particle: Particle, library: &str) -> Result<usize, St
         Particle::Neutron => neutron(&dir, &folders, library)?,
         Particle::Photon => photon(&dir, &folders, library)?,
         Particle::Photonuclear => photonuclear(&dir, &folders, library)?,
+        Particle::Thermal => thermal(&dir, &folders, library)?,
     };
     let path = dir.join("index.json");
     let text = serde_json::to_string(&body).map_err(|e| e.to_string())? + "\n";
@@ -274,6 +275,41 @@ fn photon(dir: &Path, folders: &[String], library: &str) -> Result<(Value, usize
         "mts": PHOTON_MTS,
         "mts_verified": true,
         "elements": elements,
+    });
+    Ok((body, count))
+}
+
+/// thermal, from each table's header: what it binds to, its temperatures and
+/// the energy below which it applies.
+fn thermal(dir: &Path, folders: &[String], library: &str) -> Result<(Value, usize), String> {
+    let mut tables = serde_json::Map::new();
+    for name in folders {
+        let folder = dir.join(format!("{name}.arrow"));
+        let s = yamc_convert::thermal::inspect_thermal(&folder)
+            .map_err(|e| format!("{}: {e}", folder.display()))?;
+        if s.name != *name {
+            return Err(format!(
+                "{}: the data declares {}",
+                folder.display(),
+                s.name
+            ));
+        }
+        tables.insert(
+            name.clone(),
+            json!({
+                "bound_nuclides": s.bound_nuclides,
+                "temperatures": s.temperatures,
+                "energy_max": s.energy_max,
+                "elastic": s.elastic_kind,
+            }),
+        );
+    }
+    let count = tables.len();
+    let body = json!({
+        "format": FORMAT,
+        "library": library,
+        "particle": "thermal",
+        "tables": tables,
     });
     Ok((body, count))
 }
