@@ -896,6 +896,88 @@ fn grazing_a_thin_shell_neither_exhausts_nor_invents_crossings() {
     }
 }
 
+/// Inigo Quilez's exact signed distances to a capped cylinder and a box add
+/// `sqrt` of a sum of clamped squares, which is 0 on the surface itself,
+/// where the slope of `sqrt` alone is unbounded. With no bound on the slope
+/// the centred form could not be used near the surface, and rays grazing a
+/// 30 cm cylinder within 1e-4 cm ran out of evaluations three times in four.
+#[test]
+fn grazing_an_exact_distance_neither_exhausts_nor_invents_crossings() {
+    let mut rng = Rng(23);
+    for (r, h) in [(1.0_f64, 2.0_f64), (30.0, 100.0)] {
+        let f = ImplicitFormula::new(&format!(
+            "min(max(sqrt(x^2 + y^2) - {r}, abs(z) - {h}), 0) \
+             + sqrt(max(sqrt(x^2 + y^2) - {r}, 0)^2 + max(abs(z) - {h}, 0)^2)"
+        ))
+        .unwrap();
+        for delta in [1e-4, 1e-6, 1e-8, 1e-10] {
+            // Across the axis at an impact parameter r - delta (two
+            // crossings 2 sqrt(delta (2r - delta)) apart) or r + delta (none).
+            for hit in [true, false] {
+                let rays: Vec<_> = (0..100)
+                    .map(|_| {
+                        let phi = rng.range(0.0, TAU);
+                        let (u, e) = ([phi.cos(), phi.sin(), 0.0], [-phi.sin(), phi.cos(), 0.0]);
+                        let b = if hit { r - delta } else { r + delta };
+                        let l = 3.0 * r;
+                        let case = Case {
+                            o: [
+                                b * e[0] - l * u[0],
+                                b * e[1] - l * u[1],
+                                rng.range(-0.7 * h, 0.7 * h),
+                            ],
+                            u,
+                            t_max: 2.0 * l,
+                            hint: None,
+                        };
+                        (case, hit.then(|| l - ((r - b) * (r + b)).sqrt()))
+                    })
+                    .collect();
+                let t = exact(&f.tape, f.bounding_box(), &rays);
+                println!(
+                    "capped cylinder {r} grazed {delta:e}, hit {hit}: {:.1} evaluations a ray \
+                     (most {})",
+                    t.mean(),
+                    t.most
+                );
+                clean(&format!("cylinder {r} {delta:e} {hit}"), &t, 100.0, 150);
+            }
+        }
+    }
+    // The box [-1, 1] x [-2, 2] x [-1.5, 1.5] entered through its face x = 1
+    // at angles down to 1e-6 rad.
+    let f = ImplicitFormula::new(
+        "sqrt(max(abs(x) - 1, 0)^2 + max(abs(y) - 2, 0)^2 + max(abs(z) - 1.5, 0)^2) \
+         + min(max(abs(x) - 1, abs(y) - 2, abs(z) - 1.5), 0)",
+    )
+    .unwrap();
+    for alpha in [1e-1_f64, 1e-3, 1e-6] {
+        let rays: Vec<_> = (0..100)
+            .map(|_| {
+                let side = if rng.below(2) == 0 { 1.0 } else { -1.0 };
+                let u = [-alpha.sin(), side * alpha.cos(), 0.0];
+                // 0.4 cm along y before the face, at y0.
+                let s = 0.4 / alpha.cos();
+                let y0 = rng.range(-1.5, 1.5);
+                let case = Case {
+                    o: [1.0 + s * alpha.sin(), y0 - side * 0.4, rng.range(-1.0, 1.0)],
+                    u,
+                    t_max: 3.0,
+                    hint: None,
+                };
+                (case, Some(s))
+            })
+            .collect();
+        let t = exact(&f.tape, f.bounding_box(), &rays);
+        println!(
+            "box entered at {alpha:e} rad: {:.1} evaluations a ray (most {})",
+            t.mean(),
+            t.most
+        );
+        clean(&format!("box {alpha:e}"), &t, 20.0, 40);
+    }
+}
+
 /// The point value of a sphere is exactly 0 for about 4e-8 cm along a
 /// tangent ray. The prototype took that for a crossing and stopped the
 /// particle where it is in neither half-space.

@@ -232,7 +232,7 @@ fn random_formula(rng: &mut Rng, depth: u32) -> String {
     }
     let a = random_formula(rng, depth - 1);
     let b = random_formula(rng, depth - 1);
-    match rng.below(19) {
+    match rng.below(20) {
         0 => format!("{a} + {b}"),
         1 => format!("({a}) - ({b})"),
         2 => format!("({a}) * ({b})"),
@@ -257,6 +257,8 @@ fn random_formula(rng: &mut Rng, depth: u32) -> String {
             format!("abs({a})^{}", number_signed(p))
         }
         17 => format!("({a}) - ({a})"),
+        // A length, with a term clamped at zero: 0 where both terms are.
+        18 => format!("sqrt(({a})^2 + max({b}, 0)^2 + (y - 0.5)^2)"),
         _ => format!("min(0, -abs({a})) * ({b})"),
     }
 }
@@ -437,10 +439,20 @@ fn point_in(rng: &mut Rng, b: &[Interval; 3]) -> [f64; 3] {
     }
 }
 
+/// Whether the computed sum under some `sqrt` among the point values `f` of
+/// `tape` is positive but below 2^-1000, where its squares underflow and
+/// the computed slope of a length is not enclosed (see `norm_slope`).
+fn underflowing_root(tape: &Tape, f: &[f64]) -> bool {
+    tape.ops
+        .iter()
+        .any(|op| matches!(op, Op::Sqrt(a) if f[*a as usize] > 0.0 && f[*a as usize] < 9.3e-302))
+}
+
 /// Every evaluator against the point evaluator, slot by slot, at `p` in
 /// the box `b`: the intervals enclose the point values, the interval
-/// derivatives the point derivatives, and the duals' values are the point
-/// values bit for bit. Returns the slot checks made.
+/// derivatives the point derivatives (unless a sum of squares under a
+/// `sqrt` underflows there), and the duals' values are the point values
+/// bit for bit. Returns the slot checks made.
 fn check_slots(tape: &Tape, p: [f64; 3], b: [Interval; 3], dir: [f64; 3]) -> usize {
     let (mut f, mut iv, mut du, mut idu, mut ch) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -450,6 +462,7 @@ fn check_slots(tape: &Tape, p: [f64; 3], b: [Interval; 3], dir: [f64; 3]) -> usi
     tape.eval_interval_dual(b, dir, &mut idu);
     let traced = tape.eval_traced(b, &mut Vec::new(), &mut ch);
     assert_eq!(traced, iv[iv.len() - 1]);
+    let underflow = underflowing_root(tape, &f);
     let mut checks = 0;
     for i in 0..tape.len() {
         let (v, op) = (f[i], tape.ops()[i]);
@@ -474,7 +487,7 @@ fn check_slots(tape: &Tape, p: [f64; 3], b: [Interval; 3], dir: [f64; 3]) -> usi
             "derivative slot {i}: {e:?}"
         );
         assert!(
-            !d.is_finite() || e.contains(d),
+            !d.is_finite() || underflow || e.contains(d),
             "derivative slot {i} {op:?}: {d:e} not in {e:?} (value {v:e}, box {b:?})"
         );
         checks += 1;
@@ -1097,7 +1110,8 @@ fn segments_enclose_the_computed_values_along_rays() {
                     _ => rng.range(t.lo, t.hi).min(t.hi),
                 };
                 let p = ray_point(o, u, s);
-                let v = value(tape, p);
+                let mut f = Vec::new();
+                let v = tape.eval(p, &mut f);
                 assert!(
                     v.is_nan() || seg.v.contains(v),
                     "{v:e} not in {:?} at t = {s} ({:?})",
@@ -1106,7 +1120,7 @@ fn segments_enclose_the_computed_values_along_rays() {
                 );
                 let d = tape.eval_dual(p, u, &mut Vec::new()).d;
                 assert!(
-                    !d.is_finite() || seg.d.contains(d),
+                    !d.is_finite() || underflowing_root(tape, &f) || seg.d.contains(d),
                     "{d:e} not in {:?}",
                     seg.d
                 );
@@ -1137,4 +1151,40 @@ fn the_centred_form_rules_out_a_grazing_pass() {
         "{:?}",
         seg.v
     );
+}
+
+#[test]
+fn a_length_has_a_bounded_slope_where_it_is_zero() {
+    let slope = |text: &str, b: [Interval; 3], dir: [f64; 3]| {
+        tape_of(text).eval_interval_dual(b, dir, &mut Vec::new()).d
+    };
+    // Over a box holding the z axis, sqrt(x^2 + y^2) slopes by at most 1;
+    // the square root of a sum that is not of squares can slope by any
+    // amount.
+    let axis = [
+        Interval::new(-1e-3, 1e-3),
+        Interval::new(-2e-3, 1e-3),
+        Interval::new(0.0, 1.0),
+    ];
+    let d = slope("sqrt(x^2 + y^2)", axis, [0.6, 0.8, 0.0]);
+    assert!(d.lo >= -1.0 - 1e-12 && d.hi <= 1.0 + 1e-12, "{d:?}");
+    assert_eq!(
+        slope("sqrt(abs(x) + y^2)", axis, [0.6, 0.8, 0.0]),
+        Interval::ENTIRE
+    );
+    // An exact distance to a capped cylinder, over a box across its side
+    // wall: heading in, its slope is bounded and never positive, so a
+    // stretch of ray there crosses the wall at most once.
+    let wall = [
+        Interval::new(0.99, 1.01),
+        Interval::new(-0.01, 0.01),
+        Interval::new(-0.5, 0.5),
+    ];
+    let d = slope(
+        "min(max(sqrt(x^2 + y^2) - 1, abs(z) - 2), 0) \
+         + sqrt(max(sqrt(x^2 + y^2) - 1, 0)^2 + max(abs(z) - 2, 0)^2)",
+        wall,
+        [-1.0, 0.0, 0.0],
+    );
+    assert!(d.is_finite() && d.lo > -2.1 && d.hi <= 0.0, "{d:?}");
 }

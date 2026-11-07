@@ -21,10 +21,10 @@
 //!
 //! - where the enclosure of `g` has no point strictly across there is no
 //!   crossing;
-//! - where that of `g'` excludes 0, `g` is strictly monotone and the piece
+//! - where that of `g'` keeps one sign, `g` never turns back and the piece
 //!   holds at most one crossing, there if `g` at its far end is across: the
 //!   bracket is narrowed by safeguarded Newton ([`search::bracket`]), with
-//!   the least `|g'|` as its certificate;
+//!   the least `|g'|` as its certificate where that excludes 0;
 //! - otherwise the piece is halved, down to [`H_MIN`]; a piece that short
 //!   whose far end is across is bracketed, and one whose far end is not is
 //!   passed over, which can miss only a pair of crossings closer together
@@ -480,11 +480,17 @@ impl Ray<'_> {
             // a crossing there all the same.
             return Some(Ok(piece.a));
         }
+        // Strictly monotone where the slope excludes 0, and never turning
+        // back where it only keeps its sign: either way the piece holds at
+        // most one crossing. (A length of clamped terms, `max(q, 0)`, is
+        // flat on one side of its kink, as an exact signed distance is at
+        // its surface, so its slope can be 0 there.)
         let monotone = !e.d.has_zero();
+        let steady = e.d.lo >= 0.0 || e.d.hi <= 0.0;
         // The centred form, where its spread (the slope times the length)
         // is narrower than the plain enclosure: near a tangency, or on a
         // short piece.
-        if !monotone && e.d.magnitude() * (piece.b - piece.a) < e.v.hi - e.v.lo {
+        if !steady && e.d.magnitude() * (piece.b - piece.a) < e.v.hi - e.v.lo {
             self.budget.spend();
             let c = tape.centre(o, u, t, &mut self.s.slots);
             if clear(c, self.side) {
@@ -495,7 +501,7 @@ impl Ray<'_> {
             }
         }
         let tape = self.shorten(piece.tape);
-        if !(monotone || minimal(piece.a, piece.b)) {
+        if !(steady || minimal(piece.a, piece.b)) {
             let m = midpoint(piece.a, piece.b);
             self.s.pieces.push(Piece {
                 a: m,
@@ -541,14 +547,16 @@ impl Line for Ray<'_> {
         self.budget.spent()
     }
 
-    /// The least `|g'|` over the piece being bracketed, if it is monotone.
+    /// The least `|g'|` over the piece being bracketed, if it is strictly
+    /// monotone.
     fn floor(&self, _: &Sample, _: &Sample) -> f64 {
         self.floor
     }
 
-    /// Only a piece too short to split is bracketed without a certificate,
-    /// and a pair of crossings in it is closer together than [`H_MIN`]: one
-    /// the search may miss.
+    /// A piece bracketed without a certificate is one over which `g` never
+    /// turns back, which holds a single crossing, or one too short to
+    /// split, where a pair of crossings is closer together than [`H_MIN`]:
+    /// one the search may miss.
     fn scan(&mut self, _: Sample, _: Sample) -> Result<Option<f64>, f64> {
         Ok(None)
     }

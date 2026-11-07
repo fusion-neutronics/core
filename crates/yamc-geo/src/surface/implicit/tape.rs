@@ -15,7 +15,11 @@
 //!   formula is strictly monotone along every line in that direction
 //!   through the box. At a kink (`abs`, `min`, `max`) it encloses the
 //!   derivatives of both sides (Clarke's generalised gradient), so a kink
-//!   is shown monotone only where both sides slope the same way.
+//!   is shown monotone only where both sides slope the same way. The
+//!   `sqrt` of a sum of squares is a length, whose slope is at most the
+//!   length of the slopes of the terms squared, even where it is 0 and the
+//!   slope of `sqrt` alone is unbounded (as on the surface of an exact
+//!   signed distance to a box).
 //! - [`Tape::eval_segment`]: the same along a stretch of a ray, with the
 //!   value narrowed by the centred (mean-value) form. A centred form built
 //!   from the derivative alone encloses the exact values, not the computed
@@ -183,6 +187,83 @@ fn chain_interval(d: Interval, factor: impl FnOnce() -> Interval) -> Interval {
     }
 }
 
+/// Most terms [`squares`] looks through.
+const NORM_TERMS: usize = 64;
+
+/// `v` rounded up, for bounds on magnitudes.
+fn up(v: f64) -> f64 {
+    v.next_up()
+}
+
+/// Call `each(c)` for every term `c^2` of the sum at slot `a`, and say
+/// whether it is a sum of squares: a tree of `Add`s over `Square`s of at
+/// most [`NORM_TERMS`] terms (a term reached twice counts twice).
+fn squares(ops: &[Op], a: u32, mut each: impl FnMut(u32)) -> bool {
+    let mut pending = [0u32; NORM_TERMS];
+    pending[0] = a;
+    let (mut n, mut terms) = (1, 0);
+    while n > 0 {
+        n -= 1;
+        match ops[pending[n] as usize] {
+            Op::Square(c) if terms < NORM_TERMS => {
+                each(c);
+                terms += 1;
+            }
+            Op::Add(l, r) if n + 2 <= NORM_TERMS => {
+                pending[n] = l;
+                pending[n + 1] = r;
+                n += 2;
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// An enclosure of the slope of `sqrt` of slot `a`, if that is a sum of
+/// squares `c1^2 + c2^2 + ...`. That is the length of `(c1, c2, ...)`,
+/// whose slope is at most the length of the `c_i'` (Cauchy-Schwarz) and is
+/// the sum of the `c_i'` weighted by `c_i / length`, each of the sign of
+/// `c_i`; the second keeps the sign of the slope of a length of terms that
+/// cannot be negative (`max(q, 0)`, say). Where the length is 0 it has a
+/// kink and no slope, but it changes along a line by the integral of its
+/// slope where it has one, which is all a slope bound is used for (that
+/// `g` is monotone, and the centred form). The enclosure is widened to hold
+/// for the computed slope too wherever the computed sum is at least
+/// 2^-1000 (below that its squares underflow, and the computed slope of the
+/// length can be anything).
+fn norm_slope(ops: &[Op], s: &[IntervalDual], a: u32) -> Option<Interval> {
+    // The computed slope, (c1 c1' + c2 c2' + ...) / length, is within
+    // (terms + 2) ulps of the exact one for the computed c_i and c_i', and
+    // the underflow of the products adds less than 1.2e-173 (2^-575 is
+    // 8.1e-174) a term at a length of at least 2^-500. An underflowing
+    // product keeps its sign and rounds to at most twice its size, so the
+    // weights, which only carry the sign, are taken as up to 2.
+    let w = up(1.0 + (NORM_TERMS as f64 + 2.0) * f64::EPSILON);
+    let (mut sum, mut terms, mut weighted) = (0.0, 0.0, Interval::point(0.0));
+    let norm = squares(ops, a, |c| {
+        let x = s[c as usize];
+        let m = x.d.magnitude();
+        sum = up(sum + up(m * m));
+        terms += 1.0;
+        let weight = Interval::new(
+            if x.v.lo >= 0.0 { 0.0 } else { -2.0 * w },
+            if x.v.hi <= 0.0 { 0.0 } else { 2.0 * w },
+        );
+        weighted = weighted + weight * x.d;
+    });
+    if !norm {
+        return None;
+    }
+    let length = up(up(up(sum.sqrt()) * w) + terms * 1.2e-173);
+    let (lo, hi) = (weighted.lo.max(-length), weighted.hi.min(length));
+    Some(if lo <= hi {
+        Interval::new(lo, hi)
+    } else {
+        spread(length)
+    })
+}
+
 /// The f64 value of `op` at `p`, its operands in `s`.
 #[inline(always)]
 pub(super) fn point(op: Op, s: &[f64], p: [f64; 3]) -> f64 {
@@ -332,8 +413,15 @@ fn choice(op: Op, at: impl Fn(u32) -> Interval) -> Choice {
     }
 }
 
-/// Enclosures of `op` and its derivative along `dir` over the box `b`.
-fn interval_dual(op: Op, s: &[IntervalDual], b: &[Interval; 3], dir: [f64; 3]) -> IntervalDual {
+/// Enclosures of `op`, an instruction of `ops`, and of its derivative
+/// along `dir` over the box `b`.
+fn interval_dual(
+    ops: &[Op],
+    op: Op,
+    s: &[IntervalDual],
+    b: &[Interval; 3],
+    dir: [f64; 3],
+) -> IntervalDual {
     let at = |i: u32| s[i as usize];
     let dual = |v: Interval, d: Interval| IntervalDual { v, d };
     let constant = |c: f64| Interval::point(c);
@@ -357,6 +445,15 @@ fn interval_dual(op: Op, s: &[IntervalDual], b: &[Interval; 3], dir: [f64; 3]) -
                     Interval::ENTIRE
                 }
             });
+            // Where the operand can be 0 the chain rule leaves the slope
+            // unbounded, but that of a length is bounded all the same.
+            let norm = (x.v.lo <= 0.0).then(|| norm_slope(ops, s, a)).flatten();
+            let d = match norm {
+                Some(n) if d.lo.max(n.lo) <= d.hi.min(n.hi) => {
+                    Interval::new(d.lo.max(n.lo), d.hi.min(n.hi))
+                }
+                _ => d,
+            };
             dual(r, d)
         }
         Op::Abs(a) => {
@@ -453,6 +550,7 @@ fn rounding(v: Interval, ulps: f64) -> Interval {
 /// for IEEE arithmetic, taken as one, and one ulp for `libm`, taken as
 /// [`LIBM_ULPS`].
 fn error(
+    ops: &[Op],
     op: Op,
     s: &[IntervalDual],
     e: &[Interval],
@@ -475,9 +573,27 @@ fn error(
         Op::Neg(a) => -err(a),
         Op::Square(a) => err(a) * (at(a) + at(a)) + ieee,
         Op::Sqrt(a) => {
-            // |sqrt(c) - sqrt(e)| = |c - e| / (sqrt(c) + sqrt(e)), and is at
-            // most sqrt(|c - e|).
-            let carried = if at(a).lo > 0.0 {
+            // Where the operand can be 0 and is a sum of squares, the
+            // length of `(c1, c2, ...)` moves by at most the length of the
+            // errors of the c_i, and summing the computed squares moves it
+            // by at most `terms` ulps of itself (and sqrt(terms) 2^-537
+            // where they underflow).
+            let (mut moved, mut length, mut terms) = (0.0, 0.0, 0.0);
+            let norm = at(a).lo <= 0.0
+                && squares(ops, a, |c| {
+                    let (m, v) = (err(c).magnitude(), at(c).magnitude());
+                    moved = up(moved + up(m * m));
+                    length = up(length + up(v * v));
+                    terms += 1.0;
+                });
+            let carried = if norm {
+                let summed = up(up(terms * f64::EPSILON) * up(length.sqrt()));
+                spread(up(
+                    up(up(moved.sqrt()) + summed) + up(terms.sqrt()) * 3.6e-162
+                ))
+            } else if at(a).lo > 0.0 {
+                // |sqrt(c) - sqrt(e)| = |c - e| / (sqrt(c) + sqrt(e)), and
+                // is at most sqrt(|c - e|).
                 let r = at(a).sqrt();
                 err(a) / (r + r)
             } else {
@@ -616,7 +732,7 @@ impl Tape {
     ) -> IntervalDual {
         slots.clear();
         for &op in &self.ops {
-            let v = interval_dual(op, slots, &b, dir);
+            let v = interval_dual(&self.ops, op, slots, &b, dir);
             slots.push(v);
         }
         slots.last().copied().unwrap_or(IntervalDual {
@@ -692,7 +808,15 @@ impl Tape {
         slots.errors.clear();
         for (i, &op) in self.ops.iter().enumerate() {
             let own = slots.duals[i].v;
-            let e = error(op, &slots.duals, &slots.errors, own, &b, &stretch);
+            let e = error(
+                &self.ops,
+                op,
+                &slots.duals,
+                &slots.errors,
+                own,
+                &b,
+                &stretch,
+            );
             slots.errors.push(e);
         }
         let error = slots.errors.last().copied().unwrap_or(Interval::ENTIRE);
