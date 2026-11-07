@@ -1225,7 +1225,7 @@ function surfacesAtPoint(x, y, z, tol) {
   const hits = [];
   for (let i = 0; i < SURFACE_TABLE.length; i++) {
     const entry = SURFACE_TABLE[i];
-    const f = surfaceEval(entry.surface, x, y, z);
+    const f = surfaceEval(entry.surface, x, y, z, true);
     if (!Number.isNaN(f) && Math.abs(f) <= tol) {
       hits.push(entry.name);
     }
@@ -1233,16 +1233,44 @@ function surfacesAtPoint(x, y, z, tol) {
   return hits;
 }
 
-// Implicit function of the surface at (x, y, z), or NaN for a kind this
-// cannot evaluate (e.g. Flux).
-function surfaceEval(surface, x, y, z) {
+// viewer.js's surfaceEval, torusEval and distanceEstimate: Rust's value (so
+// its sign), with `distance` set (hover) about the distance to the surface,
+// or NaN for a kind this cannot evaluate (e.g. Flux).
+function surfaceEval(surface, x, y, z, distance) {
   const k = surface.kind;
   if (k.Plane) return k.Plane.a*x + k.Plane.b*y + k.Plane.c*z - k.Plane.d;
   if (k.Sphere) { const dx=x-k.Sphere.x0,dy=y-k.Sphere.y0,dz=z-k.Sphere.z0; return Math.sqrt(dx*dx+dy*dy+dz*dz)-k.Sphere.radius; }
   if (k.Cylinder) { const ax=k.Cylinder.axis,or=k.Cylinder.origin; const vx=x-or[0],vy=y-or[1],vz=z-or[2]; const dot=vx*ax[0]+vy*ax[1]+vz*ax[2]; const dx=vx-dot*ax[0],dy=vy-dot*ax[1],dz=vz-dot*ax[2]; return Math.sqrt(dx*dx+dy*dy+dz*dz)-k.Cylinder.radius; }
-  if (k.ZTorus) { const t=k.ZTorus; const dx=x-t.x0,dy=y-t.y0,dz=z-t.z0; const rho=Math.sqrt(dx*dx+dy*dy); return (rho-t.a)*(rho-t.a)/(t.c*t.c)+dz*dz/(t.b*t.b)-1.0; }
+  if (k.ZTorus) { const t=k.ZTorus; return torusEval(x-t.x0, y-t.y0, z-t.z0, t, distance); }
+  if (k.XTorus) { const t=k.XTorus; return torusEval(y-t.y0, z-t.z0, x-t.x0, t, distance); }
+  if (k.YTorus) { const t=k.YTorus; return torusEval(x-t.x0, z-t.z0, y-t.y0, t, distance); }
+  if (k.Quadric) {
+    const q=k.Quadric;
+    const f=q.a*x*x + q.b*y*y + q.c*z*z + q.d*x*y + q.e*y*z + q.f*x*z + q.g*x + q.h*y + q.j*z + q.k;
+    if (!distance) return f;
+    const gx=2*q.a*x + q.d*y + q.f*z + q.g, gy=2*q.b*y + q.d*x + q.e*z + q.h, gz=2*q.c*z + q.e*y + q.f*x + q.j;
+    return distanceEstimate(f, Math.sqrt(gx*gx+gy*gy+gz*gz));
+  }
+  if (k.Cone) {
+    const cone=k.Cone, ap=cone.apex, ax=cone.axis;
+    const vx=x-ap[0],vy=y-ap[1],vz=z-ap[2]; const s=vx*ax[0]+vy*ax[1]+vz*ax[2]; const v2=vx*vx+vy*vy+vz*vz;
+    const f=(v2-s*s) - cone.tan2_theta*s*s;
+    if (!distance) return f;
+    const m=(1+cone.tan2_theta)*s; const gx=vx-m*ax[0],gy=vy-m*ax[1],gz=vz-m*ax[2];
+    return distanceEstimate(f, 2*Math.sqrt(gx*gx+gy*gy+gz*gz));
+  }
   return NaN;
 }
+
+function torusEval(t1, t2, ax, t, distance) {
+  const rho=Math.sqrt(t1*t1+t2*t2); const dr=rho-t.a;
+  const f=dr*dr/(t.c*t.c) + ax*ax/(t.b*t.b) - 1.0;
+  if (!distance) return f;
+  const gr=dr/(t.c*t.c), ga=ax/(t.b*t.b);
+  return distanceEstimate(f, 2*Math.sqrt(gr*gr+ga*ga));
+}
+
+function distanceEstimate(f, g) { const d=f/g; return d*f > 0 ? d : f; }
 
 // Kinds (as named in the geometry JSON) of the surfaces in `cells` that
 // `surfaceEval` cannot evaluate, i.e. returns NaN for.

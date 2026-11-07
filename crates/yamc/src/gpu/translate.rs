@@ -8,6 +8,7 @@ use std::sync::Arc;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
+use yamc_geo::region::{walk_rpn, RpnStep};
 use yamc_geo::{BoundaryType, HalfspaceType, RegionExpr, Surface, SurfaceKind};
 use yamc_gpu::neutron::nuclide_select_inputs::{
     NuclideSelectInputs, NUC_PARTIAL_ABSORPTION, NUC_PARTIAL_COLS, NUC_PARTIAL_ELASTIC,
@@ -48,6 +49,8 @@ const REGION_OP_AND: u32 = 2;
 const REGION_OP_OR: u32 = 3;
 const REGION_OP_NOT: u32 = 4;
 const REGION_OP_SHIFT: u32 = 28;
+/// The kernel's `REGION_STACK_DEPTH`: the op-stack size it evaluates with.
+const REGION_STACK_DEPTH: usize = 64;
 
 use super::error::GpuTranslateError;
 use crate::geometry::backend::GeometryKind;
@@ -891,42 +894,31 @@ pub(crate) fn translate_region_program(cells: &[Cell]) -> Vec<u32> {
         }
     }
 
-    // Emit RPN for one region expression, appending op words. A direct
-    // structural mirror of `FlatRegion::from_expr`: `Above`/`Below` push
-    // their surface (same sense the CPU uses), and `Complement` emits an
-    // explicit `Not` rather than pushing into the leaves -- this keeps the
-    // exact boundary behaviour (`Not(Above)` at `evaluate == 0` is `true`,
-    // which a De-Morgan'd `Below` would get wrong).
+    // Emit RPN for one region expression, appending op words. Uses the same
+    // walk as `FlatRegion::from_expr`, so both evaluate the same program:
+    // `Above`/`Below` push their surface (same sense the CPU uses), and
+    // `Complement` emits an explicit `Not` rather than pushing into the
+    // leaves -- this keeps the exact boundary behaviour (`Not(Above)` at
+    // `evaluate == 0` is `true`, which a De-Morgan'd `Below` would get wrong).
     fn emit(expr: &RegionExpr, surface_idx: &HashMap<*const Surface, u32>, ops: &mut Vec<u32>) {
-        match expr {
-            RegionExpr::Halfspace(hs) => {
-                let (surf, above) = match hs {
-                    HalfspaceType::Above(s) => (s, true),
-                    HalfspaceType::Below(s) => (s, false),
-                };
-                let idx = surface_idx[&Arc::as_ptr(surf)];
-                let op = if above {
-                    REGION_OP_ABOVE
-                } else {
-                    REGION_OP_BELOW
-                };
-                ops.push((op << REGION_OP_SHIFT) | idx);
-            }
-            RegionExpr::Intersection(a, b) => {
-                emit(a, surface_idx, ops);
-                emit(b, surface_idx, ops);
-                ops.push(REGION_OP_AND << REGION_OP_SHIFT);
-            }
-            RegionExpr::Union(a, b) => {
-                emit(a, surface_idx, ops);
-                emit(b, surface_idx, ops);
-                ops.push(REGION_OP_OR << REGION_OP_SHIFT);
-            }
-            RegionExpr::Complement(inner) => {
-                emit(inner, surface_idx, ops);
-                ops.push(REGION_OP_NOT << REGION_OP_SHIFT);
-            }
-        }
+        let depth = walk_rpn(expr, &mut |step| {
+            ops.push(match step {
+                RpnStep::Halfspace(hs) => {
+                    let (surf, op) = match hs {
+                        HalfspaceType::Above(s) => (s, REGION_OP_ABOVE),
+                        HalfspaceType::Below(s) => (s, REGION_OP_BELOW),
+                    };
+                    (op << REGION_OP_SHIFT) | surface_idx[&Arc::as_ptr(surf)]
+                }
+                RpnStep::And => REGION_OP_AND << REGION_OP_SHIFT,
+                RpnStep::Or => REGION_OP_OR << REGION_OP_SHIFT,
+                RpnStep::Not => REGION_OP_NOT << REGION_OP_SHIFT,
+            });
+        });
+        assert!(
+            depth <= REGION_STACK_DEPTH,
+            "region needs an evaluation stack of {depth}, more than the GPU's {REGION_STACK_DEPTH}"
+        );
     }
 
     let n_cells = cells.len();

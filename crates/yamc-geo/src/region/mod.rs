@@ -14,7 +14,7 @@ pub mod expr;
 pub mod flat;
 
 pub use expr::{HalfspaceType, RegionExpr};
-pub use flat::{FlatRegion, RegionOp};
+pub use flat::{walk_rpn, FlatRegion, RegionOp, RpnStep};
 
 /// Restores the sharing of surfaces between regions after deserialization.
 ///

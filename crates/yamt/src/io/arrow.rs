@@ -779,7 +779,9 @@ pub fn add_vacuum_boundary(data: &mut ArrowMeshData, offset: f64) {
 /// Build a MeshTopology from Arrow mesh data.
 ///
 /// Fails when the file breaks the positive-orientation invariant the element
-/// walk depends on; see [`crate::mesh::topology::validate_tet_orientation`].
+/// walk depends on (see [`crate::mesh::topology::validate_tet_orientation`]),
+/// or when a volume's boundary lists the same facet twice (see
+/// [`crate::mesh::topology::validate_no_duplicate_facets`]).
 pub fn build_topology(data: ArrowMeshData) -> Result<MeshTopology, MeshError> {
     // Refuse a mesh whose tets are not all positively oriented, before any
     // work is done on it.
@@ -931,7 +933,7 @@ pub fn build_topology(data: ArrowMeshData) -> Result<MeshTopology, MeshError> {
     let physical_data =
         build_physical_group_data_from_json(&data.physical_groups_json, num_volumes, num_surfaces);
 
-    Ok(MeshTopology {
+    let topology = MeshTopology {
         vertices: data.vertices,
         triangles: data.triangles,
         tetrahedra: data.tetrahedra,
@@ -962,7 +964,9 @@ pub fn build_topology(data: ArrowMeshData) -> Result<MeshTopology, MeshError> {
             .filter(|&&[a, b]| a < num_volumes && b < num_volumes)
             .map(|&[a, b]| (a.min(b), a.max(b)))
             .collect(),
-    })
+    };
+    crate::mesh::topology::validate_no_duplicate_facets(&topology)?;
+    Ok(topology)
 }
 
 /// Check the recorded overlap pairs: ids in range, and the "takes the shared
@@ -1460,6 +1464,146 @@ mod tests {
         assert!(msg.contains("yamm"), "{msg}");
     }
 
+    /// Append a copy of triangle `tri` to `data` on surface id `surface_id`
+    /// (1-based, as in the file), reversed when `reverse` is set.
+    fn push_triangle_copy(data: &mut ArrowMeshData, tri: usize, surface_id: u32, reverse: bool) {
+        let mut t = data.triangles[tri];
+        if reverse {
+            t.swap(1, 2);
+        }
+        data.triangles.push(t);
+        data.triangle_surface_ids.push(surface_id);
+        data.triangle_physical_groups
+            .push(data.triangle_physical_groups[tri]);
+        data.triangle_aabbs.push(data.triangle_aabbs[tri]);
+    }
+
+    /// Issue #515: a volume whose boundary lists a facet twice is refused,
+    /// whether the copy faces the same way (a copy) or the opposite way (a
+    /// contradiction), and the message names the triangles.
+    #[test]
+    fn test_duplicate_facet_is_rejected() {
+        let path = std::path::Path::new("tests/data/cube.arrow");
+        for reverse in [false, true] {
+            let mut data = read_arrow_mesh(path).unwrap();
+            let n = data.triangles.len();
+            let surface_id = data.triangle_surface_ids[0];
+            push_triangle_copy(&mut data, 0, surface_id, reverse);
+
+            let err = build_topology(data).unwrap_err();
+            match err {
+                MeshError::DuplicateFacet {
+                    volume: 0,
+                    triangles,
+                    same_facing,
+                    ..
+                } => {
+                    assert_eq!(triangles, [0, n as u32]);
+                    assert_eq!(same_facing, !reverse);
+                }
+                ref other => panic!("expected a duplicate-facet error, got {other:?}"),
+            }
+            let msg = err.to_string();
+            assert!(msg.contains(&format!("triangles 0 and {n}")), "{msg}");
+        }
+    }
+
+    /// A copy whose vertices are separate rows at the same positions (as an
+    /// STL soup writes them) is the same facet.
+    #[test]
+    fn test_duplicate_facet_with_unwelded_vertices_is_rejected() {
+        let path = std::path::Path::new("tests/data/cube.arrow");
+        let mut data = read_arrow_mesh(path).unwrap();
+        let t = data.triangles[0];
+        let first_new = data.vertices.len() as VertexId;
+        for v in t {
+            data.vertices.push(data.vertices[v as usize]);
+        }
+        let surface_id = data.triangle_surface_ids[0];
+        push_triangle_copy(&mut data, 0, surface_id, false);
+        *data.triangles.last_mut().unwrap() = [first_new, first_new + 1, first_new + 2];
+        assert!(matches!(
+            build_topology(data),
+            Err(MeshError::DuplicateFacet {
+                same_facing: true,
+                ..
+            })
+        ));
+    }
+
+    /// On a surface with the volume on both sides (an internal face), one
+    /// triangle is reached twice (once per sense) and is not a copy, and an
+    /// opposite-wound pair is the face listed from each side. A same-wound
+    /// pair there is still a copy.
+    #[test]
+    fn test_internal_face_is_not_a_duplicate() {
+        let path = std::path::Path::new("tests/data/cube.arrow");
+        let base = read_arrow_mesh(path).unwrap();
+        let mut sv = parse_surface_volumes_json(&base.surface_volumes_json);
+        assert!(sv.iter().all(|e| e[0] == Some(0) || e[1] == Some(0)));
+        // A small triangle well inside the cube, on a new [V, V] surface.
+        let (lo, hi) = base
+            .vertices
+            .iter()
+            .fold(([f64::MAX; 3], [f64::MIN; 3]), |(lo, hi), p| {
+                (
+                    [lo[0].min(p[0]), lo[1].min(p[1]), lo[2].min(p[2])],
+                    [hi[0].max(p[0]), hi[1].max(p[1]), hi[2].max(p[2])],
+                )
+            });
+        let at = |f: [f64; 3]| -> [f64; 3] {
+            [
+                lo[0] + f[0] * (hi[0] - lo[0]),
+                lo[1] + f[1] * (hi[1] - lo[1]),
+                lo[2] + f[2] * (hi[2] - lo[2]),
+            ]
+        };
+        sv.push([Some(0), Some(0)]);
+        let surface_id = sv.len() as u32;
+        let json = |sv: &[[Option<u32>; 2]]| -> String {
+            let cell = |v: Option<u32>| v.map_or("null".to_string(), |v| v.to_string());
+            let rows: Vec<String> = sv
+                .iter()
+                .map(|e| format!("[{}, {}]", cell(e[0]), cell(e[1])))
+                .collect();
+            format!("[{}]", rows.join(", "))
+        };
+        let with_internal_face = |copies: &[bool]| -> ArrowMeshData {
+            let mut data = base.clone();
+            data.surface_volumes_json = json(&sv);
+            let v0 = data.vertices.len() as VertexId;
+            data.vertices.push(at([0.4, 0.4, 0.5]));
+            data.vertices.push(at([0.6, 0.4, 0.5]));
+            data.vertices.push(at([0.5, 0.6, 0.5]));
+            let face = data.triangles.len();
+            push_triangle_copy(&mut data, 0, surface_id, false);
+            data.triangles[face] = [v0, v0 + 1, v0 + 2];
+            let p = &data.vertices[v0 as usize..];
+            data.triangle_aabbs[face] = [
+                p[0][0].min(p[1][0]).min(p[2][0]),
+                p[0][1].min(p[1][1]).min(p[2][1]),
+                p[0][2].min(p[1][2]).min(p[2][2]),
+                p[0][0].max(p[1][0]).max(p[2][0]),
+                p[0][1].max(p[1][1]).max(p[2][1]),
+                p[0][2].max(p[1][2]).max(p[2][2]),
+            ];
+            for &reverse in copies {
+                push_triangle_copy(&mut data, face, surface_id, reverse);
+            }
+            data
+        };
+
+        build_topology(with_internal_face(&[])).unwrap();
+        build_topology(with_internal_face(&[true])).unwrap();
+        assert!(matches!(
+            build_topology(with_internal_face(&[false])),
+            Err(MeshError::DuplicateFacet {
+                same_facing: true,
+                ..
+            })
+        ));
+    }
+
     /// Every committed fixture's triangle winding must agree with
     /// the sense recorded in `yamc.surface_volumes`.
     ///
@@ -1662,9 +1806,9 @@ mod tests {
         assert_eq!(geom.num_volumes(), 2);
 
         // Left box center should be in volume 0 (fuel)
-        assert!(geom.point_in_volume(0, [0.0, 0.0, 0.0]));
+        assert!(geom.point_in_volume(0, [0.25, 0.5, 0.5]));
         // Right box center should be in volume 1 (moderator)
-        assert!(geom.point_in_volume(1, [1.0, 0.0, 0.0]));
+        assert!(geom.point_in_volume(1, [0.75, 0.5, 0.5]));
 
         // Material names
         assert_eq!(geom.material_name(0), Some("fuel"));

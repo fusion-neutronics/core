@@ -1,13 +1,14 @@
 //! Point location that cannot say where a point is.
 //!
-//! Parity point location takes the first test ray that crosses no facet
-//! edge-on and, when every ray does, answers "outside". A point it cannot
-//! place inside a solid then lands in the implicit complement, and a particle
-//! there carries on as void. `point_in_volume_checked` also checks each ray's
-//! parity against the facet nearest the point along it (a ray from inside
-//! leaves through it), passes over a ray where the two disagree, and returns
-//! `None` when no ray gives a consistent answer; `try_find_volume_from` turns
-//! that into "cannot place" rather than the implicit complement.
+//! Parity point location takes the first test ray it can count (one that
+//! grazes no facet and keeps clear of edges and vertices) and, when it can
+//! count none, answers "outside". A point it cannot place inside a solid then
+//! lands in the implicit complement, and a particle there carries on as void.
+//! `point_in_volume_checked` also checks each ray's parity against the facet
+//! nearest the point along it (a ray from inside leaves through it), passes
+//! over a ray where the two disagree, and returns `None` when no ray gives a
+//! consistent answer; `try_find_volume_from` turns that into "cannot place"
+//! rather than the implicit complement.
 
 use yamt::mesh::topology::{build_tet_aabbs, build_triangle_aabbs};
 use yamt::{build_topology, ArrowMeshData, MeshGeometry};
@@ -96,9 +97,9 @@ fn a_sound_cube_is_placed_as_before() {
 
 #[test]
 fn a_flipped_facet_on_the_first_ray_is_passed_over() {
-    // The +z ray from INSIDE (y > x there, so it meets the top face's
-    // triangle [4, 6, 7]) crosses a facet wound inward. Its parity still says
-    // inside, its facing says the ray enters there: the next ray decides.
+    // The first ray from INSIDE leaves through the top face where y > x, so
+    // through its triangle [4, 6, 7], a facet wound inward. Its parity still
+    // says inside, its facing says the ray enters there: the next ray decides.
     let geom = cube(&[3]);
     assert_eq!(geom.point_in_volume_checked(0, INSIDE), Some(true));
     assert_eq!(geom.try_find_volume_from(u32::MAX, INSIDE), Some(0));

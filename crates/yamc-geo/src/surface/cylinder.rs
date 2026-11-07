@@ -108,10 +108,11 @@ impl Surface {
     ) -> Self {
         // The cylinder `evaluate` / `distance_to_surface` math rejects the axial
         // component as `v - (v·a)a`, which is the true perpendicular component only
-        // when |a| = 1. Normalize here so every construction path (Python factory,
-        // Rust callers, deserialization) gets correct geometry from any direction
-        // vector. A zero-length axis can't be normalized; leave it untouched and let
-        // callers (e.g. the Python `Cylinder` factory) reject it.
+        // when |a| = 1. Normalize here so every constructor (Python factory, Rust
+        // callers) gets correct geometry from any direction vector; loading a model
+        // normalizes through `unit_axis`. A zero-length axis can't be normalized;
+        // leave it untouched and let callers (e.g. the Python `Cylinder` factory)
+        // reject it.
         let norm = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
         let axis = if norm > 0.0 {
             [axis[0] / norm, axis[1] / norm, axis[2] / norm]
