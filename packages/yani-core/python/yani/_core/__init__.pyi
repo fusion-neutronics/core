@@ -978,6 +978,25 @@ class Material:
         Set the name of the material
         """
     @property
+    def s_alpha_beta(self) -> builtins.dict[builtins.str, builtins.float]:
+        r"""
+        The thermal scattering tables this material uses, as a dict of table
+        name to the fraction of its nuclides that is bound.
+        """
+    @s_alpha_beta.setter
+    def s_alpha_beta(self, value: str | list[str] | dict[str, float]) -> None:
+        r"""
+        Set the thermal scattering tables: a table name, a list of names, or a
+        dict of name to bound fraction. Read the nuclear data again to load
+        them.
+        """
+    @property
+    def thermal_bindings(self) -> builtins.dict[builtins.str, builtins.list[builtins.str]]:
+        r"""
+        The nuclides each loaded thermal scattering table applies to, as a dict
+        of table name to nuclide names. Empty until the nuclear data is read.
+        """
+    @property
     def id(self) -> builtins.int:
         r"""
         The material's ID.
@@ -1086,7 +1105,7 @@ class Material:
         Returns:
             Optional[float]: Sampled distance in cm, or None if total XS unavailable.
         """
-    def __new__(cls, composition: dict[str | Nuclide, float | Enriched], density: builtins.float, *, density_units: builtins.str = 'g/cm3', name: typing.Optional[builtins.str] = None, id: typing.Optional[builtins.int] = None, fraction_type: builtins.str = 'atom', transmutable: builtins.bool = False, volume: typing.Optional[builtins.float] = None, temperature: typing.Optional[builtins.float] = None) -> Material:
+    def __new__(cls, composition: dict[str | Nuclide, float | Enriched], density: builtins.float, *, density_units: builtins.str = 'g/cm3', name: typing.Optional[builtins.str] = None, id: typing.Optional[builtins.int] = None, fraction_type: builtins.str = 'atom', transmutable: builtins.bool = False, volume: typing.Optional[builtins.float] = None, temperature: typing.Optional[builtins.float] = None, s_alpha_beta: str | list[str] | dict[str, float] | None = None) -> Material:
         r"""
         Create a new material with a declarative composition and density.
         
@@ -1111,6 +1130,16 @@ class Material:
             temperature (Optional[float]): Temperature in Kelvin. If omitted,
                 294 K is used, or the only temperature the nuclear data carries
                 when it carries just one.
+            s_alpha_beta (str | list[str] | dict[str, float] | None): Thermal
+                scattering tables for bound nuclides, by name, such as
+                ``"c_H_in_H2O"`` or ``["c_Li_in_FLiBe", "c_Be_in_FLiBe",
+                "c_F_in_FLiBe"]``. A dict gives the fraction of each table's
+                nuclides that is bound (``{"c_H_in_ZrH": 0.6}``); otherwise all
+                of them are. Which nuclides a table applies to is the table's
+                own data. The tables come from the library the cross sections
+                are read from, at the material's temperature (the table it sits
+                on, or the two it falls between); a library without thermal
+                tables, or a temperature outside a table's range, is refused.
         
         Returns:
             Material: A new material.
@@ -4700,13 +4729,18 @@ def generate_library(keyword: builtins.str, path: builtins.str, *, parts: typing
         earlier build of the same library, and not inside :func:`cache_dir`.
     parts : list of str, optional
         What to build, of ``"neutron"``, ``"photon"``, ``"photonuclear"``,
-        ``"decay"``, ``"reactions"``, ``"fission_yields"`` and ``"branching"``.
-        The default is every part the library's published release carries. Only
-        ``"neutron"`` runs NJOY, so a chain alone builds in minutes.
+        ``"thermal"``, ``"decay"``, ``"reactions"``, ``"fission_yields"`` and
+        ``"branching"``. The default is every part the library's published
+        release carries. Only ``"neutron"`` and ``"thermal"`` run NJOY, so a
+        chain alone builds in minutes. ``"thermal"`` is the thermal scattering
+        tables (``thermal/c_H_in_H2O.arrow/`` and so on), which only
+        ``"endf-b8.1"`` and ``"jeff-4.0"`` publish.
     nuclides : list of str, optional
         Only these nuclides (``"Fe56"``, ``"Am242_m1"``) and elements (``"Fe"``,
-        meaning every Fe evaluation and the Fe photon data). The transmutation
-        chain is always built whole. A name the library does not have is refused.
+        meaning every Fe evaluation and the Fe photon data), and thermal tables
+        by name (``"c_H_in_H2O"``) or by what they bind to (``"H"`` is every
+        table binding hydrogen). The transmutation chain is always built whole.
+        A name the library does not have is refused.
     temperatures : list of float, optional
         Neutron temperatures in Kelvin. The default is 250, 293.6, 600, 900, 1200
         and 2500 K. The 0 K grid is always kept.
