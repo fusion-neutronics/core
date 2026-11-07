@@ -11,15 +11,12 @@
 //! never publishes a chain cut down to its subset.
 //!
 //! Decay, reactions and fission yields come from one call, which assembles
-//! the network from the decay, fission yield and neutron evaluations. A
-//! library without decay or fission yield data of its own (TENDL, FENDL)
-//! assembles it with the library its recipe names, publishes only the
-//! reactions, whose rows come from its own neutron evaluations, and records
-//! that library as `decay_library` in every subsection's provenance.
+//! the network from the library's own decay, fission yield and neutron
+//! evaluations. Nothing of another library is used: a library without decay
+//! or fission yield data of its own has no chain parts in its recipe.
 //!
 //! Branching comes from a second call, scoped to the parents of the
-//! reactions subsection so its curves line up with the network. IRDFF-II
-//! has no network to scope to, so its parents are its isotopic evaluations.
+//! reactions subsection so its curves line up with the network.
 //!
 //! The scalar isomeric ratios some chains apply to (n,gamma) from an assumed
 //! reactor spectrum are not applied: a channel's branching is the
@@ -94,7 +91,7 @@ pub fn build(
 
     let provenance = Provenance {
         library: recipe.keyword.to_string(),
-        decay_library: recipe.decay_library.unwrap_or(recipe.keyword).to_string(),
+        decay_library: recipe.keyword.to_string(),
         data_version: release.to_string(),
         created_utc: created_utc.to_string(),
     };

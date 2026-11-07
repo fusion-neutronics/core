@@ -174,13 +174,6 @@ pub struct Recipe<'a> {
     pub parts: &'static [Part],
     /// The NJOY its neutron evaluations are processed with.
     pub njoy: Flavour,
-    /// The library whose decay and fission yield evaluations its chain is
-    /// assembled with, when it has none of its own (TENDL, FENDL and IRDFF
-    /// use ENDF/B-VIII.1's). Those sources are in `sources` like any other,
-    /// and the chain records this as its `decay_library`, so it never reads
-    /// as though that half were this library's. `None` for a library that
-    /// evaluates its own.
-    pub decay_library: Option<&'static str>,
     /// The evaluations NJOY cannot process, as `"<particle>/<Name>"`. A full
     /// build without them is complete; one that converts any of them says
     /// the list has gone stale. Each recipe says why next to its list.
@@ -257,7 +250,6 @@ static RECIPES: &[Recipe<'static>] = &[
         sources: ENDF_B8_1,
         parts: FULL,
         njoy: Flavour::Upstream,
-        decay_library: None,
         unconvertible: &[],
         disk_bytes: 15 * GB,
     },
@@ -273,7 +265,6 @@ static RECIPES: &[Recipe<'static>] = &[
             Part::Branching,
         ],
         njoy: Flavour::Upstream,
-        decay_library: None,
         unconvertible: &[],
         disk_bytes: 15 * GB,
     },
@@ -282,7 +273,6 @@ static RECIPES: &[Recipe<'static>] = &[
         sources: JENDL_5_0,
         parts: FULL,
         njoy: Flavour::Upstream,
-        decay_library: None,
         // Every one of its 795 neutron evaluations converts.
         unconvertible: &[],
         disk_bytes: 50 * GB,
@@ -292,7 +282,6 @@ static RECIPES: &[Recipe<'static>] = &[
         sources: TENDL_2025,
         parts: TENDL_PARTS,
         njoy: Flavour::Upstream,
-        decay_library: Some("endf-b8.1"),
         // PURR stops on both building the unresolved range's probability
         // tables ("bad value for nres or emin>emax, increase dmin", STOP
         // 77): their unresolved range has no resonances to average over, or
@@ -307,7 +296,6 @@ static RECIPES: &[Recipe<'static>] = &[
         sources: TENDL_2017,
         parts: TENDL_PARTS,
         njoy: Flavour::Upstream,
-        decay_library: Some("endf-b8.1"),
         // HEATR stops on all twelve ("awp is zero for mt 16 particle 4006",
         // STOP 77). Eleven declare their MF=6 MT=16 (n,2n) products with
         // AWP=0 against a ZAP=0 placeholder, which sixbar cannot average;
@@ -333,40 +321,33 @@ static RECIPES: &[Recipe<'static>] = &[
     Recipe {
         keyword: "fendl-3.2d",
         sources: FENDL_3_2D,
-        // No decay or fission yield evaluations of its own: the chain is
-        // its reactions and their isomeric branching.
-        parts: &[
-            Part::Neutron,
-            Part::Photon,
-            Part::Reactions,
-            Part::Branching,
-        ],
+        // No decay or fission yield evaluations of its own, and the chain
+        // converters assemble a network from decay data, so it has no chain
+        // parts until they can build one from its neutron files alone.
+        parts: &[Part::Neutron, Part::Photon],
         njoy: Flavour::IaeaFork,
-        decay_library: Some("endf-b8.1"),
         unconvertible: &[],
         disk_bytes: 8 * GB,
     },
     Recipe {
         keyword: "irdff-ii",
         sources: IRDFF_II,
-        // A dosimetry file: its release is the isomeric branching of its
-        // isotopic evaluations, read against ENDF/B-VIII.1's decay data.
-        parts: &[Part::Branching],
+        // A dosimetry file, whose release is the isomeric branching of its
+        // isotopic evaluations. Naming a level's isomer needs decay data,
+        // which it has none of, so there is nothing to build from it alone
+        // until the branching keeps levels as evaluated and a run matches
+        // them against the decay library it is given.
+        parts: &[],
         njoy: Flavour::Upstream,
-        decay_library: Some("endf-b8.1"),
         unconvertible: &[],
         disk_bytes: GB,
     },
 ];
 
-/// TENDL's parts: neutron and photonuclear data, and a chain of reactions
-/// and their isomeric branching (TENDL has no decay or fission yield data).
-const TENDL_PARTS: &[Part] = &[
-    Part::Neutron,
-    Part::Photonuclear,
-    Part::Reactions,
-    Part::Branching,
-];
+/// TENDL's parts: neutron and photonuclear data. TENDL has no decay or
+/// fission yield data, so no chain part until the chain converters can build
+/// reactions and branching from its neutron files alone.
+const TENDL_PARTS: &[Part] = &[Part::Neutron, Part::Photonuclear];
 
 /// ENDF/B-VIII.1, released August 2024 by the CSEWG through the NNDC.
 static ENDF_B8_1: &[Source] = &[
@@ -404,8 +385,7 @@ static ENDF_B8_1: &[Source] = &[
     ENDF_B8_1_YIELDS,
 ];
 
-/// ENDF/B-VIII.1's decay sublibrary, which the libraries without decay data
-/// of their own assemble their chain with.
+/// ENDF/B-VIII.1's decay sublibrary.
 const ENDF_B8_1_DECAY: Source = Source {
     name: "decay-version.VIII.1.tar.gz",
     url:
@@ -418,7 +398,7 @@ const ENDF_B8_1_DECAY: Source = Source {
     keep: |n| named(n, "dec-", ".endf"),
 };
 
-/// ENDF/B-VIII.1's neutron-induced fission yields, likewise.
+/// ENDF/B-VIII.1's neutron-induced fission yields.
 const ENDF_B8_1_YIELDS: Source = Source {
     name: "nfy-version.VIII.1.tar.gz",
     url: "https://www.nndc.bnl.gov/endf-releases/releases/B-VIII.1/nfy/nfy-version.VIII.1.tar.gz",
@@ -639,8 +619,7 @@ const fn jendl_yields(name: &'static str, url: &'static str, pin: Pin) -> Source
 }
 
 /// TENDL-2025, released July 2025 (TALYS-based, Imperial College London).
-/// Neutron and photonuclear; TENDL has no decay or fission yield data, so
-/// its chain is assembled with ENDF/B-VIII.1's.
+/// Neutron and photonuclear. TENDL has no decay or fission yield data.
 static TENDL_2025: &[Source] = &[
     Source {
         name: "TENDL-n.tgz",
@@ -662,12 +641,9 @@ static TENDL_2025: &[Source] = &[
         sublibrary: Sublibrary::Photonuclear,
         keep: |n| named(n, "g-", ".tendl"),
     },
-    ENDF_B8_1_DECAY,
-    ENDF_B8_1_YIELDS,
 ];
 
-/// TENDL-2017 (TALYS-based, PSI), neutron and photonuclear, with
-/// ENDF/B-VIII.1's decay and fission yields for its chain.
+/// TENDL-2017 (TALYS-based, PSI), neutron and photonuclear.
 static TENDL_2017: &[Source] = &[
     Source {
         name: "TENDL-n.tgz",
@@ -689,8 +665,6 @@ static TENDL_2017: &[Source] = &[
         sublibrary: Sublibrary::Photonuclear,
         keep: |n| named(n, "g-", ".tendl"),
     },
-    ENDF_B8_1_DECAY,
-    ENDF_B8_1_YIELDS,
 ];
 
 /// FENDL-3.2d, the IAEA Fusion Evaluated Nuclear Data Library, published
@@ -700,8 +674,7 @@ static TENDL_2017: &[Source] = &[
 /// they are fetched by hand. The pins are of the copies downloaded on
 /// 2026-11-03.
 /// FENDL's atom archive carries photo-atomic data only, with no atomic
-/// relaxation (MF=28). FENDL has no decay or fission yield data, so its
-/// chain is assembled with ENDF/B-VIII.1's.
+/// relaxation (MF=28). FENDL has no decay or fission yield data.
 static FENDL_3_2D: &[Source] = &[
     Source {
         name: "fendl-3.2d-T1-neutron-endf.zip",
@@ -723,8 +696,6 @@ static FENDL_3_2D: &[Source] = &[
         sublibrary: Sublibrary::Photoatomic,
         keep: |n| n.ends_with(".endf"),
     },
-    ENDF_B8_1_DECAY,
-    ENDF_B8_1_YIELDS,
 ];
 
 /// IRDFF-II, the IAEA International Reactor Dosimetry and Fusion File,
@@ -732,21 +703,17 @@ static FENDL_3_2D: &[Source] = &[
 /// (A. Trkov et al., Nucl. Data Sheets 163 (2020) 1, doi:10.1016/j.nds.2019.12.001).
 /// One zip holding one 70-material tape. The IAEA serves it only to a web
 /// browser; the pin is of the zip as served on 2026-09-27, with a
-/// Last-Modified of 2020-12-08. Its branching is read against
-/// ENDF/B-VIII.1's decay data, which it has none of.
-static IRDFF_II: &[Source] = &[
-    Source {
-        name: "IRDFF-II_ENDF.zip",
-        url: "https://www-nds.iaea.org/IRDFF/IRDFF-II_ENDF.zip",
-        pin: Pin {
-            bytes: 33_372_016,
-            sha256: "225b25787f6d9b54a9c28ebf075ccc715f69358be181fed27d5cc315cf8744db",
-        },
-        sublibrary: Sublibrary::Neutron,
-        keep: |n| n == "IRDFF-II.endf",
+/// Last-Modified of 2020-12-08. It has no decay data.
+static IRDFF_II: &[Source] = &[Source {
+    name: "IRDFF-II_ENDF.zip",
+    url: "https://www-nds.iaea.org/IRDFF/IRDFF-II_ENDF.zip",
+    pin: Pin {
+        bytes: 33_372_016,
+        sha256: "225b25787f6d9b54a9c28ebf075ccc715f69358be181fed27d5cc315cf8744db",
     },
-    ENDF_B8_1_DECAY,
-];
+    sublibrary: Sublibrary::Neutron,
+    keep: |n| n == "IRDFF-II.endf",
+}];
 
 #[cfg(test)]
 mod tests {
@@ -803,33 +770,31 @@ mod tests {
                     Part::Neutron => &[Sublibrary::Neutron],
                     Part::Photon => &[Sublibrary::Photoatomic],
                     Part::Photonuclear => &[Sublibrary::Photonuclear],
-                    Part::Decay | Part::Reactions | Part::FissionYields => &[
+                    // The chain converters assemble one network from all
+                    // three sublibraries, whichever subsection is written.
+                    Part::Decay | Part::Reactions | Part::FissionYields | Part::Branching => &[
                         Sublibrary::Neutron,
                         Sublibrary::Decay,
                         Sublibrary::FissionYields,
                     ],
-                    Part::Branching => &[Sublibrary::Neutron, Sublibrary::Decay],
                 };
                 for s in needs {
                     assert!(has(*s), "{} {} needs {}", r.keyword, part.name(), s.dir());
                 }
             }
-            // A library that publishes its own decay data does not borrow
-            // another's, and one that borrows publishes none.
-            let own_decay = r.parts.contains(&Part::Decay);
-            assert_eq!(own_decay, r.decay_library.is_none(), "{}", r.keyword);
-            if let Some(lib) = r.decay_library {
-                let donor = recipe(lib).unwrap();
-                for s in r.sources.iter().filter(|s| {
-                    matches!(s.sublibrary, Sublibrary::Decay | Sublibrary::FissionYields)
-                }) {
-                    assert!(
-                        donor.sources.iter().any(|d| d.pin == s.pin),
-                        "{} takes {} from somewhere other than {lib}",
-                        r.keyword,
-                        s.name
-                    );
-                }
+            // Every source is the library's own: no decay or fission yield
+            // archive of another library is built into it.
+            for src in r.sources {
+                let part_of_it = match src.sublibrary {
+                    Sublibrary::Decay => r.parts.contains(&Part::Decay),
+                    Sublibrary::FissionYields => r.parts.contains(&Part::FissionYields),
+                    _ => true,
+                };
+                assert!(
+                    part_of_it,
+                    "{} builds from {} but publishes none of it",
+                    r.keyword, src.name
+                );
             }
         }
     }

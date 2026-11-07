@@ -283,9 +283,9 @@ release's `manifest.json` written last. The logic is the native-only
 `crates/yani-python/src/library.rs`:
 
 * `recipe.rs`: per keyword, the source archives with their size and sha256
-  pins, the parts the release carries, the NJOY flavour, the library its chain
-  borrows decay data from (TENDL, FENDL and IRDFF-II use ENDF/B-VIII.1's), the
-  evaluations NJOY cannot process, and the disk a full build needs.
+  pins (the library's own, never another's), the parts the release carries,
+  the NJOY flavour, the evaluations NJOY cannot process, and the disk a full
+  build needs.
 * `sources.rs`, `extract.rs`, `identify.rs`: fetch (with the browser route for
   hosts that refuse scripts), unpack per sublibrary, and name every material
   from its MF=1 MT=451 header.

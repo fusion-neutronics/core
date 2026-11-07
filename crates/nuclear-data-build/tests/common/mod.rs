@@ -72,7 +72,6 @@ pub fn recipe(keyword: &str, sources: Vec<Source>) -> Recipe<'static> {
         sources: Box::leak(sources.into_boxed_slice()),
         parts: &[],
         njoy: endf::njoy::Flavour::Upstream,
-        decay_library: None,
         unconvertible: &[],
         disk_bytes: 0,
     }

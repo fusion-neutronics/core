@@ -231,6 +231,15 @@ pub fn generate(request: &Request) -> Result<Report, String> {
 /// The parts to build: those asked for, each a part the library's release
 /// carries, or all of those.
 fn parts(recipe: &Recipe, asked: Option<&[Part]>) -> Result<Vec<Part>, String> {
+    if recipe.parts.is_empty() {
+        return Err(format!(
+            "{} has nothing that can be built from its own evaluations yet: its \
+             release is isomeric branching, and naming a product level's isomer \
+             takes decay data, which {} does not have. The published release is \
+             unchanged and stays available",
+            recipe.keyword, recipe.keyword
+        ));
+    }
     let Some(asked) = asked else {
         return Ok(recipe.parts.to_vec());
     };
@@ -557,26 +566,36 @@ mod tests {
     fn parts_default_to_the_release_and_refuse_what_it_does_not_carry() {
         let tendl = recipe::recipe("tendl-2025").unwrap();
         assert_eq!(parts(tendl, None).unwrap(), tendl.parts);
-        let err = parts(tendl, Some(&[Part::Decay])).unwrap_err();
-        assert!(err.contains("no decay part"), "{err}");
+        // TENDL has no decay data, so it carries no chain part.
+        let err = parts(tendl, Some(&[Part::Reactions])).unwrap_err();
+        assert!(err.contains("no reactions part"), "{err}");
         let got = parts(
             tendl,
-            Some(&[Part::Branching, Part::Neutron, Part::Neutron]),
+            Some(&[Part::Photonuclear, Part::Neutron, Part::Neutron]),
         )
         .unwrap();
-        assert_eq!(got, [Part::Neutron, Part::Branching]);
+        assert_eq!(got, [Part::Neutron, Part::Photonuclear]);
         assert!(parts(tendl, Some(&[])).is_err());
+        let irdff = recipe::recipe("irdff-ii").unwrap();
+        let err = parts(irdff, None).unwrap_err();
+        assert!(err.contains("takes decay data"), "{err}");
     }
 
     #[test]
     fn chain_parts_fetch_what_the_chain_is_assembled_from() {
+        let endf = recipe::recipe("endf-b8.1").unwrap();
+        let got: Vec<_> = sublibraries(endf, &[Part::Branching]).into_iter().collect();
+        assert_eq!(
+            got,
+            [
+                Sublibrary::Neutron,
+                Sublibrary::Decay,
+                Sublibrary::FissionYields
+            ]
+        );
         let tendl = recipe::recipe("tendl-2025").unwrap();
-        let only_branching = sublibraries(tendl, &[Part::Branching]);
-        assert!(only_branching.contains(&Sublibrary::FissionYields));
-        assert!(!only_branching.contains(&Sublibrary::Photonuclear));
-        let irdff = recipe::recipe("irdff-ii").unwrap();
-        let got: Vec<_> = sublibraries(irdff, irdff.parts).into_iter().collect();
-        assert_eq!(got, [Sublibrary::Neutron, Sublibrary::Decay]);
+        let got: Vec<_> = sublibraries(tendl, tendl.parts).into_iter().collect();
+        assert_eq!(got, [Sublibrary::Neutron, Sublibrary::Photonuclear]);
     }
 
     #[test]
