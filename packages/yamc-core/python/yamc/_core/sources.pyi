@@ -796,6 +796,8 @@ class StellaratorShape:
     
     A DESC equilibrium's ``R_lmn`` / ``Z_lmn`` with its ``R_basis.modes`` /
     ``Z_basis.modes`` are these coefficients directly, times 100 for cm.
+    ``StellaratorShape.from_vmec`` fits a shape to the flux surfaces of a VMEC
+    equilibrium.
     
     Args:
         num_field_periods: Number of field periods ``N``.
@@ -822,6 +824,13 @@ class StellaratorShape:
         ... )
     """
     @property
+    def fit_error(self) -> typing.Optional[builtins.float]:
+        r"""
+        How far the shape is from the VMEC surfaces ``from_vmec`` fitted it
+        to: the largest distance (cm) over every surface and an angular grid.
+        ``None`` for a shape given as Fourier-Zernike coefficients.
+        """
+    @property
     def num_field_periods(self) -> builtins.int:
         r"""
         Number of field periods.
@@ -847,6 +856,72 @@ class StellaratorShape:
         Coefficients of the ``Z`` series (cm), in the order of ``z_modes``.
         """
     def __new__(cls, *, num_field_periods: builtins.int, r_modes: typing.Sequence[typing.Sequence[builtins.int]], r_lmn: typing.Sequence[builtins.float], z_modes: typing.Sequence[typing.Sequence[builtins.int]], z_lmn: typing.Sequence[builtins.float]) -> StellaratorShape: ...
+    @staticmethod
+    def from_vmec(*, num_field_periods: builtins.int, xm: typing.Sequence[builtins.float], xn: typing.Sequence[builtins.float], rmnc: typing.Sequence[typing.Sequence[builtins.float]], zmns: typing.Sequence[typing.Sequence[builtins.float]], rmns: typing.Optional[typing.Sequence[typing.Sequence[builtins.float]]] = None, zmnc: typing.Optional[typing.Sequence[typing.Sequence[builtins.float]]] = None) -> StellaratorShape:
+        r"""
+        Fit a shape to the flux surfaces of a VMEC equilibrium, given as the
+        Fourier coefficients of a ``wout`` file.
+        
+        VMEC gives the flux surface ``s_j = j / (ns - 1)`` (``j = 0`` is the
+        magnetic axis, ``j = ns - 1`` the boundary and ``s`` the normalised
+        toroidal flux) as
+        ``R = sum rmnc[j] * cos(xm * theta - xn * zeta) + rmns[j] * sin(...)``
+        and ``Z = sum zmns[j] * sin(xm * theta - xn * zeta) + zmnc[j] * cos(...)``.
+        Each surface is rewritten exactly in the Fourier-Zernike product basis,
+        and the radial profile of each term is fitted by least squares with
+        Zernike radial polynomials in ``rho = sqrt(s)``. Every term gets the
+        same number of polynomials, trying up to ``sqrt(ns) + 1``: the fewest
+        whose fit misses the surfaces by no more than twice what the best fit
+        does, nor by more than 1% of the minor radius (the mean distance of the
+        boundary from the magnetic axis). ``fit_error`` says how far the fitted
+        surfaces, the boundary included, are from VMEC's.
+        
+        The angles are VMEC's: the shape at ``(rho, theta, zeta)`` is VMEC's
+        surface ``s = rho**2`` at ``(theta, zeta)``. A ``wout`` file's
+        ``theta`` runs counter-clockwise in the ``(R, Z)`` plane (VMEC's
+        ``signgs = -1``), as a ``TokamakShape``'s does. DESC reverses ``theta``
+        when it imports a ``wout`` file, which flips the sign of every
+        ``m < 0`` coefficient, so its ``R_lmn`` / ``Z_lmn`` for the same
+        equilibrium describe the same surfaces with ``theta`` running clockwise.
+        
+        Args:
+            num_field_periods: Number of field periods (``nfp``).
+            xm: Poloidal mode numbers (``xm``).
+            xn: Toroidal mode numbers, including the field-period factor
+                (``xn``).
+            rmnc: Cosine coefficients of ``R`` (cm): ``rmnc`` times 100, one row
+                per surface from the axis out and one column per mode.
+            zmns: Sine coefficients of ``Z`` (cm), as ``rmnc``.
+            rmns: Sine coefficients of ``R`` (cm), for an equilibrium that is
+                not stellarator symmetric (``lasym``).
+            zmnc: Cosine coefficients of ``Z`` (cm), likewise.
+        
+        Returns:
+            StellaratorShape: The fitted shape.
+        
+        Raises:
+            ValueError: If the arrays differ in size, a mode number is not a
+                whole number, an ``xn`` is not a multiple of
+                ``num_field_periods``, a mode is listed twice, a coefficient is
+                NaN or infinite, even the best fit misses the surfaces somewhere
+                by more than 1% of the minor radius, or the fitted surfaces
+                reach ``R <= 0``, self-intersect or are not nested.
+        
+        Examples:
+            >>> import yamc
+            >>> from netCDF4 import Dataset  # doctest: +SKIP
+            >>> with Dataset("wout_w7x.nc") as wout:  # doctest: +SKIP
+            ...     # In m, so times 100 for cm. rmns and zmnc are only there for
+            ...     # an equilibrium that is not stellarator symmetric.
+            ...     names = ("rmnc", "zmns", "rmns", "zmnc")
+            ...     cm = {k: 100 * wout[k][:] for k in names if k in wout.variables}
+            ...     shape = yamc.sources.StellaratorShape.from_vmec(
+            ...         num_field_periods=int(wout["nfp"][:]),
+            ...         xm=wout["xm"][:],
+            ...         xn=wout["xn"][:],
+            ...         **cm,
+            ...     )
+        """
     def volume(self) -> builtins.float:
         r"""
         Plasma volume (cm^3).
