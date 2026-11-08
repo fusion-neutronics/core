@@ -162,12 +162,12 @@ def _two_irons():
 ], ids=["rectangular", "cylindrical"])
 def test_one_element_holding_void_and_two_materials_activates_each_material(mesh):
     """One element over two materials and void: each material keeps its own
-    inventory (Mn56 from Fe56, Mn54 from Fe54), as whole cells give."""
+    inventory (Mn56 from the Fe56, Fe53 from the Fe54), as whole cells give."""
     steps = [yamc.Pulse(model=_two_irons(), rate=1e12, duration=(1, "h"))]
     by_mesh, cells = _mesh_and_cells(steps, mesh)
     _assert_agree(by_mesh, cells)
     for dose in (by_mesh, cells):
-        assert {"Mn56", "Mn54"} <= {n for n, v in dose.by_nuclide.items() if np.sum(v) > 0}
+        assert {"Mn56", "Fe53"} <= {n for n, v in dose.by_nuclide.items() if np.sum(v) > 0}
 
 
 def _bar():
@@ -273,7 +273,7 @@ def test_tet_mesh_r2s_agrees_with_cells(tmp_path):
 
 def test_tet_mesh_r2s_over_two_volumes_activates_each_material(tmp_path):
     """Two tet-meshed volumes of different irons, scored in one tally: each
-    tet keeps its own volume's material (Mn56 from Fe56, Mn54 from Fe54)."""
+    tet keeps its own volume's material (Mn56 from Fe56, Fe53 from Fe54)."""
     cq = pytest.importorskip("cadquery")
     from yamc.cad import CadToYamc
 
@@ -294,7 +294,7 @@ def test_tet_mesh_r2s_over_two_volumes_activates_each_material(tmp_path):
     by_mesh, cells = _mesh_and_cells(steps, geometry)
     _assert_agree(by_mesh, cells)
     for dose in (by_mesh, cells):
-        assert {"Mn56", "Mn54"} <= {n for n, v in dose.by_nuclide.items() if np.sum(v) > 0}
+        assert {"Mn56", "Fe53"} <= {n for n, v in dose.by_nuclide.items() if np.sum(v) > 0}
 
 
 def test_a_tet_spanning_cells_or_a_wrong_mesh_is_refused(tmp_path):
