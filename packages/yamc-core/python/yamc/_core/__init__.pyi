@@ -9057,7 +9057,7 @@ def set_transmutation_reactions(value: typing.Optional[builtins.str | typing.Lit
     rather than being solved as though the reaction produced nothing.
     """
 
-def simulate_shutdown_dose(schedule: PulseSchedule, tallies: typing.Sequence[Tally], total_particles: builtins.int, seed: builtins.int = 1, threads: typing.Optional[builtins.int] = None, method: builtins.str = 'd1s', mesh: typing.Optional[RegularRectangularMesh] = None) -> builtins.dict[builtins.str, DoseResult]:
+def simulate_shutdown_dose(schedule: PulseSchedule, tallies: typing.Sequence[Tally], total_particles: builtins.int, seed: builtins.int = 1, threads: typing.Optional[builtins.int] = None, method: builtins.str = 'd1s', mesh: RegularRectangularMesh | RegularCylindricalMesh | MeshGeometry | None = None) -> builtins.dict[builtins.str, DoseResult]:
     r"""
     Simulate the shutdown dose rate of a machine that changes along its
     irradiation and cooling schedule.
@@ -9123,9 +9123,12 @@ def simulate_shutdown_dose(schedule: PulseSchedule, tallies: typing.Sequence[Tal
         method: ``"d1s"`` (one-step, one photon run per pair of irradiation
             and observation configurations) or ``"r2s"`` (cell inventories,
             one photon run per step).
-        mesh: With ``method="r2s"``, a ``RegularRectangularMesh`` over the
-            activated components for cell-under-mesh R2S; ``None`` activates
-            whole cells.
+        mesh: With ``method="r2s"``, a mesh over the activated components for
+            cell-under-mesh R2S, each element's part of every material-filled
+            cell activated on the element's neutron spectrum: a
+            ``RegularRectangularMesh``, a ``RegularCylindricalMesh``, or a tet
+            ``MeshGeometry`` (every tet, each inside one cell, as the model's
+            own tet mesh is). ``None`` activates whole cells.
     
     Returns:
         ``{tally name: DoseResult}``, each with one row per schedule step:
