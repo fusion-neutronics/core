@@ -834,6 +834,32 @@ mod tests {
     }
 
     #[test]
+    fn the_transport_reader_reads_what_was_written() {
+        use yamc_nuclide::thermal_scattering::{read_thermal_from_arrow, Elastic};
+        let (_tmp, dir, l) = write(SIO2);
+        let table = read_thermal_from_arrow(&dir, None).unwrap();
+        assert_eq!(table.temperatures.len(), l.temperatures.len());
+        assert_eq!(table.energy_max, l.energy_max);
+        let first = &table.available[0];
+        let t = &table.temperatures[&first.0];
+        let ace = &aces_for(&l)[0];
+        assert_eq!(t.inelastic.xs, ace.inelastic_xs);
+        assert_eq!(t.inelastic.energy, ace.inelastic_energy);
+        assert_eq!(t.kelvin, l.temperatures[0]);
+        let Some(Elastic::Coherent { factors, .. }) = &t.elastic else {
+            panic!("coherent")
+        };
+        let ThermalElastic::Coherent(c) = l.elastic.as_ref().unwrap() else {
+            panic!()
+        };
+        assert_eq!(factors, &c.factors[0]);
+        // One temperature asked for, one read; one the table lacks, refused.
+        let one = read_thermal_from_arrow(&dir, Some(std::slice::from_ref(&first.0))).unwrap();
+        assert_eq!(one.temperatures.len(), 1);
+        assert!(read_thermal_from_arrow(&dir, Some(&["1K".to_string()])).is_err());
+    }
+
+    #[test]
     fn mismatched_ace_and_law_temperatures_are_refused() {
         let l = law(ZR_ZRH);
         let mut aces = aces_for(&l);

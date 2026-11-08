@@ -1069,6 +1069,7 @@ pub(crate) fn particle_dir(kind: DataKind, name: &str) -> String {
     match kind {
         DataKind::Neutron => format!("neutron/{name}.arrow"),
         DataKind::Photon => format!("photon/{name}.arrow"),
+        DataKind::Thermal => format!("thermal/{name}.arrow"),
     }
 }
 
@@ -1084,6 +1085,7 @@ pub(crate) fn fetch_particle(
     let what = match kind {
         DataKind::Neutron => format!("Nuclide '{name}'"),
         DataKind::Photon => format!("Photon data for '{name}'"),
+        DataKind::Thermal => format!("Thermal scattering table '{name}'"),
     };
     registry.fetch_dir(
         keyword,

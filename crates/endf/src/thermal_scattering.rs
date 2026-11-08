@@ -122,7 +122,7 @@ impl IncoherentElastic {
         if x == 0.0 {
             return self.bound_xs;
         }
-        self.bound_xs / 2.0 * (1.0 - (-2.0 * x).exp()) / x
+        self.bound_xs / 2.0 * -(-2.0 * x).exp_m1() / x
     }
 }
 

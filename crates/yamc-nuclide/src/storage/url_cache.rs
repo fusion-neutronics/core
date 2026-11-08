@@ -515,6 +515,9 @@ pub fn branching_only_error(keyword: &str, role: &str) -> String {
 pub enum DataKind {
     Neutron,
     Photon,
+    /// A thermal scattering table (`thermal/<name>.arrow/`), named for its
+    /// material (`c_H_in_H2O`).
+    Thermal,
 }
 
 /// What a library keyword is asked to be when it is named for `kind`'s data,
@@ -523,6 +526,7 @@ fn data_role(kind: DataKind) -> &'static str {
     match kind {
         DataKind::Neutron => "the neutron cross-section library",
         DataKind::Photon => "the photon cross-section library",
+        DataKind::Thermal => "the thermal scattering library",
     }
 }
 
@@ -777,6 +781,34 @@ pub const PHOTON_SECTIONS: &[(&str, bool)] = &[
     ("bremsstrahlung.arrow", false),
 ];
 
+/// The sections of a thermal scattering table transport reads. `sab.arrow`,
+/// the tabulated law, is not among them: it is for plotting and for sampling
+/// the law directly, and a transport load never needs it. Public for the same
+/// reason [`NEUTRON_SECTIONS`] is.
+pub const THERMAL_SECTIONS: &[(&str, bool)] = &[
+    ("version.json", true),
+    ("thermal.arrow", true),
+    ("inelastic.arrow", true),
+    // Absent for a law with no elastic part (H in H2O).
+    ("elastic.arrow", false),
+];
+
+/// The thermal sections written one batch per temperature and indexed in
+/// `version.json` under `temperature_ranges.<section>`.
+#[cfg(feature = "download")]
+const THERMAL_RANGED: [&str; 3] = ["inelastic.arrow", "elastic.arrow", "sab.arrow"];
+
+#[cfg(feature = "download")]
+fn is_thermal_ranged(section: &str) -> bool {
+    THERMAL_RANGED.contains(&section)
+}
+
+/// A thermal section's per-temperature index in a parsed `version.json`.
+#[cfg(feature = "download")]
+fn thermal_index(version: &serde_json::Value, section: &str) -> Option<EnergyRanges> {
+    EnergyRanges::from_json(version.get("temperature_ranges")?.get(section)?)
+}
+
 /// The neutron sections a transport-free reaction-rate collapse reads: the
 /// union energy grid and the per-MT cross sections, and nothing else. All three
 /// are required, so an activation fetch has no 404 to reason about.
@@ -829,6 +861,7 @@ pub(crate) fn sections_for(
         DataKind::Neutron if scope.covariance => NEUTRON_SECTIONS_WITH_COVARIANCE,
         DataKind::Neutron => NEUTRON_SECTIONS,
         DataKind::Photon => PHOTON_SECTIONS,
+        DataKind::Thermal => THERMAL_SECTIONS,
     };
     let mut sections = base.to_vec();
     if kind == DataKind::Neutron && scope.angular_covariance {
@@ -931,6 +964,10 @@ pub(super) fn ranged(kind: DataKind, scope: &crate::load_scope::LoadScope) -> Ra
         DataKind::Neutron if !scope.wants_transport_sections() => {
             scope.mts.as_ref().map_or(Ranged::Whole, Ranged::Mts)
         }
+        DataKind::Thermal => scope
+            .temperatures
+            .as_ref()
+            .map_or(Ranged::Whole, Ranged::Temperatures),
         _ => Ranged::Whole,
     }
 }
@@ -974,8 +1011,17 @@ fn labels_for(
     index: &ReactionRanges,
     requested: &HashSet<String>,
 ) -> Result<BTreeSet<String>, crate::temperature::TemperatureError> {
+    labels_on_ladder(published_labels(index).into_iter().collect(), requested)
+}
+
+/// The labels of `available` the reader parses for `requested`: each exact
+/// match, and both neighbours of a temperature between two.
+#[cfg(feature = "download")]
+fn labels_on_ladder(
+    available: Vec<String>,
+    requested: &HashSet<String>,
+) -> Result<BTreeSet<String>, crate::temperature::TemperatureError> {
     use crate::temperature::{resolve, TemperatureSource};
-    let available: Vec<String> = published_labels(index).into_iter().collect();
     let mut labels = BTreeSet::new();
     for label in requested {
         match resolve(label, &available)? {
@@ -1006,11 +1052,21 @@ fn cached_labels(dir: &std::path::Path, section: &str) -> Option<BTreeSet<String
 /// does not resolve is not covered, so the fetch runs and reports why.
 #[cfg(feature = "download")]
 fn temperatures_covered(dir: &std::path::Path, section: &str, requested: &HashSet<String>) -> bool {
-    if dir.join(section).exists() {
+    if dir.join(section).exists() || dir.join(format!("{section}{ABSENT_SUFFIX}")).exists() {
         return true;
     }
     if !dir.join(ranged_section(section)).exists() {
         return false;
+    }
+    if is_thermal_ranged(section) {
+        let (Some(index), Some(held)) = (
+            cached_version(dir).and_then(|v| thermal_index(&v, section)),
+            cached_labels(dir, section),
+        ) else {
+            return false;
+        };
+        let ladder = index.temperatures.keys().cloned().collect();
+        return labels_on_ladder(ladder, requested).is_ok_and(|wanted| wanted.is_subset(&held));
     }
     let (Some(index), Some(held)) = (cached_index(dir), cached_labels(dir, section)) else {
         return false;
@@ -1075,7 +1131,9 @@ fn section_is_resolved(dir: &std::path::Path, section: &str) -> bool {
 pub(super) fn section_covered(dir: &std::path::Path, section: &str, wanted: Ranged<'_>) -> bool {
     match wanted {
         Ranged::Mts(mts) if section == REACTIONS => reactions_covered(dir, mts),
-        Ranged::Temperatures(temperatures) if section == REACTIONS || section == ENERGY => {
+        Ranged::Temperatures(temperatures)
+            if section == REACTIONS || section == ENERGY || is_thermal_ranged(section) =>
+        {
             temperatures_covered(dir, section, temperatures)
         }
         _ => section_is_resolved(dir, section),
@@ -1458,6 +1516,30 @@ pub(super) fn plan_ranges(
     if !ranges_section(section, ranging) {
         return Ok(None);
     }
+    if is_thermal_ranged(section) {
+        // A thermal table: its own per-section index, and its own ladder.
+        let (Some(index), Ranged::Temperatures(requested)) =
+            (thermal_index(version, section), ranging)
+        else {
+            return Ok(None);
+        };
+        let ladder: BTreeSet<String> = index.temperatures.keys().cloned().collect();
+        let mut labels = labels_on_ladder(ladder.iter().cloned().collect(), requested)
+            .map_err(|e| format!("{nuclide_name}: {e}"))?;
+        if target_dir.join(ranged_section(section)).exists() {
+            labels.extend(cached_labels(target_dir, section).unwrap_or_default());
+        }
+        if labels.is_empty() || labels.is_superset(&ladder) {
+            return Ok(None);
+        }
+        let wants = |label: &str| labels.contains(label);
+        return Ok(Some(RangePlan {
+            spans: index.spans_for(wants),
+            pieces: index.pieces_for(wants),
+            hashes: index.sha256,
+            holds: Holds::Labels(labels),
+        }));
+    }
     let Some(index) = ReactionRanges::from_version_json(version) else {
         return Ok(None);
     };
@@ -1622,7 +1704,9 @@ pub(super) fn fetch_ranged(
 pub(super) fn ranges_section(section: &str, ranging: Ranged<'_>) -> bool {
     match ranging {
         Ranged::Mts(_) => section == REACTIONS,
-        Ranged::Temperatures(_) => section == REACTIONS || section == ENERGY,
+        Ranged::Temperatures(_) => {
+            section == REACTIONS || section == ENERGY || is_thermal_ranged(section)
+        }
         Ranged::Whole => false,
     }
 }
@@ -1689,7 +1773,7 @@ pub(super) fn drop_superseded(dir: &std::path::Path, published: &[String]) {
     if published.iter().any(|name| name == REACTIONS) {
         fs::remove_dir_all(dir.join(SUBSET_DIR)).ok();
     }
-    for section in [REACTIONS, ENERGY] {
+    for section in [REACTIONS, ENERGY].into_iter().chain(THERMAL_RANGED) {
         if published.iter().any(|name| name == section) {
             fs::remove_file(dir.join(ranged_section(section))).ok();
             fs::remove_file(dir.join(ranged_labels_file(section))).ok();
