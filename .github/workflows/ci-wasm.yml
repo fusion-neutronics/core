@@ -82,7 +82,15 @@ jobs:
       # unchanged tree means the published layout moved.
       - name: Test compile
         run: |
-          curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+          for attempt in 1 2 3; do
+            if curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep "$((attempt * 5))"
+          done
           cd crates/yamc
           wasm-pack build --target web --features wasm
           cargo test -p yamc --features wasm-test
@@ -142,7 +150,15 @@ jobs:
 
       - name: Build the package
         run: |
-          curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+          for attempt in 1 2 3; do
+            if curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep "$((attempt * 5))"
+          done
           cd crates/yani-wasm
           wasm-pack build --target web --out-dir pkg
 
