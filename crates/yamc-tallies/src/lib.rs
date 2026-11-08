@@ -8,6 +8,7 @@ pub mod convergence_target;
 pub mod estimator;
 pub mod filter;
 pub mod mesh;
+pub mod mesh_parts;
 pub mod mt;
 pub mod result;
 pub mod score;
@@ -30,6 +31,7 @@ pub use filter::surface::{CosineFilter, SurfaceFilter};
 #[cfg(feature = "mesh")]
 pub use filter::unstructured_mesh::UnstructuredMeshFilter;
 pub use mesh::{CylindricalMesh, RegularRectangularMesh};
+pub use mesh_parts::MeshParts;
 pub use mt::Mt;
 pub use result::{ConvergencePoint, StatisticalChecks, TallyResult};
 pub use score::{

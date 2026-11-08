@@ -159,6 +159,10 @@ pub enum GpuDispatchError {
     OverlayTallyUnsupported {
         tally_index: usize,
     },
+    /// A tally binned by (element, cell) mesh parts, which only the CPU scores.
+    MeshPartsUnsupported {
+        tally_index: usize,
+    },
     /// A tally with a per-nuclide axis (`nuclides=`) other than the single
     /// material-total bin. The kernel scores the cell material's macroscopic
     /// cross section and the writeback puts it in nuclide bin 0, so the first
@@ -280,6 +284,11 @@ impl std::fmt::Display for GpuDispatchError {
                  not supported on the GPU -- the kernel scores the cell material's \
                  macroscopic cross section, so the requested response would be silently \
                  dropped. Run this tally with compute='cpu'."
+            ),
+            Self::MeshPartsUnsupported { tally_index } => write!(
+                f,
+                "compute='gpu' tally {tally_index}: tallies binned by mesh element parts are \
+                 scored on the CPU only. Run this tally with compute='cpu'."
             ),
             Self::NuclideBinsUnsupported { tally_index } => write!(
                 f,
@@ -1039,6 +1048,9 @@ fn validate_tallies(
         // different question.
         if !t.multiply_density {
             return Err(GpuDispatchError::OverlayTallyUnsupported { tally_index: idx });
+        }
+        if t.mesh_parts.is_some() {
+            return Err(GpuDispatchError::MeshPartsUnsupported { tally_index: idx });
         }
 
         // Filters: a spatial binner is required -- a CellFilter, a

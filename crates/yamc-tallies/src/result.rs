@@ -850,6 +850,12 @@ pub(crate) fn compute_shape_and_dims(tally: &Tally) -> (Vec<usize>, Vec<String>)
     // Mesh: present whenever a mesh filter exists. Split into the mesh's three
     // axes to match the Python helper's canonical row-major layout. The slowest
     // axis comes first (z for rectangular, z for cylindrical).
+    if let Some(parts) = &tally.mesh_parts {
+        // One bin per (element, cell) part, in the parts' own order.
+        shape.push(parts.len().max(1));
+        dims.push("mesh_part".to_string());
+        return (shape, dims);
+    }
     if let Some(mesh_filter) = tally.get_mesh_filter() {
         if let Some(rect) = mesh_filter.rectangular_mesh() {
             let [nx, ny, nz] = rect.shape();

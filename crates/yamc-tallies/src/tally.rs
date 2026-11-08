@@ -191,6 +191,12 @@ pub struct Tally {
     /// not meshes.
     pub covariance: bool,
 
+    /// Score into (element, cell) parts of the mesh filter's elements rather
+    /// than the elements, one bin per part. Internal (R2S's element-part
+    /// spectra), CPU only, and not part of the tally's specification: never
+    /// serialized.
+    pub mesh_parts: Option<std::sync::Arc<crate::MeshParts>>,
+
     /// Internal scoring state: atomic per-bin values, finalized per-history
     /// Welford statistics, score-index caches, and the overlay XS cache. All
     /// `Tally` scoring methods delegate to this accumulator internally.
@@ -464,6 +470,9 @@ impl Tally {
 
     /// Get the number of mesh bins (1 if no mesh filter)
     pub fn num_mesh_bins(&self) -> usize {
+        if let Some(p) = &self.mesh_parts {
+            return p.len().max(1);
+        }
         if let Some(f) = self.get_mesh_filter() {
             return f.num_bins();
         }
@@ -1470,9 +1479,18 @@ impl Tally {
             }};
         }
 
+        // An element's bin, or with mesh parts its part in this event's cell;
+        // `None` (a cell not part of that element) scores nothing.
+        let parts = self.mesh_parts.as_deref();
+        let part = |bin: usize| match parts {
+            Some(p) => p.bin(bin, cell_id),
+            None => Some(bin),
+        };
         if let Some(mesh_filter) = self.get_mesh_filter() {
             for crossing in mesh_filter.get_bins_crossed_iter(last_position, position, direction) {
-                apply_crossing!(crossing.bin, crossing.length_fraction);
+                if let Some(bin) = part(crossing.bin) {
+                    apply_crossing!(bin, crossing.length_fraction);
+                }
             }
             return;
         }
@@ -1481,7 +1499,9 @@ impl Tally {
             // Unstructured mesh still allocates its result Vec internally;
             // the streaming saving applies only to the regular-mesh path.
             for crossing in umf.get_bins_crossed(last_position, position, direction) {
-                apply_crossing!(crossing.bin, crossing.length_fraction);
+                if let Some(bin) = part(crossing.bin) {
+                    apply_crossing!(bin, crossing.length_fraction);
+                }
             }
             return;
         }
@@ -1713,6 +1733,13 @@ impl Tally {
             #[cfg(not(feature = "mesh"))]
             0
         };
+        let mesh_bin = match self.mesh_parts.as_deref() {
+            Some(p) => match p.bin(mesh_bin, cell_id) {
+                Some(bin) => bin,
+                None => return,
+            },
+            None => mesh_bin,
+        };
 
         // Energy-function weighting (e.g. dose conversion), kept SEPARATE from
         // the weight/Σ_t factor.
@@ -1921,6 +1948,7 @@ impl Tally {
             multiply_density: true,
             overlay_material: None,
             covariance: false,
+            mesh_parts: None,
             estimator: crate::Estimator::default(),
             accumulator: TallyAccumulator::new(),
         }
@@ -2446,6 +2474,7 @@ impl Tally {
             multiply_density: true,
             overlay_material: None,
             covariance: false,
+            mesh_parts: None,
             estimator: crate::Estimator::default(),
             accumulator: TallyAccumulator::new(),
         }

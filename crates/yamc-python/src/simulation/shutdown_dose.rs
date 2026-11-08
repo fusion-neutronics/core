@@ -234,7 +234,7 @@ fn r2s_mesh(mesh: &Bound<'_, PyAny>) -> PyResult<yamc::r2s::R2sMesh> {
     }
     #[cfg(feature = "mesh")]
     if let Ok(m) = mesh.extract::<PyRef<'_, crate::geometry::PyMeshGeometry>>() {
-        return Ok(R2sMesh::Tetrahedral(Arc::new(m.inner.mesh.clone())));
+        return Ok(R2sMesh::Tetrahedral(Arc::clone(&m.inner.mesh)));
     }
     Err(PyTypeError::new_err(
         "mesh must be a RegularRectangularMesh, RegularCylindricalMesh or MeshGeometry",

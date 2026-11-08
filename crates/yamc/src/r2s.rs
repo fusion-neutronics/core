@@ -474,25 +474,12 @@ fn activate_mesh(
     settings: &TransportSettings,
 ) -> Result<Vec<Activated>, String> {
     let groups = yamc_nuclide::group_structures::get_group_structure(GROUPS)?.to_vec();
-    let mut t = Tally::new();
-    t.name = Some("R2S element neutron spectra".into());
-    t.scores = vec![Score::Flux(FluxScore)];
-    t.filters = vec![
-        Filter::Energy(EnergyFilter::new(groups.clone())),
-        mesh.filter()?,
-    ];
-    t.reset_accumulation();
-    let t = Arc::new(t);
-    model.tallies = vec![Arc::clone(&t)];
-    model.run_internal::<NoOpTracker>(settings, None, None, false)?;
-    // Track length per source neutron, energy-major then element.
-    let flux = t.finalize().mean;
-    let (nv, ng) = (mesh.len(), groups.len() - 1);
-    let reached: Vec<usize> = (0..nv)
-        .filter(|&v| (0..ng).any(|g| flux[g * nv + v] > 0.0))
-        .collect();
+    // The (element, material-filled cell) parts, found before transport so
+    // the spectra are tallied per part: an element over void and two
+    // materials gives each material the flux it sees, not the element's
+    // average over all three.
     let geometry = &model.geometry;
-    let parts = |v: usize| -> Result<Vec<(usize, usize, f64)>, String> {
+    let parts_of = |v: usize| -> Result<Vec<(usize, usize, f64)>, String> {
         let element = mesh.element(v);
         Ok(match element {
             Element::Tetrahedron(_) => tet_cell(geometry, v, &element)?.into_iter().collect(),
@@ -506,26 +493,68 @@ fn activate_mesh(
         .map(|(c, vol)| (v, c, vol))
         .collect())
     };
-    let regions: Vec<(usize, usize, f64)> = reached
-        .par_iter()
-        .map(|&v| parts(v))
+    let parts: Vec<(usize, usize, f64)> = (0..mesh.len())
+        .into_par_iter()
+        .map(parts_of)
         .collect::<Result<Vec<_>, String>>()?
         .into_iter()
         .flatten()
         .collect();
-    if regions.is_empty() {
+    let no_part = || {
+        "no material-filled cell under the mesh sees a neutron; the mesh must cover the \
+         activated components"
+            .to_string()
+    };
+    if parts.is_empty() {
         return Err(
-            "no material-filled cell under the mesh sees a neutron; the mesh must cover \
-             the activated components"
+            "no material-filled cell under the mesh; the mesh must cover the activated \
+             components"
                 .into(),
         );
+    }
+    let keys = parts
+        .iter()
+        .map(|&(v, c, _)| {
+            let id = geometry.cells()[c].cell_id.ok_or_else(|| {
+                format!(
+                    "{} has no id, so R2S cannot tally its parts",
+                    describe(geometry, c)
+                )
+            })?;
+            Ok((v as u32, id))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let mut t = Tally::new();
+    t.name = Some("R2S element part neutron spectra".into());
+    t.scores = vec![Score::Flux(FluxScore)];
+    t.filters = vec![
+        Filter::Energy(EnergyFilter::new(groups.clone())),
+        mesh.filter()?,
+    ];
+    t.mesh_parts = Some(Arc::new(yamc_tallies::MeshParts::new(keys)));
+    t.reset_accumulation();
+    let t = Arc::new(t);
+    model.tallies = vec![Arc::clone(&t)];
+    model.run_internal::<NoOpTracker>(settings, None, None, false)?;
+    // Track length per source neutron, energy-major then part.
+    let flux = t.finalize().mean;
+    let (np, ng) = (parts.len(), groups.len() - 1);
+    let geometry = &model.geometry;
+    let regions: Vec<(usize, usize, usize, f64)> = parts
+        .iter()
+        .enumerate()
+        .filter(|&(p, _)| (0..ng).any(|g| flux[g * np + p] > 0.0))
+        .map(|(p, &(v, c, vol))| (p, v, c, vol))
+        .collect();
+    if regions.is_empty() {
+        return Err(no_part());
     }
 
     // One cache-free copy of each cell's material, cloned per region: a
     // cleared cache keeps its allocation, so clearing per clone would hold a
     // transport cache for every one of a mesh's regions.
     let mut templates: HashMap<usize, yamc_materials::material::Material> = HashMap::new();
-    for &(_, c, _) in &regions {
+    for &(_, _, c, _) in &regions {
         templates.entry(c).or_insert_with(|| {
             let mut m = (**geometry
                 .material_for(&geometry.cells()[c])
@@ -540,11 +569,14 @@ fn activate_mesh(
     }
     let mut materials = Vec::with_capacity(regions.len());
     let mut plans = Vec::with_capacity(regions.len());
-    for &(v, c, volume) in &regions {
-        let masses: Vec<f64> = (0..ng).map(|g| flux[g * nv + v]).collect();
+    for &(p, _, c, volume) in &regions {
+        let masses: Vec<f64> = (0..ng).map(|g| flux[g * np + p]).collect();
         let total: f64 = masses.iter().sum();
-        // n/cm^2 per source neutron.
-        let per_source = total / mesh.element(v).volume();
+        // n/cm^2 per source neutron, in this part. The part's volume is a
+        // sampled estimate, but it cancels: the inventory scales with it and
+        // the flux with its inverse, so the activity follows the tallied
+        // track length.
+        let per_source = total / volume;
         let mut m = templates[&c].clone();
         m.volume = Some(volume);
         m.assign_material_id(None)?;
@@ -569,8 +601,8 @@ fn activate_mesh(
         .map(|m| m.get_material_id().expect("assigned above"))
         .collect();
     // In batches: the solve folds each distinct spectrum's branchings into
-    // its own copy of the chain, and every element has its own spectrum, so
-    // a mesh solved at once would hold a chain copy per element.
+    // its own copy of the chain, and every part has its own spectrum, so a
+    // mesh solved at once would hold a chain copy per part.
     let mut inventories: HashMap<u32, Vec<yamc_materials::material::Material>> = HashMap::new();
     let mut plans = plans.into_iter();
     for batch in materials.chunks_mut(TRANSMUTE_BATCH) {
@@ -602,7 +634,7 @@ fn activate_mesh(
     regions
         .iter()
         .zip(ids)
-        .map(|(&(v, cell, volume), id)| {
+        .map(|(&(_, v, cell, volume), id)| {
             Ok(Activated {
                 cell,
                 element: Some(mesh.element(v)),
