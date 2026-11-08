@@ -5,8 +5,12 @@
 //! The inelastic part goes through NJOY (`endf::njoy::make_ace_thermal`):
 //! S(alpha, beta) cannot be sampled as tabulated, and THERMR's integration
 //! turns it into outgoing energy and cosine distributions. The elastic part is
-//! closed form and is taken straight from MF=7 MT=2. The tabulated law itself
-//! is kept too (`sab.arrow`).
+//! closed form and is taken from MF=7 MT=2, with THERMR's and ACER's
+//! normalisation (SB per principal atom, everything divided by `nmix`), so
+//! transport can sample its exact angular distribution rather than ACER's
+//! equiprobable cosines; [`Prepared::check_against_njoy`] holds it to the
+//! elastic part NJOY wrote. The tabulated law itself is kept too
+//! (`sab.arrow`).
 //!
 //! Every per-temperature section is one row and one record batch per
 //! temperature, and `version.json` records where each batch sits
@@ -69,9 +73,26 @@ pub struct Prepared {
     pub name: String,
     pub bound_nuclides: Vec<String>,
     pub source: String,
+    /// ACER's `nmix`: the elastic part is divided by it as ACER divides every
+    /// cross section of the table, so elastic and inelastic stay in the ratio
+    /// the evaluation gives them.
+    nmix: f64,
     laws: Vec<ThermalScattering>,
     temperatures: Vec<Temperature>,
 }
+
+/// One temperature's elastic part as stored: its kind, the Bragg edges and
+/// cumulative factors (eV b), and SB and W' for the incoherent part.
+type ElasticRow = (
+    &'static str,
+    Option<(Vec<f64>, Vec<f64>)>,
+    Option<(f64, f64)>,
+);
+
+/// How far the elastic part may stray from what NJOY wrote, relative: far
+/// above the rounding of a PENDF tape, far below any convention mix-up (a
+/// factor of `nmix` or of M0).
+const NJOY_TOLERANCE: f64 = 1e-4;
 
 fn same(a: f64, b: f64) -> bool {
     (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0)
@@ -84,6 +105,7 @@ impl Prepared {
         name: &str,
         bound_nuclides: &[String],
         source: &str,
+        nmix: u32,
         laws: Vec<ThermalScattering>,
         aces: Vec<Vec<ThermalAce>>,
     ) -> Result<Self, Box<dyn Error>> {
@@ -155,6 +177,7 @@ impl Prepared {
             name: name.to_string(),
             bound_nuclides: bound_nuclides.to_vec(),
             source: source.to_string(),
+            nmix: f64::from(nmix.max(1)),
             laws,
             temperatures,
         })
@@ -270,52 +293,128 @@ impl Prepared {
         write_section_per_row(&dir.join("inelastic.arrow"), "inelastic.arrow", rows)
     }
 
+    /// The elastic part at temperature `t`, per bound atom as ACER writes it:
+    /// SB taken per principal atom (THERMR's `natom`, which the deck sets to
+    /// M0) and everything divided by `nmix`.
+    fn elastic_row(&self, t: &Temperature) -> Result<ElasticRow, String> {
+        let law = &self.laws[t.law];
+        let elastic = law
+            .elastic
+            .as_ref()
+            .expect("the first law has elastic, so all do");
+        let coherent = |c: &endf::thermal_scattering::CoherentElastic| {
+            c.temperatures
+                .iter()
+                .position(|&k| same(k, t.kelvin))
+                .map(|i| {
+                    let f = c.factors[i].iter().map(|f| f / self.nmix).collect();
+                    (c.bragg_edges.clone(), f)
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "{}: the coherent elastic data has no {} K, which the inelastic law has",
+                        self.name, t.kelvin
+                    )
+                })
+        };
+        let incoherent = |i: &endf::thermal_scattering::IncoherentElastic| {
+            let x = &i.debye_waller.x;
+            if x.is_empty()
+                || t.kelvin < x[0] * (1.0 - 1e-9)
+                || t.kelvin > x[x.len() - 1] * (1.0 + 1e-9)
+            {
+                return Err(format!(
+                    "{}: {} K is outside the Debye-Waller table",
+                    self.name, t.kelvin
+                ));
+            }
+            Ok((
+                i.bound_xs / (law.principal_count * self.nmix),
+                i.debye_waller.eval(t.kelvin),
+            ))
+        };
+        Ok(match elastic {
+            ThermalElastic::Coherent(c) => ("coherent", Some(coherent(c)?), None),
+            ThermalElastic::Incoherent(i) => ("incoherent", None, Some(incoherent(i)?)),
+            ThermalElastic::Mixed {
+                coherent: c,
+                incoherent: i,
+            } => ("mixed", Some(coherent(c)?), Some(incoherent(i)?)),
+        })
+    }
+
+    /// Check the elastic part taken from MF=7 MT=2 against the one NJOY wrote
+    /// into the ACE table beside the inelastic part: the cumulative Bragg
+    /// factor at every edge ACER kept, and the incoherent cross section at
+    /// every energy of its grid. The closed forms are kept rather than ACER's
+    /// equiprobable cosines, so this is what holds them to NJOY's conventions.
+    pub fn check_against_njoy(&self) -> Result<(), Box<dyn Error>> {
+        use endf::thermal_ace::AceElastic;
+        let off = |what: &str, e: f64, ours: f64, njoy: f64| -> Result<(), String> {
+            if (ours - njoy).abs() > NJOY_TOLERANCE * njoy.abs().max(ours.abs()) {
+                return Err(format!(
+                    "{}: {what} at {e} eV is {ours}, NJOY wrote {njoy}",
+                    self.name
+                ));
+            }
+            Ok(())
+        };
+        for t in &self.temperatures {
+            let emax = self.laws[t.law].energy_max;
+            let (_, bragg, inc) = self.elastic_row(t)?;
+            let (ace_bragg, ace_inc) = match &t.ace.elastic {
+                None if bragg.is_none() && inc.is_none() => continue,
+                None => return Err(format!("{}: NJOY wrote no elastic part", self.name).into()),
+                Some(AceElastic::Coherent {
+                    bragg_edges,
+                    factors,
+                }) => (Some((bragg_edges, factors)), None),
+                Some(AceElastic::Incoherent { energy, xs, .. }) => (None, Some((energy, xs))),
+                Some(AceElastic::Mixed {
+                    bragg_edges,
+                    factors,
+                    energy,
+                    xs,
+                    ..
+                }) => (Some((bragg_edges, factors)), Some((energy, xs))),
+            };
+            if bragg.is_some() != ace_bragg.is_some() || inc.is_some() != ace_inc.is_some() {
+                return Err(format!(
+                    "{}: NJOY wrote a different kind of elastic part at {} K",
+                    self.name, t.kelvin
+                )
+                .into());
+            }
+            if let (Some((edges, factors)), Some((ace_edges, ace_factors))) = (&bragg, ace_bragg) {
+                for (&e, &f) in ace_edges
+                    .iter()
+                    .zip(ace_factors)
+                    .filter(|&(&e, _)| e <= emax)
+                {
+                    let n = edges.partition_point(|&x| x <= e * (1.0 + 1e-6));
+                    let ours = if n == 0 { 0.0 } else { factors[n - 1] };
+                    off("the cumulative Bragg factor", e, ours, f)?;
+                }
+            }
+            if let (Some((sb, w)), Some((energy, xs))) = (inc, ace_inc) {
+                for (&e, &njoy) in energy.iter().zip(xs).filter(|&(&e, _)| e <= emax) {
+                    let x = 2.0 * e * w;
+                    let ours = if x == 0.0 {
+                        sb
+                    } else {
+                        sb / 2.0 * -(-2.0 * x).exp_m1() / x
+                    };
+                    off("the incoherent elastic cross section", e, ours, njoy)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn write_elastic(&self, dir: &Path) -> Result<(), Box<dyn Error>> {
         let mut rows = Vec::with_capacity(self.temperatures.len());
         for t in &self.temperatures {
-            let law = &self.laws[t.law];
-            let elastic = law
-                .elastic
-                .as_ref()
-                .expect("the first law has elastic, so all do");
-            let coherent = |c: &endf::thermal_scattering::CoherentElastic| {
-                c.temperatures
-                    .iter()
-                    .position(|&k| same(k, t.kelvin))
-                    .map(|i| (c.bragg_edges.clone(), c.factors[i].clone()))
-                    .ok_or_else(|| {
-                        format!(
-                            "{}: the coherent elastic data has no {} K, which the inelastic \
-                             law has",
-                            self.name, t.kelvin
-                        )
-                    })
-            };
-            let incoherent = |i: &endf::thermal_scattering::IncoherentElastic| {
-                let x = &i.debye_waller.x;
-                if x.is_empty()
-                    || t.kelvin < x[0] * (1.0 - 1e-9)
-                    || t.kelvin > x[x.len() - 1] * (1.0 + 1e-9)
-                {
-                    return Err(format!(
-                        "{}: {} K is outside the Debye-Waller table",
-                        self.name, t.kelvin
-                    ));
-                }
-                // SB per principal atom, as THERMR takes it.
-                Ok((
-                    i.bound_xs / law.principal_count,
-                    i.debye_waller.eval(t.kelvin),
-                ))
-            };
-            let (kind, bragg, inc) = match elastic {
-                ThermalElastic::Coherent(c) => ("coherent", Some(coherent(c)?), None),
-                ThermalElastic::Incoherent(i) => ("incoherent", None, Some(incoherent(i)?)),
-                ThermalElastic::Mixed {
-                    coherent: c,
-                    incoherent: i,
-                } => ("mixed", Some(coherent(c)?), Some(incoherent(i)?)),
-            };
+            let (kind, bragg, inc) = self.elastic_row(t)?;
             let (edges, factors) = match bragg {
                 Some((e, f)) => (vec![e], vec![f]),
                 None => (vec![], vec![]),
@@ -449,9 +548,11 @@ pub fn convert_thermal(
         source.name,
         source.bound_nuclides,
         &names.join(","),
+        source.nmix,
         laws,
         aces,
     )?;
+    prepared.check_against_njoy()?;
     let dir = output_dir.join(format!("{}.arrow", source.name));
     if dir.exists() {
         std::fs::remove_dir_all(&dir)?;
@@ -510,6 +611,7 @@ mod tests {
             "c_Test",
             &["Si28".into()],
             "t.endf",
+            1,
             vec![l.clone()],
             vec![aces],
         )
@@ -605,13 +707,109 @@ mod tests {
         let l = law(ZR_ZRH);
         let mut aces = aces_for(&l);
         aces.pop();
-        assert!(Prepared::new("c", &[], "s", vec![l], vec![aces]).is_err());
+        assert!(Prepared::new("c", &[], "s", 1, vec![l], vec![aces]).is_err());
     }
 
     #[test]
     fn two_files_that_are_not_one_table_are_refused() {
         let (a, b) = (law(SIO2), law(ZR_ZRH));
         let (aa, ab) = (aces_for(&a), aces_for(&b));
-        assert!(Prepared::new("c", &[], "s", vec![a, b], vec![aa, ab]).is_err());
+        assert!(Prepared::new("c", &[], "s", 1, vec![a, b], vec![aa, ab]).is_err());
+    }
+
+    const S_CH4: &[u8] = include_bytes!("../../endf/fixtures/tsl-s-CH4.endf.xz");
+
+    /// `law` paired with ACE tables whose elastic part is what THERMR and
+    /// ACER make of MT=2 with `natom` = M0 and `nmix` (thermr.f90 `iel`:
+    /// `c1 = sb/(2 natom)`; aceth.f90 `thrlod`: every cross section `/nmix`;
+    /// Bragg factors `e * sigma`, kept only where they grow).
+    fn prepared_against_njoy(fixture: &[u8], njoy_nmix: f64, nmix: u32) -> Prepared {
+        use endf::thermal_ace::AceElastic;
+        let l = law(fixture);
+        let mut aces = aces_for(&l);
+        for (i, ace) in aces.iter_mut().enumerate() {
+            let kelvin = l.temperatures[i];
+            ace.elastic = Some(match l.elastic.as_ref().unwrap() {
+                ThermalElastic::Coherent(c) => {
+                    let (mut edges, mut factors) = (vec![], vec![]);
+                    let mut last = 0.0;
+                    for (&e, &f) in c.bragg_edges.iter().zip(&c.factors[i]) {
+                        if f > last {
+                            edges.push(e);
+                            factors.push(f / njoy_nmix);
+                            last = f;
+                        }
+                    }
+                    AceElastic::Coherent {
+                        bragg_edges: edges,
+                        factors,
+                    }
+                }
+                ThermalElastic::Incoherent(inc) => {
+                    let energy: Vec<f64> = (0..40).map(|k| 1e-5 * 1.3f64.powi(k)).collect();
+                    let sb = inc.bound_xs / l.principal_count / njoy_nmix;
+                    let xs = energy
+                        .iter()
+                        .map(|&e| inc.xs(kelvin, e) * sb / inc.bound_xs)
+                        .collect();
+                    AceElastic::Incoherent {
+                        energy,
+                        xs,
+                        mu: vec![],
+                        n_mu: 0,
+                    }
+                }
+                ThermalElastic::Mixed { .. } => unreachable!(),
+            });
+        }
+        Prepared::new("c_Test", &[], "t.endf", nmix, vec![l], vec![aces]).unwrap()
+    }
+
+    #[test]
+    fn the_elastic_part_agrees_with_what_njoy_writes() {
+        // SiO2: coherent, three atom types (nmix = 3).
+        prepared_against_njoy(SIO2, 3.0, 3)
+            .check_against_njoy()
+            .unwrap();
+        // Solid CH4: incoherent with four principal atoms (M0 = 4).
+        assert_eq!(law(S_CH4).principal_count, 4.0);
+        prepared_against_njoy(S_CH4, 1.0, 1)
+            .check_against_njoy()
+            .unwrap();
+        prepared_against_njoy(ZR_ZRH, 1.0, 1)
+            .check_against_njoy()
+            .unwrap();
+    }
+
+    #[test]
+    fn an_elastic_part_off_from_njoy_by_nmix_is_refused() {
+        let err = prepared_against_njoy(SIO2, 3.0, 1)
+            .check_against_njoy()
+            .unwrap_err();
+        assert!(err.to_string().contains("Bragg"), "{err}");
+        let err = prepared_against_njoy(S_CH4, 2.0, 1)
+            .check_against_njoy()
+            .unwrap_err();
+        assert!(err.to_string().contains("incoherent"), "{err}");
+    }
+
+    #[test]
+    fn the_stored_elastic_part_is_divided_by_nmix() {
+        let p = prepared_against_njoy(SIO2, 3.0, 3);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("c_Test.arrow");
+        p.write(&dir).unwrap();
+        let elastic = &rows(&dir.join("elastic.arrow"))[0];
+        let factors = elastic
+            .column_by_name("factors")
+            .unwrap()
+            .as_list::<i32>()
+            .value(0);
+        let factors = factors.as_primitive::<arrow_array::types::Float64Type>();
+        let ThermalElastic::Coherent(c) = law(SIO2).elastic.unwrap() else {
+            panic!()
+        };
+        let want: Vec<f64> = c.factors[0].iter().map(|f| f / 3.0).collect();
+        assert_eq!(factors.values().to_vec(), want);
     }
 }
