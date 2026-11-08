@@ -8466,13 +8466,18 @@ def generate_library(keyword: builtins.str, path: builtins.str, *, parts: typing
         earlier build of the same library, and not inside :func:`cache_dir`.
     parts : list of str, optional
         What to build, of ``"neutron"``, ``"photon"``, ``"photonuclear"``,
-        ``"decay"``, ``"reactions"``, ``"fission_yields"`` and ``"branching"``.
-        The default is every part the library's published release carries. Only
-        ``"neutron"`` runs NJOY, so a chain alone builds in minutes.
+        ``"thermal"``, ``"decay"``, ``"reactions"``, ``"fission_yields"`` and
+        ``"branching"``. The default is every part the library's published
+        release carries. Only ``"neutron"`` and ``"thermal"`` run NJOY, so a
+        chain alone builds in minutes. ``"thermal"`` is the thermal scattering
+        tables (``thermal/c_H_in_H2O.arrow/`` and so on), which only
+        ``"endf-b8.1"`` and ``"jeff-4.0"`` publish.
     nuclides : list of str, optional
         Only these nuclides (``"Fe56"``, ``"Am242_m1"``) and elements (``"Fe"``,
-        meaning every Fe evaluation and the Fe photon data). The transmutation
-        chain is always built whole. A name the library does not have is refused.
+        meaning every Fe evaluation and the Fe photon data), and thermal tables
+        by name (``"c_H_in_H2O"``) or by what they bind to (``"H"`` is every
+        table binding hydrogen). The transmutation chain is always built whole.
+        A name the library does not have is refused.
     temperatures : list of float, optional
         Neutron temperatures in Kelvin. The default is 250, 293.6, 600, 900, 1200
         and 2500 K. The 0 K grid is always kept.

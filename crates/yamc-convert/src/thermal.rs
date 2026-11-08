@@ -562,6 +562,122 @@ pub fn convert_thermal(
     Ok(dir)
 }
 
+/// What a thermal folder holds, as the library builder's gates and index
+/// read it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThermalSummary {
+    pub name: String,
+    pub bound_nuclides: Vec<String>,
+    pub temperatures: Vec<String>,
+    pub energy_max: f64,
+    pub elastic_kind: Option<String>,
+}
+
+/// Read a thermal folder's header and check that every per-temperature
+/// section in it decodes, with one row and one batch for each of the header's
+/// temperatures, in its order. `inelastic.arrow` and `sab.arrow` must be
+/// there, and `elastic.arrow` exactly when the header names an elastic kind.
+pub fn inspect_thermal(dir: &Path) -> Result<ThermalSummary, Box<dyn Error>> {
+    use arrow_array::cast::AsArray;
+    use arrow_array::Array;
+    use arrow_ipc::reader::FileReader;
+
+    let read = |section: &str| -> Result<Vec<arrow_array::RecordBatch>, Box<dyn Error>> {
+        let path = dir.join(section);
+        let reader = FileReader::try_new(
+            std::fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?,
+            None,
+        )?;
+        let batches = reader.collect::<Result<Vec<_>, _>>()?;
+        for b in &batches {
+            nuclear_data_schema::check_batch(section, &b.schema())?;
+        }
+        Ok(batches)
+    };
+    let header = read("thermal.arrow")?;
+    let [header] = header.as_slice() else {
+        return Err("thermal.arrow does not hold one batch".into());
+    };
+    let text = |name: &str| -> Result<String, Box<dyn Error>> {
+        Ok(header
+            .column_by_name(name)
+            .ok_or_else(|| format!("thermal.arrow has no {name}"))?
+            .as_string_opt::<i32>()
+            .ok_or_else(|| format!("thermal.arrow {name} is not text"))?
+            .value(0)
+            .to_string())
+    };
+    let texts = |name: &str| -> Result<Vec<String>, Box<dyn Error>> {
+        let list = header
+            .column_by_name(name)
+            .ok_or_else(|| format!("thermal.arrow has no {name}"))?
+            .as_list_opt::<i32>()
+            .ok_or_else(|| format!("thermal.arrow {name} is not a list"))?
+            .value(0);
+        let strings = list
+            .as_string_opt::<i32>()
+            .ok_or_else(|| format!("thermal.arrow {name} items are not text"))?;
+        Ok((0..strings.len())
+            .map(|i| strings.value(i).to_string())
+            .collect())
+    };
+    let temperatures = texts("temperatures")?;
+    if temperatures.is_empty() {
+        return Err("thermal.arrow lists no temperatures".into());
+    }
+    let kind_column = header
+        .column_by_name("elastic_kind")
+        .ok_or("thermal.arrow has no elastic_kind")?;
+    let elastic_kind = (!kind_column.is_null(0))
+        .then(|| text("elastic_kind"))
+        .transpose()?;
+    let energy_max = header
+        .column_by_name("energy_max")
+        .ok_or("thermal.arrow has no energy_max")?
+        .as_primitive_opt::<arrow_array::types::Float64Type>()
+        .ok_or("energy_max is not a float")?
+        .value(0);
+    let mut sections = vec!["inelastic.arrow", "sab.arrow"];
+    let elastic_present = dir.join("elastic.arrow").exists();
+    if elastic_kind.is_some() != elastic_present {
+        return Err(format!(
+            "elastic kind {elastic_kind:?}, and elastic.arrow is {}",
+            if elastic_present { "there" } else { "missing" }
+        )
+        .into());
+    }
+    if elastic_present {
+        sections.push("elastic.arrow");
+    }
+    for section in sections {
+        let batches = read(section)?;
+        let labels: Vec<String> = batches
+            .iter()
+            .map(|b| {
+                if b.num_rows() != 1 {
+                    return Err(format!("{section} has a batch of {} rows", b.num_rows()));
+                }
+                Ok(b.column_by_name("temperature")
+                    .and_then(|c| c.as_string_opt::<i32>().map(|s| s.value(0).to_string()))
+                    .unwrap_or_default())
+            })
+            .collect::<Result<_, _>>()?;
+        if labels != temperatures {
+            return Err(format!(
+                "{section} holds temperatures {labels:?}, thermal.arrow lists {temperatures:?}"
+            )
+            .into());
+        }
+    }
+    Ok(ThermalSummary {
+        name: text("name")?,
+        bound_nuclides: texts("bound_nuclides")?,
+        temperatures,
+        energy_max,
+        elastic_kind,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -700,6 +816,21 @@ mod tests {
             .as_primitive::<arrow_array::types::Float64Type>()
             .value(0);
         assert_eq!(w, i.debye_waller.eval(l.temperatures[0]));
+    }
+
+    #[test]
+    fn a_written_folder_inspects_back() {
+        let (_tmp, dir, l) = write(SIO2);
+        let s = inspect_thermal(&dir).unwrap();
+        assert_eq!(s.name, "c_Test");
+        assert_eq!(s.bound_nuclides, ["Si28"]);
+        assert_eq!(s.temperatures.len(), l.temperatures.len());
+        assert_eq!(s.elastic_kind.as_deref(), Some("coherent"));
+        std::fs::remove_file(dir.join("elastic.arrow")).unwrap();
+        assert!(
+            inspect_thermal(&dir).is_err(),
+            "a coherent table with no elastic.arrow"
+        );
     }
 
     #[test]

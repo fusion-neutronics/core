@@ -25,6 +25,8 @@ pub enum Sublibrary {
     Photonuclear,
     Decay,
     FissionYields,
+    /// Thermal neutron scattering laws (MF=7).
+    ThermalScattering,
 }
 
 impl Sublibrary {
@@ -37,6 +39,7 @@ impl Sublibrary {
             Sublibrary::AtomicRelaxation => 6,
             Sublibrary::Neutron => 10,
             Sublibrary::FissionYields => 11,
+            Sublibrary::ThermalScattering => 12,
         }
     }
 
@@ -49,6 +52,7 @@ impl Sublibrary {
             Sublibrary::Photonuclear => "photonuclear",
             Sublibrary::Decay => "decay",
             Sublibrary::FissionYields => "fission_yields",
+            Sublibrary::ThermalScattering => "thermal_scattering",
         }
     }
 }
@@ -65,14 +69,18 @@ pub enum Part {
     Reactions,
     FissionYields,
     Branching,
+    /// Thermal scattering tables (`thermal/<name>.arrow/`), processed with
+    /// NJOY against the library's own neutron evaluations.
+    Thermal,
 }
 
 impl Part {
     /// Every part, in the order they are listed.
-    pub const ALL: [Part; 7] = [
+    pub const ALL: [Part; 8] = [
         Part::Neutron,
         Part::Photon,
         Part::Photonuclear,
+        Part::Thermal,
         Part::Decay,
         Part::Reactions,
         Part::FissionYields,
@@ -90,6 +98,7 @@ impl Part {
             Part::Reactions => "reactions",
             Part::FissionYields => "fission_yields",
             Part::Branching => "branching",
+            Part::Thermal => "thermal",
         }
     }
 
@@ -178,6 +187,9 @@ pub struct Recipe<'a> {
     /// build without them is complete; one that converts any of them says
     /// the list has gone stale. Each recipe says why next to its list.
     pub unconvertible: &'static [&'static str],
+    /// Which nuclides each thermal scattering evaluation binds to; empty for a
+    /// library with no thermal scattering sublibrary.
+    pub thermal: &'static [crate::thermal::Binding],
     /// The free disk a full build needs at its peak, in bytes: the source
     /// archives, what they unpack to, NJOY's scratch and the release. Rounded
     /// up from the measured builds.
@@ -243,15 +255,29 @@ const FULL: &[Part] = &[
     Part::Branching,
 ];
 
+/// [`FULL`] and the thermal scattering tables.
+const FULL_WITH_THERMAL: &[Part] = &[
+    Part::Neutron,
+    Part::Photon,
+    Part::Decay,
+    Part::Reactions,
+    Part::FissionYields,
+    Part::Branching,
+    Part::Thermal,
+];
+
 /// The sources tables.
 static RECIPES: &[Recipe<'static>] = &[
     Recipe {
         keyword: "endf-b8.1",
         sources: ENDF_B8_1,
-        parts: FULL,
+        parts: FULL_WITH_THERMAL,
         njoy: Flavour::Upstream,
         unconvertible: &[],
-        disk_bytes: 15 * GB,
+        thermal: crate::thermal::ENDF_B8_1,
+        // 15 GB without the thermal part, which adds its 0.5 GB archive,
+        // 1.5 GB unpacked and about 8 GB of tables.
+        disk_bytes: 25 * GB,
     },
     Recipe {
         keyword: "jeff-4.0",
@@ -263,10 +289,14 @@ static RECIPES: &[Recipe<'static>] = &[
             Part::Reactions,
             Part::FissionYields,
             Part::Branching,
+            Part::Thermal,
         ],
         njoy: Flavour::Upstream,
         unconvertible: &[],
-        disk_bytes: 15 * GB,
+        thermal: crate::thermal::JEFF_4_0,
+        // 15 GB without the thermal part, which adds its 1.5 GB archive,
+        // 5.2 GB unpacked and about 10 GB of tables.
+        disk_bytes: 32 * GB,
     },
     Recipe {
         keyword: "jendl-5.0",
@@ -275,6 +305,7 @@ static RECIPES: &[Recipe<'static>] = &[
         njoy: Flavour::Upstream,
         // Every one of its 795 neutron evaluations converts.
         unconvertible: &[],
+        thermal: &[],
         disk_bytes: 50 * GB,
     },
     Recipe {
@@ -289,6 +320,7 @@ static RECIPES: &[Recipe<'static>] = &[
         // 2026-08-08. Both are short-lived and far from stability. Ne24 also
         // fails in TENDL-2017, for another reason (see there).
         unconvertible: &["neutron/Ne24", "neutron/S42"],
+        thermal: &[],
         disk_bytes: 60 * GB,
     },
     Recipe {
@@ -316,6 +348,7 @@ static RECIPES: &[Recipe<'static>] = &[
             "neutron/O14",
             "neutron/O15",
         ],
+        thermal: &[],
         disk_bytes: 60 * GB,
     },
     Recipe {
@@ -331,6 +364,7 @@ static RECIPES: &[Recipe<'static>] = &[
         ],
         njoy: Flavour::IaeaFork,
         unconvertible: &[],
+        thermal: &[],
         disk_bytes: 8 * GB,
     },
     Recipe {
@@ -341,6 +375,7 @@ static RECIPES: &[Recipe<'static>] = &[
         parts: &[Part::Branching],
         njoy: Flavour::Upstream,
         unconvertible: &[],
+        thermal: &[],
         disk_bytes: GB,
     },
 ];
@@ -389,6 +424,16 @@ static ENDF_B8_1: &[Source] = &[
     },
     ENDF_B8_1_DECAY,
     ENDF_B8_1_YIELDS,
+    Source {
+        name: "thermal_scatt-version.VIII.1.tar.gz",
+        url: "https://www.nndc.bnl.gov/endf-releases/releases/B-VIII.1/thermal_scatt/thermal_scatt-version.VIII.1.tar.gz",
+        pin: Pin {
+            bytes: 484_995_875,
+            sha256: "bfb824a9719253e4be6e9be5b1faf76b1b78452b941005babddadb3294c9a184",
+        },
+        sublibrary: Sublibrary::ThermalScattering,
+        keep: |n| named(n, "tsl-", ".endf"),
+    },
 ];
 
 /// ENDF/B-VIII.1's decay sublibrary.
@@ -454,6 +499,22 @@ static JEFF_4_0: &[Source] = &[
         },
         sublibrary: Sublibrary::FissionYields,
         keep: |_| true,
+    },
+    // Every evaluation is a file of its own; the UO2, PuO2, ThO2 and
+    // Zircaloy-4 tables are one file per isotope and temperature, named
+    // `tsl_<isotope>_<compound>_<T>K.jeff`, which group into one table each.
+    // Zircaloy-4 at burnup is left out: eight burnup sets of files named
+    // `tsl_<isotope>_Zy4.jeff` without a temperature, the same names in each,
+    // which need names of their own before they can be published.
+    Source {
+        name: "JEFF40-Evaluations-TSL.zip",
+        url: "https://data.oecd-nea.org/api/records/scmva-nqh68/files/JEFF40-Evaluations-TSL.zip/content",
+        pin: Pin {
+            bytes: 1_517_384_729,
+            sha256: "a42660bfc0b56966ee17b4ee605744410d0fa740c88f3e6906c0aa91cb951b5a",
+        },
+        sublibrary: Sublibrary::ThermalScattering,
+        keep: |n| named(n, "tsl_", ".jeff") && !n.ends_with("_Zy4.jeff"),
     },
 ];
 
@@ -779,6 +840,7 @@ mod tests {
                     Part::Decay => &[Sublibrary::Decay],
                     Part::FissionYields => &[Sublibrary::FissionYields],
                     Part::Reactions | Part::Branching => &[Sublibrary::Neutron],
+                    Part::Thermal => &[Sublibrary::ThermalScattering, Sublibrary::Neutron],
                 };
                 for s in needs {
                     assert!(has(*s), "{} {} needs {}", r.keyword, part.name(), s.dir());
@@ -790,6 +852,7 @@ mod tests {
                 let part_of_it = match src.sublibrary {
                     Sublibrary::Decay => r.parts.contains(&Part::Decay),
                     Sublibrary::FissionYields => r.parts.contains(&Part::FissionYields),
+                    Sublibrary::ThermalScattering => r.parts.contains(&Part::Thermal),
                     _ => true,
                 };
                 assert!(
@@ -835,6 +898,37 @@ mod tests {
         table.sort();
         recipes.sort();
         assert_eq!(table, recipes);
+    }
+
+    #[test]
+    fn a_library_with_thermal_tables_builds_them_and_only_then() {
+        for r in RECIPES {
+            assert_eq!(
+                !r.thermal.is_empty(),
+                r.parts.contains(&Part::Thermal),
+                "{}",
+                r.keyword
+            );
+            assert_eq!(
+                !r.thermal.is_empty(),
+                r.sublibraries().contains(&Sublibrary::ThermalScattering),
+                "{}",
+                r.keyword
+            );
+        }
+    }
+
+    #[test]
+    fn the_readers_list_of_thermal_libraries_is_the_recipes() {
+        let recipes: Vec<&str> = RECIPES
+            .iter()
+            .filter(|r| r.parts.contains(&Part::Thermal))
+            .map(|r| r.keyword)
+            .collect();
+        assert_eq!(
+            yamc_nuclide::url_cache::THERMAL_LIBRARIES,
+            recipes.as_slice()
+        );
     }
 
     #[test]
