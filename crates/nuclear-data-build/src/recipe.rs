@@ -245,18 +245,9 @@ fn jendl_stem(name: &str, prefix: &str, suffix: &str) -> bool {
 
 const GB: u64 = 1_000_000_000;
 
-/// Every part of a library with its own complete chain and photon data.
+/// Every part of a library with its own complete chain, photon data and
+/// thermal scattering tables.
 const FULL: &[Part] = &[
-    Part::Neutron,
-    Part::Photon,
-    Part::Decay,
-    Part::Reactions,
-    Part::FissionYields,
-    Part::Branching,
-];
-
-/// [`FULL`] and the thermal scattering tables.
-const FULL_WITH_THERMAL: &[Part] = &[
     Part::Neutron,
     Part::Photon,
     Part::Decay,
@@ -271,7 +262,7 @@ static RECIPES: &[Recipe<'static>] = &[
     Recipe {
         keyword: "endf-b8.1",
         sources: ENDF_B8_1,
-        parts: FULL_WITH_THERMAL,
+        parts: FULL,
         njoy: Flavour::Upstream,
         unconvertible: &[],
         thermal: crate::thermal::ENDF_B8_1,
@@ -305,8 +296,10 @@ static RECIPES: &[Recipe<'static>] = &[
         njoy: Flavour::Upstream,
         // Every one of its 795 neutron evaluations converts.
         unconvertible: &[],
-        thermal: &[],
-        disk_bytes: 50 * GB,
+        thermal: crate::thermal::JENDL_5_0,
+        // 50 GB without the thermal part, which adds its 0.5 GB of archives,
+        // 1.8 GB unpacked and its tables.
+        disk_bytes: 55 * GB,
     },
     Recipe {
         keyword: "tendl-2025",
@@ -645,6 +638,29 @@ static JENDL_5_0: &[Source] = &[
             sha256: "4d076dd1bc7297d40794db69090a0663831428b1450a77b3ae30342d789b7b34",
         },
     ),
+    // The thermal scattering law sublibrary and its update 16, which
+    // re-evaluates H and O in H2O with 25 times more molecular dynamics runs.
+    // Pinned from the copies downloaded on 2026-11-08.
+    Source {
+        name: "jendl5-tsl.tar.gz",
+        url: "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-tsl.tar.gz",
+        pin: Pin {
+            bytes: 356_177_628,
+            sha256: "cbbafdac7a3f1134fc694dd56674d0b8897a2f7dbf5f438229fca8a8c4d4ce17",
+        },
+        sublibrary: Sublibrary::ThermalScattering,
+        keep: |n| named(n, "tsl_", ".dat"),
+    },
+    Source {
+        name: "jendl5-tsl_upd16.tar.gz",
+        url: "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-tsl_upd16.tar.gz",
+        pin: Pin {
+            bytes: 141_655_279,
+            sha256: "82daa56d8ce85a7e9375735e8819a2d51ce1d762c654e02593331a59fc7682b8",
+        },
+        sublibrary: Sublibrary::ThermalScattering,
+        keep: |n| named(n, "tsl_", ".dat"),
+    },
     jendl_yields(
         "jendl5-fpy_upd8.tar.gz",
         "https://wwwndc.jaea.go.jp/ftpnd/ftp/JENDL/jendl5-fpy_upd8.tar.gz",
