@@ -90,7 +90,7 @@ fn read_back(dir: &Path) -> Vec<BranchingCovarianceBlock> {
         reactions: Vec::new(),
         decays: Vec::new(),
         fission_yields: None,
-        sources: Vec::new(),
+        sources: Default::default(),
     };
     let chain = std::collections::HashMap::from([("Nb93".to_string(), nuclide)]);
     yani::export_chain_parts(&chain, &chain_dir, Some("test")).expect("chain exports");

@@ -416,7 +416,7 @@ fn a_source_switched_off_contributes_nothing() {
         Some(&DataUncertainty {
             seed: 4,
             samples: Some(64),
-            sources: vec![],
+            sources: Default::default(),
             attribution: false,
             ..Default::default()
         }),

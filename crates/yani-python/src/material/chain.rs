@@ -261,7 +261,7 @@ impl PyChain {
                 continue;
             }
             let sources = PyList::empty(py);
-            for src in &nuclide.sources {
+            for src in nuclide.sources.iter() {
                 if src.particle == "photon" {
                     let row = match &src.distribution {
                         DecaySourceDistribution::Discrete {

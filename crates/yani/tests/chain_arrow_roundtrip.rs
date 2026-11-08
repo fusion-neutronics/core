@@ -49,7 +49,7 @@ fn arrow_writer_roundtrip() {
     // that a reader that drops continua cannot pass by comparing empty sets.
     let continua = original
         .values()
-        .flat_map(|n| &n.sources)
+        .flat_map(|n| n.sources.iter())
         .filter(|s| matches!(s.distribution, DecaySourceDistribution::Tabular { .. }))
         .count();
     assert_eq!(

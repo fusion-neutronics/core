@@ -13,7 +13,7 @@ use pyo3_stub_gen::derive::gen_stub_pyfunction;
 use yamc::shutdown_dose::{Placement, Stage, Step};
 use yani_python::distribution::{PyDoseResult, PyPulseSchedule};
 
-use crate::geometry::PyRegularRectangularMesh;
+use crate::geometry::{PyRegularCylindricalMesh, PyRegularRectangularMesh};
 use crate::simulation::PyModel;
 use crate::tally::PyTally;
 
@@ -81,9 +81,12 @@ use crate::tally::PyTally;
 ///     method: ``"d1s"`` (one-step, one photon run per pair of irradiation
 ///         and observation configurations) or ``"r2s"`` (cell inventories,
 ///         one photon run per step).
-///     mesh: With ``method="r2s"``, a ``RegularRectangularMesh`` over the
-///         activated components for cell-under-mesh R2S; ``None`` activates
-///         whole cells.
+///     mesh: With ``method="r2s"``, a mesh over the activated components for
+///         cell-under-mesh R2S, each element's part of every material-filled
+///         cell activated on the element's neutron spectrum: a
+///         ``RegularRectangularMesh``, a ``RegularCylindricalMesh``, or a tet
+///         ``MeshGeometry`` (every tet, each inside one cell, as the model's
+///         own tet mesh is). ``None`` activates whole cells.
 ///
 /// Returns:
 ///     ``{tally name: DoseResult}``, each with one row per schedule step:
@@ -109,8 +112,12 @@ pub fn simulate_shutdown_dose(
     seed: u64,
     threads: Option<usize>,
     method: &str,
-    mesh: Option<PyRegularRectangularMesh>,
+    #[gen_stub(override_type(
+        type_repr = "RegularRectangularMesh | RegularCylindricalMesh | MeshGeometry | None"
+    ))]
+    mesh: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<BTreeMap<String, PyDoseResult>> {
+    let mesh = mesh.map(r2s_mesh).transpose()?;
     match (method, &mesh) {
         ("r2s", _) | ("d1s", None) => {}
         ("d1s", Some(_)) => {
@@ -202,7 +209,7 @@ pub fn simulate_shutdown_dose(
                 &steps,
                 &tallies,
                 &settings,
-                mesh.as_ref().map(|m| &m.internal),
+                mesh.as_ref(),
             ),
         })
         .map_err(PyValueError::new_err)?;
@@ -214,4 +221,22 @@ pub fn simulate_shutdown_dose(
                 .map(|r| (name, r))
         })
         .collect()
+}
+
+/// The mesh R2S activates on, from the yamc mesh object given as `mesh=`.
+fn r2s_mesh(mesh: &Bound<'_, PyAny>) -> PyResult<yamc::r2s::R2sMesh> {
+    use yamc::r2s::R2sMesh;
+    if let Ok(m) = mesh.extract::<PyRef<'_, PyRegularRectangularMesh>>() {
+        return Ok(R2sMesh::Rectangular(m.internal.clone()));
+    }
+    if let Ok(m) = mesh.extract::<PyRef<'_, PyRegularCylindricalMesh>>() {
+        return Ok(R2sMesh::Cylindrical(m.internal.clone()));
+    }
+    #[cfg(feature = "mesh")]
+    if let Ok(m) = mesh.extract::<PyRef<'_, crate::geometry::PyMeshGeometry>>() {
+        return Ok(R2sMesh::Tetrahedral(Arc::new(m.inner.mesh.clone())));
+    }
+    Err(PyTypeError::new_err(
+        "mesh must be a RegularRectangularMesh, RegularCylindricalMesh or MeshGeometry",
+    ))
 }

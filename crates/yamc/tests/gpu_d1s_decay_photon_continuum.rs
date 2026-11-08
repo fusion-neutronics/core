@@ -63,10 +63,11 @@ fn continuum_chain() -> std::path::PathBuf {
     )
     .expect("parse the fixture chain");
     let mn56 = chain.get_mut("Mn56").expect("the fixture chain has Mn56");
-    mn56.sources.retain(|s| s.particle != "photon");
+    let sources = std::sync::Arc::make_mut(&mut mn56.sources);
+    sources.retain(|s| s.particle != "photon");
     // Densities are emission rates per atom per second per eV, of the order
     // of Mn56's decay constant (7.5e-5 /s) spread over an MeV.
-    mn56.sources.push(yani::DecaySource {
+    sources.push(yani::DecaySource {
         particle: "photon".to_string(),
         radiation: None,
         distribution: yani::DecaySourceDistribution::Tabular {
@@ -76,7 +77,7 @@ fn continuum_chain() -> std::path::PathBuf {
         },
         uncertainty: None,
     });
-    mn56.sources.push(yani::DecaySource {
+    sources.push(yani::DecaySource {
         particle: "photon".to_string(),
         radiation: None,
         distribution: yani::DecaySourceDistribution::Tabular {

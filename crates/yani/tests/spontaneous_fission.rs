@@ -101,7 +101,7 @@ fn nuclide(name: &str, half_life: Option<f64>, decays: Vec<ChainReaction>) -> Ch
         reactions: Vec::new(),
         decays,
         fission_yields: None,
-        sources: Vec::new(),
+        sources: Default::default(),
     }
 }
 

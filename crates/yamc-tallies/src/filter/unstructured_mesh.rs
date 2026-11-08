@@ -17,8 +17,9 @@ use crate::mesh::MeshCrossing;
 pub struct UnstructuredMeshFilter {
     /// The mesh geometry with element BVH for fast lookups.
     mesh: Arc<yamt::MeshGeometry>,
-    /// Which volume of the mesh to score on.
-    volume_id: yamt::VolumeId,
+    /// The volumes of the mesh to score on, ascending; their tets share the
+    /// one global bin numbering.
+    volumes: Vec<yamt::VolumeId>,
     /// Total number of tets in the mesh (bins = global tet IDs).
     num_tets: usize,
 }
@@ -43,7 +44,10 @@ impl serde::Serialize for UnstructuredMeshFilter {
         let topo = &self.mesh.topology;
         let mut st = serializer.serialize_struct("UnstructuredMeshFilter", 7)?;
         st.serialize_field("kind", "unstructured_mesh")?;
-        st.serialize_field("volume_id", &self.volume_id)?;
+        match self.volumes.as_slice() {
+            [v] => st.serialize_field("volume_id", v)?,
+            vs => st.serialize_field("volume_ids", vs)?,
+        }
         st.serialize_field("num_tets", &self.num_tets)?;
         st.serialize_field("num_volumes", &topo.num_volumes)?;
         st.serialize_field("num_vertices", &topo.vertices.len())?;
@@ -68,10 +72,23 @@ impl UnstructuredMeshFilter {
     /// * `mesh` -- the mesh geometry (shared via Arc for thread safety)
     /// * `volume_id` -- which volume of the mesh to walk through
     pub fn new(mesh: Arc<yamt::MeshGeometry>, volume_id: yamt::VolumeId) -> Self {
+        Self::over_volumes(mesh, vec![volume_id])
+    }
+
+    /// A filter scoring on several volumes of one mesh at once, in one set of
+    /// bins (global tet ids): one tet-sized buffer where a filter per volume
+    /// would need one each. A track step is walked through each volume.
+    ///
+    /// # Panics
+    /// If `volumes` is empty.
+    pub fn over_volumes(mesh: Arc<yamt::MeshGeometry>, mut volumes: Vec<yamt::VolumeId>) -> Self {
+        assert!(!volumes.is_empty(), "a tet filter needs a volume");
+        volumes.sort_unstable();
+        volumes.dedup();
         let num_tets = mesh.topology.tetrahedra.len();
         UnstructuredMeshFilter {
             mesh,
-            volume_id,
+            volumes,
             num_tets,
         }
     }
@@ -86,7 +103,11 @@ impl UnstructuredMeshFilter {
         r1: [f64; 3],
         _direction: [f64; 3],
     ) -> Vec<MeshCrossing> {
-        let segments = self.mesh.segments(self.volume_id, r0, r1);
+        let segments: Vec<(yamt::TetrahedronId, f64)> = self
+            .volumes
+            .iter()
+            .flat_map(|&v| self.mesh.segments(v, r0, r1))
+            .collect();
 
         if segments.is_empty() {
             return Vec::new();
@@ -116,8 +137,9 @@ impl UnstructuredMeshFilter {
     /// global tetrahedron id -- the same mapping `get_bins_crossed`
     /// uses -- resolved with yamt's element-BVH point query.
     pub fn get_bin(&self, position: [f64; 3]) -> Option<usize> {
-        self.mesh
-            .find_element(self.volume_id, position)
+        self.volumes
+            .iter()
+            .find_map(|&v| self.mesh.find_element(v, position))
             .map(|tet_id| tet_id as usize)
     }
 
@@ -136,16 +158,16 @@ impl UnstructuredMeshFilter {
         &self.mesh
     }
 
-    /// The volume ID being scored.
-    pub fn volume_id(&self) -> yamt::VolumeId {
-        self.volume_id
+    /// The volume IDs being scored, ascending.
+    pub fn volumes(&self) -> &[yamt::VolumeId] {
+        &self.volumes
     }
 }
 
 impl std::fmt::Debug for UnstructuredMeshFilter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UnstructuredMeshFilter")
-            .field("volume_id", &self.volume_id)
+            .field("volumes", &self.volumes)
             .field("num_tets", &self.num_tets)
             .finish()
     }
@@ -153,8 +175,8 @@ impl std::fmt::Debug for UnstructuredMeshFilter {
 
 impl PartialEq for UnstructuredMeshFilter {
     fn eq(&self, other: &Self) -> bool {
-        // Compare by volume_id and num_tets (Arc pointer equality for mesh)
-        self.volume_id == other.volume_id
+        // Compare by volumes and num_tets (Arc pointer equality for mesh)
+        self.volumes == other.volumes
             && self.num_tets == other.num_tets
             && Arc::ptr_eq(&self.mesh, &other.mesh)
     }
@@ -181,7 +203,7 @@ mod tests {
         let filter = UnstructuredMeshFilter::new(mesh.clone(), 0);
 
         assert!(filter.num_bins() > 0);
-        assert_eq!(filter.volume_id(), 0);
+        assert_eq!(filter.volumes(), [0]);
     }
 
     #[test]
