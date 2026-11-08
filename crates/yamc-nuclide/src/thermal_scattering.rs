@@ -10,13 +10,19 @@
 //! hard error, never a table quietly missing its elastic part.
 
 use std::collections::BTreeMap;
+#[cfg(feature = "arrow")]
 use std::error::Error;
+#[cfg(feature = "arrow")]
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "arrow")]
 use arrow_array::cast::AsArray;
+#[cfg(feature = "arrow")]
 use arrow_array::types::{Float32Type, Float64Type};
+#[cfg(feature = "arrow")]
 use arrow_array::{Array, RecordBatch};
 
+#[cfg(feature = "arrow")]
 use crate::arrow_helpers::{
     get_f64, get_f64_list, get_i32, get_str, get_str_list, read_arrow_file, try_get_f64,
 };
@@ -128,6 +134,7 @@ pub struct ThermalTable {
     pub temperatures: BTreeMap<String, ThermalTemperature>,
 }
 
+#[cfg(feature = "arrow")]
 /// A section's path: the whole file, or the ranged copy a temperature-ranged
 /// download keeps under `temperatures/`.
 fn section_path(dir: &Path, section: &str) -> Option<PathBuf> {
@@ -139,6 +146,7 @@ fn section_path(dir: &Path, section: &str) -> Option<PathBuf> {
     crate::storage::exists(&ranged).then_some(ranged)
 }
 
+#[cfg(feature = "arrow")]
 fn row_of(batch: &RecordBatch, label: &str) -> Result<Option<usize>, Box<dyn Error>> {
     for row in 0..batch.num_rows() {
         if get_str(batch, "temperature", row)? == label {
@@ -148,6 +156,7 @@ fn row_of(batch: &RecordBatch, label: &str) -> Result<Option<usize>, Box<dyn Err
     Ok(None)
 }
 
+#[cfg(feature = "arrow")]
 fn nested_f64(batch: &RecordBatch, col: &str, row: usize) -> Result<Vec<Vec<f64>>, Box<dyn Error>> {
     let outer = batch
         .column_by_name(col)
@@ -169,6 +178,7 @@ fn nested_f64(batch: &RecordBatch, col: &str, row: usize) -> Result<Vec<Vec<f64>
         .collect())
 }
 
+#[cfg(feature = "arrow")]
 fn nested_f32(batch: &RecordBatch, col: &str, row: usize) -> Result<Vec<Vec<f32>>, Box<dyn Error>> {
     let outer = batch
         .column_by_name(col)
@@ -190,6 +200,7 @@ fn nested_f32(batch: &RecordBatch, col: &str, row: usize) -> Result<Vec<Vec<f32>
         .collect())
 }
 
+#[cfg(feature = "arrow")]
 /// Read a thermal table from `dir`, at the temperature labels `wanted`
 /// (`"294K"`), or every temperature present when `None`. A wanted label the
 /// table does not publish, or whose rows are not in the folder (a ranged
@@ -382,6 +393,7 @@ pub fn labels_for_temperature(
     Ok(vec![sorted[i - 1].0.clone(), sorted[i].0.clone()])
 }
 
+#[cfg(feature = "arrow")]
 /// Load thermal table `name` from `source` (a library keyword, a release
 /// folder or a table folder) for a material at `kelvin`, reading only the
 /// table temperatures the material uses (one, or the two it falls between).

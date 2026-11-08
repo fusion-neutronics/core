@@ -6,6 +6,26 @@ use std::collections::HashMap;
 use yamc_materials::material::Material;
 use yamc_nuclide::config::ChainUse;
 
+/// `s_alpha_beta` as given from Python: one name, a list of names, or a dict
+/// of name to bound fraction.
+fn s_alpha_beta_tables(value: &Bound<'_, PyAny>) -> PyResult<Vec<(String, f64)>> {
+    if let Ok(name) = value.extract::<String>() {
+        return Ok(vec![(name, 1.0)]);
+    }
+    if let Ok(dict) = value.cast::<pyo3::types::PyDict>() {
+        return dict
+            .iter()
+            .map(|(k, v)| Ok((k.extract::<String>()?, v.extract::<f64>()?)))
+            .collect();
+    }
+    if let Ok(names) = value.extract::<Vec<String>>() {
+        return Ok(names.into_iter().map(|n| (n, 1.0)).collect());
+    }
+    Err(PyValueError::new_err(
+        "s_alpha_beta must be a table name, a list of names, or a dict of name to bound fraction",
+    ))
+}
+
 /// A homogeneous mixture of nuclides at a fixed density and temperature.
 ///
 /// A Material is built from a composition dictionary whose keys may be
@@ -204,6 +224,40 @@ impl PyMaterial {
         self.internal.name = Some(name);
     }
 
+    /// The thermal scattering tables this material uses, as a dict of table
+    /// name to the fraction of its nuclides that is bound.
+    #[getter]
+    fn s_alpha_beta(&self) -> HashMap<String, f64> {
+        self.internal.s_alpha_beta().iter().cloned().collect()
+    }
+
+    /// Set the thermal scattering tables: a table name, a list of names, or a
+    /// dict of name to bound fraction. Read the nuclear data again to load
+    /// them.
+    #[setter(s_alpha_beta)]
+    fn set_s_alpha_beta(
+        &mut self,
+        #[gen_stub(override_type(type_repr = "str | list[str] | dict[str, float]"))] tables: &Bound<
+            '_,
+            PyAny,
+        >,
+    ) -> PyResult<()> {
+        self.internal
+            .set_s_alpha_beta(s_alpha_beta_tables(tables)?)
+            .map_err(PyValueError::new_err)
+    }
+
+    /// The nuclides each loaded thermal scattering table applies to, as a dict
+    /// of table name to nuclide names. Empty until the nuclear data is read.
+    #[getter]
+    fn thermal_bindings(&self) -> HashMap<String, Vec<String>> {
+        self.internal
+            .thermal
+            .iter()
+            .map(|t| (t.table.name.clone(), t.nuclides.clone()))
+            .collect()
+    }
+
     /// The material's ID.
     ///
     /// Assigned when the material is built: the ``id`` given to the
@@ -293,13 +347,23 @@ impl PyMaterial {
     ///     temperature (Optional[float]): Temperature in Kelvin. If omitted,
     ///         294 K is used, or the only temperature the nuclear data carries
     ///         when it carries just one.
+    ///     s_alpha_beta (str | list[str] | dict[str, float] | None): Thermal
+    ///         scattering tables for bound nuclides, by name, such as
+    ///         ``"c_H_in_H2O"`` or ``["c_Li_in_FLiBe", "c_Be_in_FLiBe",
+    ///         "c_F_in_FLiBe"]``. A dict gives the fraction of each table's
+    ///         nuclides that is bound (``{"c_H_in_ZrH": 0.6}``); otherwise all
+    ///         of them are. Which nuclides a table applies to is the table's
+    ///         own data. The tables come from the library the cross sections
+    ///         are read from, at the material's temperature (the table it sits
+    ///         on, or the two it falls between); a library without thermal
+    ///         tables, or a temperature outside a table's range, is refused.
     ///
     /// Returns:
     ///     Material: A new material.
     #[new]
     #[pyo3(
-        signature = (composition, density, *, density_units="g/cm3".to_string(), name=None, id=None, fraction_type="atom".to_string(), transmutable=false, volume=None, temperature=None),
-        text_signature = "(composition, density, *, density_units='g/cm3', name=None, id=None, fraction_type='atom', transmutable=False, volume=None, temperature=None)"
+        signature = (composition, density, *, density_units="g/cm3".to_string(), name=None, id=None, fraction_type="atom".to_string(), transmutable=false, volume=None, temperature=None, s_alpha_beta=None),
+        text_signature = "(composition, density, *, density_units='g/cm3', name=None, id=None, fraction_type='atom', transmutable=False, volume=None, temperature=None, s_alpha_beta=None)"
     )]
     fn new(
         // `Enriched` is a pyclass in this crate, so it needs no package
@@ -315,6 +379,8 @@ impl PyMaterial {
         transmutable: bool,
         volume: Option<f64>,
         temperature: Option<f64>,
+        #[gen_stub(override_type(type_repr = "str | list[str] | dict[str, float] | None"))]
+        s_alpha_beta: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         // Build nuclides map from composition dict using composition module.
         // Also track nuclide insertion order: each user-input key contributes
@@ -395,6 +461,11 @@ impl PyMaterial {
                 return Err(PyValueError::new_err("temperature must be a finite number"));
             }
             internal.set_temperature(format!("{}", t));
+        }
+        if let Some(tables) = s_alpha_beta {
+            internal
+                .set_s_alpha_beta(s_alpha_beta_tables(tables)?)
+                .map_err(PyValueError::new_err)?;
         }
         // Last, so a material that fails validation takes no id.
         internal

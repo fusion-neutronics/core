@@ -70,8 +70,69 @@ impl Material {
         // Validate that all nuclides have compatible temperatures
         self.validate_temperature_consistency()?;
 
+        self.load_thermal_tables(source_map)?;
+
         // Clear cached data since new nuclear data affects cross sections
         self.invalidate_xs_cache();
+        Ok(())
+    }
+
+    /// Load the tables `s_alpha_beta` names, at the material's temperature,
+    /// from the one library the material's cross sections come from, and bind
+    /// each to the material's nuclides it applies to.
+    fn load_thermal_tables(
+        &mut self,
+        source_map: &HashMap<String, String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.thermal.clear();
+        if self.s_alpha_beta.is_empty() {
+            return Ok(());
+        }
+        let mut sources: Vec<&String> = self
+            .nuclides
+            .keys()
+            .filter_map(|n| source_map.get(n))
+            .collect();
+        sources.sort();
+        sources.dedup();
+        let source = match sources.as_slice() {
+            [one] => (*one).clone(),
+            [] => return Err("s_alpha_beta needs the material's cross sections to be read from a library or folder".into()),
+            _ => return Err(format!(
+                "s_alpha_beta takes its tables from the library the cross sections come from, \
+                 and this material reads them from {} sources; read them from one",
+                sources.len()
+            )
+            .into()),
+        };
+        let kelvin = self.temperature_k();
+        let mut tables = Vec::with_capacity(self.s_alpha_beta.len());
+        for (name, _) in &self.s_alpha_beta {
+            tables.push(Arc::new(
+                yamc_nuclide::thermal_scattering::load_thermal(&source, name, kelvin)
+                    .map_err(|e| format!("thermal table {name}: {e}"))?,
+            ));
+        }
+        let mut nuclides: Vec<String> = self.nuclides.keys().cloned().collect();
+        nuclides.sort();
+        let named: Vec<(&str, &[String])> = tables
+            .iter()
+            .map(|t| (t.name.as_str(), t.bound_nuclides.as_slice()))
+            .collect();
+        let bound = crate::material::bind_thermal(&named, &nuclides)?;
+        self.thermal = tables
+            .into_iter()
+            .zip(bound)
+            .zip(&self.s_alpha_beta)
+            .map(
+                |((table, nuclides), (_, fraction))| crate::material::BoundThermal {
+                    table,
+                    fraction: *fraction,
+                    nuclides,
+                    kelvin,
+                },
+            )
+            .collect();
         Ok(())
     }
 
