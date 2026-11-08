@@ -4734,7 +4734,7 @@ def generate_library(keyword: builtins.str, path: builtins.str, *, parts: typing
         release carries. Only ``"neutron"`` and ``"thermal"`` run NJOY, so a
         chain alone builds in minutes. ``"thermal"`` is the thermal scattering
         tables (``thermal/c_H_in_H2O.arrow/`` and so on), which only
-        ``"endf-b8.1"`` and ``"jeff-4.0"`` publish.
+        ``"endf-b8.1"``, ``"jeff-4.0"`` and ``"jendl-5.0"`` publish.
     nuclides : list of str, optional
         Only these nuclides (``"Fe56"``, ``"Am242_m1"``) and elements (``"Fe"``,
         meaning every Fe evaluation and the Fe photon data), and thermal tables
