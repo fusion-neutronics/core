@@ -453,7 +453,7 @@ pub fn publishers_of(subsection: &str) -> String {
 /// from, never another one: a table is processed on top of its own library's
 /// neutron evaluation, and borrowing one would mix libraries. A library not
 /// listed here has no thermal scattering sublibrary at all.
-pub const THERMAL_LIBRARIES: &[&str] = &["endf-b8.1", "jeff-4.0"];
+pub const THERMAL_LIBRARIES: &[&str] = &["endf-b8.1", "jeff-4.0", "jendl-5.0"];
 
 /// Why `keyword` has no thermal scattering tables, naming the libraries that
 /// do.
