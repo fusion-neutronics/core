@@ -32,16 +32,30 @@ impl BoundThermal {
     /// The table temperatures in use and the weight of the upper one: the
     /// single table the material sits on (weight 0), or the two it falls
     /// between.
+    ///
+    /// Called on every cross section lookup and collision of a bound nuclide,
+    /// so it allocates nothing: `load_thermal` reads only the one or two
+    /// temperatures the material uses, and the labels they are keyed by do
+    /// not sort by temperature, so the pair is ordered here.
     pub fn bracket(&self) -> (&ThermalTemperature, Option<(&ThermalTemperature, f64)>) {
-        let mut temps: Vec<&ThermalTemperature> = self.table.temperatures.values().collect();
-        temps.sort_by(|a, b| a.kelvin.total_cmp(&b.kelvin));
-        match temps.as_slice() {
-            [one] => (one, None),
-            [lo, hi, ..] => (
-                lo,
-                Some((hi, blend_weight(lo.kelvin, hi.kelvin, self.kelvin))),
-            ),
-            [] => unreachable!("a loaded table holds at least one temperature"),
+        let temps = &self.table.temperatures;
+        debug_assert!(
+            (1..=2).contains(&temps.len()),
+            "a bound table holds the one or two temperatures it uses"
+        );
+        let mut it = temps.values();
+        let a = it
+            .next()
+            .expect("a loaded table holds at least one temperature");
+        match it.next() {
+            None => (a, None),
+            Some(b) => {
+                let (lo, hi) = if a.kelvin <= b.kelvin { (a, b) } else { (b, a) };
+                (
+                    lo,
+                    Some((hi, blend_weight(lo.kelvin, hi.kelvin, self.kelvin))),
+                )
+            }
         }
     }
 
@@ -182,6 +196,25 @@ mod tests {
         assert!((b.inelastic_xs(0.5) - 3.5).abs() < 1e-12);
         // Coherent elastic is the same at both, so the blend is that value.
         assert!((b.elastic_xs(0.003) - 0.01 / 0.003).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_bracket_orders_by_temperature_not_by_label() {
+        // "1000K" sorts before "800K" as a label.
+        let temperatures = BTreeMap::from([
+            ("1000K".to_string(), temperature(1000.0, 4.0)),
+            ("800K".to_string(), temperature(800.0, 2.0)),
+        ]);
+        let mut b = bound(900.0, 1.0);
+        b.table = Arc::new(ThermalTable {
+            temperatures,
+            ..(*b.table).clone()
+        });
+        let (lo, hi) = b.bracket();
+        let (hi, w) = hi.unwrap();
+        assert_eq!((lo.kelvin, hi.kelvin), (800.0, 1000.0));
+        assert!((w - 0.5).abs() < 1e-12);
+        assert!((b.inelastic_xs(0.5) - 3.0).abs() < 1e-12);
     }
 
     #[test]
