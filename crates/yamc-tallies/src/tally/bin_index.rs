@@ -13,6 +13,11 @@ impl Tally {
     /// Get the flat index for 7D indexing:
     /// `score → cell → material → nuclide → parent_nuclide → energy → mesh`
     ///
+    /// The full layout also has surface and cosine dimensions straight after
+    /// score (`score → surface → cosine → cell → …`). They only have more
+    /// than one bin on a surface tally, which scores through
+    /// [`Tally::get_surface_bin_index`] instead; here they are 0.
+    ///
     /// Dimension order is outermost (slowest-varying) to innermost. Mesh stays the
     /// innermost dimension so that each nuclide's spatial data forms a contiguous
     /// block, which is optimal for D1S time-correction-factor application
@@ -58,14 +63,48 @@ impl Tally {
         let stride_material = num_material_bins * stride_nuclide;
         let stride_cell = num_cell_bins * stride_material;
 
+        let stride_score = stride_cell * self.num_surface_bins() * self.num_cosine_bins();
         Some(
-            score_index * stride_cell
+            score_index * stride_score
                 + cell_bin * stride_material
                 + material_bin * stride_nuclide
                 + nuclide_bin * stride_parent
                 + parent_bin * stride_energy
                 + energy_bin * stride_mesh
                 + mesh_bin,
+        )
+    }
+
+    /// The flat index of a surface-tally bin:
+    /// `score → surface → cosine → energy`. A surface tally carries no cell,
+    /// material, nuclide, parent or mesh dimension (`Tally::validate`
+    /// refuses them), so those collapse to 1 and energy is innermost.
+    #[inline]
+    pub fn get_surface_bin_index(
+        &self,
+        score_index: usize,
+        surface_bin: usize,
+        cosine_bin: usize,
+        energy_bin: usize,
+    ) -> Option<usize> {
+        let num_surface_bins = self.num_surface_bins();
+        let num_cosine_bins = self.num_cosine_bins();
+        let num_energy_bins = self.num_energy_bins();
+        if score_index >= self.scores.len()
+            || surface_bin >= num_surface_bins
+            || cosine_bin >= num_cosine_bins
+            || energy_bin >= num_energy_bins
+        {
+            return None;
+        }
+        let stride_cosine = num_energy_bins;
+        let stride_surface = num_cosine_bins * stride_cosine;
+        let stride_score = num_surface_bins * stride_surface;
+        Some(
+            score_index * stride_score
+                + surface_bin * stride_surface
+                + cosine_bin * stride_cosine
+                + energy_bin,
         )
     }
 }

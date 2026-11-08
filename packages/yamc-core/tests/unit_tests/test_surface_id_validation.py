@@ -7,15 +7,13 @@ import pytest
 import yamc
 
 
-def test_surface_optional_id():
-    """Test that surface IDs are optional and default to None."""
-    # Create surface without specifying ID
+def test_surface_ids_are_assigned_automatically():
+    """A surface built without an id, or with surface_id=None, gets its own."""
     surface = yamc.Sphere(x0=0.0, y0=0.0, z0=0.0, radius=1.0)
-    assert surface.surface_id is None
-    
-    # Create surface with explicit None
     surface2 = yamc.Sphere(x0=0.0, y0=0.0, z0=0.0, radius=1.0, surface_id=None)
-    assert surface2.surface_id is None
+    assert isinstance(surface.surface_id, int)
+    assert isinstance(surface2.surface_id, int)
+    assert surface.surface_id != surface2.surface_id
 
 
 def test_surface_explicit_id():
@@ -31,8 +29,8 @@ def test_surface_explicit_id():
 def test_surface_id_setter():
     """Test that surface IDs can be modified after creation."""
     surface = yamc.Sphere(x0=0.0, y0=0.0, z0=0.0, radius=1.0)
-    assert surface.surface_id is None
-    
+    assert isinstance(surface.surface_id, int)
+
     # Set ID
     surface.surface_id = 123
     assert surface.surface_id == 123
@@ -145,7 +143,7 @@ def test_surface_types_with_ids():
 
 
 def test_surface_types_without_ids():
-    """Test that all surface types default to None for surface_id."""
+    """Every surface type built without an id gets its own automatic one."""
     # Test various surface types without IDs
     sphere = yamc.Sphere(x0=0, y0=0, z0=0, radius=1)
     plane = yamc.Plane(axis="x", offset=1)
@@ -155,13 +153,10 @@ def test_surface_types_without_ids():
     zcylinder = yamc.Cylinder(axis="z", x0=0, y0=0, radius=1)
     cylinder = yamc.Cylinder(axis="z", x0=0, y0=0, radius=1)
     
-    assert sphere.surface_id is None
-    assert plane.surface_id is None
-    assert xplane.surface_id is None
-    assert yplane.surface_id is None
-    assert zplane.surface_id is None
-    assert zcylinder.surface_id is None
-    assert cylinder.surface_id is None
+    surfaces = [sphere, plane, xplane, yplane, zplane, zcylinder, cylinder]
+    ids = [s.surface_id for s in surfaces]
+    assert all(isinstance(i, int) for i in ids)
+    assert len(set(ids)) == len(surfaces)
 
 
 def test_complex_geometry_surface_validation():

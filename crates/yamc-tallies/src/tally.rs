@@ -351,6 +351,8 @@ impl Tally {
     #[inline]
     pub fn num_bins(&self) -> usize {
         self.scores.len()
+            * self.num_surface_bins()
+            * self.num_cosine_bins()
             * self.num_cell_bins()
             * self.num_material_bins()
             * self.num_nuclide_bins()
@@ -393,6 +395,46 @@ impl Tally {
                 None
             }
         })
+    }
+
+    /// Get the SurfaceFilter if present.
+    pub fn get_surface_filter(&self) -> Option<&crate::SurfaceFilter> {
+        self.filters.iter().find_map(|f| {
+            if let Filter::Surface(sf) = f {
+                Some(sf)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Get the CosineFilter if present.
+    pub fn get_cosine_filter(&self) -> Option<&crate::CosineFilter> {
+        self.filters.iter().find_map(|f| {
+            if let Filter::Cosine(cf) = f {
+                Some(cf)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// True for a surface-current tally, which scores at surface crossings.
+    #[inline]
+    pub fn is_surface_tally(&self) -> bool {
+        self.estimator == crate::Estimator::Surface
+    }
+
+    /// Number of surface bins (1 when no SurfaceFilter or a single surface).
+    #[inline]
+    pub fn num_surface_bins(&self) -> usize {
+        self.get_surface_filter().map(|f| f.num_bins()).unwrap_or(1)
+    }
+
+    /// Number of cosine bins (1 when no CosineFilter).
+    #[inline]
+    pub fn num_cosine_bins(&self) -> usize {
+        self.get_cosine_filter().map(|f| f.num_bins()).unwrap_or(1)
     }
 
     /// Get the MaterialFilter if present.
@@ -514,6 +556,7 @@ impl Tally {
     pub fn reads_urr_xs(&self) -> bool {
         match self.estimator {
             crate::Estimator::Collision => true,
+            crate::Estimator::Surface => false,
             crate::Estimator::TrackLength => self.scores.iter().any(|score| match score {
                 Score::ReactionRate(r) => yamc_materials::UrrMacroXs::covers_mt(r.mt.as_i32()),
                 Score::Flux(_)
@@ -521,7 +564,8 @@ impl Tally {
                 | Score::HeatingLocal(_)
                 | Score::Production(_)
                 | Score::DamageEnergy(_)
-                | Score::PhotonXS(_) => false,
+                | Score::PhotonXS(_)
+                | Score::Current(_) => false,
             }),
         }
     }
@@ -1116,6 +1160,8 @@ impl Tally {
             for (nuc_idx, nuc_bin) in nuclide_bins.iter().enumerate() {
                 let base_contribution = match score {
                     Score::Flux(_) => Some(weighted_track_length),
+                    // Scored only at surface crossings, never along a track.
+                    Score::Current(_) => None,
                     Score::Heating(_) => {
                         // Overlay mode: use microscopic XS from cache (both neutron & photon)
                         if let Some(ovl) = overlay {
@@ -1441,6 +1487,74 @@ impl Tally {
         }
         // No mesh filter -- one synthetic crossing covering the full track.
         apply_crossing!(0, 1.0);
+    }
+
+    /// Score one crossing of a surface into a surface-current tally.
+    ///
+    /// `mu` is the cosine between the particle's direction and the crossed
+    /// surface's normal, which points to the surface's positive side
+    /// (`Surface.above`). The `current` score adds the weight with the sign
+    /// of `mu`, so summed over the cosine bins it is the net current towards
+    /// the positive side; for the outer surface of a convex body in vacuum,
+    /// nothing comes back and that is the leakage. A crossing on a surface
+    /// the tally does not name, outside its cosine or energy bins, or by a
+    /// particle its particle filter excludes, scores nothing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn score_surface_crossing(
+        &self,
+        scratch: &mut crate::welford::WelfordWorkerState,
+        tally_idx: usize,
+        surface_id: usize,
+        mu: f64,
+        weight: f64,
+        energy: f64,
+        particle_type: yamc_particle::ParticleType,
+    ) {
+        let Some(surface_bin) = self
+            .get_surface_filter()
+            .and_then(|f| f.get_bin(surface_id))
+        else {
+            return;
+        };
+        for filter in &self.filters {
+            if let Filter::ParticleType(ptf) = filter
+                && !ptf.matches(particle_type)
+            {
+                return;
+            }
+        }
+        let cosine_bin = match self.get_cosine_filter() {
+            Some(cf) => match cf.get_bin(mu) {
+                Some(bin) => bin,
+                None => return,
+            },
+            None => 0,
+        };
+        let energy_bin = match self.get_energy_filter() {
+            Some(ef) => match ef.get_bin(energy) {
+                Some(bin) => bin,
+                None => return,
+            },
+            None => 0,
+        };
+        let mut ef_weight = 1.0_f64;
+        for filter in &self.filters {
+            if let Filter::EnergyFunction(ef) = filter {
+                match ef.get_weight(energy) {
+                    Some(w) => ef_weight = w,
+                    None => return,
+                }
+                break;
+            }
+        }
+        let value = weight.copysign(mu) * ef_weight;
+        for score_index in 0..self.scores.len() {
+            if let Some(bin) =
+                self.get_surface_bin_index(score_index, surface_bin, cosine_bin, energy_bin)
+            {
+                scratch.add_contribution(tally_idx, bin, value);
+            }
+        }
     }
 
     /// Score a single collision event.
@@ -2388,6 +2502,71 @@ impl Tally {
         Ok(())
     }
 
+    /// A surface-current tally scores at surface crossings, so it takes
+    /// only what a crossing has: the surfaces, a cosine, an energy, the
+    /// particle type and an energy function. The `current` score, the
+    /// surface filter and the surface estimator come together or not at all.
+    fn validate_surface_tally(&self) -> Result<(), String> {
+        let name = self.display_name();
+        let has_surfaces = self.get_surface_filter().is_some();
+        let has_current = self.scores.iter().any(|s| matches!(s, Score::Current(_)));
+        if !has_surfaces {
+            if has_current {
+                return Err(format!(
+                    "Tally '{name}': the 'current' score is scored on surfaces; pass surfaces="
+                ));
+            }
+            if self.get_cosine_filter().is_some() {
+                return Err(format!(
+                    "Tally '{name}': cosine_bins bin surface crossings; pass surfaces= too"
+                ));
+            }
+            if self.estimator == crate::Estimator::Surface {
+                return Err(format!(
+                    "Tally '{name}': the surface estimator needs a surface filter"
+                ));
+            }
+            return Ok(());
+        }
+        if self.estimator != crate::Estimator::Surface {
+            return Err(format!(
+                "Tally '{name}': a surface tally scores at surface crossings; it takes no estimator"
+            ));
+        }
+        if let Some(other) = self.scores.iter().find(|s| !matches!(s, Score::Current(_))) {
+            return Err(format!(
+                "Tally '{name}': a surface tally scores 'current' only, not '{}'",
+                other.name()
+            ));
+        }
+        for filter in &self.filters {
+            let refused = match filter {
+                Filter::Cell(_) => Some("cells"),
+                Filter::Material(_) => Some("materials"),
+                Filter::Mesh(_) => Some("mesh"),
+                #[cfg(feature = "mesh")]
+                Filter::UnstructuredMesh(_) => Some("unstructured_mesh"),
+                Filter::ParentNuclide(_) => Some("parent_nuclides"),
+                Filter::Surface(_)
+                | Filter::Cosine(_)
+                | Filter::Energy(_)
+                | Filter::EnergyFunction(_)
+                | Filter::ParticleType(_) => None,
+            };
+            if let Some(arg) = refused {
+                return Err(format!(
+                    "Tally '{name}': a surface tally cannot also take {arg}="
+                ));
+            }
+        }
+        if !self.nuclides.is_empty() || !self.multiply_density {
+            return Err(format!(
+                "Tally '{name}': a surface tally takes no nuclides= or response="
+            ));
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         let mut filter_type_counts: HashMap<&str, u32> = HashMap::new();
 
@@ -2436,6 +2615,7 @@ impl Tally {
         }
 
         self.validate_nuclide_axis()?;
+        self.validate_surface_tally()?;
 
         // Validate score/estimator compatibility. Heating-family scores
         // require the collision estimator; everything else is permissive.

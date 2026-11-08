@@ -18,6 +18,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use torus::{torus_distance, torus_evaluate};
 
+/// The next id [`Surface::with_auto_id`] hands out.
+static NEXT_AUTO_SURFACE_ID: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(1);
+
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub enum BoundaryType {
     #[default]
@@ -387,6 +391,28 @@ impl Surface {
     /// Set the surface ID
     pub fn set_surface_id(&mut self, surface_id: usize) {
         self.surface_id = Some(surface_id);
+    }
+
+    /// Give the surface the next free id if it has none, and keep an
+    /// explicit id out of the automatic range.
+    ///
+    /// A surface tally names the surfaces it scores on by id, so every
+    /// surface a user builds needs one without having to choose it. Ids are
+    /// handed out from one process-wide counter that always moves past the
+    /// largest id seen, explicit or automatic, the same convention OpenMC
+    /// uses. An explicit id chosen below an automatic one can still collide;
+    /// building the geometry then fails with the duplicate id named.
+    pub fn with_auto_id(mut self) -> Self {
+        use std::sync::atomic::Ordering;
+        match self.surface_id {
+            Some(id) => {
+                NEXT_AUTO_SURFACE_ID.fetch_max(id + 1, Ordering::Relaxed);
+            }
+            None => {
+                self.surface_id = Some(NEXT_AUTO_SURFACE_ID.fetch_add(1, Ordering::Relaxed));
+            }
+        }
+        self
     }
 
     pub fn evaluate(&self, point: (f64, f64, f64)) -> f64 {

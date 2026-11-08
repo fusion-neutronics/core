@@ -789,9 +789,10 @@ fn is_roughly_constant(v: &[f64]) -> bool {
 /// is always included and mesh which is included whenever a mesh filter is
 /// present):
 ///
-///   score → cell → material → nuclide → parent_nuclide → energy → mesh_z → mesh_y → mesh_x
+///   score → surface → cosine → cell → material → nuclide → parent_nuclide → energy → mesh_z → mesh_y → mesh_x
 ///
-/// This must match the flat bin layout of `Tally::get_bin_index_7d`.
+/// This must match the flat bin layout of `Tally::get_bin_index_7d` and
+/// `Tally::get_surface_bin_index`.
 pub(crate) fn compute_shape_and_dims(tally: &Tally) -> (Vec<usize>, Vec<String>) {
     let mut shape = Vec::with_capacity(8);
     let mut dims: Vec<String> = Vec::with_capacity(8);
@@ -799,6 +800,18 @@ pub(crate) fn compute_shape_and_dims(tally: &Tally) -> (Vec<usize>, Vec<String>)
     // Score dimension is always present.
     shape.push(tally.scores.len());
     dims.push("score".to_string());
+
+    // Surface and cosine dimensions (surface tallies only) when >1 bin.
+    let n_surface = tally.num_surface_bins();
+    if n_surface > 1 {
+        shape.push(n_surface);
+        dims.push("surface".to_string());
+    }
+    let n_cosine = tally.num_cosine_bins();
+    if n_cosine > 1 {
+        shape.push(n_cosine);
+        dims.push("cosine".to_string());
+    }
 
     // Cell dimension only when the filter has >1 bins.
     let n_cell = tally.num_cell_bins();

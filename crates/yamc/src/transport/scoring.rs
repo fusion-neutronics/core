@@ -36,9 +36,9 @@ pub(crate) fn score_track_length_segment(
         particle.position[2] + particle.direction[2] * dist,
     ];
     for (tally_idx, tally) in tallies.iter().enumerate() {
-        // Skip tallies that have opted into the collision estimator --
-        // they get scored at collision sites, not at every cell crossing.
-        if tally.estimator == yamc_tallies::Estimator::Collision {
+        // Only track-length tallies score here: collision tallies at
+        // collision sites, surface tallies at surface crossings.
+        if tally.estimator != yamc_tallies::Estimator::TrackLength {
             continue;
         }
         if let Some(seg) = replica.filter(|_| welford_worker.has_replicas(tally_idx)) {
@@ -414,5 +414,132 @@ pub(crate) fn score_woodcock_flight_estimator(
             ),
             None => dep.score(mid, particle.energy, weighted, mref),
         }
+    }
+}
+
+/// The surfaces that surface-current tallies score on, looked up by the id a
+/// boundary crossing reports. Built once per run, and only when some tally
+/// scores surfaces, so the crossing hot path pays one `None` check otherwise.
+pub(crate) struct SurfaceScoring {
+    surfaces: std::collections::HashMap<usize, Arc<crate::geo::Surface>>,
+}
+
+impl SurfaceScoring {
+    /// Collect the surfaces the surface tallies name, or `None` when no tally
+    /// scores surfaces. A surface id that is not in the geometry, or a mesh
+    /// geometry (whose crossings are triangles, not the user's surfaces), is
+    /// refused here, before any transport.
+    pub(crate) fn build(
+        geometry: &GeometryKind,
+        tallies: &[&Tally],
+    ) -> Result<Option<Self>, String> {
+        let wanted: std::collections::BTreeSet<usize> = tallies
+            .iter()
+            .filter_map(|t| t.get_surface_filter())
+            .flat_map(|f| f.surface_ids.iter().copied())
+            .collect();
+        if wanted.is_empty() {
+            return Ok(None);
+        }
+        let GeometryKind::Csg(csg) = geometry else {
+            return Err(
+                "surface tallies score on CSG surfaces; this model's geometry is a \
+                        mesh, so tally a cell instead, or build the boundary as a CSG surface"
+                    .to_string(),
+            );
+        };
+        let mut surfaces = std::collections::HashMap::new();
+        for cell in &csg.cells {
+            for (surface, _sense) in cell.region.surfaces_with_sense() {
+                if let Some(id) = surface.surface_id
+                    && wanted.contains(&id)
+                {
+                    surfaces.entry(id).or_insert(surface);
+                }
+            }
+        }
+        if let Some(missing) = wanted.iter().find(|id| !surfaces.contains_key(id)) {
+            return Err(format!(
+                "a surface tally names surface id {missing}, but no cell in the geometry is \
+                 bounded by it"
+            ));
+        }
+        Ok(Some(Self { surfaces }))
+    }
+
+    /// Score a crossing into every surface tally, if the crossed surface is
+    /// one they name. `point` is where the particle meets the surface.
+    #[inline]
+    pub(crate) fn score_crossing(
+        &self,
+        particle: &yamc_particle::particle::Particle,
+        surface_id: Option<usize>,
+        point: [f64; 3],
+        tallies: &[&Tally],
+        welford_worker: &mut yamc_tallies::welford::WelfordWorkerState,
+    ) {
+        let Some(id) = surface_id else { return };
+        let Some(surface) = self.surfaces.get(&id) else {
+            return;
+        };
+        let normal = surface_normal(surface, point);
+        let d = particle.direction;
+        let mu = (d[0] * normal[0] + d[1] * normal[1] + d[2] * normal[2]).clamp(-1.0, 1.0);
+        for (tally_idx, tally) in tallies.iter().enumerate() {
+            if tally.is_surface_tally() {
+                tally.score_surface_crossing(
+                    welford_worker,
+                    tally_idx,
+                    id,
+                    mu,
+                    particle.weight,
+                    particle.energy,
+                    particle.particle_type,
+                );
+            }
+        }
+    }
+}
+
+/// The unit normal of `surface` at `point`, pointing to its positive side
+/// (`Surface.above`, where `evaluate > 0`): the gradient of `evaluate` by
+/// central differences, which serves every surface kind alike, formula and
+/// flux surfaces included.
+fn surface_normal(surface: &crate::geo::Surface, point: [f64; 3]) -> [f64; 3] {
+    let scale = 1.0 + point.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+    let h = 1e-6 * scale;
+    let at =
+        |dx: f64, dy: f64, dz: f64| surface.evaluate((point[0] + dx, point[1] + dy, point[2] + dz));
+    let g = [
+        at(h, 0.0, 0.0) - at(-h, 0.0, 0.0),
+        at(0.0, h, 0.0) - at(0.0, -h, 0.0),
+        at(0.0, 0.0, h) - at(0.0, 0.0, -h),
+    ];
+    let norm = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt();
+    if norm > 0.0 {
+        [g[0] / norm, g[1] / norm, g[2] / norm]
+    } else {
+        [0.0, 0.0, 0.0]
+    }
+}
+
+#[cfg(test)]
+mod surface_normal_tests {
+    use super::*;
+
+    #[test]
+    fn sphere_normal_points_outwards() {
+        let sphere = crate::geo::Surface::sphere(0.0, 0.0, 0.0, 5.0, Some(1), None);
+        let n = surface_normal(&sphere, [0.0, 5.0, 0.0]);
+        assert!((n[1] - 1.0).abs() < 1e-9 && n[0].abs() < 1e-9 && n[2].abs() < 1e-9);
+    }
+
+    #[test]
+    fn plane_normal_points_to_positive_side() {
+        let plane = crate::geo::Surface::new_plane(1.0, 0.0, 0.0, 2.0, Some(1), None);
+        let n = surface_normal(&plane, [2.0, 3.0, -1.0]);
+        let above = plane.evaluate((3.0, 3.0, -1.0)) > 0.0;
+        assert_eq!(n[0] > 0.0, above);
+        assert!((n[0].abs() - 1.0).abs() < 1e-9);
     }
 }

@@ -32,13 +32,13 @@ pub enum Estimator {
     /// collision instead of one per cell crossing. Heating-family
     /// scores require this estimator.
     Collision,
-    // NOTE: if a surface-current / surface-crossing estimator is ever
-    // added here, it must be validate-rejected under both delta-tracking
-    // modes -- `TrackingMode::Woodcock` and `TrackingMode::Hybrid` (see
-    // `Model::simulate_transport`): pure Woodcock and the hybrid surface
-    // step do not produce the exact surface-crossing points such an
-    // estimator needs, so it would silently misreport. Surface tracking
-    // is the only mode that can serve a surface estimator.
+    /// Score at every crossing of the tally's surfaces. Set on any tally
+    /// with a surface filter; never chosen by name. Refused under both
+    /// delta-tracking modes (`TrackingMode::Woodcock` and
+    /// `TrackingMode::Hybrid`), which do not produce the exact
+    /// surface-crossing points it needs: surface tracking is the only mode
+    /// that can serve it.
+    Surface,
 }
 
 impl Estimator {
@@ -47,6 +47,7 @@ impl Estimator {
         match self {
             Self::TrackLength => "track-length",
             Self::Collision => "collision",
+            Self::Surface => "surface",
         }
     }
 }
