@@ -441,12 +441,16 @@ impl SurfaceScoring {
         if wanted.is_empty() {
             return Ok(None);
         }
-        let GeometryKind::Csg(csg) = geometry else {
-            return Err(
-                "surface tallies score on CSG surfaces; this model's geometry is a \
-                        mesh, so tally a cell instead, or build the boundary as a CSG surface"
-                    .to_string(),
-            );
+        let csg = match geometry {
+            GeometryKind::Csg(csg) => csg,
+            #[cfg(feature = "mesh")]
+            GeometryKind::Mesh(_) => {
+                return Err(
+                    "surface tallies score on CSG surfaces; this model's geometry is a \
+                            mesh, so tally a cell instead, or build the boundary as a CSG surface"
+                        .to_string(),
+                );
+            }
         };
         let mut surfaces = std::collections::HashMap::new();
         for cell in &csg.cells {
