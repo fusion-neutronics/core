@@ -78,7 +78,7 @@ pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
 
 /// The particle folders a release can carry, in the order a manifest lists
 /// them under `particles`.
-pub const PARTICLES: [&str; 3] = ["neutron", "photon", "photonuclear"];
+pub const PARTICLES: [&str; 4] = ["neutron", "photon", "photonuclear", "thermal"];
 
 /// The folder of a release that holds the transmutation chain's subsections.
 const TRANSMUTATION: &str = "transmutation";
@@ -1534,7 +1534,7 @@ mod tests {
         assert_eq!(manifest.schema.as_deref(), Some(MANIFEST_SCHEMA));
         assert_eq!(manifest.schema_version, Some(MANIFEST_SCHEMA_VERSION));
         assert_eq!(manifest.created.as_deref(), Some("2026-09-21T14:13:20Z"));
-        assert_eq!(manifest.particles, PARTICLES);
+        assert_eq!(manifest.particles, ["neutron", "photon", "photonuclear"]);
         assert_eq!(
             manifest.converter_versions,
             ["yamc-convert 0.1.0", "yani-convert 0.1.0"]
@@ -1551,6 +1551,42 @@ mod tests {
         // describing the folder again gives the same bytes.
         write_tree_manifest(&dir).unwrap();
         assert_eq!(std::fs::read(dir.join(MANIFEST)).unwrap(), bytes);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A build of the thermal part alone publishes its tables and their index.
+    #[test]
+    fn a_thermal_only_build_publishes_its_tables() {
+        let dir = folder(
+            "thermal-only",
+            &[
+                ("thermal/c_O_in_H2O.arrow/thermal.arrow", b"thermal-table"),
+                ("thermal/c_O_in_H2O.arrow/inelastic.arrow", b"inelastic"),
+                ("thermal/c_O_in_H2O.arrow/version.json", VERSION),
+                ("thermal/index.json", b"{}"),
+            ],
+        );
+        let release = write_manifest(
+            &dir,
+            "jendl-5.0",
+            "2026-11-08",
+            2,
+            created(),
+            Default::default(),
+        )
+        .unwrap();
+        let manifest = &release.manifest;
+        assert_eq!(manifest.particles, ["thermal"]);
+        let paths: Vec<&str> = manifest.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "thermal/c_O_in_H2O.arrow/inelastic.arrow",
+                "thermal/c_O_in_H2O.arrow/thermal.arrow",
+                "thermal/c_O_in_H2O.arrow/version.json",
+                "thermal/index.json",
+            ]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
