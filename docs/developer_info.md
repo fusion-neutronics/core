@@ -274,6 +274,34 @@ The neutron and photoatomic transport loaders cannot consume these sections.
 Photon-specific level-scattering kinematics and Kalbach-Mann sampling remain
 separate transport work.
 
+## Thermal Scattering Data Processing
+
+A thermal scattering law evaluation (`NSUB=12`, MF=7) gives the scattering
+law of one nuclide bound in a material, such as H in water or C in graphite.
+`yamc_convert::thermal::convert_thermal` turns one, with the neutron
+evaluation of its principal atom, into `thermal/<name>.arrow/` (`c_H_in_H2O`):
+
+* `thermal.arrow`: one row describing the table: its bound nuclides, the
+  principal and secondary atoms, energy_max, the temperature labels with kT,
+  and the elastic kind.
+* `inelastic.arrow`: one record batch per temperature. The incoherent
+  inelastic cross section, and for each incident energy the outgoing
+  energies, pdf, cdf and 16 equiprobable cosines (float32), as NJOY's THERMR
+  and ACER (`iopt=2`) produce them. The pdf and cdf are kept as written.
+* `elastic.arrow`: one record batch per temperature, straight from MF=7 MT=2:
+  Bragg edges and cumulative factors (coherent), and/or the bound cross
+  section per principal atom (SB over M0, as THERMR takes it) and the
+  Debye-Waller integral (incoherent).
+* `sab.arrow`: one record batch per temperature, the tabulated S(alpha, beta)
+  as evaluated.
+* `version.json`: provenance, `particle="thermal"`, and `temperature_ranges`,
+  the byte range of every temperature's batch in each per-temperature
+  section, written last as the completion marker.
+
+Every cross section is per principal atom. A table processed at all of its
+evaluation's temperatures is about a fifth of the size of the same data with
+the equiprobable cosine pdf and cdf stored.
+
 ## Building a Whole Library
 
 `generate_library(keyword, path)`, in both wheels, builds one of the hosted

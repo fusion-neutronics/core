@@ -19,6 +19,8 @@
 //! - [`neutron`] -- `{nuclide}.arrow/`
 //! - [`photon`] -- `{element}.arrow/`
 //! - [`transmutation`] -- `transmutation_{library}.arrow/<subsection>/`
+//! - thermal scattering -- `thermal/{name}.arrow/`: [`thermal`],
+//!   [`thermal_inelastic`], [`thermal_elastic`] and [`thermal_sab`]
 
 use arrow_schema::{DataType, Field, Metadata, Schema};
 use std::sync::Arc;
@@ -63,6 +65,7 @@ pub fn all_sections() -> Vec<(&'static str, Schema)> {
         ("decay/nuclides.arrow", decay_nuclides()),
         ("decay/sources.arrow", decay_sources()),
         ("distributions.arrow", distributions()),
+        ("elastic.arrow", thermal_elastic()),
         ("element.arrow", element()),
         ("energy.arrow", energy()),
         ("fission_photon.arrow", fission_photon()),
@@ -75,6 +78,7 @@ pub fn all_sections() -> Vec<(&'static str, Schema)> {
             "fission_yields/fission_yields.arrow",
             fission_yields_fission_yields(),
         ),
+        ("inelastic.arrow", thermal_inelastic()),
         ("nubar_covariance.arrow", nubar_covariance()),
         ("nuclide.arrow", nuclide()),
         ("photonuclear.arrow", photonuclear()),
@@ -83,8 +87,10 @@ pub fn all_sections() -> Vec<(&'static str, Schema)> {
         ("reactions.arrow", reactions()),
         ("reactions/reactions.arrow", reactions_reactions()),
         ("resonance_parameters.arrow", resonance_parameters()),
+        ("sab.arrow", thermal_sab()),
         ("spectrum_covariance.arrow", spectrum_covariance()),
         ("subshells.arrow", subshells()),
+        ("thermal.arrow", thermal()),
         ("total_nu.arrow", total_nu()),
         ("urr.arrow", urr()),
     ]
@@ -213,6 +219,10 @@ fn bools(name: &str, nullable: bool) -> Field {
 
 fn utf8s(name: &str, nullable: bool) -> Field {
     Field::new(name, list_of(DataType::Utf8), nullable)
+}
+
+fn f32ss(name: &str, nullable: bool) -> Field {
+    Field::new(name, list_of(list_of(DataType::Float32)), nullable)
 }
 
 fn f64ss(name: &str, nullable: bool) -> Field {
@@ -1012,6 +1022,119 @@ pub fn energy() -> Schema {
     ]))
 }
 
+/// `thermal.arrow`: what a thermal scattering table is, one row.
+///
+/// A table is the scattering law of one nuclide bound in one material
+/// (`c_H_in_H2O`), from MF=7 of a thermal scattering law evaluation. Its
+/// temperatures are listed here so a reader can pick one before fetching the
+/// per-temperature sections, each of which is one record batch per
+/// temperature, indexed by `temperature_ranges` in `version.json`.
+///
+/// `bound_nuclides` are the nuclides of the neutron library the table applies
+/// to. `principal_count` is M0, the number of principal atoms per molecule;
+/// every cross section in the per-temperature sections is per principal atom.
+/// The secondary atoms and the S(alpha, beta) interpolation flags are kept for
+/// sampling the law directly (`sab.arrow`).
+pub fn thermal() -> Schema {
+    Schema::new(vec![
+        utf8("name", false),
+        utf8("zsymam", true),
+        i32("mat", false),
+        utf8s("bound_nuclides", false),
+        f64("atomic_weight_ratio", false),
+        f64("free_atom_xs", false),
+        f64("energy_max", false),
+        f64("epsilon", false),
+        f64("principal_count", false),
+        i32("lat", false),
+        boolean("symmetric", false),
+        i32("lln", false),
+        utf8s("secondary_model", false),
+        f64s("secondary_free_atom_xs", false),
+        f64s("secondary_atomic_weight_ratio", false),
+        f64s("secondary_count", false),
+        utf8s("temperatures", false),
+        f64s("temperatures_k", false),
+        f64s("kTs", false),
+        utf8("elastic_kind", true),
+        i32s("alpha_breakpoints", false),
+        i32s("alpha_interpolation", false),
+        i32s("beta_breakpoints", false),
+        i32s("beta_interpolation", false),
+        utf8("source", false),
+    ])
+    .with_metadata(meta([("filetype", "data_thermal"), ("version", "1.0")]))
+}
+
+/// `inelastic.arrow`: the incoherent inelastic cross section and its outgoing
+/// distribution, one row and one record batch per temperature.
+///
+/// As NJOY's THERMR and ACER (`iopt=2`, continuous form) produce them: for
+/// each incident energy, the outgoing energies with their pdf and cdf, kept
+/// exactly as written (not normalised), and `n_mu` equiprobable cosines per
+/// outgoing energy, sorted. Each outgoing distribution starts at E' = 0 with
+/// pdf 0 and cdf 0. The cosines are float32: they are equiprobable bin
+/// representatives smeared at sampling time, so float64 carries nothing.
+pub fn thermal_inelastic() -> Schema {
+    Schema::new(vec![
+        utf8("temperature", false),
+        f64("kT", false),
+        f64s("energy", false),
+        f64s("xs", false),
+        f64ss("energy_out", false),
+        f64ss("pdf", false),
+        f64ss("cdf", false),
+        f32ss("mu", false),
+        i32("n_mu", false),
+    ])
+    .with_metadata(meta([
+        ("filetype", "data_thermal_inelastic"),
+        ("version", "1.0"),
+    ]))
+}
+
+/// `elastic.arrow`: the elastic part, one row and one record batch per
+/// temperature, straight from MF=7 MT=2 (closed form, no processing).
+///
+/// `kind` is `coherent`, `incoherent` or `mixed`. Coherent: the Bragg edges
+/// (eV) and the cumulative factor at each (eV-barns), so sigma = factor / E
+/// above the edge. Incoherent: the bound cross section per principal atom (the
+/// evaluation's SB over M0, as NJOY's THERMR takes it) and the Debye-Waller
+/// integral W' (1/eV) at this temperature.
+pub fn thermal_elastic() -> Schema {
+    Schema::new(vec![
+        utf8("temperature", false),
+        utf8("kind", false),
+        f64s("bragg_edges", true),
+        f64s("factors", true),
+        f64("bound_xs", true),
+        f64("debye_waller", true),
+    ])
+    .with_metadata(meta([
+        ("filetype", "data_thermal_elastic"),
+        ("version", "1.0"),
+    ]))
+}
+
+/// `sab.arrow`: the tabulated scattering law S(alpha, beta) as evaluated, one
+/// row and one record batch per temperature. Not read by transport through
+/// NJOY's tables; kept for plotting and for sampling the law directly.
+///
+/// `s` is `s[i_beta * len(alpha) + i_alpha]`, ln S when `thermal.arrow`'s
+/// `lln` is 1. `effective_temperature` is the principal atom's, in Kelvin.
+pub fn thermal_sab() -> Schema {
+    Schema::new(vec![
+        utf8("temperature", false),
+        f64("temperature_k", false),
+        f64s("alpha", false),
+        f64s("beta", false),
+        f64s("s", false),
+        i32("temperature_interpolation", false),
+        f64("effective_temperature", false),
+    ])
+    .with_metadata(meta([("filetype", "data_thermal_sab"), ("version", "1.0")]))
+}
+
 /// `products.arrow`
 pub fn products() -> Schema {
     Schema::new(vec![
@@ -1143,7 +1266,7 @@ mod tests {
         let sections = all_sections();
         assert_eq!(
             sections.len(),
-            28,
+            32,
             "section count changed; update the manifest"
         );
         let mut paths: Vec<&str> = sections.iter().map(|(p, _)| *p).collect();
