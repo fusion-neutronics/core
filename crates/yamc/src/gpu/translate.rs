@@ -1544,6 +1544,18 @@ fn translate_materials(
         // A single-material problem's union == the global union, so its lone fine
         // grid sits at base 0 and every index reduces to the old shared grid
         // (bit-identical).
+        // Thermal scattering is CPU-only for now: the GPU builds its cross
+        // sections from the nuclides, not from the material's bound tables,
+        // so a run here would scatter bound nuclides as free atoms.
+        if !material.s_alpha_beta().is_empty() {
+            return Err(GpuTranslateError::CellRegionUnsupported {
+                cell_id: None,
+                reason: format!(
+                    "material `{mat_name}` uses thermal scattering tables (s_alpha_beta), \
+                     which the GPU backend does not support yet; run it on the CPU"
+                ),
+            });
+        }
         let mat_fine: Vec<f64> =
             union_energy_grid(&weighted, material.temperature()).map_err(|e| {
                 GpuTranslateError::CellRegionUnsupported {
