@@ -194,6 +194,7 @@ fn transmute(
             &settings(seed, particles),
             request,
             yani_transmute::DEFAULT_PRODUCT_THRESHOLD,
+            None,
         )
         .expect("transmute")
 }

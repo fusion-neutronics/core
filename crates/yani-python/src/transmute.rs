@@ -61,6 +61,12 @@ use yamc_nuclide::config::ChainUse;
 ///         quantity, a product must reach for its cross sections to be loaded
 ///         and its reactions solved, applied to each material's own schedule.
 ///         Default 1e-12. See ``Material.transmute``.
+///     processing (Processing, optional): Removals, transfers between
+///         materials and feeds. The materials a transfer links are solved
+///         together each step. A material it names that is not in
+///         ``materials``, a storage tank say, is carried unirradiated and
+///         reported under its own id. Not yet combined with
+///         ``data_uncertainty``.
 ///
 /// Returns:
 ///     TransmutationResults: Keyed by each material's ``id``. Per material,
@@ -87,7 +93,7 @@ use yamc_nuclide::config::ChainUse;
 ///     >>> results.get_final_material(cells[3].id)
 #[gen_stub_pyfunction]
 #[pyfunction]
-#[pyo3(signature = (materials, schedules, data_uncertainty = None, self_shielding_chord = None, self_shielding_shape = None, displacement_damage = false, displacement_energies = None, product_threshold = 1e-12))]
+#[pyo3(signature = (materials, schedules, data_uncertainty = None, self_shielding_chord = None, self_shielding_shape = None, displacement_damage = false, displacement_energies = None, product_threshold = 1e-12, processing = None))]
 #[allow(clippy::too_many_arguments)]
 pub fn transmute(
     py: Python<'_>,
@@ -105,6 +111,7 @@ pub fn transmute(
     displacement_damage: bool,
     displacement_energies: Option<std::collections::HashMap<String, f64>>,
     product_threshold: f64,
+    processing: Option<PyRef<'_, crate::processing::PyProcessing>>,
 ) -> PyResult<PyTransmutationResults> {
     yani_transmute::screening::check_threshold(product_threshold).map_err(PyValueError::new_err)?;
     let damage = crate::material::damage_request(displacement_damage, displacement_energies)?;
@@ -140,6 +147,12 @@ pub fn transmute(
         }
     };
 
+    // Before the materials are borrowed for the solve: the ones processing
+    // names that are not among them are copied out now.
+    let processing = processing
+        .as_ref()
+        .map(|p| p.run(py, &materials))
+        .transpose()?;
     let mut plans = Vec::with_capacity(materials.len());
     let mut guards = Vec::with_capacity(materials.len());
     for (i, (material, schedule)) in materials.iter().zip(&schedules).enumerate() {
@@ -194,6 +207,7 @@ pub fn transmute(
             loaded.parts,
             uncertainty.as_ref(),
             damage.as_ref(),
+            processing,
         )
         // `Box<dyn Error>` is not `Send`, so it cannot come back out through
         // `detach`; the message is what the caller sees anyway.

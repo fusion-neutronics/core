@@ -125,6 +125,13 @@ impl Model {
     ///   product left out still decays and is still produced. Product nuclide
     ///   paths are resolved from CONFIG.cross_sections or material data.
     ///
+    /// * `processing` - Removals, transfers and feeds (see
+    ///   [`yani_transmute::processing`]). The materials a transfer links are
+    ///   solved together each step. A material it names that the geometry does
+    ///   not hold, a storage tank say, is taken from `receivers`, carried
+    ///   unirradiated and reported like the transmutable ones. `None` solves
+    ///   every material independently, as before.
+    ///
     /// # Returns
     /// TransmutationResults containing material compositions at each timestep
     #[allow(clippy::too_many_arguments)]
@@ -138,8 +145,12 @@ impl Model {
         settings: &crate::model::TransportSettings,
         uncertainty: Option<&yani_transmute::uncertainty::DataUncertainty>,
         product_threshold: f64,
+        processing: Option<yani_transmute::ProcessingRun<'_>>,
     ) -> Result<TransmutationResults, Box<dyn std::error::Error>> {
         yani_transmute::screening::check_threshold(product_threshold)?;
+        if processing.is_some() && uncertainty.is_some() {
+            return Err("data_uncertainty is not yet supported together with processing".into());
+        }
         // Validate method
         let is_independent = match method {
             "independent" => true,
@@ -248,6 +259,49 @@ impl Model {
                 for slot in slots {
                     self.geometry.materials_mut()[slot as usize] = Arc::clone(&new_arc);
                 }
+            }
+        }
+
+        // The materials only processing names, and per transmutable material
+        // the nuclides processing can bring in, whose cross sections its
+        // rates need although its composition does not hold them.
+        let mut receivers: Vec<Material> = Vec::new();
+        let mut brought: HashMap<u32, std::collections::BTreeSet<String>> = HashMap::new();
+        let processing_terms = processing.as_ref().map(|run| run.processing);
+        if let Some(run) = &processing {
+            let in_geometry: HashMap<u32, &Material> = self
+                .geometry
+                .materials()
+                .iter()
+                .filter_map(|m| m.get_material_id().map(|id| (id, m.as_ref())))
+                .collect();
+            for m in &run.receivers {
+                let Some(id) = m.get_material_id() else {
+                    continue;
+                };
+                if transmutable_cells.contains_key(&id) {
+                    continue;
+                }
+                if in_geometry.contains_key(&id) {
+                    return Err(format!(
+                        "processing names material {id}, which is in the geometry but not \
+                         transmutable; make it transmutable to process it"
+                    )
+                    .into());
+                }
+                receivers.push(match m.density_units {
+                    DensityUnits::Sum => m.clone(),
+                    _ => m.to_sum_mode()?,
+                });
+            }
+            let all: Vec<&Material> = transmutable_cells
+                .keys()
+                .filter_map(|id| in_geometry.get(id).copied())
+                .chain(&receivers)
+                .collect();
+            run.processing.check(&all, timesteps.len())?;
+            for &id in transmutable_cells.keys() {
+                brought.insert(id, run.processing.nuclides_into(id, &chain, &all));
             }
         }
 
@@ -397,6 +451,18 @@ impl Model {
                 }
                 let mut keep: std::collections::HashSet<String> =
                     screening.loaded().into_iter().collect();
+                if let Some(extra) = brought.get(&mat_id).filter(|b| !b.is_empty()) {
+                    yani_transmute::preload_activation_data(
+                        &mut material,
+                        &chain,
+                        &branch,
+                        None,
+                        None,
+                        extra,
+                    )
+                    .map_err(|e| format!("material {mat_id}: {e}"))?;
+                    keep.extend(extra.iter().cloned());
+                }
                 // The transport composition is not the screening's to rule
                 // on: those nuclides are collided on, not produced.
                 keep.extend(material.nuclides.keys().cloned());
@@ -502,6 +568,11 @@ impl Model {
                 .clone(),
         );
         results.product_screening = screenings;
+        for receiver in &receivers {
+            let id = receiver.get_material_id().unwrap_or(0);
+            results.add_initial(id, receiver.clone(), vec![0.0; timesteps.len()]);
+            results.product_screening.insert(id, Default::default());
+        }
 
         // Track full compositions (including all chain products) across steps.
         // The cell material only has transport nuclides (with HDF5 data),
@@ -662,6 +733,7 @@ impl Model {
             .map(|_| self.geometry.materials().to_vec());
 
         // Transmutation loop
+        let mut t0 = 0.0;
         for (step, (&dt, &source_rate)) in timesteps.iter().zip(source_rates.iter()).enumerate() {
             println!(
                 "Transmutation step {}/{}: dt={:.2e} s, source_rate={:.2e} n/s",
@@ -744,16 +816,43 @@ impl Model {
             #[cfg(feature = "debug_timing")]
             let transmute_solve_start = std::time::Instant::now();
 
-            let transmuted_materials = solve_step(
-                &transmutable_cells,
-                &full_compositions,
-                &rates,
-                &fy_weights,
-                &folded_chains,
-                &chain,
-                parts,
-                dt,
-            );
+            let transmuted_materials = match processing_terms {
+                None => solve_step(
+                    &transmutable_cells,
+                    &full_compositions,
+                    &rates,
+                    &fy_weights,
+                    &folded_chains,
+                    &chain,
+                    parts,
+                    dt,
+                ),
+                Some(terms) => {
+                    let (cells, tanks) = solve_processed_step(
+                        terms,
+                        &full_compositions,
+                        &mut receivers,
+                        &rates,
+                        &fy_weights,
+                        &folded_chains,
+                        &chain,
+                        parts,
+                        (step, t0, dt),
+                    )?;
+                    for tank in tanks {
+                        let id = tank.get_material_id().unwrap_or(0);
+                        results.add_step(id, tank);
+                        results.add_step_rates(id, Default::default());
+                        results
+                            .branching_report
+                            .entry(id)
+                            .or_default()
+                            .push(Default::default());
+                    }
+                    cells
+                }
+            };
+            t0 += dt;
 
             #[cfg(feature = "debug_timing")]
             eprintln!(
@@ -994,6 +1093,53 @@ fn solve_step(
             (mat_id, result)
         })
         .collect()
+}
+
+/// [`solve_step`] under `processing`: the transmutable materials and the
+/// `receivers` stepped together through [`yani_transmute::Processing::step`],
+/// which solves the materials a transfer links as one and the rest
+/// independently. Returns the transmutable materials' results and the
+/// receivers' new states, which also replace `receivers`.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn solve_processed_step(
+    processing: &yani_transmute::Processing,
+    compositions: &HashMap<u32, Material>,
+    receivers: &mut Vec<Material>,
+    rates: &HashMap<u32, ReactionRates>,
+    fy_weights: &HashMap<u32, FissionYieldWeights>,
+    folded_chains: &HashMap<u32, Arc<HashMap<String, ChainNuclide>>>,
+    chain: &Arc<HashMap<String, ChainNuclide>>,
+    parts: yani::ChainParts,
+    (step, t0, dt): (usize, f64, f64),
+) -> Result<(Transmuted, Vec<Material>), String> {
+    let no_rates = ReactionRates::new();
+    let no_fission = FissionYieldWeights::new();
+    let mut ids: Vec<u32> = compositions.keys().copied().collect();
+    ids.sort_unstable();
+    let members: Vec<yani_transmute::Member<'_>> = ids
+        .iter()
+        .map(|id| (*id, &compositions[id]))
+        .chain(
+            receivers
+                .iter()
+                .map(|m| (m.get_material_id().unwrap_or(0), m)),
+        )
+        .map(|(id, material)| yani_transmute::Member {
+            id,
+            material,
+            chain: folded_chains.get(&id).unwrap_or(chain),
+            rates: rates.get(&id).unwrap_or(&no_rates),
+            fy_weights: fy_weights.get(&id).unwrap_or(&no_fission),
+        })
+        .collect();
+    let mut solved = processing.step(&members, step, t0, dt, parts).into_iter();
+    let cells: Transmuted = ids.iter().copied().zip(solved.by_ref()).collect();
+    let tanks: Vec<Material> = solved
+        .zip(receivers.iter())
+        .map(|(r, m)| r.map_err(|e| format!("material {}: {e}", m.get_material_id().unwrap_or(0))))
+        .collect::<Result<_, _>>()?;
+    *receivers = tanks.clone();
+    Ok((cells, tanks))
 }
 
 impl Model {

@@ -11,6 +11,7 @@ use crate::isomer_branching_uncertainty::{
     IsomerCovariance, IsomerIntervalProductions, IsomerRun, IsomerSpectrum,
 };
 use crate::multigroup::{collapse_with_lists, fold_list, scale_rates, CollapseMemo, Collapsed};
+use crate::processing::{Member, Processing, ProcessingRun};
 use crate::results::TransmutationResults;
 use crate::screening::ProductScreening;
 use crate::self_shielding::{Shielding, ShieldingInfo};
@@ -205,6 +206,7 @@ pub fn transmute_material_shielded(
         parts,
         uncertainty,
         None,
+        None,
     )
 }
 
@@ -253,6 +255,13 @@ pub struct TransmuteCase<'a> {
 /// [`TransmutationResults::displacement_damage`]. It is computed after the
 /// solve from the states it produced, and MT=444 is loaded only then, so
 /// `None` leaves the solve and the data it loads exactly as they were.
+///
+/// `processing` adds removals, transfers and feeds (see
+/// [`crate::processing`]). The materials it links are solved together each
+/// step; one it names that is not a case, a storage tank say, is carried
+/// unirradiated and reported like the cases. `None` is the independent solve
+/// above, unchanged.
+#[allow(clippy::too_many_arguments)]
 pub fn transmute_materials(
     mut cases: Vec<TransmuteCase<'_>>,
     chain: Arc<HashMap<String, yani::ChainNuclide>>,
@@ -260,6 +269,7 @@ pub fn transmute_materials(
     parts: yani::ChainParts,
     uncertainty: Option<&DataUncertainty>,
     damage: Option<&DamageRequest>,
+    processing: Option<ProcessingRun<'_>>,
 ) -> Result<TransmutationResults, Box<dyn std::error::Error>> {
     if cases.is_empty() {
         return Err("no materials to transmute".into());
@@ -305,6 +315,39 @@ pub fn transmute_materials(
         check_same_timeline(&cases[0].steps, &case.steps)
             .map_err(|e| format!("material {} (position {c}): {e}", ids[c]))?;
     }
+    // The materials processing names beyond the cases, in sum mode, and per
+    // case the nuclides it can bring in, whose cross sections the collapse
+    // needs although the composition does not hold them.
+    let (receivers, brought) = match &processing {
+        Some(run) => {
+            if uncertainty.is_some() {
+                return Err(
+                    "data_uncertainty is not yet supported together with processing".into(),
+                );
+            }
+            let receivers: Vec<Material> = run
+                .receivers
+                .iter()
+                .filter(|m| !m.get_material_id().is_some_and(|id| ids.contains(&id)))
+                .map(|m| match m.density_units {
+                    DensityUnits::Sum => Ok(m.clone()),
+                    _ => m.to_sum_mode(),
+                })
+                .collect::<Result<_, _>>()?;
+            let all: Vec<&Material> = cases
+                .iter()
+                .map(|c| &*c.material)
+                .chain(&receivers)
+                .collect();
+            run.processing.check(&all, cases[0].steps.len())?;
+            let brought: Vec<BTreeSet<String>> = ids
+                .iter()
+                .map(|&id| run.processing.nuclides_into(id, &chain, &all))
+                .collect();
+            (receivers, brought)
+        }
+        None => (Vec::new(), vec![BTreeSet::new(); cases.len()]),
+    };
 
     // Per material: the chain must drive something, the products the schedule
     // populates are screened and their data loaded into the caller's
@@ -335,12 +378,23 @@ pub fn transmute_materials(
             crate::damage::ensure_damage_data_loaded(case.material, &[])
                 .map_err(|e| named(c, ids[c], e))?;
         }
+        if !brought[c].is_empty() && case.steps.iter().any(|st| st.irradiation.is_some()) {
+            preload_activation_data(
+                case.material,
+                &chain,
+                branch,
+                None,
+                case.shielding.as_ref(),
+                &brought[c],
+            )
+            .map_err(|e| named(c, ids[c], e))?;
+        }
         let mut current = case.material.clone();
         let loaded = screening.loaded();
         let composition: HashSet<String> = current.nuclides.keys().cloned().collect();
-        current
-            .nuclide_data
-            .retain(|name, _| loaded.contains(name) || composition.contains(name));
+        current.nuclide_data.retain(|name, _| {
+            loaded.contains(name) || composition.contains(name) || brought[c].contains(name)
+        });
         screenings.push(screening);
         case_memos.push(memos);
         if current.density_units != DensityUnits::Sum {
@@ -493,21 +547,43 @@ pub fn transmute_materials(
             e.to_string()
         })
     };
-    let outcomes: Vec<Result<CaseOutcome, String>> = {
+    let (outcomes, receiver_states): (Vec<Result<CaseOutcome, String>>, Vec<Vec<Material>>) =
+        match &processing {
+            Some(run) => {
+                let (outcomes, states) = solve_processed(
+                    &initial,
+                    &receivers,
+                    &ids,
+                    &case_steps,
+                    &per_spectrum,
+                    &chain,
+                    parts,
+                    run.processing,
+                )?;
+                (outcomes.into_iter().map(Ok).collect(), states)
+            }
+            None => (independent(&solve, cases.len(), plural), Vec::new()),
+        };
+    fn independent(
+        solve: &(dyn Fn(usize) -> Result<CaseOutcome, String> + Sync),
+        n: usize,
+        plural: bool,
+    ) -> Vec<Result<CaseOutcome, String>> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             use rayon::prelude::*;
             if plural {
-                (0..cases.len()).into_par_iter().map(solve).collect()
+                (0..n).into_par_iter().map(solve).collect()
             } else {
-                (0..cases.len()).map(solve).collect()
+                (0..n).map(solve).collect()
             }
         }
         #[cfg(target_arch = "wasm32")]
         {
-            (0..cases.len()).map(solve).collect()
+            let _ = plural;
+            (0..n).map(solve).collect()
         }
-    };
+    }
 
     let mut results = TransmutationResults::new(cases[0].steps.iter().map(|st| st.dt).collect());
     // Before the first state, so each one is taken apart into the inventory
@@ -574,6 +650,30 @@ pub fn transmute_materials(
                     .map(|st| st.irradiation.map(|(idx, _)| idx))
                     .collect(),
                 shielding: case.shielding,
+            },
+        );
+    }
+    // The materials only processing names: carried unirradiated, so no
+    // rates, spectra or branching to report.
+    for (receiver, states) in receivers.into_iter().zip(receiver_states) {
+        let id = receiver.get_material_id().unwrap_or(0);
+        let n = states.len();
+        results.add_initial(id, receiver, vec![0.0; n]);
+        for state in states {
+            results.add_step_rates(id, Default::default());
+            results.add_step(id, state);
+        }
+        results
+            .branching_report
+            .insert(id, vec![Arc::new(BranchingReport::default()); n]);
+        results.product_screening.insert(id, Default::default());
+        results.shielding_info.insert(id, Default::default());
+        results.collapse.insert(
+            id,
+            crate::results::CollapseInputs {
+                spectra: Vec::new(),
+                step_spectrum: vec![None; n],
+                shielding: None,
             },
         );
     }
@@ -1017,6 +1117,90 @@ fn solve_case(
         rates: edge_rates,
         uncertainty,
     })
+}
+
+/// Every case's timeline, and the receivers', stepped together under
+/// `processing`: step by step rather than material by material, since a
+/// transfer couples the materials it links within each step.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn solve_processed(
+    initial: &[Material],
+    receivers: &[Material],
+    ids: &[u32],
+    steps: &[Vec<TransmuteStep>],
+    per_spectrum: &[PerSpectrum],
+    chain: &Arc<HashMap<String, ChainNuclide>>,
+    parts: yani::ChainParts,
+    processing: &Processing,
+) -> Result<(Vec<CaseOutcome>, Vec<Vec<Material>>), Box<dyn std::error::Error>> {
+    let no_rates: ReactionRates = HashMap::new();
+    let no_fission: FissionYieldWeights = HashMap::new();
+    let mut current: Vec<Material> = initial.iter().chain(receivers).cloned().collect();
+    let member_ids: Vec<u32> = ids
+        .iter()
+        .copied()
+        .chain(receivers.iter().map(|m| m.get_material_id().unwrap_or(0)))
+        .collect();
+    let mut outcomes: Vec<CaseOutcome> = initial
+        .iter()
+        .map(|_| CaseOutcome {
+            states: Vec::new(),
+            rates: Vec::new(),
+            uncertainty: None,
+        })
+        .collect();
+    let mut receiver_states: Vec<Vec<Material>> = receivers.iter().map(|_| Vec::new()).collect();
+    let mut t0 = 0.0;
+    for k in 0..steps.first().map_or(0, Vec::len) {
+        let dt = steps[0][k].dt;
+        let per_case: Vec<(
+            ReactionRates,
+            &FissionYieldWeights,
+            &Arc<HashMap<String, ChainNuclide>>,
+        )> = steps
+            .iter()
+            .map(|s| match s[k].irradiation {
+                Some((idx, rate)) => (
+                    scale_rates(&per_spectrum[idx].0, rate),
+                    &per_spectrum[idx].1,
+                    &per_spectrum[idx].2,
+                ),
+                None => (HashMap::new(), &no_fission, chain),
+            })
+            .collect();
+        let members: Vec<Member<'_>> = current
+            .iter()
+            .enumerate()
+            .map(|(i, material)| {
+                let (rates, fy_weights, chain) = per_case
+                    .get(i)
+                    .map_or((&no_rates, &no_fission, chain), |(r, f, c)| (r, *f, *c));
+                Member {
+                    id: member_ids[i],
+                    material,
+                    chain,
+                    rates,
+                    fy_weights,
+                }
+            })
+            .collect();
+        let next: Vec<Material> = processing
+            .step(&members, k, t0, dt, parts)
+            .into_iter()
+            .zip(&member_ids)
+            .map(|(r, id)| r.map_err(|e| format!("material {id}: {e}")))
+            .collect::<Result<_, _>>()?;
+        for (c, (rates, _, step_chain)) in per_case.iter().enumerate() {
+            outcomes[c].rates.push(per_edge_rates(step_chain, rates));
+            outcomes[c].states.push(next[c].clone());
+        }
+        for (r, state) in next[initial.len()..].iter().enumerate() {
+            receiver_states[r].push(state.clone());
+        }
+        current = next;
+        t0 += dt;
+    }
+    Ok((outcomes, receiver_states))
 }
 
 /// What one replica produces, and nothing else.

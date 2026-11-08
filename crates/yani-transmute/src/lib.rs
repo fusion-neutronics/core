@@ -32,6 +32,7 @@ mod joint_fit;
 mod material_transmute;
 pub mod multigroup;
 pub mod nearest_correlation;
+pub mod processing;
 pub mod resonance_rates;
 pub mod resonance_sampling;
 mod results;
@@ -177,6 +178,7 @@ pub use history_statistics::{HistoryCovariance, RateCovariance, RateLabel, Yield
 pub use multigroup::{
     compute_multigroup_reaction_rates, reaction_rate_spectrum, scale_rates, EnergyGroups,
 };
+pub use processing::{Member, Processing, ProcessingRun, Rate};
 pub use results::{
     CollapseInputs, CollapseReuse, RateSpectrum, TransmutationResults, UncertaintyBreakdown,
 };

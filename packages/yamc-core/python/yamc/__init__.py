@@ -37,6 +37,7 @@ from yamc._core import (  # noqa: F811
     Model as Model,
     NeutronSource as NeutronSource,
     PhotonSource as PhotonSource,
+    Processing as Processing,
     Region as Region,
     Tally as Tally,
     Tracks as Tracks,

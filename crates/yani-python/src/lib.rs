@@ -35,6 +35,7 @@ pub mod html_repr;
 pub mod library;
 pub mod material;
 pub mod particle;
+pub mod processing;
 pub mod read;
 mod shapes;
 pub mod transmutation_results;
@@ -82,6 +83,7 @@ pub fn register_classes(py: Python<'_>, m: &Bound<'_, PyModule>, package: &str) 
     m.add_class::<transmutation_results::PyEstimate>()?;
     m.add_class::<transmutation_results::PyLineEstimate>()?;
     m.add_class::<data_uncertainty::PyDataUncertainty>()?;
+    m.add_class::<processing::PyProcessing>()?;
 
     m.add_class::<distribution::PyNeutronSource>()?;
     // PhotonSource takes the (x, p) pair `decay_photon_spectrum()` returns, but
