@@ -1493,10 +1493,11 @@ impl Tally {
     ///
     /// `mu` is the cosine between the particle's direction and the crossed
     /// surface's normal, which points to the surface's positive side
-    /// (`Surface.above`). The `current` score adds the weight with the sign
-    /// of `mu`, so summed over the cosine bins it is the net current towards
-    /// the positive side; for the outer surface of a convex body in vacuum,
-    /// nothing comes back and that is the leakage. A crossing on a surface
+    /// (`Surface.above`). `current-above` counts crossings towards that side
+    /// and `current-below` those towards `Surface.below`, each with positive
+    /// weight; `current-net` adds the weight with the sign of `mu`, above
+    /// minus below. For the outer surface of a convex body in vacuum nothing
+    /// comes back, so above and net are both the leakage. A crossing on a surface
     /// the tally does not name, outside its cosine or energy bins, or by a
     /// particle its particle filter excludes, scores nothing.
     #[allow(clippy::too_many_arguments)]
@@ -1547,12 +1548,17 @@ impl Tally {
                 break;
             }
         }
-        let value = weight.copysign(mu) * ef_weight;
-        for score_index in 0..self.scores.len() {
+        for (score_index, score) in self.scores.iter().enumerate() {
+            let Score::Current(current) = score else {
+                continue;
+            };
+            let Some(value) = current.contribution(weight, mu) else {
+                continue;
+            };
             if let Some(bin) =
                 self.get_surface_bin_index(score_index, surface_bin, cosine_bin, energy_bin)
             {
-                scratch.add_contribution(tally_idx, bin, value);
+                scratch.add_contribution(tally_idx, bin, value * ef_weight);
             }
         }
     }
@@ -2513,7 +2519,7 @@ impl Tally {
         if !has_surfaces {
             if has_current {
                 return Err(format!(
-                    "Tally '{name}': the 'current' score is scored on surfaces; pass surfaces="
+                    "Tally '{name}': surface current scores are scored on surfaces; pass surfaces="
                 ));
             }
             if self.get_cosine_filter().is_some() {
@@ -2535,7 +2541,8 @@ impl Tally {
         }
         if let Some(other) = self.scores.iter().find(|s| !matches!(s, Score::Current(_))) {
             return Err(format!(
-                "Tally '{name}': a surface tally scores 'current' only, not '{}'",
+                "Tally '{name}': a surface tally scores 'current-net', 'current-above' and \
+                 'current-below' only, not '{}'",
                 other.name()
             ));
         }

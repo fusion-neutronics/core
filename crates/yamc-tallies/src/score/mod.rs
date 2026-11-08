@@ -54,7 +54,7 @@ impl Score {
                 None => r.mt.to_string(),
             },
             Self::PhotonXS(p) => p.component.name().to_string(),
-            Self::Current(_) => "current".to_string(),
+            Self::Current(c) => c.name().to_string(),
         }
     }
 
@@ -78,8 +78,9 @@ impl Score {
             Self::Flux(_) => panic!(
                 "Direct integer value for flux score is not supported. Use 'flux' string only."
             ),
-            Self::Current(_) => panic!(
-                "Direct integer value for current score is not supported. Use 'current' string only."
+            Self::Current(c) => panic!(
+                "Direct integer value for the {} score is not supported. Use its name.",
+                c.name()
             ),
             _ => self.mt().unwrap().as_i32(),
         }

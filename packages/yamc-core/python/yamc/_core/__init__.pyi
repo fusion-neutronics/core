@@ -5451,22 +5451,43 @@ class Tally:
             materials (Material | list[Material], optional): Material(s) to bin over --
                 one result bin per material. A single material (not in a list) is also
                 accepted.
-            surfaces (Surface | list[Surface], optional): Score at crossings of these
-                surfaces instead of along tracks: a surface-current tally, one result
-                bin per surface. Its only score is ``"current"``: each crossing adds
-                the particle weight, positive towards the surface's ``.above`` side
-                and negative towards ``.below``, so it is the net current through the
-                surface per source particle. For the outer surface of a body in vacuum
-                nothing comes back, and that is the leakage. Takes ``energy_bins``,
-                ``cosine_bins``, ``particle`` and an energy function, but no cells,
-                materials, mesh, nuclides or estimator. Surface tracking and CSG
-                surfaces only.
-            cosine_bins (list[float], optional): Bin a surface tally by the cosine
-                between the particle's direction and the surface normal, which points
-                to ``.above`` (outwards on a sphere). Ascending edges within
-                ``[-1, 1]``; for example ``[math.cos(math.radians(17.28)), 1.0]`` keeps
-                particles leaving within 17.28 degrees of the normal. Needs
-                ``surfaces``.
+            surfaces (Surface | list[Surface], optional): Make this a surface-current
+                tally: it scores each time a particle crosses one of these surfaces,
+                rather than along tracks or at collisions, with one result bin per
+                surface in the order given. Its scores count crossings per source
+                particle, by the side of the surface they cross to:
+        
+                  * ``"current-above"`` -- crossings towards the surface's ``.above``
+                    side, each adding the particle weight.
+                  * ``"current-below"`` -- crossings towards ``.below``, each adding
+                    the particle weight.
+                  * ``"current-net"`` -- above minus below: the weight with a plus
+                    sign towards ``.above`` and a minus sign towards ``.below``.
+        
+                Which side is ``.above`` is the same as for regions: outside a
+                ``Sphere``, ``Cylinder``, ``Cone`` or ``Torus``, and the positive side
+                of a ``Plane`` (``x > offset`` for ``axis="x"``). So on a sphere
+                ``"current-above"`` is the outward current and ``"current-below"``
+                the inward one; on an x plane they are the currents towards +x and
+                -x. For the outer surface of a body in vacuum nothing comes back, so
+                ``"current-above"`` and ``"current-net"`` are both the leakage, and
+                ``"current-below"`` is zero. Inside a model a particle can cross the
+                same surface several times, and each crossing counts.
+        
+                A surface tally takes ``energy_bins`` (the crossing energy),
+                ``cosine_bins``, ``particle`` and an energy function, and no cells,
+                materials, mesh, nuclides, response or estimator. It needs surface
+                tracking (not ``"woodcock"`` or ``"hybrid"``) and CSG surfaces, and
+                runs on the CPU. Units are particles per source particle.
+            cosine_bins (list[float], optional): Bin a surface tally by the cosine of
+                the angle between the particle's direction and the surface normal at
+                the crossing, the normal pointing to ``.above`` (outwards on a
+                sphere). Ascending edges within ``[-1, 1]``: a cosine of 1 is
+                straight along the normal, 0 is grazing, and negative cosines are
+                crossings towards ``.below``. ``[-1.0, 0.0, 1.0]`` splits crossings
+                by direction; ``[math.cos(math.radians(17.28)), 1.0]`` keeps only
+                particles leaving within 17.28 degrees of the normal, as a detector
+                that views part of a surface sees. Needs ``surfaces``.
             mesh (RegularRectangularMesh, optional): Mesh for spatial binning
             unstructured_mesh (tuple, optional): (MeshGeometry, volume) for tet mesh scoring
             energy_bins (list[float], optional): Energy bin boundaries in eV

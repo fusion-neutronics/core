@@ -84,7 +84,7 @@ fn split_sphere() -> Geometry {
 
 fn current_tally(surfaces: Vec<usize>, cosine_bins: Option<Vec<f64>>) -> Arc<Tally> {
     let mut tally = Tally::new();
-    tally.scores = vec![Score::Current(CurrentScore)];
+    tally.scores = vec![Score::Current(CurrentScore::NET)];
     tally.estimator = Estimator::Surface;
     tally.filters = vec![Filter::Surface(SurfaceFilter::from_ids(surfaces))];
     if let Some(edges) = cosine_bins {
@@ -157,30 +157,49 @@ fn an_off_centre_source_still_gives_a_current_of_one_with_no_inward_crossings() 
 }
 
 #[test]
-fn the_current_through_a_plane_has_the_sign_of_the_side_crossed_to() {
+fn the_current_through_a_plane_is_counted_by_the_side_crossed_to() {
     // A particle heading towards the plane x = 2 crosses it only if it meets
     // it inside the vacuum sphere (r = 10), where the plane is a disc of
     // radius sqrt(96). From a source on the x axis a distance d from the
     // plane, that takes a direction cosine towards it above
     // d / sqrt(96 + d^2), so (1 - d / sqrt(96 + d^2)) / 2 of the particles
-    // cross. From the origin (d = 2) that is 0.4, towards x > 2, the plane's
-    // positive side; from x = 5 (d = 3) it is 0.354, towards the negative side.
+    // cross. From the origin (d = 2) that is 0.4, all towards x > 2, the
+    // plane's above side; from x = 5 (d = 3) it is 0.354, all towards below.
     let crossing = |d: f64| (1.0 - d / (96.0 + d * d).sqrt()) / 2.0;
-    let from_x5 = -crossing(3.0);
     let sigma = (0.25 / PARTICLES as f64).sqrt();
-    for (source, expected) in [([0.0, 0.0, 0.0], crossing(2.0)), ([5.0, 0.0, 0.0], from_x5)] {
+    for (source, above, below) in [
+        ([0.0, 0.0, 0.0], crossing(2.0), 0.0),
+        ([5.0, 0.0, 0.0], 0.0, crossing(3.0)),
+    ] {
+        let mut tally = Tally::new();
+        tally.scores = vec![
+            Score::Current(CurrentScore::NET),
+            Score::Current(CurrentScore::ABOVE),
+            Score::Current(CurrentScore::BELOW),
+        ];
+        tally.estimator = Estimator::Surface;
+        tally.filters = vec![Filter::Surface(SurfaceFilter::from_ids(vec![3]))];
+        tally.validate().unwrap();
         let model = run(
             split_sphere(),
             source,
-            vec![current_tally(vec![3], None)],
+            vec![Arc::new(tally)],
             TrackingMode::Surface,
         )
         .unwrap();
-        let mean = model.tallies[0].get_mean()[0];
-        assert!(
-            (mean - expected).abs() < 5.0 * sigma,
-            "source {source:?}: {mean}, expected {expected}"
-        );
+        let mean = model.tallies[0].get_mean();
+        for (got, expected, score) in [
+            (mean[0], above - below, "net"),
+            (mean[1], above, "above"),
+            (mean[2], below, "below"),
+        ] {
+            assert!(
+                (got - expected).abs() < 5.0 * sigma,
+                "source {source:?} {score}: {got}, expected {expected}"
+            );
+        }
+        // Net is exactly above minus below: the same crossings, history by history.
+        assert!((mean[0] - (mean[1] - mean[2])).abs() < 1e-12, "{mean:?}");
     }
 }
 
@@ -213,7 +232,7 @@ fn a_surface_the_geometry_does_not_have_is_refused() {
 #[test]
 fn a_current_score_without_surfaces_is_refused() {
     let mut tally = Tally::new();
-    tally.scores = vec![Score::Current(CurrentScore)];
+    tally.scores = vec![Score::Current(CurrentScore::NET)];
     let err = tally.validate().unwrap_err();
     assert!(err.contains("pass surfaces="), "{err}");
 }
