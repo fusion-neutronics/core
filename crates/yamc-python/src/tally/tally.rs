@@ -14,6 +14,7 @@ use crate::geometry::PyCell;
 use crate::geometry::PyGeometry;
 #[cfg(feature = "mesh")]
 use crate::geometry::PyMeshGeometry;
+use crate::geometry::PySurface;
 use crate::geometry::{PyRegularCylindricalMesh, PyRegularRectangularMesh};
 use crate::material::PyMaterial;
 
@@ -72,6 +73,38 @@ pub fn cell_filter_ids(cells: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
         .collect()
 }
 
+/// Resolve a `Surface` or sequence of `Surface`s into the surface ids a
+/// `SurfaceFilter` bins over. Every surface built in Python has an id (one is
+/// handed out when none is given), so a missing id means the surface came
+/// from somewhere that set none.
+fn surface_filter_ids(surfaces: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
+    let py_surfaces: Vec<pyo3::PyRef<'_, PySurface>> =
+        if let Ok(list) = surfaces.extract::<Vec<pyo3::PyRef<'_, PySurface>>>() {
+            list
+        } else if let Ok(single) = surfaces.extract::<pyo3::PyRef<'_, PySurface>>() {
+            vec![single]
+        } else {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "surfaces must be a Surface or a list of Surface instances",
+            ));
+        };
+    if py_surfaces.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "surfaces must contain at least one Surface",
+        ));
+    }
+    py_surfaces
+        .iter()
+        .map(|s| {
+            s.inner.surface_id.ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(
+                    "cannot tally on a Surface with no id: give it one with surface_id=",
+                )
+            })
+        })
+        .collect()
+}
+
 /// Resolve a `Material` or sequence of `Material`s into the `MaterialFilter`
 /// that bins over them, with the core's reason as a `ValueError` when it
 /// cannot (an empty list, or two materials sharing an id).
@@ -117,6 +150,43 @@ impl PyTally {
     ///     materials (Material | list[Material], optional): Material(s) to bin over --
     ///         one result bin per material. A single material (not in a list) is also
     ///         accepted.
+    ///     surfaces (Surface | list[Surface], optional): Make this a surface-current
+    ///         tally: it scores each time a particle crosses one of these surfaces,
+    ///         rather than along tracks or at collisions, with one result bin per
+    ///         surface in the order given. Its scores count crossings per source
+    ///         particle, by the side of the surface they cross to:
+    ///
+    ///           * ``"current-above"`` -- crossings towards the surface's ``.above``
+    ///             side, each adding the particle weight.
+    ///           * ``"current-below"`` -- crossings towards ``.below``, each adding
+    ///             the particle weight.
+    ///           * ``"current-net"`` -- above minus below: the weight with a plus
+    ///             sign towards ``.above`` and a minus sign towards ``.below``.
+    ///
+    ///         Which side is ``.above`` is the same as for regions: outside a
+    ///         ``Sphere``, ``Cylinder``, ``Cone`` or ``Torus``, and the positive side
+    ///         of a ``Plane`` (``x > offset`` for ``axis="x"``). So on a sphere
+    ///         ``"current-above"`` is the outward current and ``"current-below"``
+    ///         the inward one; on an x plane they are the currents towards +x and
+    ///         -x. For the outer surface of a body in vacuum nothing comes back, so
+    ///         ``"current-above"`` and ``"current-net"`` are both the leakage, and
+    ///         ``"current-below"`` is zero. Inside a model a particle can cross the
+    ///         same surface several times, and each crossing counts.
+    ///
+    ///         A surface tally takes ``energy_bins`` (the crossing energy),
+    ///         ``cosine_bins``, ``particle`` and an energy function, and no cells,
+    ///         materials, mesh, nuclides, response or estimator. It needs surface
+    ///         tracking (not ``"woodcock"`` or ``"hybrid"``) and CSG surfaces, and
+    ///         runs on the CPU. Units are particles per source particle.
+    ///     cosine_bins (list[float], optional): Bin a surface tally by the cosine of
+    ///         the angle between the particle's direction and the surface normal at
+    ///         the crossing, the normal pointing to ``.above`` (outwards on a
+    ///         sphere). Ascending edges within ``[-1, 1]``: a cosine of 1 is
+    ///         straight along the normal, 0 is grazing, and negative cosines are
+    ///         crossings towards ``.below``. ``[-1.0, 0.0, 1.0]`` splits crossings
+    ///         by direction; ``[math.cos(math.radians(17.28)), 1.0]`` keeps only
+    ///         particles leaving within 17.28 degrees of the normal, as a detector
+    ///         that views part of a surface sees. Needs ``surfaces``.
     ///     mesh (RegularRectangularMesh, optional): Mesh for spatial binning
     ///     unstructured_mesh (tuple, optional): (MeshGeometry, volume) for tet mesh scoring
     ///     energy_bins (list[float], optional): Energy bin boundaries in eV
@@ -157,7 +227,7 @@ impl PyTally {
     #[new]
     #[pyo3(signature = (
         scores=None, name=None, id=None, nuclides=None, response=None,
-        cells=None, materials=None,
+        cells=None, materials=None, surfaces=None, cosine_bins=None,
         mesh=None, unstructured_mesh=None,
         energy_bins=None, energy_group_structure=None, energy_function=None,
         interpolation=None, dose_coefficients=None, particle=None, parent_nuclides=None,
@@ -179,6 +249,9 @@ impl PyTally {
         >,
         #[gen_stub(override_type(type_repr = "Material | typing.Sequence[Material] | None"))]
         materials: Option<&Bound<'_, PyAny>>,
+        #[gen_stub(override_type(type_repr = "Surface | typing.Sequence[Surface] | None"))]
+        surfaces: Option<&Bound<'_, PyAny>>,
+        cosine_bins: Option<Vec<f64>>,
         #[gen_stub(override_type(
             type_repr = "RegularRectangularMesh | RegularCylindricalMesh | None"
         ))]
@@ -201,7 +274,13 @@ impl PyTally {
         estimator: Option<String>,
         covariance: bool,
     ) -> PyResult<Self> {
+        if surfaces.is_some() && estimator.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "a surface tally scores at surface crossings; it takes no estimator",
+            ));
+        }
         let estimator_value = match estimator.as_deref() {
+            None if surfaces.is_some() => yamc_tallies::Estimator::Surface,
             None => yamc_tallies::Estimator::default(),
             Some(s) => s
                 .parse::<yamc_tallies::Estimator>()
@@ -297,6 +376,19 @@ impl PyTally {
 
         if let Some(ms) = materials {
             filters.push(Filter::Material(material_filter(ms)?));
+        }
+
+        if let Some(ss) = surfaces {
+            filters.push(Filter::Surface(yamc_tallies::SurfaceFilter::from_ids(
+                surface_filter_ids(ss)?,
+            )));
+        }
+
+        if let Some(edges) = cosine_bins {
+            filters.push(Filter::Cosine(
+                yamc_tallies::CosineFilter::new(edges)
+                    .map_err(pyo3::exceptions::PyValueError::new_err)?,
+            ));
         }
 
         if let Some(m) = mesh {
@@ -593,7 +685,8 @@ impl PyTally {
             .validate_nuclide_axis()
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
 
-        if !filters.is_empty() {
+        let has_current = tally.scores.iter().any(|s| matches!(s, Score::Current(_)));
+        if !filters.is_empty() || has_current {
             tally.filters = filters;
             tally
                 .validate()
@@ -860,6 +953,21 @@ impl PyTally {
                 None
             }
         })
+    }
+
+    /// Surface ids of the surface filter, or None for a tally that is not a
+    /// surface tally.
+    #[getter]
+    pub fn surfaces(&self) -> Option<Vec<usize>> {
+        self.inner
+            .get_surface_filter()
+            .map(|f| f.surface_ids.clone())
+    }
+
+    /// Cosine bin edges of a surface tally, or None if it has none.
+    #[getter]
+    pub fn cosine_bins(&self) -> Option<Vec<f64>> {
+        self.inner.get_cosine_filter().map(|f| f.edges.clone())
     }
 
     /// Set the cell filter. Accepts a single Cell or a list of Cells.

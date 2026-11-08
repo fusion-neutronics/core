@@ -26,14 +26,15 @@ pub use filter::material::MaterialFilter;
 pub use filter::mesh::{MeshFilter, MeshKind};
 pub use filter::parent_nuclide::ParentNuclideFilter;
 pub use filter::particle_type::ParticleTypeFilter;
+pub use filter::surface::{CosineFilter, SurfaceFilter};
 #[cfg(feature = "mesh")]
 pub use filter::unstructured_mesh::UnstructuredMeshFilter;
 pub use mesh::{CylindricalMesh, RegularRectangularMesh};
 pub use mt::Mt;
 pub use result::{ConvergencePoint, StatisticalChecks, TallyResult};
 pub use score::{
-    DamageEnergyScore, FluxScore, HeatingLocalScore, HeatingScore, PhotonComponent, PhotonXSScore,
-    ProductionScore, ReactionRateScore, Score, ScoreKind,
+    CurrentDirection, CurrentScore, DamageEnergyScore, FluxScore, HeatingLocalScore, HeatingScore,
+    PhotonComponent, PhotonXSScore, ProductionScore, ReactionRateScore, Score, ScoreKind,
 };
 pub use simulation_results::SimulationResults;
 pub use tally::{NuclideBin, Tally};

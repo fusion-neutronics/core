@@ -240,10 +240,7 @@ struct Row {
 }
 
 fn est_name(e: Estimator) -> &'static str {
-    match e {
-        Estimator::TrackLength => "track-length",
-        Estimator::Collision => "collision",
-    }
+    e.as_str()
 }
 
 /// Render rows as a markdown table and report the worst-case |ratio-1| over the

@@ -52,7 +52,9 @@ def test_offset_layers_are_true_distances_that_add_up():
     first_wall = yamc.OffsetSurface(plasma, 15.0, surface_id=2, boundary="vacuum")
     back = yamc.OffsetSurface(first_wall, 2.0, name="first_wall_back")
     assert (first_wall.distance, back.distance) == (15.0, 17.0)
-    assert repr(back) == "Surface(id=None, type=OffsetSurface(distance=17.0), boundary=None)"
+    assert repr(back) == (
+        f"Surface(id={back.surface_id}, type=OffsetSurface(distance=17.0), boundary=None)"
+    )
     assert repr(first_wall).endswith("boundary='vacuum')")
     # 15 cm straight out from the outboard midplane at zeta = 0, where the
     # boundary is at its largest R for every zeta, so the cut's closest

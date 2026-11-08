@@ -396,7 +396,7 @@ pub fn Plane(
         surface = surface.with_name(nm);
     }
     Ok(PySurface {
-        inner: std::sync::Arc::new(surface),
+        inner: std::sync::Arc::new(surface.with_auto_id()),
     })
 }
 
@@ -431,7 +431,7 @@ pub fn Sphere(
         surface = surface.with_name(n);
     }
     Ok(PySurface {
-        inner: std::sync::Arc::new(surface),
+        inner: std::sync::Arc::new(surface.with_auto_id()),
     })
 }
 
@@ -487,7 +487,7 @@ pub fn Cylinder(
         surface = surface.with_name(nm);
     }
     Ok(PySurface {
-        inner: std::sync::Arc::new(surface),
+        inner: std::sync::Arc::new(surface.with_auto_id()),
     })
 }
 
@@ -529,7 +529,7 @@ pub fn Quadric(
         surface = surface.with_name(nm);
     }
     Ok(PySurface {
-        inner: std::sync::Arc::new(surface),
+        inner: std::sync::Arc::new(surface.with_auto_id()),
     })
 }
 
@@ -570,7 +570,7 @@ pub fn Cone(
         surface = surface.with_name(nm);
     }
     Ok(PySurface {
-        inner: std::sync::Arc::new(surface),
+        inner: std::sync::Arc::new(surface.with_auto_id()),
     })
 }
 
@@ -659,7 +659,7 @@ pub fn Torus(
         surface = surface.with_name(nm);
     }
     Ok(PySurface {
-        inner: std::sync::Arc::new(surface),
+        inner: std::sync::Arc::new(surface.with_auto_id()),
     })
 }
 
@@ -722,7 +722,7 @@ pub fn FluxSurface(
         surface = surface.with_name(nm);
     }
     Ok(PySurface {
-        inner: std::sync::Arc::new(surface),
+        inner: std::sync::Arc::new(surface.with_auto_id()),
     })
 }
 
@@ -776,7 +776,7 @@ pub fn OffsetSurface(
         surface = surface.with_name(nm);
     }
     Ok(PySurface {
-        inner: std::sync::Arc::new(surface),
+        inner: std::sync::Arc::new(surface.with_auto_id()),
     })
 }
 
@@ -878,6 +878,6 @@ pub fn ImplicitSurface(
         surface = surface.with_name(nm);
     }
     Ok(PySurface {
-        inner: std::sync::Arc::new(surface),
+        inner: std::sync::Arc::new(surface.with_auto_id()),
     })
 }
