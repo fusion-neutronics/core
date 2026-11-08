@@ -1,0 +1,357 @@
+//! Read `covariance.arrow` back into the blocks the parser produced.
+//!
+//! The inverse of `yamc-convert`'s writer, and deliberately as dumb as it is:
+//! every column maps to one field, nothing is combined, and no matrix is built.
+//! Interpreting a block is [`crate::covariance::expand`]'s job.
+//!
+//! # Absence is normal
+//!
+//! Every `{Nuclide}.arrow/` published before this section existed has no such
+//! file, and most evaluations have no MF=33 at all, so a missing file reads as
+//! "no covariance" and never as an error. The `.absent` markers a downloaded
+//! directory may carry play no part: those are a download-cache record of a
+//! settled 404 and this reader does not consult them, exactly as the rest of
+//! the loader does not.
+
+use std::error::Error;
+use std::path::Path;
+
+use arrow_array::Array;
+use endf::mf::covariance::{NcSubsection, NiSubsection};
+
+use crate::arrow::arrow_helpers::{
+    get_i32, get_str, read_arrow_file, try_get_f64, try_get_f64_list, try_get_i32, try_get_str,
+};
+use crate::covariance::{
+    AngularCovarianceBlock, BranchingCovarianceBlock, CovarianceBlock, CovarianceData,
+    SpectrumCovarianceBlock,
+};
+use crate::resonance_parameters::ResonanceParameters;
+
+/// A nullable `int32` column read as the parser's `i64`, with null as zero.
+///
+/// Null and zero mean the same thing here by construction: the writer nulls a
+/// column only when the row's variant does not use it, and the parser leaves
+/// exactly those fields at their zero default. Reading null as zero is
+/// therefore what makes the round trip exact rather than a tolerance.
+fn int_or_zero(batch: &arrow_array::RecordBatch, col: &str, row: usize) -> i64 {
+    try_get_i32(batch, col, row).unwrap_or(0) as i64
+}
+
+/// A nullable `double` column, with null as zero. Same reasoning as above.
+fn float_or_zero(batch: &arrow_array::RecordBatch, col: &str, row: usize) -> f64 {
+    try_get_f64(batch, col, row).unwrap_or(0.0)
+}
+
+fn ni_from_row(batch: &arrow_array::RecordBatch, row: usize) -> NiSubsection {
+    NiSubsection {
+        lt: int_or_zero(batch, "lt", row),
+        ls: int_or_zero(batch, "ls", row),
+        lb: int_or_zero(batch, "lb", row),
+        nt: int_or_zero(batch, "nt", row),
+        np: int_or_zero(batch, "np", row),
+        ne: int_or_zero(batch, "ne", row),
+        ner: int_or_zero(batch, "ner", row),
+        nec: int_or_zero(batch, "nec", row),
+        ek: try_get_f64_list(batch, "ek", row),
+        fk: try_get_f64_list(batch, "fk", row),
+        el: try_get_f64_list(batch, "el", row),
+        fl: try_get_f64_list(batch, "fl", row),
+        fkk: try_get_f64_list(batch, "fkk", row),
+        er: try_get_f64_list(batch, "er", row),
+        ec: try_get_f64_list(batch, "ec", row),
+        fkl: try_get_f64_list(batch, "fkl", row),
+    }
+}
+
+fn nc_from_row(batch: &arrow_array::RecordBatch, row: usize) -> NcSubsection {
+    NcSubsection {
+        lty: int_or_zero(batch, "lty", row),
+        e1: float_or_zero(batch, "e1", row),
+        e2: float_or_zero(batch, "e2", row),
+        nci: int_or_zero(batch, "nci", row),
+        ci: try_get_f64_list(batch, "ci", row),
+        xmti: try_get_f64_list(batch, "xmti", row),
+        mats: int_or_zero(batch, "mats", row),
+        mts: int_or_zero(batch, "mts", row),
+        nei: int_or_zero(batch, "nei", row),
+        xmfs: float_or_zero(batch, "xmfs", row),
+        xlfss: float_or_zero(batch, "xlfss", row),
+        ei: try_get_f64_list(batch, "ei", row),
+        wei: try_get_f64_list(batch, "wei", row),
+    }
+}
+
+/// Read `covariance.arrow` from a `{Nuclide}.arrow/` directory.
+///
+/// `Ok(None)` when the file is not there. A file that IS there and cannot be
+/// read is an error: a caller who asked for uncertainty and would otherwise get
+/// silence needs to know the difference between "this evaluation has no
+/// covariance" and "the covariance could not be read".
+pub fn read_covariance(
+    dir: &Path,
+    nuclide: &str,
+) -> Result<Option<Vec<CovarianceBlock>>, Box<dyn Error>> {
+    let path = dir.join("covariance.arrow");
+    if !crate::storage::exists(&path) {
+        return Ok(None);
+    }
+    let batch = read_arrow_file(&path)?;
+
+    let mut blocks = Vec::with_capacity(batch.num_rows());
+    for row in 0..batch.num_rows() {
+        blocks.push(block_from_row(
+            &batch,
+            row,
+            &format!("{nuclide} covariance.arrow"),
+            true,
+        )?);
+    }
+
+    Ok(Some(blocks))
+}
+
+/// Read `angular_covariance.arrow` (MF=34) from a `{Nuclide}.arrow/`
+/// directory.
+///
+/// `Ok(None)` when the file is not there, which is every evaluation without
+/// MF=34 and every folder written before the section existed. A file that is
+/// there and cannot be read is an error, as for `covariance.arrow`.
+pub fn read_angular_covariance(
+    dir: &Path,
+) -> Result<Option<Vec<AngularCovarianceBlock>>, Box<dyn Error>> {
+    let path = dir.join("angular_covariance.arrow");
+    if !crate::storage::exists(&path) {
+        return Ok(None);
+    }
+    let batch = read_arrow_file(&path)?;
+    let int = |col: &str, row: usize| int_or_zero(&batch, col, row) as i32;
+    let blocks = (0..batch.num_rows())
+        .map(|row| AngularCovarianceBlock {
+            mt: int("mt", row),
+            subsection_idx: int("subsection_idx", row),
+            pair_idx: int("pair_idx", row),
+            block_idx: int("block_idx", row),
+            mat1: int("mat1", row),
+            mt1: int("mt1", row),
+            ltt: int("ltt", row),
+            nl: int("nl", row),
+            nl1: int("nl1", row),
+            l: int("l", row),
+            l1: int("l1", row),
+            lct: int("lct", row),
+            mat: int("mat", row),
+            block: ni_from_row(&batch, row),
+        })
+        .collect();
+    Ok(Some(blocks))
+}
+
+/// Read `nubar_covariance.arrow` (MF=31) from a `{Nuclide}.arrow/`
+/// directory.
+///
+/// The blocks are [`CovarianceBlock`]s because MF=31 is MF=33's format, but
+/// `mt` and `mt1` name fission multiplicities (452, 455, 456), not cross
+/// sections, which is why they are kept apart from `covariance.arrow`'s.
+/// `Ok(None)` when the file is not there, which is every evaluation without
+/// MF=31 and every folder written before the section existed. A file that is
+/// there and cannot be read is an error, as for `covariance.arrow`.
+pub fn read_nubar_covariance(
+    dir: &Path,
+    nuclide: &str,
+) -> Result<Option<Vec<CovarianceBlock>>, Box<dyn Error>> {
+    let path = dir.join("nubar_covariance.arrow");
+    if !crate::storage::exists(&path) {
+        return Ok(None);
+    }
+    let batch = read_arrow_file(&path)?;
+    let what = format!("{nuclide} nubar_covariance.arrow");
+    let blocks = (0..batch.num_rows())
+        .map(|row| block_from_row(&batch, row, &what, false))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(blocks))
+}
+
+/// Read `spectrum_covariance.arrow` (MF=35) from a `{Nuclide}.arrow/`
+/// directory.
+///
+/// `Ok(None)` when the file is not there, as for the other covariance
+/// sections, and an error when it is there and cannot be read.
+pub fn read_spectrum_covariance(
+    dir: &Path,
+) -> Result<Option<Vec<SpectrumCovarianceBlock>>, Box<dyn Error>> {
+    let path = dir.join("spectrum_covariance.arrow");
+    if !crate::storage::exists(&path) {
+        return Ok(None);
+    }
+    let batch = read_arrow_file(&path)?;
+    let int = |col: &str, row: usize| int_or_zero(&batch, col, row) as i32;
+    let blocks = (0..batch.num_rows())
+        .map(|row| SpectrumCovarianceBlock {
+            mt: int("mt", row),
+            block_idx: int("block_idx", row),
+            e1: float_or_zero(&batch, "e1", row),
+            e2: float_or_zero(&batch, "e2", row),
+            ls: int("ls", row),
+            lb: int("lb", row),
+            ne: int("ne", row),
+            ek: try_get_f64_list(&batch, "ek", row),
+            fkk: try_get_f64_list(&batch, "fkk", row),
+        })
+        .collect();
+    Ok(Some(blocks))
+}
+
+/// Read `resonance_parameters.arrow` (MF=2 and MF=32, MT=151) from a
+/// `{Nuclide}.arrow/` directory.
+///
+/// The text is kept as it is, not parsed: [`ResonanceParameters`] parses it
+/// on demand. `Ok(None)` when the file is not there, which is every
+/// evaluation without MF=32 and every folder written before the section
+/// existed. A file that is there but lacks either section, or holds one
+/// twice, is an error: the writer always writes both.
+pub fn read_resonance_parameters(
+    dir: &Path,
+    nuclide: &str,
+) -> Result<Option<ResonanceParameters>, Box<dyn Error>> {
+    let path = dir.join("resonance_parameters.arrow");
+    if !crate::storage::exists(&path) {
+        return Ok(None);
+    }
+    let batch = read_arrow_file(&path)?;
+    let mut mf2_text = None;
+    let mut mf32_text = None;
+    for row in 0..batch.num_rows() {
+        let section = (get_i32(&batch, "mf", row)?, get_i32(&batch, "mt", row)?);
+        let slot = match section {
+            (2, 151) => &mut mf2_text,
+            (32, 151) => &mut mf32_text,
+            (mf, mt) => {
+                return Err(format!(
+                    "{nuclide} resonance_parameters.arrow holds MF={mf} MT={mt}; \
+                     only MF=2 and MF=32 MT=151 belong there"
+                )
+                .into());
+            }
+        };
+        if slot.replace(get_str(&batch, "text", row)?).is_some() {
+            return Err(format!(
+                "{nuclide} resonance_parameters.arrow holds MF={} MT={} twice",
+                section.0, section.1
+            )
+            .into());
+        }
+    }
+    match (mf2_text, mf32_text) {
+        (Some(mf2_text), Some(mf32_text)) => Ok(Some(ResonanceParameters {
+            mf2_text,
+            mf32_text,
+        })),
+        _ => Err(format!(
+            "{nuclide} resonance_parameters.arrow does not hold both MF=2 and MF=32 \
+             MT=151; re-convert or re-download this nuclide"
+        )
+        .into()),
+    }
+}
+
+/// One row's block, in the columns `covariance.arrow`,
+/// `nubar_covariance.arrow` and `branching_covariance.arrow` share. `what`
+/// names the file in errors. `lumped` is whether a lumped reaction's
+/// component row (`kind = "lumped"`) may appear, which only MF=33 has: MF=40
+/// has no MTL, and the converter writes no MF=31 lumped row.
+fn block_from_row(
+    batch: &arrow_array::RecordBatch,
+    row: usize,
+    what: &str,
+    lumped: bool,
+) -> Result<CovarianceBlock, Box<dyn Error>> {
+    let kind = get_str(batch, "kind", row)?;
+    let data = match kind.as_str() {
+        "ni" => CovarianceData::Ni(ni_from_row(batch, row)),
+        "nc" => CovarianceData::Nc(nc_from_row(batch, row)),
+        "lumped" if lumped => CovarianceData::Lumped,
+        other => {
+            let expected = if lumped {
+                "\"ni\", \"nc\" or \"lumped\""
+            } else {
+                "\"ni\" or \"nc\""
+            };
+            return Err(
+                format!("{what} row {row}: unknown kind {other:?}; expected {expected}").into(),
+            );
+        }
+    };
+    Ok(CovarianceBlock {
+        mt: try_get_i32(batch, "mt", row)
+            .ok_or_else(|| format!("{what} row {row}: mt is null, and it is the key"))?,
+        subsection_idx: int_or_zero(batch, "subsection_idx", row) as i32,
+        block_idx: int_or_zero(batch, "block_idx", row) as i32,
+        mat1: int_or_zero(batch, "mat1", row) as i32,
+        mt1: int_or_zero(batch, "mt1", row) as i32,
+        xmf1: float_or_zero(batch, "xmf1", row),
+        xlfs1: float_or_zero(batch, "xlfs1", row),
+        mtl: int_or_zero(batch, "mtl", row) as i32,
+        // Both files carry the evaluation's own MAT under this name; null, or
+        // absent in a file written before the column, reads as 0 (unknown).
+        mat: int_or_zero(batch, "mat", row) as i32,
+        data,
+    })
+}
+
+/// A nullable `list<double>` column, with null as `None` rather than empty.
+fn optional_list(batch: &arrow_array::RecordBatch, col: &str, row: usize) -> Option<Vec<f64>> {
+    let present = batch.column_by_name(col).is_some_and(|c| !c.is_null(row));
+    present.then(|| try_get_f64_list(batch, col, row))
+}
+
+/// The blocks of `branching/branching_covariance.arrow`, the MF=40 covariance
+/// of the isomeric branching partials, from the batches the chain loader holds
+/// (`yani::BranchTable::covariance`).
+///
+/// There is no absent case here: the loader holds batches only when the file
+/// was there, and has already checked them against the declared schema. A row
+/// whose key is null is an error rather than a skipped row, since a dropped
+/// block would read as a covariance the evaluator never stated.
+pub fn branching_covariance_blocks(
+    batches: &[arrow_array::RecordBatch],
+) -> Result<Vec<BranchingCovarianceBlock>, Box<dyn Error>> {
+    const WHAT: &str = "branching/branching_covariance.arrow";
+    let mut blocks = Vec::with_capacity(batches.iter().map(|b| b.num_rows()).sum());
+    for (batch_idx, batch) in batches.iter().enumerate() {
+        // Row numbers in errors are within the batch, so the batch is named.
+        let what = format!("{WHAT} batch {batch_idx}");
+        for row in 0..batch.num_rows() {
+            let int = |col: &str| -> Result<i32, Box<dyn Error>> {
+                try_get_i32(batch, col, row)
+                    .ok_or_else(|| format!("{what} row {row}: {col} is null").into())
+            };
+            let float = |col: &str| -> Result<f64, Box<dyn Error>> {
+                try_get_f64(batch, col, row)
+                    .ok_or_else(|| format!("{what} row {row}: {col} is null").into())
+            };
+            blocks.push(BranchingCovarianceBlock {
+                nuclide: try_get_str(batch, "nuclide", row).ok_or_else(|| {
+                    format!("{what} row {row}: nuclide is null, and it is the key")
+                })?,
+                reaction: try_get_str(batch, "reaction", row),
+                target: try_get_str(batch, "target", row),
+                target1: try_get_str(batch, "target1", row),
+                energy: optional_list(batch, "energy", row),
+                values: optional_list(batch, "values", row),
+                quantity: try_get_str(batch, "quantity", row),
+                mat: int("mat")?,
+                za: int("za")?,
+                awr: float("awr")?,
+                lis: int("lis")?,
+                state_idx: int("state_idx")?,
+                qm: float("qm")?,
+                qi: float("qi")?,
+                izap: int("izap")?,
+                lfs: int("lfs")?,
+                block: block_from_row(batch, row, &what, false)?,
+            });
+        }
+    }
+    Ok(blocks)
+}

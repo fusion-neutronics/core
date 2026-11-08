@@ -1,0 +1,49 @@
+[package]
+name = "yani-convert"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Convert ENDF decay, fission yield and neutron evaluations into the transmutation Arrow format yani reads"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "yani_convert"
+path = "src/lib.rs"
+
+# endf is the parser and has no dependencies of its own; nuclear-data-schema
+# declares the columns. yamc-convert is here for one thing, the MF=33-format
+# block writer that `branching/branching_covariance.arrow` shares with the
+# neutron `covariance.arrow`: MF=40 writes its blocks in MF=33's format, and a
+# second copy of that layout could drift from the first. It brings yamc-nuclide
+# with default-features = false, the MT synthesis rules and no reader or
+# download (see yamc-convert/Cargo.toml), which is not the transport engine.
+# yani-python already links both converters, so the standalone yani wheel gains
+# no new code from it and still does not link the transport engine.
+[dependencies]
+endf = { path = "../endf" }
+nuclear-data-schema = { path = "../nuclear-data-schema" }
+yamc-convert = { path = "../yamc-convert" }
+arrow-array = "60"
+arrow-schema = "60"
+arrow-ipc = { version = "60", features = ["lz4"] }
+serde_json = "1.0"
+
+# Split on target the way `yani-transmute/Cargo.toml` splits it, and for the
+# same reason: rayon has no thread pool on wasm32, and nothing that builds for
+# the browser should have to care that this crate parses in parallel. The
+# per-file work is written once and only the driver line is `#[cfg]`-ed, so the
+# sequential and parallel forms cannot drift apart.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = "1.10"
+
+# Tests only. `yani` is here so the round trip crosses the boundary that
+# matters: this crate writes the files and yani's own reader takes them back,
+# rather than a reader that shares this writer's assumptions. lzma-rs reads the
+# xz fixtures, as it does in the endf crate.
+[dev-dependencies]
+yani = { path = "../yani" }
+lzma-rs = "0.3"
+serde_json = "1.0"
+# The reader of `branching_covariance.arrow`, which the covariance round trip
+# has to cross for the same reason the chain round trip crosses yani's.
+yamc-nuclide = { path = "../yamc-nuclide", default-features = false, features = ["arrow"] }

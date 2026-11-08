@@ -1,0 +1,883 @@
+#![allow(non_snake_case)]
+
+use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
+// ...existing code...
+
+use crate::geometry::PyBoundingBox;
+use crate::geometry::PyHalfspace;
+use yamc::geo::{BoundaryType, Surface};
+
+fn parse_boundary(boundary: Option<&str>) -> PyResult<Option<BoundaryType>> {
+    match boundary {
+        None => Ok(None),
+        Some(s) => BoundaryType::from_str_option(s)
+            .map(Some)
+            .ok_or_else(|| PyValueError::new_err("boundary must be None or 'vacuum'")),
+    }
+}
+
+// Internal only: this wrapper is never registered on the module (no
+// `add_class`) and no binding returns it -- surfaces accept a boundary `str`
+// (e.g. "vacuum"). It is intentionally NOT given the `gen_stub_*` macros, so it
+// stays out of the generated stub and `__all__` (otherwise the stub would
+// advertise a `BoundaryType` symbol that cannot be imported).
+#[pyclass(module = "yamc._core", name = "BoundaryType", from_py_object)]
+#[derive(Clone)]
+pub struct PyBoundaryType {
+    pub inner: BoundaryType,
+}
+
+#[pymethods]
+impl PyBoundaryType {
+    #[new]
+    fn new(boundary: &str) -> PyResult<Self> {
+        let boundary = BoundaryType::from_str_option(boundary)
+            .ok_or_else(|| PyValueError::new_err("boundary must be 'transmission' or 'vacuum'"))?;
+        Ok(PyBoundaryType { inner: boundary })
+    }
+
+    fn __str__(&self) -> &str {
+        match self.inner {
+            BoundaryType::Transmission => "transmission",
+            BoundaryType::Vacuum => "vacuum",
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("BoundaryType('{}')", self.__str__())
+    }
+}
+
+/// A geometric surface (plane, cylinder, sphere, …). Its `.below` and `.above`
+/// half-spaces, combined with `&`/`|`/`~`, build CSG `Region`s.
+#[gen_stub_pyclass]
+#[pyclass(module = "yamc._core", name = "Surface", from_py_object)]
+#[derive(Clone)]
+pub struct PySurface {
+    pub inner: std::sync::Arc<Surface>,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PySurface {
+    pub fn __repr__(&self) -> String {
+        let id = self
+            .inner
+            .surface_id
+            .map_or("None".to_string(), |id| id.to_string());
+        // Label an axis vector as "x"/"y"/"z" when it is exactly ±a basis
+        // vector, else as its components. Mirrors the unified `axis=` argument.
+        fn axis_label(axis: &[f64; 3]) -> String {
+            match parallel_basis_index(axis) {
+                Some(k) => ["x", "y", "z"][k].to_string(),
+                None => format!("({}, {}, {})", axis[0], axis[1], axis[2]),
+            }
+        }
+        let kind = match &self.inner.kind {
+            yamc::geo::SurfaceKind::Plane { a, b, c, .. } => {
+                format!("Plane(axis={})", axis_label(&[*a, *b, *c]))
+            }
+            yamc::geo::SurfaceKind::Sphere { .. } => "Sphere".to_string(),
+            yamc::geo::SurfaceKind::Cylinder { axis, .. } => {
+                format!("Cylinder(axis={})", axis_label(axis))
+            }
+            yamc::geo::SurfaceKind::ZTorus { .. } => "Torus(axis=z)".to_string(),
+            yamc::geo::SurfaceKind::XTorus { .. } => "Torus(axis=x)".to_string(),
+            yamc::geo::SurfaceKind::YTorus { .. } => "Torus(axis=y)".to_string(),
+            yamc::geo::SurfaceKind::Quadric { .. } => "Quadric".to_string(),
+            yamc::geo::SurfaceKind::Cone { axis, .. } => {
+                format!("Cone(axis={})", axis_label(axis))
+            }
+            yamc::geo::SurfaceKind::Flux { offset, .. } if *offset == 0.0 => {
+                "FluxSurface".to_string()
+            }
+            yamc::geo::SurfaceKind::Flux { offset, .. } => {
+                format!("OffsetSurface(distance={offset:?})")
+            }
+            yamc::geo::SurfaceKind::Implicit { formula } => {
+                format!("ImplicitSurface('{}')", formula.brief())
+            }
+        };
+        let boundary = match self.inner.boundary {
+            BoundaryType::Transmission => "None",
+            BoundaryType::Vacuum => "'vacuum'",
+        };
+        format!("Surface(id={id}, type={kind}, boundary={boundary})")
+    }
+
+    /// Signed distance (cm) of a flux or offset surface from its flux
+    /// surface (0 for a FluxSurface), else None
+    #[getter]
+    pub fn distance(&self) -> Option<f64> {
+        match &self.inner.kind {
+            yamc::geo::SurfaceKind::Flux { offset, .. } => Some(*offset),
+            _ => None,
+        }
+    }
+
+    /// The formula of an ImplicitSurface as it is stored, which parses back
+    /// to the same surface, else None
+    #[getter]
+    pub fn formula(&self) -> Option<String> {
+        match &self.inner.kind {
+            yamc::geo::SurfaceKind::Implicit { formula } => Some(formula.formula().to_string()),
+            _ => None,
+        }
+    }
+
+    /// Evaluate the surface equation at a point.
+    ///
+    /// For a flux surface the value is the signed distance (cm) from it.
+    /// For an offset surface it is the signed distance from the underlying
+    /// flux surface minus ``distance``: the distance to the layer outside
+    /// it and wherever the layer is not creased, an underestimate inside
+    /// the layer near a crease. The sign is always exact. For an implicit
+    /// surface it is the formula's value, a distance only if the formula is
+    /// one.
+    ///
+    /// Args:
+    ///     point: Tuple of 3 floats (x, y, z)
+    ///
+    /// Returns:
+    ///     Float value. Negative means inside/below, positive means outside/above, zero means on surface.
+    pub fn evaluate(&self, point: (f64, f64, f64)) -> f64 {
+        self.inner.evaluate_exact(point)
+    }
+
+    /// Offset of a plane perpendicular to the x-axis (axis='x'), else None
+    #[getter]
+    pub fn x0(&self) -> Option<f64> {
+        match &self.inner.kind {
+            yamc::geo::SurfaceKind::Plane { a, b, c, d } if *a == 1.0 && *b == 0.0 && *c == 0.0 => {
+                Some(*d)
+            }
+            _ => None,
+        }
+    }
+
+    /// Offset of a plane perpendicular to the y-axis (axis='y'), else None
+    #[getter]
+    pub fn y0(&self) -> Option<f64> {
+        match &self.inner.kind {
+            yamc::geo::SurfaceKind::Plane { a, b, c, d } if *a == 0.0 && *b == 1.0 && *c == 0.0 => {
+                Some(*d)
+            }
+            _ => None,
+        }
+    }
+
+    /// Offset of a plane perpendicular to the z-axis (axis='z'), else None
+    #[getter]
+    pub fn z0(&self) -> Option<f64> {
+        match &self.inner.kind {
+            yamc::geo::SurfaceKind::Plane { a, b, c, d } if *a == 0.0 && *b == 0.0 && *c == 1.0 => {
+                Some(*d)
+            }
+            _ => None,
+        }
+    }
+
+    /// Radius for Sphere or Cylinder surfaces, else None
+    #[getter]
+    pub fn radius(&self) -> Option<f64> {
+        match &self.inner.kind {
+            yamc::geo::SurfaceKind::Sphere { radius, .. } => Some(*radius),
+            yamc::geo::SurfaceKind::Cylinder { radius, .. } => Some(*radius),
+            _ => None,
+        }
+    }
+
+    /// Get the axis_x value for Cylinder surfaces, or None otherwise
+    #[getter]
+    pub fn axis_x(&self) -> Option<f64> {
+        match &self.inner.kind {
+            yamc::geo::SurfaceKind::Cylinder { axis, .. } => Some(axis[0]),
+            _ => None,
+        }
+    }
+
+    /// Get the axis_y value for Cylinder surfaces, or None otherwise
+    #[getter]
+    pub fn axis_y(&self) -> Option<f64> {
+        match &self.inner.kind {
+            yamc::geo::SurfaceKind::Cylinder { axis, .. } => Some(axis[1]),
+            _ => None,
+        }
+    }
+
+    /// Get the axis_z value for Cylinder surfaces, or None otherwise
+    #[getter]
+    pub fn axis_z(&self) -> Option<f64> {
+        match &self.inner.kind {
+            yamc::geo::SurfaceKind::Cylinder { axis, .. } => Some(axis[2]),
+            _ => None,
+        }
+    }
+
+    /// Compute the distance to the surface from a point in a direction.
+    /// Returns the distance as a float, or None if no intersection is
+    /// found. A flux, offset or implicit surface searches for it, and finds
+    /// none if its search runs out of evaluations first, as it can far
+    /// along a ray through an implicit lattice with no bounding box (which
+    /// is searched only within 1048576 cm, 2^20 cm, of the origin on each
+    /// axis).
+    pub fn distance_to_surface(
+        &self,
+        point: (f64, f64, f64),
+        direction: (f64, f64, f64),
+    ) -> Option<f64> {
+        let point_arr = [point.0, point.1, point.2];
+        let dir_arr = [direction.0, direction.1, direction.2];
+        self.inner.distance_to_surface(point_arr, dir_arr)
+    }
+
+    /// Get the bounding box for the inside (negative halfspace) of this surface
+    pub fn bounding_box_inside(&self) -> Option<PyBoundingBox> {
+        self.inner
+            .bounding_box(true)
+            .map(|(lower, upper)| PyBoundingBox::new(lower, upper))
+    }
+
+    pub fn bounding_box_outside(&self) -> Option<PyBoundingBox> {
+        self.inner
+            .bounding_box(false)
+            .map(|(lower, upper)| PyBoundingBox::new(lower, upper))
+    }
+
+    /// Get axis constraint for this surface when used as a halfspace
+    /// Returns (axis_index, is_upper_bound, value) or None
+    /// axis_index: 0=X, 1=Y, 2=Z
+    /// is_upper_bound: True if this constrains the upper bound, False for lower bound
+    pub fn axis_constraint(&self, halfspace_below: bool) -> Option<(usize, bool, f64)> {
+        self.inner.axis_constraint(halfspace_below)
+    }
+
+    #[getter]
+    pub fn surface_id(&self) -> Option<usize> {
+        self.inner.surface_id
+    }
+
+    #[setter(surface_id)]
+    pub fn set_surface_id(&mut self, surface_id: Option<usize>) {
+        if let Some(surface) = std::sync::Arc::get_mut(&mut self.inner) {
+            surface.surface_id = surface_id;
+        } else {
+            // If Arc is shared, clone it to get a mutable version
+            let mut surface = (*self.inner).clone();
+            surface.surface_id = surface_id;
+            self.inner = std::sync::Arc::new(surface);
+        }
+    }
+
+    /// Boundary condition: None for transmission (default) or 'vacuum'.
+    #[getter]
+    pub fn boundary(&self) -> Option<&'static str> {
+        match self.inner.boundary {
+            BoundaryType::Transmission => None,
+            BoundaryType::Vacuum => Some("vacuum"),
+        }
+    }
+
+    #[setter(boundary)]
+    pub fn set_boundary(&mut self, boundary: Option<&str>) -> PyResult<()> {
+        let boundary = match boundary {
+            None => BoundaryType::Transmission,
+            Some(s) => BoundaryType::from_str_option(s)
+                .ok_or_else(|| PyValueError::new_err("boundary must be None or 'vacuum'"))?,
+        };
+
+        if let Some(surface) = std::sync::Arc::get_mut(&mut self.inner) {
+            surface.set_boundary(boundary);
+        } else {
+            // If Arc is shared, clone it to get a mutable version
+            let mut surface = (*self.inner).clone();
+            surface.set_boundary(boundary);
+            self.inner = std::sync::Arc::new(surface);
+        }
+        Ok(())
+    }
+
+    /// The below (negative-sense) half-space of this surface, as a `Region`:
+    /// points where `surface.evaluate(p) < 0` (inside a sphere/cylinder, below a
+    /// plane). Combine with `&`/`|`/`~`. (Replaces the old unary `-surface`.)
+    #[getter]
+    fn below(slf: PyRef<'_, Self>) -> PyResult<crate::geometry::PyRegion> {
+        use crate::geometry::{PyRegion, PyRegionExpr};
+        let py = slf.py();
+        let py_surface: Py<crate::geometry::PySurface> = Py::new(py, slf.clone())?;
+        let expr = PyRegionExpr::Halfspace(PyHalfspace::new_below(py_surface));
+        let region = yamc::geo::Region {
+            expr: expr.to_region_expr(),
+        };
+        Ok(PyRegion { expr, region })
+    }
+
+    /// The above (positive-sense) half-space of this surface, as a `Region`:
+    /// points where `surface.evaluate(p) > 0` (outside a sphere/cylinder, above a
+    /// plane). Combine with `&`/`|`/`~`. (Replaces the old unary `+surface`.)
+    #[getter]
+    fn above(slf: PyRef<'_, Self>) -> PyResult<crate::geometry::PyRegion> {
+        use crate::geometry::{PyRegion, PyRegionExpr};
+        let py = slf.py();
+        let py_surface: Py<crate::geometry::PySurface> = Py::new(py, slf.clone())?;
+        let expr = PyRegionExpr::Halfspace(PyHalfspace::new_above(py_surface));
+        let region = yamc::geo::Region {
+            expr: expr.to_region_expr(),
+        };
+        Ok(PyRegion { expr, region })
+    }
+}
+
+/// Parse an `axis=` argument that is either an axis name ('x'/'y'/'z') or a
+/// 3-element direction vector, returning a NORMALIZED `[f64; 3]`. Rejects
+/// zero-length vectors and unknown axis names.
+fn parse_axis(axis: &Bound<'_, PyAny>) -> PyResult<[f64; 3]> {
+    if let Ok(name) = axis.extract::<String>() {
+        return match name.to_lowercase().as_str() {
+            "x" => Ok([1.0, 0.0, 0.0]),
+            "y" => Ok([0.0, 1.0, 0.0]),
+            "z" => Ok([0.0, 0.0, 1.0]),
+            other => Err(PyValueError::new_err(format!(
+                "axis string must be 'x', 'y', or 'z' (got '{other}')"
+            ))),
+        };
+    }
+    let v: [f64; 3] = axis.extract().map_err(|_| {
+        PyValueError::new_err("axis must be 'x'/'y'/'z' or a 3-element direction vector")
+    })?;
+    let norm = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if norm == 0.0 {
+        return Err(PyValueError::new_err("axis vector must be non-zero"));
+    }
+    Ok([v[0] / norm, v[1] / norm, v[2] / norm])
+}
+
+/// If the unit `axis` is exactly ±e_k (parallel to a coordinate axis), return
+/// Some(k); else None. Used to reject the gauge-redundant axial coordinate of a
+/// named-axis cylinder. Exact equality is intentional: a slightly-off axis is a
+/// genuinely oblique cylinder for which every coordinate is meaningful.
+fn parallel_basis_index(axis: &[f64; 3]) -> Option<usize> {
+    (0..3).find(|&k| axis[k].abs() == 1.0 && (0..3).all(|i| i == k || axis[i] == 0.0))
+}
+
+/// Create a plane surface perpendicular to a direction.
+///
+/// The plane is the set of points where `n·(x, y, z) = offset`, with `n` the
+/// (normalized) `axis`.
+///
+/// Args:
+///     axis: Plane normal - 'x'/'y'/'z' or a direction vector (a, b, c).
+///     offset: Signed position of the plane along `axis` (default: 0.0).
+///         With axis='x', offset=5 is the plane x = 5; with axis=(1, 1, 0),
+///         offset=3 (after normalization) is the plane x + y = 3·√2.
+///     surface_id: Optional surface ID
+///     boundary: Boundary condition - None (default, transmission) or 'vacuum'
+///     name: Optional surface name
+///
+/// Returns:
+///     A Surface object representing the plane
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[allow(non_snake_case)]
+#[pyo3(signature = (axis, offset = 0.0, surface_id = None, boundary = None, name = None))]
+pub fn Plane(
+    axis: &Bound<'_, PyAny>,
+    offset: f64,
+    surface_id: Option<usize>,
+    boundary: Option<&str>,
+    name: Option<String>,
+) -> PyResult<PySurface> {
+    let n = parse_axis(axis)?;
+    let boundary_validated = parse_boundary(boundary)?;
+    let mut surface = Surface::new_plane(n[0], n[1], n[2], offset, surface_id, boundary_validated);
+    if let Some(nm) = name {
+        surface = surface.with_name(nm);
+    }
+    Ok(PySurface {
+        inner: std::sync::Arc::new(surface),
+    })
+}
+
+/// Create a sphere surface.
+///
+/// Args:
+///     x0: X-coordinate of the sphere center (default: 0.0)
+///     y0: Y-coordinate of the sphere center (default: 0.0)
+///     z0: Z-coordinate of the sphere center (default: 0.0)
+///     radius: Radius of the sphere (default: 1.0)
+///     surface_id: Optional surface ID
+///     boundary: Boundary condition - None (default, transmission) or 'vacuum'
+///
+/// Returns:
+///     A Surface object representing the sphere
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[allow(non_snake_case)]
+#[pyo3(signature = (x0 = 0.0, y0 = 0.0, z0 = 0.0, radius = 1.0, surface_id = None, boundary = None, name = None))]
+pub fn Sphere(
+    x0: f64,
+    y0: f64,
+    z0: f64,
+    radius: f64,
+    surface_id: Option<usize>,
+    boundary: Option<&str>,
+    name: Option<String>,
+) -> PyResult<PySurface> {
+    let boundary_validated = parse_boundary(boundary)?;
+    let mut surface = Surface::sphere(x0, y0, z0, radius, surface_id, boundary_validated);
+    if let Some(n) = name {
+        surface = surface.with_name(n);
+    }
+    Ok(PySurface {
+        inner: std::sync::Arc::new(surface),
+    })
+}
+
+/// Create a cylinder surface.
+///
+/// The cylinder passes through the point ``(x0, y0, z0)`` (default: origin).
+/// When the axis is parallel to a coordinate axis, the coordinate along that
+/// axis is meaningless (the cylinder is infinite along it) and supplying it
+/// raises ValueError; for an oblique axis all three are meaningful.
+///
+/// Args:
+///     axis: Cylinder axis - 'x'/'y'/'z' or a direction vector. The axis is an
+///         undirected line: its sign and magnitude don't matter.
+///     radius: Cylinder radius (default: 1.0)
+///     surface_id: Optional surface ID
+///     boundary: Boundary condition - None (default, transmission) or 'vacuum'
+///     name: Optional surface name
+///
+/// Returns:
+///     A Surface object representing the cylinder
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[allow(non_snake_case, clippy::too_many_arguments)]
+#[pyo3(signature = (axis, x0 = None, y0 = None, z0 = None, radius = 1.0, surface_id = None, boundary = None, name = None))]
+pub fn Cylinder(
+    axis: &Bound<'_, PyAny>,
+    x0: Option<f64>,
+    y0: Option<f64>,
+    z0: Option<f64>,
+    radius: f64,
+    surface_id: Option<usize>,
+    boundary: Option<&str>,
+    name: Option<String>,
+) -> PyResult<PySurface> {
+    let a = parse_axis(axis)?;
+    if let Some(k) = parallel_basis_index(&a) {
+        let (coord, label) = match k {
+            0 => (x0, "x0"),
+            1 => (y0, "y0"),
+            _ => (z0, "z0"),
+        };
+        if coord.is_some() {
+            return Err(PyValueError::new_err(format!(
+                "{label} has no meaning for a cylinder whose axis is parallel to '{}' (the cylinder is infinite along it)",
+                ["x", "y", "z"][k]
+            )));
+        }
+    }
+    let origin = [x0.unwrap_or(0.0), y0.unwrap_or(0.0), z0.unwrap_or(0.0)];
+    let boundary_validated = parse_boundary(boundary)?;
+    let mut surface = Surface::new_cylinder(a, origin, radius, surface_id, boundary_validated);
+    if let Some(nm) = name {
+        surface = surface.with_name(nm);
+    }
+    Ok(PySurface {
+        inner: std::sync::Arc::new(surface),
+    })
+}
+
+/// Create a general quadric surface (``Quadric``):
+/// ``a x^2 + b y^2 + c z^2 + d xy + e yz + f xz + g x + h y + j z + k = 0``.
+/// The coefficients ``a`` through ``k`` (``i`` is skipped) are the terms of
+/// that equation.
+///
+/// Args:
+///     surface_id: Optional surface ID
+///     boundary: Boundary condition - None (default, transmission) or 'vacuum'
+///     name: Optional surface name
+///
+/// Returns:
+///     A Surface object representing the quadric
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[allow(non_snake_case, clippy::too_many_arguments)]
+#[pyo3(signature = (a = 0.0, b = 0.0, c = 0.0, d = 0.0, e = 0.0, f = 0.0, g = 0.0, h = 0.0, j = 0.0, k = 0.0, surface_id = None, boundary = None, name = None))]
+pub fn Quadric(
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+    e: f64,
+    f: f64,
+    g: f64,
+    h: f64,
+    j: f64,
+    k: f64,
+    surface_id: Option<usize>,
+    boundary: Option<&str>,
+    name: Option<String>,
+) -> PyResult<PySurface> {
+    let boundary_validated = parse_boundary(boundary)?;
+    let mut surface =
+        Surface::new_quadric(a, b, c, d, e, f, g, h, j, k, surface_id, boundary_validated);
+    if let Some(nm) = name {
+        surface = surface.with_name(nm);
+    }
+    Ok(PySurface {
+        inner: std::sync::Arc::new(surface),
+    })
+}
+
+/// Create a cone surface (double-sheeted / both nappes). The apex is at
+/// ``(x0, y0, z0)`` (default: origin); unlike a cylinder, all three apex
+/// coordinates are meaningful for every axis.
+///
+/// Args:
+///     axis: Cone axis - 'x'/'y'/'z' or a direction vector.
+///     opening_angle: Half-opening angle in DEGREES (default: 45.0).
+///     surface_id: Optional surface ID
+///     boundary: Boundary condition - None (default, transmission) or 'vacuum'
+///     name: Optional surface name
+///
+/// Returns:
+///     A Surface object representing the (double) cone.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[allow(non_snake_case, clippy::too_many_arguments)]
+#[pyo3(signature = (axis, x0 = 0.0, y0 = 0.0, z0 = 0.0, opening_angle = 45.0, surface_id = None, boundary = None, name = None))]
+pub fn Cone(
+    axis: &Bound<'_, PyAny>,
+    x0: f64,
+    y0: f64,
+    z0: f64,
+    opening_angle: f64,
+    surface_id: Option<usize>,
+    boundary: Option<&str>,
+    name: Option<String>,
+) -> PyResult<PySurface> {
+    let a = parse_axis(axis)?;
+    let t = (opening_angle * std::f64::consts::PI / 180.0).tan();
+    let tan2_theta = t * t;
+    let boundary_validated = parse_boundary(boundary)?;
+    let mut surface =
+        Surface::new_cone([x0, y0, z0], a, tan2_theta, surface_id, boundary_validated);
+    if let Some(nm) = name {
+        surface = surface.with_name(nm);
+    }
+    Ok(PySurface {
+        inner: std::sync::Arc::new(surface),
+    })
+}
+
+/// Create a torus surface.
+///
+/// The torus is centered at ``(x0, y0, z0)`` (default: origin); all three
+/// coordinates are meaningful for every axis.
+///
+/// Args:
+///     axis: Symmetry axis - 'x', 'y', or 'z'. Arbitrary direction vectors are
+///         NOT yet supported (a torus is degree-4 and the engine only has
+///         axis-locked variants); an oblique vector raises
+///         ValueError.
+///     r_major: Major radius (default: 1.0)
+///     r_minor: Minor radius along the symmetry axis (default: 0.5)
+///     r_minor_2: Minor radius in the transverse plane. Defaults to `r_minor`
+///         (a circular cross-section); set it different from `r_minor` for an
+///         elliptical cross-section.
+///     surface_id: Optional surface ID
+///     boundary: Boundary condition - None (default, transmission) or 'vacuum'
+///     name: Optional surface name
+///
+/// Returns:
+///     A Surface object representing the torus
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[allow(non_snake_case, clippy::too_many_arguments)]
+#[pyo3(signature = (axis, x0 = 0.0, y0 = 0.0, z0 = 0.0, r_major = 1.0, r_minor = 0.5, r_minor_2 = None, surface_id = None, boundary = None, name = None))]
+pub fn Torus(
+    axis: &Bound<'_, PyAny>,
+    x0: f64,
+    y0: f64,
+    z0: f64,
+    r_major: f64,
+    r_minor: f64,
+    r_minor_2: Option<f64>,
+    surface_id: Option<usize>,
+    boundary: Option<&str>,
+    name: Option<String>,
+) -> PyResult<PySurface> {
+    let a = parse_axis(axis)?;
+    let boundary_validated = parse_boundary(boundary)?;
+    // `r_minor` is the minor radius along the symmetry axis (engine `b`),
+    // `r_minor_2` the transverse minor radius (engine `c`); equal => circular.
+    let c = r_minor_2.unwrap_or(r_minor);
+    // The engine only has axis-locked X/Y/ZTorus variants. An arbitrary-axis
+    // torus (degree-4, not a quadric) needs a new engine variant.
+    let mut surface = match parallel_basis_index(&a) {
+        Some(0) => Surface::new_xtorus(
+            x0,
+            y0,
+            z0,
+            r_major,
+            r_minor,
+            c,
+            surface_id,
+            boundary_validated,
+        ),
+        Some(1) => Surface::new_ytorus(
+            x0,
+            y0,
+            z0,
+            r_major,
+            r_minor,
+            c,
+            surface_id,
+            boundary_validated,
+        ),
+        Some(2) => Surface::new_ztorus(
+            x0,
+            y0,
+            z0,
+            r_major,
+            r_minor,
+            c,
+            surface_id,
+            boundary_validated,
+        ),
+        _ => {
+            return Err(PyValueError::new_err(
+                "arbitrary-axis torus is not yet supported; use axis='x', 'y', or 'z'",
+            ));
+        }
+    };
+    if let Some(nm) = name {
+        surface = surface.with_name(nm);
+    }
+    Ok(PySurface {
+        inner: std::sync::Arc::new(surface),
+    })
+}
+
+/// Create a flux surface of a stellarator or tokamak plasma shape.
+///
+/// The surface ``rho = const`` of the same shape that drives the plasma
+/// source, a ``StellaratorShape`` for ``yamc.sources.stellarator_source`` or a
+/// ``TokamakShape`` for ``yamc.sources.tokamak_source``, so a plasma cell and
+/// its source share one shape. ``.below`` is the plasma inside the surface,
+/// ``.above`` the rest of space, as for any other surface.
+///
+/// Args:
+///     shape: The plasma shape, a ``yamc.sources.StellaratorShape`` or
+///         ``yamc.sources.TokamakShape``
+///     rho: The shape's flux label in (0, 1]; 1 (the default) is the plasma
+///         boundary
+///     surface_id: Optional surface ID
+///     boundary: Boundary condition - None (default, transmission) or 'vacuum'
+///     name: Optional surface name
+///
+/// Returns:
+///     A Surface object representing the flux surface
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[allow(non_snake_case)]
+#[pyo3(signature = (shape, rho = 1.0, surface_id = None, boundary = None, name = None))]
+pub fn FluxSurface(
+    #[gen_stub(override_type(type_repr = "sources.StellaratorShape | sources.TokamakShape"))]
+    shape: &Bound<'_, PyAny>,
+    rho: f64,
+    surface_id: Option<usize>,
+    boundary: Option<&str>,
+    name: Option<String>,
+) -> PyResult<PySurface> {
+    use yamc::geometry::flux::{flux_surface, PlasmaShape};
+    use yani_python::distribution::{PyStellaratorShape, PyTokamakShape};
+    let boundary_validated = parse_boundary(boundary)?;
+    let built = if let Ok(stellarator) = shape.extract::<PyRef<'_, PyStellaratorShape>>() {
+        flux_surface(
+            PlasmaShape::Stellarator(&stellarator.inner),
+            rho,
+            surface_id,
+            boundary_validated,
+        )
+    } else if let Ok(tokamak) = shape.extract::<PyRef<'_, PyTokamakShape>>() {
+        flux_surface(
+            PlasmaShape::Tokamak(&tokamak.inner),
+            rho,
+            surface_id,
+            boundary_validated,
+        )
+    } else {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "shape must be a yamc.sources.StellaratorShape or TokamakShape (got {})",
+            shape.get_type().name()?
+        )));
+    };
+    let mut surface = built.map_err(PyValueError::new_err)?;
+    if let Some(nm) = name {
+        surface = surface.with_name(nm);
+    }
+    Ok(PySurface {
+        inner: std::sync::Arc::new(surface),
+    })
+}
+
+/// Create the surface at a fixed distance outside (or inside) a flux surface.
+///
+/// The points at signed 3-D distance ``distance`` (cm) from the flux surface
+/// that ``base`` is built on, positive outwards: a first-wall or blanket
+/// layer of uniform thickness. Distances are measured from that flux surface,
+/// so an offset of an offset adds: ``OffsetSurface(OffsetSurface(plasma, 15),
+/// 2)`` is ``OffsetSurface(plasma, 17)``. Layers built from one flux surface
+/// are nested and never cross. ``.below`` is the side towards the plasma.
+///
+/// Layers farther out than the flux surface's crease-free distance (the
+/// smaller of its tightest concave radius of curvature and half its narrowest
+/// gap outside, such as across the central hole) keep their exact distance
+/// from it, but have creases (sharp edges) where offset fronts from different
+/// parts of the flux surface meet, as a true distance offset does; building
+/// one gives a ``UserWarning`` saying so.
+///
+/// Args:
+///     base: A FluxSurface or OffsetSurface
+///     distance: Signed distance in cm, positive outwards
+///     surface_id: Optional surface ID
+///     boundary: Boundary condition - None (default, transmission) or 'vacuum'
+///     name: Optional surface name
+///
+/// Returns:
+///     A Surface object representing the offset surface
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[allow(non_snake_case)]
+#[pyo3(signature = (base, distance, surface_id = None, boundary = None, name = None))]
+pub fn OffsetSurface(
+    base: PyRef<'_, PySurface>,
+    distance: f64,
+    surface_id: Option<usize>,
+    boundary: Option<&str>,
+    name: Option<String>,
+) -> PyResult<PySurface> {
+    let boundary_validated = parse_boundary(boundary)?;
+    let mut surface = base
+        .inner
+        .offset(distance, surface_id, boundary_validated)
+        .map_err(PyValueError::new_err)?;
+    if let Some(message) = surface.crease_warning() {
+        base.py()
+            .import("warnings")?
+            .call_method1("warn", (message,))?;
+    }
+    if let Some(nm) = name {
+        surface = surface.with_name(nm);
+    }
+    Ok(PySurface {
+        inner: std::sync::Arc::new(surface),
+    })
+}
+
+/// Create a surface from a formula: the points where ``formula`` is zero.
+///
+/// ``.below`` is where the formula is negative and ``.above`` where it is
+/// positive, and they combine with ``&``, ``|`` and ``~`` like the
+/// half-spaces of any other surface. Coordinates are in cm. ``evaluate``
+/// returns the formula's value, which is a distance only if the formula is
+/// written as one (``sqrt(x^2 + y^2 + z^2) - 5`` is, ``x^2 + y^2 + z^2 - 25``
+/// is not); transport reads only its sign.
+///
+/// A formula is made of:
+///
+/// - numbers (``2``, ``0.5``, ``1e-3``), ``x``, ``y``, ``z`` and ``pi``;
+/// - ``+``, ``-``, ``*``, ``/``, unary ``-`` and ``^`` with a constant
+///   exponent. An integer power is a product (``x^3`` is ``x^2 * x`` and
+///   ``x^-2`` is ``1 / x^2``); any other power needs a base that cannot be
+///   negative, as in ``abs(x)^2.5``;
+/// - ``sqrt``, ``abs``, ``exp``, ``log``, ``sin`` and ``cos``, and ``min``
+///   and ``max`` of two or more arguments;
+/// - ``smin(a, b, k)`` and ``smax(a, b, k)``: the minimum and maximum
+///   blended over a distance ``k > 0`` (a polynomial blend), which round
+///   the edge where two shapes meet.
+///
+/// There are no comparisons or jumps (``floor``, ``mod``, ``atan2``): a
+/// jump in sign would be a crossing with no surface there. A formula is
+/// refused with a ValueError that says where it goes wrong if it does not
+/// parse, if it can be undefined (the square root or logarithm of a
+/// negative number, ``0 / 0``) or divide by zero where it is used, if it is
+/// shown never to change sign there, or if it is shown to be zero
+/// throughout some part of that region (as ``max(x, 0) * y`` is wherever
+/// ``x < 0``), whose points would be on neither side of the surface. These
+/// checks use interval arithmetic, which loses track of a square written
+/// out: write ``(x - 1)^2 + 1`` rather than ``x^2 - 2 * x + 2``, or the
+/// formula can be refused as one not shown to be defined. It is kept in a
+/// canonical form (``Surface.formula``) that reads back to the same
+/// surface, and its functions give the same results on every platform.
+///
+/// A box holding everything below the surface is proved from the formula
+/// where possible (``bounding_box_inside``). A formula with none, such as a
+/// periodic lattice, a plane or a twist, must be bounded by the other
+/// surfaces of each cell that uses it, within 1048576 cm (2^20 cm) of the
+/// origin, where formulas are checked. Implicit surfaces run on the CPU
+/// only (not with ``compute='gpu'``), cannot be offset with
+/// ``OffsetSurface`` (a layer of even thickness needs a distance), and the
+/// browser views show yamc's own image of them.
+///
+/// Args:
+///     formula: The formula, in x, y and z (cm)
+///     surface_id: Optional surface ID
+///     boundary: Boundary condition - None (default, transmission) or 'vacuum'
+///     name: Optional surface name
+///
+/// Returns:
+///     A Surface object representing the implicit surface
+///
+/// Examples:
+///     >>> import yamc
+///     >>> # A sphere of radius 5 cm, as its signed distance.
+///     >>> ball = yamc.ImplicitSurface("sqrt(x^2 + y^2 + z^2) - 5")
+///     >>> # A gyroid lattice of period 2 cm in a 10 cm box of planes.
+///     >>> gyroid = yamc.ImplicitSurface(
+///     ...     "sin(pi * x) * cos(pi * y) + sin(pi * y) * cos(pi * z)"
+///     ...     " + sin(pi * z) * cos(pi * x) - 0.3"
+///     ... )
+///     >>> box = yamc.Plane("x", -5.0).above & yamc.Plane("x", 5.0).below
+///     >>> box = box & yamc.Plane("y", -5.0).above & yamc.Plane("y", 5.0).below
+///     >>> box = box & yamc.Plane("z", -5.0).above & yamc.Plane("z", 5.0).below
+///     >>> struts = yamc.Cell(region=box & gyroid.below)
+///     >>> pores = yamc.Cell(region=box & gyroid.above)
+///     >>> # A port through a blanket shell, cut by a superellipsoid: a box
+///     >>> # 120 by 60 by 100 cm with rounded edges, across the shell.
+///     >>> port = yamc.ImplicitSurface(
+///     ...     "((x - 225) / 60)^4 + (y / 30)^4 + (z / 50)^4 - 1"
+///     ... )
+///     >>> shell = yamc.Sphere(radius=200.0).above & yamc.Sphere(radius=250.0).below
+///     >>> blanket = yamc.Cell(region=shell & port.above)
+///     >>> opening = yamc.Cell(region=shell & port.below)
+///     >>> # Two spheres 8 cm apart, blended with a 2 cm fillet where they meet.
+///     >>> pair = yamc.ImplicitSurface(
+///     ...     "smin(sqrt((x - 4)^2 + y^2 + z^2) - 5, sqrt((x + 4)^2 + y^2 + z^2) - 5, 2)"
+///     ... )
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[allow(non_snake_case)]
+#[pyo3(signature = (formula, *, surface_id = None, boundary = None, name = None))]
+pub fn ImplicitSurface(
+    formula: &str,
+    surface_id: Option<usize>,
+    boundary: Option<&str>,
+    name: Option<String>,
+) -> PyResult<PySurface> {
+    let boundary_validated = parse_boundary(boundary)?;
+    let formula = yamc::geo::ImplicitFormula::new(formula).map_err(PyValueError::new_err)?;
+    let mut surface =
+        Surface::new_implicit(std::sync::Arc::new(formula), surface_id, boundary_validated);
+    if let Some(nm) = name {
+        surface = surface.with_name(nm);
+    }
+    Ok(PySurface {
+        inner: std::sync::Arc::new(surface),
+    })
+}

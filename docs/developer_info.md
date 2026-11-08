@@ -1,0 +1,763 @@
+# Developer Info
+
+This guide shows how to clone, build, test, and generate documentation for the project. Instructions are written for Linux but equivalent commands should be possible in Windows and Mac OS.
+
+## 1. Clone the Repository
+
+```bash
+git clone https://github.com/fusion-neutronics/core.git
+cd core
+```
+
+## 2. Install Rust
+
+Install Rust by following the [official Rust installation guide](https://rust-lang.org/tools/install/)
+
+
+## 3. Build Rust Package:
+
+The project is a Cargo workspace of 24 crates. See [Workspace Layout](#workspace-layout) below for what lives where. Build everything with:
+
+```bash
+cargo build
+```
+
+To build only a specific crate:
+
+```bash
+cargo build -p yamc
+cargo build -p yamt
+cargo build -p yamm
+cargo build -p yani
+```
+
+## 4. Run Rust tests
+
+The test suite reads nuclear data from `crates/yamc/tests/*.arrow`. Those are
+published data, not source, so they are **downloaded once** rather than
+committed:
+
+```bash
+python scripts/fetch_test_fixtures.py     # ~530 MB, into the platform cache dir
+```
+
+It fetches the endf-b8.1 nuclide, element and transmutation-chain sections into
+the same on-disk cache production uses and symlinks them into
+`crates/yamc/tests/`. Re-running is cheap: anything already cached is left
+alone. `--check` reports what is missing without downloading.
+
+The cache is the platform's per-user cache directory with `yamc` appended:
+`~/.cache/yamc` on Linux (`$XDG_CACHE_HOME/yamc` when that is set),
+`~/Library/Caches/yamc` on macOS and `%LOCALAPPDATA%\yamc` on Windows
+(`yamc.cache_dir()` reports it). There is no setting or environment variable
+that moves it. The fixtures keep their own flat layout there
+(`endf-b8.1-<Name>.arrow`), apart from the per-release folders the downloader
+writes, and are fetched from the unversioned layout until the libraries are
+republished in the release layout.
+
+The tests find it through `yamc_test_cache` (`crates/yamc-test-cache`) rather
+than resolving it themselves, so every test agrees with production on where the
+cache is on every OS. A test whose fixture is missing takes its "data absent"
+skip path, so a wrongly resolved cache would read green having read nothing.
+`YAMC_REQUIRE_FIXTURES=1`, which CI sets after the fetch step, turns that
+absence into a failure.
+
+```bash
+cargo test --workspace
+```
+
+yamc-plot's `browser_surface_eval` tests run the browser views' JavaScript
+under [Node.js](https://nodejs.org), so they need `node` on PATH. Without it
+they fail rather than skip, since a skip would pass having checked nothing; the
+GitHub-hosted runners CI uses ship Node.
+
+### GPU tests - run single-threaded
+
+The GPU path shares a **process-global cubecl client/device** (a cached
+`GpuContext` singleton). Running GPU tests in parallel launches multiple
+kernels concurrently on that one shared client, which intermittently corrupts
+results (you'll see `alive=0, mean steps=0, zero tally` - non-deterministic).
+So GPU tests **must run single-threaded**. There is a cargo alias for this:
+
+```bash
+cargo test-gpu            # = test -p yamc-gpu -p yamc --features yamc/gpu --release -- --test-threads=1
+```
+
+or spell it out:
+
+```bash
+cargo test -p yamc-gpu --release -- --test-threads=1                 # GPU kernel tests
+cargo test -p yamc --features gpu --release -- --test-threads=1      # GPU integration tests
+```
+
+(On machines with no f64-capable Vulkan adapter these tests self-skip, so a
+plain `cargo test --workspace` stays correct there - the flag only matters on a
+real GPU box. The same applies in user code: each `model.simulate_transport(
+compute='gpu')` call resets the shared client, so back-to-back calls are safe,
+but only one GPU transport runs at a time within a process.)
+
+## 5. Build the Python Extension
+
+(Optional) Create a Python virtual environment:
+```bash
+sudo apt install python3-venv
+python3 -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+```
+
+Build and install the Python module in editable mode. The wheel is defined by
+`packages/yamc-core/pyproject.toml`, not by anything at the repo root, so the
+package directory is what gets installed:
+```bash
+pip install -e packages/yamc-core
+```
+
+This compiles the Rust extension through the maturin build backend (in release mode) and installs `yamc` as an editable package. Edits to the Python sources under `packages/yamc-core/python/yamc/` are picked up immediately; after changing Rust code, re-run `pip install -e packages/yamc-core` to rebuild. The default features include `mesh` and `cad`.
+
+Add the optional extras you need:
+```bash
+pip install -e "packages/yamc-core[all]"      # runtime extras: CAD meshing (cadquery), VTK/HDF export (h5py), and numpy
+pip install -e "packages/yamc-core[all,dev]"  # also installs the dev and test tooling (pytest, matplotlib, tqdm)
+```
+
+For an MPI-enabled build (which requires the `mpi` cargo feature and a local MPI install), see the [installation guide](https://fusion-neutronics.github.io/yamc/installation/).
+
+> You can also build the extension directly with [maturin](https://www.maturin.rs/) from inside the package directory (for example `cd packages/yamc-core && maturin develop`, or `maturin build` to produce a standalone abi3 wheel) if you want finer control over the cargo features or build profile. maturin has no flag that points at a pyproject, its `-m` takes a Cargo manifest, so the package directory has to be the working directory. See the [maturin documentation](https://www.maturin.rs/) for details.
+
+### Building for the machine you will run on
+
+The published wheels target a baseline x86-64, so they run anywhere. If you are
+building from source **on the machine that will run it** -- a cluster node, a
+workstation -- you can let the compiler use that machine's instruction set:
+
+```bash
+RUSTFLAGS="-C target-cpu=native" pip install -e packages/yamc-core
+```
+
+Measured at about **3%** on the CRAM solve (`docs/transmute_speed.md` has the
+numbers and the two flags that turned out to be worth nothing). Modest, and it
+costs nothing but a rebuild.
+
+> **Never put this in a published wheel.** `native` emits whatever instructions
+> the build machine happens to have, so the result crashes with an illegal
+> instruction on any older CPU that lacks them, and under Rosetta 2. It is a
+> from-source option for a known machine, which is why it is not in
+> `.cargo/config.toml`.
+
+Note that `[target.<triple>] rustflags` in `.cargo/config.toml` *replaces*
+`[build] rustflags` rather than merging with it, so per-target flags there are
+easy to get wrong; passing `RUSTFLAGS` on the command line avoids the question.
+
+## 6. Run Python Tests
+
+The transport, coupled-photon, D1S and transmutation regression references are
+generated by yamc with fixed seeds and the local Arrow fixtures. They detect
+changes in yamc; they are not evidence of agreement with another transport code.
+The full transmutation chain, including MT=5, is used where supported. Nuclides
+whose supplied MT=5 data are refused retain their MT=5-free inventory regression
+and a separate full-chain refusal check; the reference records that distinction.
+A separate check derives MT=5 production and decay from the evaluation data. Dose coefficients are checked
+against published ICRP table entries, without an optional comparison-code import.
+
+After an intentional physics or data change, regenerate the references with:
+
+```bash
+python packages/yamc-core/tests/regression_tests/generate_reference_data.py
+```
+
+The generator also accepts `--types` and `--nuclides` to update selected cases.
+Reference updates must explain the change in the PR, including the data release
+when applicable. The JSON records the generator, version, source commit, library
+and seed. Missing references or references from another generator fail the tests.
+Same-seed primary results use tight floating-point tolerances; comparisons between
+different estimators retain statistical tolerances.
+
+OpenMC validation belongs in
+[yamc-verification](https://github.com/fusion-neutronics/yamc-verification), whose
+`Core main against OpenMC` workflow builds core's `main` nightly. It compares
+neutron transport, coupled transport, D1S and like-for-like depletion, retaining
+the results and provenance as CI artifacts. Only that V&V comparison removes
+MT=5 to match OpenMC's depletion chain. A self-reference update must also be
+reviewed against this independent validation; updating the goldens alone does
+not establish correctness.
+
+Install test dependencies:
+```bash
+pip install pytest numpy h5py cadquery pandas
+```
+
+Run tests (the same downloaded fixtures as the Rust suite; pytest stops with the
+fetch command if they are missing):
+```bash
+python scripts/fetch_test_fixtures.py     # once, if not already done
+pytest packages/yamc-core/tests/
+```
+
+That command covers the CAD tests too, since `packages/yamc-core/tests/cad/`
+sits inside it, and they self-skip unless cadquery is installed. To install it
+and run just that tier:
+```bash
+pip install cadquery
+pytest packages/yamc-core/tests/cad/
+```
+
+A bare `pytest` from the repo root runs all three Python suites: the yamc tests
+above, `packages/yani-core/tests/` and `pytests/parity/`. The latter two need
+the standalone `yani` wheel installed and self-skip without it. The list lives
+in `pytest.ini`, which also explains why each suite sits where it does.
+
+## 7. Build Rust API Docs
+
+```bash
+cargo doc --workspace --no-deps
+python -m webbrowser target/doc/yamc/index.html
+```
+
+## 8. Build Python Docs
+
+The docs are built with [MkDocs](https://www.mkdocs.org/) (Material theme). The
+configuration lives in `mkdocs.yml` and the sources in `docs/`.
+
+Install doc requirements:
+```bash
+pip install -r docs/requirements.txt
+```
+
+Building the Python extension is not a prerequisite for this site, and neither
+is any Python package of this workspace. The pages that executed their own code
+blocks moved to the user-facing repositories, and the last API reference
+generated from source went with the converter package. What is left is
+hand-written Markdown, so `mkdocs build` imports nothing.
+
+Build the static site (run from the repo root, outputs to `site/`):
+```bash
+mkdocs build -f mkdocs.yml
+```
+
+Open docs:
+```bash
+python -m webbrowser site/index.html
+```
+
+For a live-reloading preview while editing (serves at http://127.0.0.1:8000):
+```bash
+mkdocs serve -f mkdocs.yml
+```
+
+To force a full clean rebuild:
+```bash
+mkdocs build -f mkdocs.yml --clean
+```
+
+## Photonuclear Data Processing
+
+TENDL gamma evaluations are photonuclear (`NSUB=0`), not photoatomic
+(`NSUB=3`). `yamc.convert_photonuclear` and `yani.convert_photonuclear`
+preserve one ENDF evaluation as `{Nuclide}.arrow/`:
+
+* `photonuclear.arrow`: each MF=3 cross section, native energy grid, Q values,
+  and ENDF interpolation breakpoints and schemes, in eV and barns.
+* `photonuclear_sections.arrow`: every original (MF, MT) section, including
+  outgoing-particle distributions, retained as ENDF text.
+* `version.json`: release provenance, `particle="photonuclear"` and
+  `scope="evaluated"`, written last as the completion marker.
+
+`read_photonuclear_from_arrow` validates the tables against the preserved
+MF=3 sections and reports the nuclide identity, reaction MTs, per-reaction
+energy-point counts and preserved section keys. No NJOY or auxiliary atomic
+tabulations are needed. `generate_library` (below) converts TENDL's gamma
+sublibrary into these directories under `photonuclear/`, separately from
+photoatomic `photon/` data.
+
+This is evaluated-data processing, not photonuclear collision sampling.
+The neutron and photoatomic transport loaders cannot consume these sections.
+Photon-specific level-scattering kinematics and Kalbach-Mann sampling remain
+separate transport work.
+
+## Building a Whole Library
+
+`generate_library(keyword, path)`, in both wheels, builds one of the hosted
+libraries locally into a folder laid out as its published release, with the
+release's `manifest.json` written last. The logic is the native-only
+`crates/nuclear-data-build` crate, bound once in
+`crates/yani-python/src/library.rs`:
+
+* `recipe.rs`: per keyword, the source archives with their size and sha256
+  pins (the library's own, never another's), the parts the release carries,
+  the NJOY flavour, the evaluations NJOY cannot process, and the disk a full
+  build needs.
+* `sources.rs`, `extract.rs`, `identify.rs`: fetch (with the browser route for
+  hosts that refuse scripts), unpack per sublibrary, and name every material
+  from its MF=1 MT=451 header.
+* `convert.rs`: the memory-budgeted pool over every evaluation, with resume.
+* `chain.rs`: the transmutation subsections, staged in `.build/chain/` and
+  renamed into `transmutation/<sub>.arrow/`.
+* `gates.rs`: completeness against the recipe, read back through the real
+  readers, and the chain loading as a chain.
+* `index.rs`: each particle's `index.json`.
+* `generate.rs`: the order, the lock, `.build/state.json` (release stamp and
+  builder), the NJOY and disk checks, and the manifest.
+
+The publishing repository, `nuclear_data_generation_scripts`, builds every
+release with this call and then uploads it.
+
+## Workspace Layout
+
+```
+core/
+  crates/
+    yamc/           -- Top-level Monte Carlo transport driver (Model,
+                       simulate_transport, coupled transmutation, GPU
+                       dispatch)
+    yamc-particle/  -- Runtime particle state (Particle struct + helpers)
+    yamc-source/    -- Particle source specs + spatial/energy/angle samplers
+    yamc-geo/       -- CSG geometry primitives (surfaces, regions, BVH);
+                       compiles to native and wasm32
+    yamc-nuclide/   -- Evaluated neutron nuclear data (Nuclide, Reaction,
+                       reaction-product sampling)
+    yamc-element/   -- Photoatomic interaction data (Element, photon
+                       interaction cross-sections, atomic transitions,
+                       TTB table build)
+    yamc-materials/ -- Material composition + macroscopic cross sections
+    yamc-physics/   -- Collision physics (scatter/inelastic kinematics,
+                       secondary photons, TTB emission, D1S photon
+                       production, particle banking)
+    yamc-rng/       -- The shared PCG stream (per-history and per-secondary
+                       seeding); mirrored by the GPU #[cube] twin
+    yamc-tallies/   -- Tallies (filters, scores, per-history Welford
+                       variance, SimulationResults, Arrow IO)
+    yamc-plot/      -- Shared interactive-plot HTML/JS templating used by
+                       Python's Model.plot() and the browser editor
+    yamc-gpu/       -- GPU compute infra (Vulkan via cubecl, f64 required)
+    yamc-convert/   -- Converts ENDF and ACE evaluations into transport Arrow
+               data, and preserves evaluated photonuclear data
+    yamc-python/    -- pyo3 bindings; built into
+                       packages/yamc-core/python/yamc/_core.so
+    yamt/           -- Mesh-based geometry runtime (BVH, Arrow IO)
+    yamm/           -- CDT surface mesher with DAG scheduler
+    endf/           -- Parser for ENDF-6 formatted evaluated nuclear data
+                       files
+    nuclear-data-schema/
+                    -- The Arrow schema of the simulation-ready nuclear
+                       data format, declared once
+    nuclear-data-build/
+                    -- Builds a whole library from its pinned source
+                       archives into a release folder (native only;
+                       generate_library)
+    yani/           -- CRAM matrix-exponential transmutation solver
+    yani-transmute/ -- Transmutation driver over yani (irradiation
+                       schedules, multigroup spectrum collapse,
+                       per-material inventories, reaction-rate tallies)
+    yani-decay/     -- Decay-chain observables (chain enumeration, Bateman
+                       activity, activity/decay heat, D1S time-correction
+                       factors)
+    yani-convert/   -- Converts ENDF decay, fission-yield and neutron
+                       evaluations into the transmutation Arrow format yani
+                       reads
+    yani-python/    -- pyo3 bindings for the transmutation stack
+                       (materials, nuclides, chains, schedules,
+                       inventories), shared by both wheels
+    yani-wasm/      -- WebAssembly bindings for yani (transmutation and
+                       activation in the browser)
+  packages/
+    yamc-core/      -- The yamc wheel: pyproject.toml, README.md, LICENSE
+      python/
+        yamc/       -- Python package (re-exports from yamc._core)
+          cad/      -- CAD meshing pipeline (CadToYamc, etc.)
+          vtkhdf.py -- VTKHDF mesh-result export
+      tests/        -- Python tests for transport (unit_tests/,
+                       integration_tests/, regression_tests/, cad/ and
+                       typing/)
+    yani-core/      -- The yani wheel (python/yani/) plus the tests that
+                       prove it ships none of the transport stack
+  pytests/
+    parity/         -- Tests needing both wheels installed at once, which is
+                       why they belong to neither package
+  pytest.ini        -- Repo-wide pytest config; testpaths lists all three
+                       Python suites above
+  examples/
+    python/         -- Python example scripts (TBR, transmutation, photon
+                       transport, MPI, perf matrix, etc.)
+  docs/             -- MkDocs documentation source (built via mkdocs.yml)
+```
+
+The split into many small crates is intentional: `yamc-geo`, `yamc-particle`,
+and `yamc-source` are wasm-compatible and free of system dependencies so
+they can be reused from the browser build, while `yamc-gpu` and `yamc-plot`
+are isolated so they don't pull heavy dependencies (cubecl, plot templating)
+into builds that don't need them.
+
+That isolation is now partly historical for `yamc-gpu`: `yamc-python`'s
+`default` includes `gpu`, so a plain `cargo build --workspace` or
+`maturin develop` does build it. The isolation still does real work for the
+targets that opt out, which reach `yamc` through
+`--no-default-features`: the wasm builds and the ppc64le/riscv64
+cross-checks never compile cubecl. And the crate boundary is what makes
+`GpuContext::new()` returning `NoF64Adapter` on macOS a clean stub rather
+than a build failure.
+
+The transmutation stack is layered so it can be built without transport:
+`yani` (solver) and `yani-decay` (chain observables) are leaves, and
+`yani-transmute` reaches only `yani`, `yamc-materials`, `yamc-nuclide` and
+`yamc-element`. `Model::transmute` in `yamc` is the sole part that needs
+transport, because it runs a transport solve per timestep. `yamc-materials`
+deliberately does not depend on `yamc-physics`, so materials and collision
+physics can be compiled independently of each other.
+
+### Profile the code
+
+High level profile
+```bash
+# Build with debug symbols in release mode
+cargo build --release -p yamc --example tbr
+RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release -p yamc --example tbr
+
+# Profile with full call graph
+sudo perf record -g --call-graph dwarf ./target/release/examples/tbr
+
+# View interactive report
+sudo perf report --no-children
+
+# Or generate text report with full call stacks
+sudo perf report --no-children --stdio > perf_report.txt
+```
+
+Detailed profile
+
+```bash
+RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release -p yamc --example tbr
+sudo perf record -g --call-graph dwarf ./target/release/examples/tbr
+sudo perf report --no-children --stdio | head -200
+```
+
+### Test Coverage
+
+#### Rust coverage
+
+Install `cargo-llvm-cov` and the LLVM tools component (one-time setup):
+
+```bash
+cargo install cargo-llvm-cov
+rustup component add llvm-tools-preview
+```
+
+Run tests with coverage and print a summary to the terminal:
+
+```bash
+cargo llvm-cov --workspace
+```
+
+Generate an HTML report:
+
+```bash
+cargo llvm-cov --workspace --html
+python -m webbrowser target/llvm-cov/html/index.html
+```
+
+#### Python coverage
+
+Install `pytest-cov` (one-time setup):
+
+```bash
+pip install pytest-cov
+```
+
+Run Python tests with coverage:
+
+```bash
+pytest packages/yamc-core/tests/ --cov=yamc --cov-report=term-missing
+```
+
+Generate an HTML report:
+
+```bash
+pytest packages/yamc-core/tests/ --cov=yamc --cov-report=html
+python -m webbrowser htmlcov/index.html
+```
+
+### Formatting, linting and checking
+
+The CI runs some checks on the Rust code (fmt check and clippy) and also some checks on the Python code (ruff check). The same checks can be run locally with the use of the pre-commit file.
+
+```bash
+pip install pre-commit
+pre-commit run --all-files
+```
+
+If the pre-commit hooks fail (e.g. due to a missing MPI installation) and you still need to commit, you can skip the hooks with `--no-verify`:
+
+```bash
+git commit --no-verify -m "commit message"
+```
+
+## Building the wasm blobs
+
+Two `.wasm` and `.js` pairs live under
+`packages/yamc-core/python/yamc/_wasm/` and ship inside the `yamc-core` wheel:
+
+| files | built from |
+| --- | --- |
+| `yamc_sim_bg.wasm`, `yamc_sim.js` | `crates/yamc`, `--out-name yamc_sim`, `--features wasm` |
+| `yamt_bg.wasm`, `yamt.js` | `crates/yamt`, `--features wasm` |
+
+They are not committed. The `wasm-blobs` job in `ci-python.yml` builds them and
+the wheel jobs fetch them, so a fresh checkout has none until you build them:
+
+```bash
+scripts/build_wasm_blobs.sh
+```
+
+Needed for `maturin develop`, for `Model.to_html()`, which base64-embeds
+`yamc_sim_bg.wasm` into every file it writes, and for
+`cargo check -p yamc-plot --features mesh`, which `include_bytes!`s the yamt
+pair.
+
+The script passes a `$HOME` remap on the command line because
+`.cargo/config.toml` names the CI runner homes and cannot name yours: cargo
+does not expand environment variables in `rustflags`. It re-supplies the
+`getrandom_backend` cfg at the same time, since a `RUSTFLAGS` environment
+variable replaces the target-specific array rather than adding to it. Check the
+result with:
+
+```bash
+python scripts/check_binary_paths.py packages/yamc-core/python/yamc/_wasm/*.wasm
+```
+
+A `.js` file and its `.wasm` are a matched pair from one `wasm-bindgen`
+version, so regenerate both together. `ci-wasm.yml`'s browser test is what
+catches a mismatch: it builds cleanly and fails only when run.
+
+## Releasing
+
+Two distributions are published from this repository, and they carry
+independent version numbers: `yamc-core` (the transport wheel) and `yani-core`
+(the standalone transmutation wheel).
+
+### Where the version lives
+
+Each wheel's version lives in the crate manifest that its `pyproject.toml`
+names as `manifest-path`:
+
+| Distribution | Version lives in | Declared in |
+| --- | --- | --- |
+| `yamc-core` | `crates/yamc-python/Cargo.toml` | `packages/yamc-core/pyproject.toml` |
+| `yani-core` | `crates/yani-python/Cargo.toml` | `packages/yani-core/pyproject.toml` |
+
+Both `pyproject.toml` files declare `dynamic = ["version"]`, which is what tells
+maturin to read the number from the manifest. Neither crate is published to
+crates.io, so its version field is free to carry the wheel's number — one number
+in one place, rather than two that have to be kept in step.
+
+The committed version names the **next** release, not the last one. That is what
+makes a bump reviewable: the number that will reach PyPI appears in the diff.
+
+### Bumping a version
+
+```bash
+cargo install cargo-edit                      # once
+cargo set-version -p yamc-python 0.8.1        # yamc-core
+cargo set-version -p yani-python 0.10.1       # yani-core
+```
+
+`cargo set-version` updates `Cargo.lock` in the same step, so both files land in
+the same commit. Without cargo-edit, `bash scripts/set-wheel-version.sh
+yamc-python 0.8.1` does the same two edits (it is what CI uses, so that the wheel
+jobs do not have to install cargo-edit on three platforms).
+
+Bump in the PR that earns the bump.
+
+Pull requests that change `SUPPORTED_FORMAT_VERSIONS` or Rust source in
+`crates/nuclear-data-schema/src/` must change both binding versions in the
+same PR. The offline `Data format changes bump both binding versions` check
+compares the PR base and head; ordinary release-reader comments do not require
+a bump. Update `Cargo.lock` alongside the manifests. This guard does not
+decide whether old and new data formats may replace one another on the server.
+
+### Tagging a release
+
+A release tag **names every project it publishes and the version each goes out
+at**, one project per comma:
+
+```
+yamc-core-0.8.1                    yamc-core alone
+yani-core-0.9.1                    yani-core alone
+yamc-core-0.8.1,yani-core-0.9.1    both, at their own versions
+```
+
+A leading `v` on each version is allowed (`yamc-core-v0.8.1`), and whitespace
+around a comma is ignored. There is no bare `0.8.1` tag: one tag carries one
+number, and the two distributions are versioned apart.
+
+The flow is therefore:
+
+1. Bump the version of each project you are releasing, and merge that PR.
+2. Tag with those exact versions and publish the GitHub release.
+3. `.github/workflows/ci-python.yml` builds the wheels and publishes to PyPI.
+
+Before anything is uploaded, the `verify-versions` job fails the release if a
+tag component names a version that disagrees with its manifest, if the tag names
+no project at all, or if the version is already on PyPI. So a tag cannot ship a
+number nobody bumped, and a bump cannot ship under a number nobody tagged.
+
+### The Pyodide wheels
+
+A release also publishes a Pyodide (Emscripten) wheel of each project it names,
+`yamc_core-<version>-cp310-abi3-pyemscripten_2026_0_wasm32.whl` and
+`yani_core-<version>-cp310-abi3-pyemscripten_2026_0_wasm32.whl`, next to the
+native ones, so `micropip.install("yamc-core")` or `micropip.install("yani-core")`
+in Pyodide resolves it from PyPI. Their platform tag is the
+[PEP 783](https://peps.python.org/pep-0783/) one for the Pyodide release they
+are built against (`PYODIDE_VERSION` in `.github/workflows/ci-pyodide.yml`), and
+they install only in that Pyodide ABI. They are built with
+`--no-default-features`, so they have no TLS download stack, and yamc-core has
+no mesh geometry, CAD or GPU either. Pyodide has no sockets, so the page
+installs a data fetcher with `_core._set_data_fetcher`, which `yani-python`
+registers for both wheels.
+
+`.github/workflows/ci-pyodide.yml` builds both wheels and runs each inside
+Pyodide under Node: a transport for yamc-core, and an irradiation read back as
+activity and decay heat for yani-core, each against the test fixtures served as
+a data release. Pushes and pull requests run it on its own. A run of
+`ci-python.yml` that publishes calls it as a reusable workflow for the projects
+it publishes, because PyPI's trusted publishers are bound to `ci-python.yml`
+and the upload has to come from there: `collect` picks each wheel up with the
+native ones, refuses a release of either project without exactly one Pyodide
+wheel for it, and the publish jobs upload them with the rest.
+`assert-published` then checks that PyPI lists every file that was handed to
+each publish job, not only that the version exists.
+
+The wheels are not attached to the GitHub release. PyPI carries the same files,
+and serves them with the CORS headers a browser needs to fetch them; GitHub
+release assets do not.
+
+### Publishing without a release
+
+`workflow_dispatch` on the same workflow publishes without a tag, for the two
+cases where there should not be a release: a first upload that creates the
+project on PyPI, and a re-publish of one wheel after a fix. The `yamc_version` /
+`yani_version` inputs override the manifests for that run, since neither case has
+a tag to check against. A dispatch that publishes builds and uploads the
+Pyodide wheel of each project it publishes too, at the overridden version if
+one is given.
+
+## Nuclear data downloads
+
+A library keyword (`endf-b8.1`, `fendl-3.2d`, ...) resolves at run time to the
+library's current published release, once per process:
+
+1. `https://yamc-data.xsplot.com/<keyword>/latest.json` names the release, its
+   `format_version`, and its manifest with the manifest's size and sha256. A
+   build reads the `format_version`s in
+   `yamc_nuclide::storage::release::SUPPORTED_FORMAT_VERSIONS` and refuses any
+   other with a message saying to upgrade. The converters stamp
+   `nuclear_data_schema::FORMAT_VERSION`, and that range must end at it
+   (checked at compile time). A data fix that keeps the format
+   needs no yamc release. The pointer is asked for with a cache-busting query,
+   `latest.json?release-check=<16 random hex digits>`, by the native and
+   Pyodide downloader and by the browser fetcher alike
+   (`yamc_nuclide::storage::release::pointer_url`). The CDN's edge keeps its own
+   copy of `latest.json` for as long as the zone's cache settings say, whatever
+   `Cache-Control` the object was uploaded with, and once served a copy 5.8 days
+   old that named a deleted release, so every download from an empty cache
+   failed with a 404. A query the edge has not seen goes through to the origin.
+   The manifest and the release files never change and are asked for plainly,
+   so the edge caches them.
+2. `<keyword>/<release>/manifest.json` lists every file of the release with its
+   size and sha256. It is checked against the pointer and kept in the cache.
+   It is also the index of what the release carries: a nuclide, element or
+   transmutation subsection the manifest does not list is reported as not
+   available, with the list of what is, and an optional section it does not
+   list is simply absent (nothing is probed).
+3. Each file a run needs is downloaded from `<keyword>/<release>/<path>`,
+   streamed to a temporary file in the cache while its size and sha256 are
+   computed, compared with the manifest, fsynced and renamed into place. A
+   mismatch is a hard error naming the file, the expected value and the
+   received one. Transport failures and 5xx answers are retried.
+
+The cache layout:
+
+```
+<cache dir>/<keyword>/<release>/manifest.json
+<cache dir>/<keyword>/<release>/neutron/<Nuclide>.arrow/<section>
+<cache dir>/<keyword>/<release>/photon/<Element>.arrow/<section>
+<cache dir>/<keyword>/<release>/transmutation/<subsection>.arrow/<section>
+```
+
+A file is present in a release folder only once it verified. Every file of a
+library a process reads comes from one release: when `latest.json` names a
+newer release than the cache holds, the files the run needs are downloaded
+from the new release and the switch is logged once ("updated endf-b8.1 from
+2026-10-01 to 2026-11-15"). Older release folders are left in place.
+
+A load that reads only some MTs (activation) or some temperatures (transport
+at a material temperature) fetches `reactions.arrow`, and for temperatures
+`energy.arrow`, as the byte ranges of just those record batches, when they can
+be verified. The byte-range index in each nuclide's `version.json` gives every
+entry as `[offset, length, "<sha256>"]`, the schema message included, and
+`version.json` is itself verified against the manifest before its index is
+used. Each batch received is cut back out of the (merged) spans and checked
+against its hash; a mismatch is a hard error naming the nuclide, the file, the
+MT or temperature, and both hashes, and is not retried. The spliced copy is
+cached under `temperatures/` or `subset/` in the nuclide's folder with a record
+of what it holds, never under the section's own name, so it is not taken for
+the whole verified file. It is logged as `<what>: <keyword> release <release>,
+downloaded and verified <n> byte range(s) of <section>, <bytes> of its <total>
+bytes -> <folder>`.
+
+An index entry with no hash (a library indexed before hashes existed) cannot
+be verified, so a load that needs it downloads that section whole, verified
+against the manifest. So does a load that wants every temperature, or every
+MT. An origin that ignores the `Range` header sends the whole object, which is
+checked against the manifest and cached as the whole file. The hashes are
+written by the converter, and `index_reactions` adds them to an already
+converted tree (it rewrites only `version.json`), which the publishing scripts
+run before building the release manifest.
+
+The wasm32 browser fetcher (`yamc::wasm`) keeps its per-temperature ranges,
+which it registers unverified; it verifies every section it fetches whole.
+
+When the origin cannot be reached (DNS, connect, timeout, TLS, a 5xx), yamc
+does not fail if the data is already local: it uses the newest cached release
+holding every file the run asks for, logs that the origin was unreachable and
+which release it used, and records that release in the results. Only a file
+missing from the cache is an error then, and the error names it. The first
+contact (`latest.json`) has a 3 s connect timeout, a 3 s request timeout and
+two attempts, so an offline machine waits at most about 6 s before the cache
+is used; data files have a 3 s connect timeout and a 30 s timeout on each read.
+
+Each file a run reads whole is logged as `<what>: <keyword> release <release>,
+downloaded and verified <n> file(s), <bytes> bytes -> <folder>` when it was
+downloaded, and as `<what>: <keyword> release <release>, from cache <folder>`
+when per-file load logging is on.
+
+Results record the release of each library a run used: `SimulationResults.runs`
+entries carry `data_releases` (`release`, `manifest_sha256`, `format_version`,
+`offline`, `converter_versions`), and `TransmutationResults.data_releases`
+carries the same. `converter_versions` is the release manifest's list of the
+converters that wrote its files, with their versions (`["yamc-convert 0.1.0",
+"yani-convert 0.1.0"]` for the 2026-10-12.1 releases); results saved before it
+was recorded read back with an empty list. `combine_results` refuses to pool
+runs that read different releases of one library.
+
+A local directory passed as a data source is read with no download. One that
+holds a release `manifest.json` (a library downloaded or built whole) is a
+release folder, and its one path serves every setting: cross sections from
+`neutron/` and `photon/`, each transmutation subsection from
+`transmutation/<subsection>.arrow/`. Its manifest is parsed once per process
+(again only when the file is rewritten), a `format_version` this build does not
+read is refused as for a published release, and the files each load reads are
+checked against the manifest's sizes (hashes are not checked on load). A
+subsection the manifest does not list is refused, naming the subsections it
+does carry, and so is a listed file the folder does not hold. Results record
+the folder in `data_releases` under its absolute path, with `offline` false.
+Any other directory is read as it is, with no manifest check: a converter's
+output, a folder of `<Name>.arrow/`, or a chain directory, whose own
+`manifest.json` lists `subsections` rather than `files`. Wherever a reactions
+or fission-yields source resolves, the folder must hold `reactions.arrow` or
+`fission_yields.arrow`: one without it is refused rather than read as a chain
+with none, and `False` leaves the part out.
+
+A bare name that is both a keyword and a directory in the working directory
+(`endf-b8.1` with a folder `./endf-b8.1` beside it) is refused rather than
+guessed at. `./endf-b8.1` or an absolute path names the directory.
+

@@ -1,0 +1,625 @@
+use super::*;
+
+impl Material {
+    /// Read nuclear data (nuclide + optional photon element data) for this material.
+    ///
+    /// # Arguments
+    /// * `nuclide_path_map` - Map of nuclide names to file paths (e.g., {"Li6": "Li6.arrow"})
+    /// * `photon_data_paths` - Optional map of element symbols to photon Arrow data paths
+    pub fn read_nuclear_data(
+        &mut self,
+        nuclide_path_map: &HashMap<String, String>,
+        photon_data_paths: Option<&HashMap<String, String>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Store photon data paths if provided
+        if let Some(paths) = photon_data_paths {
+            self.photon_data_paths = paths.clone();
+        }
+        // Collect needed nuclide names
+        let mut nuclide_names: Vec<String> = self.nuclides.keys().cloned().collect();
+        nuclide_names.sort(); // ensure deterministic alphabetical load order
+
+        // Build merged source map: explicit entries override, missing filled from CONFIG
+        let mut merged: HashMap<String, String> = HashMap::new();
+
+        // Start with global config entries for required nuclides, with proper error handling
+        let cfg = yamc_nuclide::config::CONFIG
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        for n in &nuclide_names {
+            if let Some(p) = cfg.get_cross_section(n) {
+                merged.insert(n.clone(), p.clone());
+            }
+        }
+        drop(cfg);
+
+        // Override with any provided mapping entries (even if extra keys not in composition)
+        for (k, v) in nuclide_path_map {
+            merged.insert(k.clone(), v.clone());
+        }
+        let source_map: &HashMap<String, String> = &merged;
+
+        // Load nuclides using the centralized function in the nuclide module
+        let scope = self.transport_scope();
+        let photon_only = photon_data_paths.is_some() && source_map.is_empty();
+        // The loads below are one at a time; the downloads behind them go out
+        // together first.
+        yamc_nuclide::url_cache::prefetch(
+            &nuclide_names
+                .iter()
+                .filter_map(|name| {
+                    Some(yamc_nuclide::url_cache::DataRequest {
+                        source: source_map.get(name)?,
+                        name,
+                        kind: yamc_nuclide::url_cache::DataKind::Neutron,
+                        scope: &scope,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        );
+        for nuclide_name in nuclide_names {
+            if photon_only && !source_map.contains_key(&nuclide_name) {
+                // Photon-only mode: skip nuclides without neutron data
+                continue;
+            }
+            let nuclide = get_or_load_nuclide(&nuclide_name, source_map, &scope)?;
+            self.nuclide_data.insert(nuclide_name, nuclide);
+        }
+
+        // Validate that all nuclides have compatible temperatures
+        self.validate_temperature_consistency()?;
+
+        // Clear cached data since new nuclear data affects cross sections
+        self.invalidate_xs_cache();
+        Ok(())
+    }
+
+    /// Make sure every nuclide has `temperature` parsed in, loading it if the
+    /// data offers it but the current load scope left it out.
+    ///
+    /// `read_nuclear_data` narrows the load to `self.temperature`, so a material
+    /// built at 294 K holds only 294 K reactions even though its Arrow files
+    /// carry every temperature. `available_temperatures` then advertises a
+    /// temperature that `loaded_temperatures` cannot serve, and the request dies
+    /// downstream as a missing MT rather than as a temperature problem.
+    ///
+    /// The re-request goes back through `get_or_load_nuclide` with a widened
+    /// scope so the global cache's own `covers`/`union` logic does the widening
+    /// once, shared. `Nuclide::auto_load_additional_temperature` is the wrong
+    /// lever: it takes `&mut self` against an `Arc<Nuclide>`, so calling it means
+    /// `Arc::make_mut` forking this material's copy away from the global cache,
+    /// and it resolves files only through the global CONFIG, which never sees
+    /// the explicit paths handed to `read_nuclear_data`.
+    ///
+    /// Nuclides whose data does not offer the temperature at all are left alone;
+    /// reporting that is `resolve_temperature`'s job, which can name every
+    /// nuclide at once instead of failing on whichever came first.
+    pub fn ensure_temperature_loaded(
+        &mut self,
+        temperature: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let wanted = yamc_nuclide::temperature::strip_k(temperature).to_string();
+        if wanted.is_empty() {
+            return Ok(());
+        }
+
+        let stale: Vec<String> = self
+            .nuclide_data
+            .iter()
+            .filter(|(_, n)| {
+                !n.loaded_temperatures.contains(&wanted)
+                    && yamc_nuclide::temperature::resolve(&wanted, &n.available_temperatures)
+                        .is_ok()
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        if stale.is_empty() {
+            return Ok(());
+        }
+
+        for name in stale {
+            let (path, mut temps, scope) = {
+                let nuclide = &self.nuclide_data[&name];
+                let temps: std::collections::HashSet<String> =
+                    nuclide.loaded_temperatures.iter().cloned().collect();
+                (nuclide.reload_source(), temps, nuclide.load_scope.clone())
+            };
+            // `data_path` is stamped by the Arrow loader whichever route loaded
+            // the nuclide, so it survives the explicit-path case that CONFIG
+            // does not know about. Fall back to CONFIG for the nuclides that
+            // reached us some other way.
+            let source = match path.or_else(|| {
+                let cfg = yamc_nuclide::config::CONFIG
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                cfg.get_cross_section(&name)
+            }) {
+                Some(p) => p,
+                None => {
+                    // Skipping quietly would put the request back on the path
+                    // that ends in `No cross section data found for MT n`, a
+                    // failure with no mention of temperature.
+                    return Err(format!(
+                        "nuclide '{name}' offers temperature '{wanted}' but only \
+                         has {:?} loaded, and there is no path to load it from: \
+                         no `data_path` was recorded and no cross section is \
+                         configured for it",
+                        self.nuclide_data[&name].loaded_temperatures
+                    )
+                    .into());
+                }
+            };
+            temps.insert(wanted.clone());
+
+            // Widen the temperature axis and nothing else. `LoadScope::full()`
+            // here would union to Full with every MT, re-reading the nine
+            // full-grid transport sections for a nuclide that `transmute_material`
+            // deliberately loaded at activation scope.
+            let path_map = HashMap::from([(name.clone(), source)]);
+            let widened =
+                get_or_load_nuclide(&name, &path_map, &scope.with_temperatures(Some(temps)))?;
+            self.nuclide_data.insert(name, widened);
+        }
+
+        // No invalidation. Widening only adds temperatures: the reactions and
+        // grid the caches were built from are still there, unchanged, under the
+        // same key. Clearing here would mean a query at some other temperature
+        // destroys the caches belonging to this material's own -- the exact
+        // incoherence the rest of this work exists to remove.
+        Ok(())
+    }
+
+    /// Re-read any nuclide that was loaded without its MF=33 covariance.
+    ///
+    /// The covariance axis of [`LoadScope`] has the same problem the temperature
+    /// axis has: a material built by `read_nuclear_data` holds nuclides loaded
+    /// at whatever scope that call used, and `transmute_material`'s own loading
+    /// loop resolves paths through the global CONFIG, which never sees the
+    /// explicit paths handed to `read_nuclear_data`. Without this, asking for
+    /// uncertainty on such a material reports every nuclide as having no
+    /// covariance data, which is indistinguishable from an evaluation that
+    /// genuinely has none.
+    ///
+    /// Widening goes back through `get_or_load_nuclide` so the global cache's
+    /// own `covers`/`union` logic does it once and shares the result, exactly as
+    /// [`Self::ensure_temperature_loaded`] does.
+    ///
+    /// A nuclide re-read and still carrying no covariance is NOT an error: most
+    /// evaluations have no MF=33, and `covariance.arrow` is optional by
+    /// construction. Nor is a nuclide with no path to re-read from -- it simply
+    /// keeps what it has, and the fold's coverage report is what names it. The
+    /// alternative, failing the whole transmutation because one trace daughter
+    /// cannot be located, would be worse than a reported gap.
+    pub fn ensure_covariance_loaded(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.widen_scope(|s| s.covariance, |s| s.with_covariance(true))
+    }
+
+    /// [`Self::ensure_covariance_loaded`] for MF=34, `angular_covariance.arrow`:
+    /// re-read every nuclide loaded without it, widening that axis alone.
+    /// Absent data is not an error, for the same reasons.
+    pub fn ensure_angular_covariance_loaded(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.widen_scope(
+            |s| s.angular_covariance,
+            |s| s.with_angular_covariance(true),
+        )
+    }
+
+    /// [`Self::ensure_covariance_loaded`] for MF=31 and MF=35,
+    /// `nubar_covariance.arrow` and `spectrum_covariance.arrow`: re-read every
+    /// nuclide loaded without them, widening that axis alone. Absent data is
+    /// not an error, for the same reasons.
+    pub fn ensure_fission_covariance_loaded(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.widen_scope(
+            |s| s.fission_covariance,
+            |s| s.with_fission_covariance(true),
+        )
+    }
+
+    /// [`Self::ensure_covariance_loaded`] for MF=2 and MF=32,
+    /// `resonance_parameters.arrow`: re-read every nuclide loaded without
+    /// them, widening that axis alone. Absent data is not an error, for the
+    /// same reasons.
+    pub fn ensure_resonance_parameters_loaded(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.widen_scope(
+            |s| s.resonance_parameters,
+            |s| s.with_resonance_parameters(true),
+        )
+    }
+
+    /// Re-read every nuclide whose scope lacks what `has` asks for, at the
+    /// scope `widen` makes of its current one.
+    fn widen_scope(
+        &mut self,
+        has: impl Fn(&yamc_nuclide::LoadScope) -> bool,
+        widen: impl Fn(yamc_nuclide::LoadScope) -> yamc_nuclide::LoadScope,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let narrow: Vec<String> = self
+            .nuclide_data
+            .iter()
+            .filter(|(_, n)| !has(&n.load_scope))
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        for name in narrow {
+            let (path, scope) = {
+                let nuclide = &self.nuclide_data[&name];
+                (nuclide.reload_source(), nuclide.load_scope.clone())
+            };
+            let source = path.or_else(|| {
+                let cfg = yamc_nuclide::config::CONFIG
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                cfg.get_cross_section(&name)
+            });
+            let Some(source) = source else {
+                continue;
+            };
+
+            // Widen the one axis and nothing else. `LoadScope::full()`
+            // would union to Full with every MT and re-read the transport
+            // sections an activation load deliberately skipped.
+            let path_map = HashMap::from([(name.clone(), source)]);
+            let widened = get_or_load_nuclide(&name, &path_map, &widen(scope))?;
+            self.nuclide_data.insert(name, widened);
+        }
+        Ok(())
+    }
+
+    /// Read nuclear data from either a JSON mapping, a keyword string, or a directory path.
+    /// Keywords and directories are applied to all nuclides in this material.
+    pub fn read_nuclear_data_or_keyword(
+        &mut self,
+        source: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let is_keyword = yamc_nuclide::url_cache::is_keyword(source);
+        if !is_keyword && !std::path::Path::new(source).is_dir() {
+            return Err(format!(
+                "'{source}' is neither a registered data keyword nor a directory. \
+                 Pass a dict mapping nuclide names to file paths, or use a keyword \
+                 (e.g. 'endf-b8.1') or a directory containing per-nuclide files."
+            )
+            .into());
+        }
+
+        // Apply the keyword or directory to every nuclide in this material.
+        let mut source_map = HashMap::new();
+        for nuclide_name in self.nuclides.keys() {
+            source_map.insert(nuclide_name.clone(), source.to_string());
+        }
+
+        if is_keyword {
+            self.register_photon_data_source(source);
+        }
+
+        // Register the keyword / directory as the GLOBAL fallback source when
+        // the user has not configured one. Nuclides that enter the problem
+        // later by name only -- the transmutation products preloaded in
+        // `Model::simulate_transmutation` -- resolve through
+        // `Config::get_cross_section`, which knows nothing about this
+        // material's source. Without a fallback every such product warns
+        // "not found" and silently skips neutron transport, which collapsed
+        // second-generation product densities 100-1000x in the coupled
+        // depletion V&V (Ar36 -> Cl36 -> S36; Cd110 -> Cd109 -> Cd108). The
+        // `is_none` guard keeps any explicit user configuration winning.
+        {
+            let mut config = yamc_nuclide::config::CONFIG
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if config.default_cross_section.is_none() {
+                config.default_cross_section = Some(source.to_string());
+            }
+        }
+
+        self.read_nuclear_data(&source_map, None)?;
+        Ok(())
+    }
+
+    fn register_photon_data_source(&mut self, source: &str) {
+        use yamc_element::element::element_symbol_from_nuclide;
+
+        for nuclide_name in self.nuclides.keys() {
+            let element = element_symbol_from_nuclide(nuclide_name);
+            self.photon_data_paths
+                .entry(element)
+                .or_insert_with(|| source.to_string());
+        }
+    }
+
+    /// Resolve missing element paths from the global cross-section source.
+    /// Explicit per-element photon paths are preserved.
+    pub fn ensure_photon_data_paths(&mut self) {
+        let source = CONFIG
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .default_cross_section
+            .clone();
+        if let Some(source) = source {
+            self.register_photon_data_source(&source);
+        }
+    }
+
+    /// Read nuclear data from a keyword string that will be applied to all nuclides in this material
+    pub fn read_nuclear_data_keyword(
+        &mut self,
+        keyword: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.read_nuclear_data_or_keyword(keyword)
+    }
+
+    /// Load nuclear data from extracted input data (pure Rust, no PyO3 dependencies)
+    pub fn load_nuclear_data_from_input(
+        &mut self,
+        dict_data: Option<HashMap<String, String>>,
+        keyword_data: Option<String>,
+        photon_data: Option<HashMap<String, String>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(map) = dict_data {
+            self.read_nuclear_data(&map, photon_data.as_ref())
+        } else if let Some(keyword) = keyword_data {
+            // Store photon data paths if provided
+            if let Some(paths) = photon_data {
+                self.photon_data_paths = paths;
+            }
+            self.read_nuclear_data_keyword(&keyword)
+        } else {
+            let empty_map = HashMap::new();
+            self.read_nuclear_data(&empty_map, photon_data.as_ref())
+        }
+    }
+
+    /// Directly load a nuclide from a file path and insert into nuclide_data.
+    /// If the nuclide already exists it will be overwritten.
+    /// Only loads the temperature needed for this material (from self.temperature field).
+    pub fn load_nuclide_from_file(
+        &mut self,
+        nuclide_name: &str,
+        path: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Only load the temperature we need (from material's temperature setting)
+        // Temperature keys are stored without 'K' suffix (e.g., "294" not "294K")
+        let temp_filter: Option<std::collections::HashSet<String>> = {
+            let temp = yamc_nuclide::temperature::strip_k(&self.temperature);
+            Some(std::iter::once(temp.to_string()).collect())
+        };
+        let nuclide = yamc_nuclide::nuclide_loader::load_nuclide(
+            path,
+            &LoadScope::full().with_temperatures(temp_filter),
+        )?;
+        self.nuclide_data
+            .insert(nuclide_name.to_string(), Arc::new(nuclide));
+        Ok(())
+    }
+
+    /// The nuclides [`Self::ensure_nuclides_loaded`] would load, each with the
+    /// source it would load it from.
+    ///
+    /// Presence is not enough to leave one out. An entry loaded at ACTIVATION
+    /// scope carries only the MTs the transmutation network names, and
+    /// transport would go looking for one that is not there.
+    ///
+    /// The preload writes back into the caller's material rather than a
+    /// private clone: transmute a material and then put it in a Model, and
+    /// its composition nuclides are present but too narrow.
+    ///
+    /// The test is `mts.is_some()` rather than `has_transport_data`, which
+    /// also demands `SectionScope::Full`. A trimmed data directory carrying
+    /// none of the transport sections is recorded as `XsOnly` by
+    /// `narrow_to_present_sections` even when the caller asked for
+    /// everything, so `has_transport_data` is false for a nuclide that was
+    /// loaded as fully as its directory allows -- and reloading those on
+    /// every call would be a regression, not a fix. Only the activation
+    /// preload sets a concrete MT set.
+    ///
+    /// The source is the nuclide's own `data_path` first, the way
+    /// `ensure_temperature_loaded` widens: it is stamped by the Arrow loader
+    /// whichever route loaded the entry, so a material built by
+    /// `read_nuclear_data` from explicit paths widens from those rather than
+    /// from whatever CONFIG happens to name. `None` when neither names one.
+    ///
+    /// In photon-only mode (photon data loaded but no neutron data), nuclides
+    /// that have no neutron data path available are left out.
+    fn nuclides_to_load(&self) -> Vec<(String, Option<String>)> {
+        let config = CONFIG
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let photon_only = !self.photon_data_paths.is_empty() && self.nuclide_data.is_empty();
+        self.nuclides
+            .keys()
+            .filter(|name| match self.nuclide_data.get(*name) {
+                None => true,
+                Some(n) => n.load_scope.mts.is_some(),
+            })
+            .filter_map(|name| {
+                let recorded = self.nuclide_data.get(name).and_then(|n| n.reload_source());
+                let source = recorded.or_else(|| config.get_cross_section(name));
+                (source.is_some() || !photon_only).then(|| (name.clone(), source))
+            })
+            .collect()
+    }
+
+    /// Download, many at a time, the nuclear data that loading `materials` for
+    /// transport will need and the cache does not hold yet: the nuclides
+    /// [`Self::ensure_nuclides_loaded`] would load, and with `photons` the
+    /// photon data of their elements.
+    ///
+    /// The loads themselves stay one at a time; this only means the downloads
+    /// behind them are already done (see `url_cache::prefetch`). A failure is
+    /// left for the load to report.
+    pub fn prefetch_nuclear_data<'a>(
+        materials: impl IntoIterator<Item = &'a Material>,
+        photons: bool,
+    ) {
+        use yamc_element::element::element_symbol_from_nuclide;
+        use yamc_nuclide::url_cache::{prefetch, DataKind, DataRequest};
+
+        let full = LoadScope::full();
+        let mut wanted: Vec<(String, String, DataKind, LoadScope)> = Vec::new();
+        for material in materials {
+            let scope = material.transport_scope();
+            for (name, source) in material.nuclides_to_load() {
+                if let Some(source) = source {
+                    wanted.push((name, source, DataKind::Neutron, scope.clone()));
+                }
+            }
+            if photons {
+                let mut names: Vec<&String> = material.nuclides.keys().collect();
+                names.sort();
+                for name in names {
+                    let element = element_symbol_from_nuclide(name);
+                    if let Some(source) = material.photon_data_paths.get(&element) {
+                        wanted.push((element, source.clone(), DataKind::Photon, full.clone()));
+                    }
+                }
+            }
+        }
+        let requests: Vec<DataRequest> = wanted
+            .iter()
+            .map(|(name, source, kind, scope)| DataRequest {
+                source,
+                name,
+                kind: *kind,
+                scope,
+            })
+            .collect();
+        prefetch(&requests);
+    }
+
+    /// Ensure all nuclides are loaded, using the global configuration if needed
+    pub fn ensure_nuclides_loaded(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let to_load = self.nuclides_to_load();
+        if to_load.is_empty() {
+            return Ok(());
+        }
+
+        for (nuclide_name, source) in to_load {
+            let source_map: HashMap<String, String> = source
+                .map(|path| HashMap::from([(nuclide_name.clone(), path)]))
+                .unwrap_or_default();
+            match get_or_load_nuclide(&nuclide_name, &source_map, &self.transport_scope()) {
+                Ok(nuclide) => {
+                    self.nuclide_data.insert(nuclide_name.clone(), nuclide);
+                }
+                Err(e) => {
+                    return Err(format!("Failed to load nuclide '{nuclide_name}': {e}").into());
+                }
+            }
+        }
+
+        // Clear cached data since new nuclear data affects cross sections
+        self.invalidate_xs_cache();
+        Ok(())
+    }
+
+    /// Whether this material holds data for `nuclide_name` that transport can
+    /// use: every section and every MT.
+    ///
+    /// Presence in `nuclide_data` is not the same question. A transmutation
+    /// preload puts activation-scope entries there, which carry the network's
+    /// cross sections but none of the transport sections.
+    ///
+    /// Only the section and MT axes are tested. Temperature coverage is left
+    /// alone: `LoadScope::full()` names every temperature, so testing that axis
+    /// would call every temperature-filtered load insufficient.
+    pub fn has_transport_data(&self, nuclide_name: &str) -> bool {
+        self.nuclide_data
+            .get(nuclide_name)
+            .is_some_and(|n| n.load_scope.wants_transport_sections() && n.load_scope.mts.is_none())
+    }
+
+    /// Load nuclear data for a single nuclide at transport scope, if what is
+    /// already held does not reach that far.
+    /// Does NOT invalidate caches (caller is responsible).
+    ///
+    /// Presence alone is not enough to skip the load: transmutation preloads
+    /// its reachable products at activation scope, which carries the network's
+    /// cross sections but none of the transport sections. When such a product
+    /// later grows a density and enters transport, it has to be widened here.
+    /// Returns whether data was actually read, so a caller can skip the
+    /// cross-section rebuild that only a real load makes necessary.
+    pub fn ensure_nuclide_loaded(
+        &mut self,
+        nuclide_name: &str,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        if self.has_transport_data(nuclide_name) {
+            return Ok(false);
+        }
+
+        let config = CONFIG
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut source_map = HashMap::new();
+        if let Some(path) = config.get_cross_section(nuclide_name) {
+            source_map.insert(nuclide_name.to_string(), path);
+        }
+
+        match get_or_load_nuclide(nuclide_name, &source_map, &self.transport_scope()) {
+            Ok(nuclide) => {
+                self.nuclide_data.insert(nuclide_name.to_string(), nuclide);
+                Ok(true)
+            }
+            Err(e) => Err(format!("Failed to load nuclide '{nuclide_name}': {e}").into()),
+        }
+    }
+
+    /// Every section and every MT, at this material's own temperature.
+    ///
+    /// The temperature is the material's label as given, which need not be one
+    /// the data carries: the loader serves a temperature that falls between two
+    /// of the file's by loading both neighbours and blending them once. An
+    /// unlabelled material loads every temperature, so `resolve_temperature`
+    /// can still adopt a single-temperature library's one temperature.
+    ///
+    /// Loading every temperature for a labelled material built a transport
+    /// lookup per temperature the file carries (seven in the published
+    /// libraries) when transport only ever reads one. A query at another
+    /// temperature later still works: `ensure_temperature_loaded` widens on
+    /// the miss.
+    fn transport_scope(&self) -> LoadScope {
+        let temperatures = (!self.temperature.is_empty())
+            .then(|| std::collections::HashSet::from([self.temperature.clone()]));
+        LoadScope::full().with_temperatures(temperatures)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn material() -> Material {
+        Material::new(
+            HashMap::from([
+                ("Fe54".into(), 1.0),
+                ("Fe56".into(), 1.0),
+                ("O16".into(), 1.0),
+            ]),
+            "atom",
+            "g/cm3",
+            Some(1.0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn photon_sources_follow_the_selected_keyword() {
+        for keyword in ["endf-b8.1", "fendl-3.2d", "tendl-2025"] {
+            let mut material = material();
+            material.register_photon_data_source(keyword);
+            assert_eq!(material.photon_data_paths.len(), 2);
+            assert_eq!(material.photon_data_paths["Fe"], keyword);
+            assert_eq!(material.photon_data_paths["O"], keyword);
+        }
+    }
+
+    #[test]
+    fn explicit_photon_sources_are_preserved() {
+        let mut material = material();
+        material
+            .photon_data_paths
+            .insert("Fe".into(), "local/Fe.arrow".into());
+        material.register_photon_data_source("fendl-3.2d");
+        assert_eq!(material.photon_data_paths["Fe"], "local/Fe.arrow");
+        assert_eq!(material.photon_data_paths["O"], "fendl-3.2d");
+    }
+}

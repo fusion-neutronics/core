@@ -1,0 +1,419 @@
+"""Tests for yamc dose coefficient functions and EnergyFunctionFilter."""
+
+import pytest
+
+import yamc
+
+
+class TestDoseCoefficients:
+    """Tests for yamc.data.dose_coefficients function."""
+
+    def test_basic_neutron_dose_coefficients(self):
+        """Test getting neutron dose coefficients."""
+        _dc = yamc.data.dose_coefficients("neutron", "AP")
+        energy, coeffs = _dc.energy, _dc.coefficients
+
+        assert len(energy) > 0
+        assert len(energy) == len(coeffs)
+        assert all(e > 0 for e in energy)
+        assert all(c > 0 for c in coeffs)
+
+    def test_all_geometries(self):
+        """Test all irradiation geometries."""
+        geometries = ["AP", "PA", "LLAT", "RLAT", "ROT", "ISO"]
+
+        for geom in geometries:
+            _dc = yamc.data.dose_coefficients("neutron", geom)
+            energy, coeffs = _dc.energy, _dc.coefficients
+            assert len(energy) > 0
+            assert len(coeffs) == len(energy)
+
+    def test_both_data_sources(self):
+        """Test ICRP-74 and ICRP-116 data sources."""
+        for source in ["icrp74", "icrp116"]:
+            energy = yamc.data.dose_coefficients("neutron", "AP", source).energy
+            assert len(energy) > 0
+
+    def test_energy_in_ev(self):
+        """Test that energy is returned in eV (not MeV)."""
+        energy = yamc.data.dose_coefficients("neutron", "AP").energy
+
+        # Lowest energy in ICRP-116 is 1e-9 MeV = 1e-3 eV
+        # So energy[0] should be small but > 0
+        assert energy[0] < 1.0  # Less than 1 eV
+        assert energy[0] > 0
+
+        # Highest energy should be in MeV range (converted to eV)
+        assert energy[-1] > 1e6  # Greater than 1 MeV in eV
+
+    def test_photon_dose_coefficients(self):
+        """ICRP-116 photon coefficients: 55 points from 10 keV to 10 GeV."""
+        _dc = yamc.data.dose_coefficients("photon", "AP")
+        energy, coeffs = _dc.energy, _dc.coefficients
+
+        assert len(energy) == 55
+        assert energy[0] == pytest.approx(1e4)
+        assert energy[-1] == pytest.approx(1e10)
+        # ICRP-116 Table A.1, AP geometry.
+        assert coeffs[0] == pytest.approx(0.0685)
+
+    def test_photon_and_neutron_coefficients_differ(self):
+        """The two particles read different tables, not the same one twice."""
+        photon = yamc.data.dose_coefficients("photon", "AP").coefficients
+        neutron = yamc.data.dose_coefficients("neutron", "AP").coefficients
+        assert len(photon) != len(neutron)
+
+    def test_invalid_particle(self):
+        """Test error handling for invalid particle."""
+        with pytest.raises(ValueError, match="not supported"):
+            yamc.data.dose_coefficients("proton", "AP")
+
+    def test_invalid_geometry(self):
+        """Test error handling for invalid geometry."""
+        with pytest.raises(ValueError, match="Invalid geometry"):
+            yamc.data.dose_coefficients("neutron", "INVALID")
+
+    def test_invalid_data_source(self):
+        """Test error handling for invalid data source."""
+        with pytest.raises(ValueError, match="Invalid data_source"):
+            yamc.data.dose_coefficients("neutron", "AP", "invalid")
+
+    def test_case_insensitivity(self):
+        """Test that geometry and data_source are case-insensitive."""
+        # These should all work
+        yamc.data.dose_coefficients("neutron", "ap")
+        yamc.data.dose_coefficients("neutron", "AP")
+        yamc.data.dose_coefficients("neutron", "Ap")
+        yamc.data.dose_coefficients("neutron", "AP", "ICRP116")
+        yamc.data.dose_coefficients("neutron", "AP", "icrp116")
+
+
+def _at(dc, energy):
+    """The tabulated coefficient at ``energy`` (eV), which must be a grid point."""
+    (index,) = [i for i, e in enumerate(dc.energy) if e == pytest.approx(energy)]
+    return dc.coefficients[index]
+
+
+class TestAmbientDoseCoefficients:
+    """Tests for dose_quantity='ambient', ICRP-74 ambient dose equivalent H*(10)."""
+
+    def test_neutron_table_matches_icrp74(self):
+        """ICRP-74 Table A.42: 47 points from 1 meV to 20 MeV."""
+        dc = yamc.data.dose_coefficients("neutron", dose_quantity="ambient")
+
+        assert len(dc.energy) == 47
+        assert dc.units == "pSv cm2"
+        assert dc.energy[0] == pytest.approx(1e-3)
+        assert dc.energy[-1] == pytest.approx(2e7)
+        assert _at(dc, 0.0253) == 10.6
+        assert _at(dc, 1.4e7) == 520.0
+        assert _at(dc, 2e7) == 600.0
+
+    def test_photon_table_matches_icrp74(self):
+        """ICRP-74 Table A.21: 25 points from 10 keV to 10 MeV."""
+        dc = yamc.data.dose_coefficients("photon", dose_quantity="ambient")
+
+        assert len(dc.energy) == 25
+        assert dc.energy[0] == pytest.approx(1e4)
+        assert dc.energy[-1] == pytest.approx(1e7)
+        assert _at(dc, 1e4) == 0.061
+        assert _at(dc, 1e6) == 5.20
+        assert _at(dc, 1e7) == 25.6
+
+    def test_neutron_table_covers_dt_source_energy(self):
+        """A DT source at 14.1 MeV sits inside the tabulation, not past its end."""
+        dc = yamc.data.dose_coefficients("neutron", dose_quantity="ambient")
+        assert dc.energy[-1] > 14.1e6
+
+    def test_ambient_differs_from_effective(self):
+        effective = yamc.data.dose_coefficients("neutron", "AP", "icrp74")
+        ambient = yamc.data.dose_coefficients("neutron", dose_quantity="ambient")
+        # Same 47-point ICRP-74 grid apart from the thermal point (25 meV vs 25.3 meV).
+        assert len(effective.energy) == len(ambient.energy)
+        assert effective.coefficients != ambient.coefficients
+
+    def test_explicit_icrp74_data_source(self):
+        default = yamc.data.dose_coefficients("photon", dose_quantity="ambient")
+        explicit = yamc.data.dose_coefficients(
+            "photon", data_source="icrp74", dose_quantity="ambient"
+        )
+        assert default.coefficients == explicit.coefficients
+
+    def test_repr_names_the_quantity(self):
+        dc = yamc.data.dose_coefficients("photon", dose_quantity="ambient")
+        assert repr(dc) == "DoseCoefficients(photon, ambient, icrp74, 25 points, pSv cm2)"
+
+    @pytest.mark.parametrize("geometry", ["AP", "ISO"])
+    def test_ambient_refuses_geometry(self, geometry):
+        """An explicit geometry is refused, including the effective-dose default."""
+        with pytest.raises(ValueError, match="H\\*\\(10\\) has no irradiation geometry"):
+            yamc.data.dose_coefficients("neutron", geometry, dose_quantity="ambient")
+
+    def test_ambient_refuses_icrp116(self):
+        with pytest.raises(ValueError, match="does not tabulate ambient dose equivalent"):
+            yamc.data.dose_coefficients(
+                "neutron", data_source="icrp116", dose_quantity="ambient"
+            )
+
+    def test_invalid_dose_quantity(self):
+        with pytest.raises(ValueError, match="dose_quantity must be 'effective' or 'ambient'"):
+            yamc.data.dose_coefficients("neutron", dose_quantity="H*(10)")
+
+    @pytest.mark.parametrize("particle, energies_mev, expected", [
+        ("neutron", [
+            1e-9, 1e-8, 2.53e-8, 1e-7, 2e-7, 5e-7, 1e-6, 2e-6, 5e-6,
+            1e-5, 2e-5, 5e-5, 1e-4, 2e-4, 5e-4, 1e-3, 2e-3, 5e-3,
+            0.01, 0.02, 0.03, 0.05, 0.07, 0.1, 0.15, 0.2, 0.3, 0.5,
+            0.7, 0.9, 1.0, 1.2, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+            9.0, 10.0, 12.0, 14.0, 15.0, 16.0, 18.0, 20.0,
+        ], [
+            6.6, 9.0, 10.6, 12.9, 13.5, 13.6, 13.3, 12.9, 12.0,
+            11.3, 10.6, 9.9, 9.4, 8.9, 8.3, 7.9, 7.7, 8.0, 10.5,
+            16.6, 23.7, 41.1, 60.0, 88.0, 132.0, 170.0, 233.0, 322.0,
+            375.0, 400.0, 416.0, 425.0, 420.0, 412.0, 408.0, 405.0,
+            400.0, 405.0, 409.0, 420.0, 440.0, 480.0, 520.0, 540.0,
+            555.0, 570.0, 600.0,
+        ]),
+        ("photon", [
+            0.01, 0.015, 0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.1,
+            0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.5, 2.0,
+            3.0, 4.0, 5.0, 6.0, 8.0, 10.0,
+        ], [
+            0.061, 0.83, 1.05, 0.81, 0.64, 0.55, 0.51, 0.53, 0.61,
+            0.89, 1.2, 1.8, 2.38, 2.93, 3.44, 4.38, 5.2, 6.9, 8.6,
+            11.1, 13.4, 15.5, 17.6, 21.6, 25.6,
+        ]),
+    ])
+    def test_complete_tables_match_icrp74(self, particle, energies_mev, expected):
+        """Every row of ICRP-74 Tables A.42 (neutrons) and A.21 (photons)."""
+        coefficients = yamc.data.dose_coefficients(particle, dose_quantity="ambient")
+        assert coefficients.energy == pytest.approx(
+            [energy * 1e6 for energy in energies_mev], rel=1e-12
+        )
+        assert coefficients.coefficients == expected
+        assert coefficients.units == "pSv cm2"
+
+
+class TestDoseTallyIntegration:
+    """Integration tests for dose tallies."""
+
+    def test_tally_with_energy_function_filter(self):
+        """Test creating a tally with energy_function kwarg."""
+        # Create geometry (auto-assigns cell IDs)
+        sphere = yamc.Sphere(x0=0, y0=0, z0=0, radius=10, boundary="vacuum")
+        cell = yamc.Cell(region=sphere.below)
+        yamc.Geometry([cell])
+
+        # Create dose coefficients
+        _dc = yamc.data.dose_coefficients("neutron", "AP")
+        energy, coeffs = _dc.energy, _dc.coefficients
+
+        # Create tally with cells and energy_function kwargs
+        tally = yamc.Tally(
+            scores=["flux"],
+            name="neutron_dose",
+            cells=cell,
+            energy_function=(energy, coeffs))
+
+        # Verify setup
+        assert tally.cells == [cell.id]
+        assert tally.energy_function is not None
+
+    def test_multiple_filter_types(self):
+        """Test tally with mesh and energy function."""
+        # Create geometry
+        sphere = yamc.Sphere(x0=0, y0=0, z0=0, radius=50, boundary="vacuum")
+        yamc.Cell(region=sphere.below)
+
+        # Create mesh
+        mesh = yamc.RegularRectangularMesh(
+            lower_left=[-50, -50, -50], upper_right=[50, 50, 50], shape=[5, 5, 5]
+        )
+
+        # Create dose coefficients
+        _dc = yamc.data.dose_coefficients("neutron", "AP")
+        energy, coeffs = _dc.energy, _dc.coefficients
+
+        # Create tally with mesh and energy_function kwargs
+        tally = yamc.Tally(
+            scores=["flux"],
+            mesh=mesh,
+            energy_function=(energy, coeffs))
+
+        assert tally.mesh is not None
+        assert tally.energy_function is not None
+
+
+class TestDoseCoefficientsValues:
+    """Tests to verify actual dose coefficient values."""
+
+    def test_icrp116_has_68_points(self):
+        """ICRP-116 should have 68 neutron energy points."""
+        _dc = yamc.data.dose_coefficients("neutron", "AP", "icrp116")
+        energy, coeffs = _dc.energy, _dc.coefficients
+        assert len(energy) == 68
+        assert len(coeffs) == 68
+
+    def test_icrp74_has_47_points(self):
+        """ICRP-74 should have 47 neutron energy points."""
+        _dc = yamc.data.dose_coefficients("neutron", "AP", "icrp74")
+        energy, coeffs = _dc.energy, _dc.coefficients
+        assert len(energy) == 47
+        assert len(coeffs) == 47
+
+    def test_energy_monotonically_increasing(self):
+        """Energy grid should be monotonically increasing."""
+        energy = yamc.data.dose_coefficients("neutron", "AP", "icrp116").energy
+        for i in range(1, len(energy)):
+            assert energy[i] > energy[i - 1]
+
+    def test_ap_vs_pa_different(self):
+        """AP and PA geometries should have different coefficients."""
+        ap_coeffs = yamc.data.dose_coefficients("neutron", "AP", "icrp116").coefficients
+        pa_coeffs = yamc.data.dose_coefficients("neutron", "PA", "icrp116").coefficients
+
+        # At least some values should be different
+        different = any(
+            abs(ap - pa) > 1e-10 for ap, pa in zip(ap_coeffs, pa_coeffs, strict=False)
+        )
+        assert different, "AP and PA should have different coefficients"
+
+
+class TestPhotonCoefficients:
+    """Tests for the NIST photon attenuation and energy-absorption tables."""
+
+    def test_mass_attenuation_by_symbol_and_by_atomic_number(self):
+        """'Fe' and 26 name the same element, so they read the same table."""
+        by_symbol = yamc.data.mass_attenuation_coefficient("Fe")
+        by_number = yamc.data.mass_attenuation_coefficient(26)
+
+        assert by_symbol.energy == by_number.energy
+        assert by_symbol.coefficients == by_number.coefficients
+        assert by_symbol.units == "cm2/g"
+
+    def test_mass_attenuation_matches_the_published_table(self):
+        """NIST XCOM: iron is 0.05995 cm2/g at 1 MeV, where Compton dominates."""
+        iron = yamc.data.mass_attenuation_coefficient("Fe")
+
+        assert iron.interpolate(1.0e6) == pytest.approx(0.05995)
+        assert min(iron.energy) == pytest.approx(1.0e3)
+        assert max(iron.energy) == pytest.approx(2.0e7)
+
+    def test_mass_attenuation_jumps_at_an_absorption_edge(self):
+        """Iron's K edge at 7112 eV lifts mu/rho by about 7.7x."""
+        iron = yamc.data.mass_attenuation_coefficient("Fe")
+
+        assert iron.interpolate(7113.0) / iron.interpolate(7111.0) > 7.0
+
+    def test_mass_attenuation_covers_hydrogen_to_fermium(self):
+        for z in (1, 26, 92, 100):
+            assert len(yamc.data.mass_attenuation_coefficient(z).energy) > 0
+
+        with pytest.raises(ValueError, match="Z = 1 to 100"):
+            yamc.data.mass_attenuation_coefficient(101)
+
+    def test_mass_attenuation_rejects_nonsense(self):
+        with pytest.raises(ValueError, match="not a recognized element symbol"):
+            yamc.data.mass_attenuation_coefficient("Xx")
+
+        with pytest.raises(TypeError, match="element symbol"):
+            yamc.data.mass_attenuation_coefficient(1.5)
+
+    def test_air_energy_absorption_matches_the_published_table(self):
+        """NIST SRD 126 Table 4: air is 0.02789 cm2/g at 1 MeV."""
+        air = yamc.data.mass_energy_absorption_coefficient("air")
+
+        assert air.interpolate(1.0e6) == pytest.approx(0.02789)
+        assert air.units == "cm2/g"
+
+    def test_air_is_the_only_tabulated_material(self):
+        with pytest.raises(ValueError, match="Only 'air' is tabulated"):
+            yamc.data.mass_energy_absorption_coefficient("water")
+
+    def test_energy_absorption_is_below_attenuation(self):
+        """Absorption counts deposited energy, attenuation counts photons
+        removed, so the absorption coefficient is the smaller of the two."""
+        air = yamc.data.mass_energy_absorption_coefficient("air")
+        oxygen = yamc.data.mass_attenuation_coefficient("O")
+
+        assert air.interpolate(1.0e6) < oxygen.interpolate(1.0e6)
+
+    def test_as_energy_function_round_trips_into_a_tally(self):
+        air = yamc.data.mass_energy_absorption_coefficient("air")
+        energy, coefficients, units, interpolation = air.as_energy_function()
+
+        assert len(energy) == len(coefficients)
+        assert units == "cm2/g"
+        assert interpolation == "log-log"
+        tally = yamc.Tally(scores=["flux"], energy_function=air.as_energy_function())
+        assert tally.energy_function[3] == "log-log"
+
+
+class TestEnergyFunctionInterpolation:
+    """The `interpolation=` argument and how dose tallies interpolate."""
+
+    def test_energy_function_defaults_to_cubic(self):
+        tally = yamc.Tally(
+            scores=["flux"], energy_function=([1.0, 10.0, 100.0, 1000.0], [1.0, 2.0, 3.0, 4.0])
+        )
+        assert tally.energy_function[3] == "cubic"
+
+    @pytest.mark.parametrize("interpolation", ["cubic", "linear", "log-log"])
+    def test_interpolation_is_recorded(self, interpolation):
+        tally = yamc.Tally(
+            scores=["flux"],
+            energy_function=([1.0, 10.0, 100.0, 1000.0], [1.0, 2.0, 3.0, 4.0]),
+            interpolation=interpolation,
+        )
+        assert tally.energy_function[3] == interpolation
+
+    def test_log_log_and_linear_need_only_two_points(self):
+        for interpolation in ["linear", "log-log"]:
+            tally = yamc.Tally(
+                scores=["flux"],
+                energy_function=([1.0, 10.0], [1.0, 2.0]),
+                interpolation=interpolation,
+            )
+            assert tally.energy_function is not None
+
+    def test_cubic_still_needs_four_points(self):
+        with pytest.raises(ValueError, match="at least 4"):
+            yamc.Tally(scores=["flux"], energy_function=([1.0, 10.0], [1.0, 2.0]))
+
+    def test_an_unknown_interpolation_is_refused(self):
+        with pytest.raises(ValueError, match="'cubic', 'linear' or 'log-log'"):
+            yamc.Tally(
+                scores=["flux"],
+                energy_function=([1.0, 10.0], [1.0, 2.0]),
+                interpolation="spline",
+            )
+
+    def test_a_tuple_and_argument_that_disagree_are_refused(self):
+        with pytest.raises(ValueError, match="names interpolation"):
+            yamc.Tally(
+                scores=["flux"],
+                energy_function=([1.0, 10.0], [1.0, 2.0], "", "log-log"),
+                interpolation="linear",
+            )
+
+    def test_interpolation_without_an_energy_function_is_refused(self):
+        with pytest.raises(ValueError, match="energy_function only"):
+            yamc.Tally(scores=["flux"], dose_coefficients=("neutron", "AP"), interpolation="cubic")
+
+    def test_log_log_refuses_a_zero_energy(self):
+        with pytest.raises(ValueError, match="positive energies"):
+            yamc.Tally(
+                scores=["flux"],
+                energy_function=([0.0, 10.0], [1.0, 2.0]),
+                interpolation="log-log",
+            )
+
+    def test_dose_coefficients_interpolate_log_log(self):
+        tally = yamc.Tally(scores=["flux"], dose_coefficients=("neutron", "AP"))
+        assert tally.energy_function[3] == "log-log"
+
+    def test_interpolating_outside_the_grid_clamps(self):
+        air = yamc.data.mass_energy_absorption_coefficient("air")
+
+        assert air.interpolate(1.0) == air.interpolate(min(air.energy))
+        assert air.interpolate(1.0e12) == air.interpolate(max(air.energy))

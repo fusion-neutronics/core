@@ -1,0 +1,3840 @@
+//! Nuclear-data uncertainty on the inventory, by resampling and re-solving.
+//!
+//! The Bateman solve is deterministic and every expensive input is a reaction
+//! rate, so the uncertainty is propagated by perturbing the rates and running
+//! the same solve again. That is exact to all orders in the matrix exponential:
+//! nothing is linearized, and the solver is not touched at all, only its input.
+//!
+//! What can be perturbed is [`Source::IMPLEMENTED`], each source documented on
+//! its variant. [`Info`] says per run what was perturbed, what carried no
+//! stated uncertainty, and what was held at nominal, rather than leaving it to
+//! be inferred from a small sigma.
+//!
+//! # Cost
+//!
+//! One CRAM solve per replica per step, on top of the nominal run. The cross
+//! sections are loaded once, the covariance is folded once per distinct
+//! spectrum, and the factorization is done once, so a replica is the solve and
+//! nothing else.
+//!
+//! # Nothing happens unless asked
+//!
+//! With no [`DataUncertainty`] the covariance is never read from disk, no
+//! matrix is folded or factorized, and the step loop runs exactly once. The
+//! means are bit-identical to a build without any of this.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+use yamc_materials::Material;
+
+use crate::covariance_fold::Coverage;
+use crate::covariance_sample::{lognormal_multiplier, Repair, SigmaReport};
+
+/// One input to the Bateman matrix that can be perturbed.
+///
+/// Named rather than boolean-per-field so the set can grow without every
+/// caller's signature changing, and so asking for one that does not exist yet
+/// is an ERROR rather than a silent no-op. That matters for the workflow this
+/// exists to support: adding sources one at a time and watching the inventory
+/// sigma grow. A typo, or a source that has not landed, must not look like a
+/// source that contributed nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Source {
+    /// Activation cross sections, from ENDF MF=33 covariance.
+    CrossSections,
+    /// The supplied flux spectrum, from a per-bin standard deviation the caller
+    /// provides.
+    ///
+    /// Unlike the others this needs no nuclear data: the flux is the caller's
+    /// own input. It contributes only where a sigma was actually given, which
+    /// a spectrum from a published reference set does not have.
+    FluxSpectrum,
+    /// Half-lives, from the decay sublibrary's own standard deviation on each
+    /// (the uncertainty on the MT=457 `T1/2`), each nuclide drawn
+    /// independently as a lognormal with the stated mean and sigma.
+    ///
+    /// A replica's half-lives are used everywhere that replica's decay
+    /// constants appear: in the solve and in the activity, decay heat and dose
+    /// evaluated from its inventory. Using the nominal value in either place
+    /// would break the cancellation that makes a saturated activity nearly
+    /// insensitive to its own half-life (`N ~ R / lambda`, so `A ~ R`), and
+    /// inflate its uncertainty.
+    HalfLife,
+    /// Decay branching ratios, from the MT=457 sigma on each mode. A replica
+    /// draws a parent's ratios keeping their total and every ratio in
+    /// `[0, T]`: each mode but one from a logit-normal with the evaluated
+    /// ratio as its mean and the stated sigma as its standard deviation, the
+    /// last their complement, coupled by a Gaussian copula so the modes carry
+    /// the zero-sum covariance of largest entropy that realises every stated
+    /// sigma (for two or three modes the only one). A largest sigma above the
+    /// sum of the others' is drawn as that sum. A single mode stating none is
+    /// the complement of the rest when it is the largest or the only way to
+    /// trade, and is held otherwise, as are two or more stating none and a
+    /// mode whose sigma no ratio with its mean can have
+    /// (`sigma^2 >= b (T - b)`); the rest share what is left.
+    ///
+    /// [`Info`] names every parent short of its stated sigmas by why. It
+    /// moves the inventory only: a parent's own per-decay emission is the
+    /// decay scheme's.
+    DecayBranching,
+    /// The Monte Carlo statistical uncertainty of transport-tallied reaction
+    /// rates, from their per-history covariance.
+    ///
+    /// Applies to `Model.simulate_transmutation`, whose rates come from
+    /// transport; a spectrum run's rates are a deterministic collapse with no
+    /// sampling error, so it has nothing to perturb there.
+    ///
+    /// Every replica's rates are scored by the same histories as the nominal ones, so they share the nominal
+    /// tally's Monte Carlo error, and the draw is added to each replica's
+    /// rates as a deviation from the nominal: the error enters once per
+    /// replica, independent of the cross-section draw. What correlated
+    /// sampling does not cancel is the noise in each replica's difference
+    /// from the nominal, which is far smaller than the rates' own error but
+    /// is in the cross-section spread whether or not this source is on: it
+    /// shrinks as one over the particle count, in variance.
+    Statistical,
+    /// Mean decay energies, from the decay data's sigma on each
+    /// recoverable-heat component (beta, gamma, alpha), or on the total where
+    /// the data carries no split, each drawn as a lognormal with the stated
+    /// mean and sigma.
+    ///
+    /// A decay energy does not enter the Bateman matrix, so the inventory is
+    /// untouched: it moves the decay heat evaluated from each replica, and
+    /// nothing else.
+    DecayEnergy,
+    /// Decay photon lines and continua, from the MT=457 sigmas on each
+    /// spectrum: the normalisation's (FD for lines, FC for a continuum),
+    /// common to the whole spectrum, and each line's own intensity (dRI) and
+    /// energy (dER). Every one is drawn as a lognormal with the stated mean
+    /// and sigma, the normalisation once per spectrum and so fully correlated
+    /// across its lines, each line's intensity and energy independently.
+    ///
+    /// The tape's dRI is relative to FD and excludes its sigma, so the two
+    /// multiply without counting either twice. A continuum's shape stays at
+    /// nominal: no library states the covariance it would be drawn from.
+    ///
+    /// Like a decay energy it never enters the solve. It moves the decay
+    /// photon spectrum and the contact dose evaluated from each replica, and
+    /// nothing else.
+    DecayPhotonLines,
+    /// Independent fission yields, from the DY the evaluation states on each
+    /// (MT=454), each drawn as a lognormal with the stated mean and sigma and
+    /// summed onto the solver's products the way the converter summed the
+    /// nominal yields. No evaluation publishes a correlation between yields,
+    /// so each is drawn independently and nothing is renormalised.
+    ///
+    /// An alias, an actinide that borrows another's yields, shares that
+    /// evaluation's draw. Cumulative yields are not solved with and are not
+    /// drawn.
+    FissionYield,
+    /// The isomeric split of a reaction, from the MF=40 covariance of each
+    /// final state's production cross section (the MF=10 partials the
+    /// branching subsection carries), read from its
+    /// `branching_covariance.arrow`.
+    ///
+    /// Each stated state's production is drawn as a lognormal on the
+    /// covariance's own grid, folded against the spectrum the nominal split
+    /// was folded with, and the split re-made from the draw by the nominal
+    /// branching rule: shares of a list that names its ground state move
+    /// while the reaction total stays MF=33's, and an isomer listed alone is
+    /// made at its drawn production, the ground taking the rest. See
+    /// `isomer_branching_uncertainty` for why that counts no uncertainty
+    /// twice. On a transport run the tally scores each stated state's
+    /// production on its MF=40 intervals beside the partials, at each track
+    /// segment's energy, and the draw re-splits the tallied partials with
+    /// those weights in place of the spectrum's group fold.
+    IsomerBranching,
+}
+
+impl Source {
+    /// Every source this build can perturb. [`Info::not_perturbed`] lists what
+    /// a run held at nominal.
+    pub const IMPLEMENTED: &'static [Source] = &[
+        Source::CrossSections,
+        Source::FluxSpectrum,
+        Source::HalfLife,
+        Source::DecayBranching,
+        Source::Statistical,
+        Source::DecayEnergy,
+        Source::DecayPhotonLines,
+        Source::FissionYield,
+        Source::IsomerBranching,
+    ];
+
+    /// The name used in the API and in the coverage report.
+    pub fn name(self) -> &'static str {
+        match self {
+            Source::CrossSections => "cross_sections",
+            Source::FluxSpectrum => "flux_spectrum",
+            Source::HalfLife => "half_life",
+            Source::DecayBranching => "decay_branching",
+            Source::Statistical => "statistical",
+            Source::DecayEnergy => "decay_energy",
+            Source::DecayPhotonLines => "decay_photon_lines",
+            Source::FissionYield => "fission_yield",
+            Source::IsomerBranching => "isomer_branching",
+        }
+    }
+
+    /// Parse a name, naming what IS available when it is not one of them.
+    pub fn parse(name: &str) -> Result<Source, String> {
+        Source::IMPLEMENTED
+            .iter()
+            .copied()
+            .find(|s| s.name() == name)
+            .ok_or_else(|| {
+                let have: Vec<&str> = Source::IMPLEMENTED.iter().map(|s| s.name()).collect();
+                format!("unknown uncertainty source {name:?}; this build can perturb {have:?}")
+            })
+    }
+}
+
+/// One nuclide's entry in [`Info::damage_energy`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DamageEnergyCoverage {
+    /// The share of the stored MT=444 rate the deposits reproduce, the part a
+    /// draw can move.
+    pub explained: f64,
+    /// The relative sigma of the drawn damage-energy rate.
+    pub sigma: f64,
+}
+
+/// Ask for nuclear-data uncertainty on a transmutation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DataUncertainty {
+    /// Base seed. The perturbation of a given nuclide in a given replica is a
+    /// pure function of `(seed, replica, nuclide)`, so a rerun with the same
+    /// seed gives the same answer whatever else changed about the run. The
+    /// one exception is displacement damage: asking for it widens each
+    /// composition nuclide's cross-section field to the reactions its damage
+    /// energy comes from (see [`crate::damage`]), which is a different field
+    /// and so a different draw.
+    pub seed: u64,
+    /// Fixed replica count, or `None` to run until every tracked sigma is
+    /// known to [`Self::convergence`].
+    ///
+    /// `None` is the recommended setting. A number here is for reproducing a
+    /// specific run or for bounding cost: exactly that many replicas run, and
+    /// [`Info::unconverged`] still says which sigmas did not reach the target.
+    pub samples: Option<usize>,
+    /// Which inputs to perturb. Empty means every implemented source.
+    ///
+    /// Restricting this is how a run isolates one contribution, which is what
+    /// makes "add a source, watch the sigma grow" a measurement rather than a
+    /// guess. Sources are independent, so the total sigma must not DECREASE as
+    /// the set grows; that is a property worth testing. The one exception is
+    /// by design: `isomer_branching` gives an isomer listed alone its stated
+    /// MF=40 uncertainty in place of the MF=33 one its reaction lends it
+    /// without, which can be the smaller (see `isomer_branching_uncertainty`).
+    pub sources: Vec<Source>,
+    /// Also say where the uncertainty comes from ([`Attribution`]).
+    ///
+    /// Off by default because it costs further solves: one ensemble per
+    /// source, and one deterministic solve per contributor. It changes no
+    /// number the run otherwise reports.
+    pub attribution: bool,
+    /// The target for the standard error of each tracked sigma, relative to
+    /// that sigma: replicas are added until `SE(sigma) / sigma` is below it
+    /// for every tracked output at every step. [`DEFAULT_CONVERGENCE`] (5%)
+    /// unless set; in (0, 1), see [`check_convergence`].
+    ///
+    /// For a Gaussian output `SE(sigma) / sigma` is about `1 / sqrt(2(n-1))`,
+    /// so a target `t` needs about `1 / (2 t^2) + 1` replicas: 201 at 5%, 51
+    /// at 10%. A heavy-tailed output needs more (see
+    /// [`std_dev_standard_error`]), and [`MAX_SAMPLES`] bounds the run, so a
+    /// target much below 2.2% (the Gaussian figure at the cap) cannot be met.
+    /// What is tracked is listed on [`Ensemble::unconverged`].
+    pub convergence: f64,
+}
+
+impl Default for DataUncertainty {
+    fn default() -> Self {
+        Self {
+            seed: 1,
+            samples: None,
+            sources: Source::IMPLEMENTED.to_vec(),
+            attribution: false,
+            convergence: DEFAULT_CONVERGENCE,
+        }
+    }
+}
+
+/// How a run's flux answered each replica's perturbed cross sections, as
+/// [`Info::flux_response`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FluxResponseReport {
+    /// A spectrum run: the flux is the caller's, and nothing transports.
+    #[default]
+    Supplied,
+    /// A transport run that tallied every replica under its own replica
+    /// weights, carrying `replicas`: one transport, each history carrying one
+    /// likelihood-ratio weight per replica, so replica `k`'s rates are an
+    /// unbiased estimate of what a transport with replica `k`'s data would
+    /// tally, flux response and all.
+    ReplicaWeights {
+        /// Replicas the transport carried.
+        replicas: usize,
+    },
+    /// A transport run with the cross-section source off: nothing perturbed
+    /// what the flux depends on, so there was no response to carry.
+    Unperturbed,
+    /// A coupled transport run, each replica the whole coupled calculation
+    /// again: every step's transport ran on that replica's own compositions,
+    /// so the flux answers how its earlier steps' noise and decay data moved
+    /// them. Its cross sections are the nominal ones.
+    CoupledReplicas,
+}
+
+impl FluxResponseReport {
+    /// The name used in the report.
+    pub fn name(self) -> &'static str {
+        match self {
+            FluxResponseReport::Supplied => "supplied",
+            FluxResponseReport::ReplicaWeights { .. } => "replica_weights",
+            FluxResponseReport::Unperturbed => "unperturbed",
+            FluxResponseReport::CoupledReplicas => "coupled_replicas",
+        }
+    }
+}
+
+/// The replicas a transport-coupled run's transport carries:
+/// `request.samples` where it is set, else the count a Gaussian output needs
+/// to reach `request.convergence`, `1 / (2 t^2) + 1`, rounded up to a whole
+/// [`BLOCK`] and kept within [`MIN_SAMPLES`] and [`MAX_SAMPLES`]: 256 at the
+/// default 5%.
+///
+/// The count has to be fixed before the transport, since every history
+/// carries one weight per replica, so the adaptive rule cannot add replicas
+/// after it. The Gaussian count is what the rule itself would stop near on a
+/// well-behaved output; a heavier tail needs more, and the run then reports
+/// the sigmas that missed the target (`Info::unconverged`, with `hit_cap`
+/// set), for a rerun with `samples` raised.
+pub fn transport_replicas_for(request: &DataUncertainty) -> usize {
+    if let Some(n) = request.samples {
+        return n;
+    }
+    let t = request.convergence;
+    let gaussian = (1.0 / (2.0 * t * t) + 1.0).ceil() as usize;
+    gaussian
+        .div_ceil(BLOCK)
+        .saturating_mul(BLOCK)
+        .clamp(MIN_SAMPLES, MAX_SAMPLES)
+}
+
+impl DataUncertainty {
+    /// Whether `source` is switched on for this request.
+    ///
+    /// An empty set means every implemented source, so a default-constructed
+    /// request perturbs everything this build can.
+    pub fn wants(&self, source: Source) -> bool {
+        self.sources.is_empty() || self.sources.contains(&source)
+    }
+}
+
+/// The default [`DataUncertainty::convergence`]: each tracked sigma known to
+/// 5% of itself, one standard error.
+pub const DEFAULT_CONVERGENCE: f64 = 0.05;
+
+/// Refuse a convergence target outside (0, 1).
+///
+/// Zero or below can never be met and would always run the cap, and a
+/// standard error as large as the sigma it qualifies says nothing about it.
+pub fn check_convergence(convergence: f64) -> Result<(), String> {
+    if convergence.is_finite() && convergence > 0.0 && convergence < 1.0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "convergence must be between 0 and 1 (exclusive), the target for each \
+             sigma's standard error relative to that sigma, e.g. 0.05 for 5%; got \
+             {convergence}"
+        ))
+    }
+}
+
+/// Replicas are added in blocks, and convergence is judged between blocks.
+pub(crate) const BLOCK: usize = 64;
+/// Below this the run does not stop whatever the target says. The standard
+/// error rests on a sample kurtosis, which is itself noisy on a few dozen
+/// replicas and reads low on a heavy tail that has not shown yet, so a loose
+/// target could otherwise stop a run on the first block.
+pub(crate) const MIN_SAMPLES: usize = 128;
+/// A ceiling, so a pathological problem cannot run forever.
+pub(crate) const MAX_SAMPLES: usize = 1024;
+/// Nuclides below this share of the largest density at a step are not tracked
+/// at that step: their sigma is noise on a number nobody reads.
+pub(crate) const SIGNIFICANCE: f64 = 1.0e-6;
+/// A sigma below this share of its mean is not tracked. It changes no figure
+/// a reader uses, and its shape is often far from Gaussian: a saturated
+/// activity's spread is `exp(-lambda t)` of the half-life draw, a heavy tail
+/// whose sigma no cap could pin down to a few percent, and at the bottom of
+/// the range it is rounding in the solve.
+pub(crate) const NEGLIGIBLE: f64 = 1.0e-4;
+
+/// One output whose sigma the stopping rule judges.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Output {
+    /// A nuclide's density.
+    Density(String),
+    /// The total activity.
+    Activity,
+    /// The total decay heat.
+    DecayHeat,
+    /// The total emission rate of the decay photon lines, the photon spectrum
+    /// summed over its lines.
+    DecayPhotonRate,
+    /// A D1S time-correction factor: one emitter in one campaign.
+    TimeCorrectionFactor {
+        /// The campaign, in schedule order.
+        campaign: usize,
+        /// The emitting radionuclide.
+        emitter: String,
+    },
+}
+
+impl Output {
+    /// The name the output goes by in a report.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Output::Density(_) => "density",
+            Output::Activity => "activity",
+            Output::DecayHeat => "decay_heat",
+            Output::DecayPhotonRate => "decay_photon_rate",
+            Output::TimeCorrectionFactor { .. } => "time_correction_factor",
+        }
+    }
+
+    /// The nuclide it belongs to, for a density or a time-correction factor.
+    pub fn nuclide(&self) -> Option<&str> {
+        match self {
+            Output::Density(n) => Some(n),
+            Output::TimeCorrectionFactor { emitter, .. } => Some(emitter),
+            _ => None,
+        }
+    }
+}
+
+/// One tracked sigma that did not reach the convergence target.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Unconverged {
+    /// What it is the sigma of.
+    pub output: Output,
+    /// The step, indexed like `TransmutationResults::get_material` (1 is the
+    /// end of the first schedule step); a schedule index for a time-correction
+    /// factor.
+    pub step: usize,
+    /// `SE(sigma) / sigma` reached, or `None` below four replicas, where no
+    /// standard error is estimated.
+    pub relative_standard_error: Option<f64>,
+}
+
+/// The tracked sigmas of `values` that miss `convergence`, as `Some(SE /
+/// sigma)`, `Some(None)` below four values, or `None` when the output meets
+/// it or has no spread worth judging (none at all, or under [`NEGLIGIBLE`] of
+/// its mean).
+pub(crate) fn misses(values: &[f64], convergence: f64) -> Option<Option<f64>> {
+    let n = values.len() as f64;
+    if n < 2.0 {
+        return None;
+    }
+    let mean = values.iter().sum::<f64>() / n;
+    let sigma = (values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt();
+    if sigma <= NEGLIGIBLE * mean.abs() || sigma == 0.0 {
+        return None;
+    }
+    match std_dev_standard_error(values) {
+        None => Some(None),
+        Some(se) if se / sigma >= convergence => Some(Some(se / sigma)),
+        Some(_) => None,
+    }
+}
+
+/// [`misses`] on the sigma with the Monte Carlo noise removed (see
+/// [`spread_and_noise`]), judged by [`noise_removed_standard_error`]. A
+/// sigma the noise swamps has no standard error and reads as unestimated.
+pub(crate) fn misses_noise_removed(
+    values: &[f64],
+    even: &[f64],
+    scale: f64,
+    convergence: f64,
+) -> Option<Option<f64>> {
+    let n = values.len() as f64;
+    if n < 2.0 {
+        return None;
+    }
+    let mean = values.iter().sum::<f64>() / n;
+    let (spread, noise) = spread_and_noise(values, even, scale);
+    if spread <= 0.0 || spread.sqrt() <= NEGLIGIBLE * mean.abs() {
+        return None;
+    }
+    let sigma = (spread - noise).max(0.0).sqrt();
+    match noise_removed_standard_error(values, even, scale) {
+        Some(se) if sigma > 0.0 && se / sigma < convergence => None,
+        Some(se) if sigma > 0.0 => Some(Some(se / sigma)),
+        _ => Some(None),
+    }
+}
+
+/// Sort the misses worst first, an unestimated one ahead of every number.
+pub(crate) fn worst_first(unconverged: &mut [Unconverged]) {
+    unconverged.sort_by(|a, b| {
+        let key = |u: &Unconverged| u.relative_standard_error.unwrap_or(f64::INFINITY);
+        key(b)
+            .total_cmp(&key(a))
+            .then_with(|| a.step.cmp(&b.step))
+            .then_with(|| a.output.cmp(&b.output))
+    });
+}
+
+/// What was perturbed, and what could not be.
+///
+/// The point of this type is that a missing uncertainty and a genuinely zero
+/// one must never look the same. A nuclide in `no_covariance_data` contributed
+/// nothing to the spread because the evaluation says nothing about it, which is
+/// a different statement from "this channel is well known".
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Info {
+    /// Replicas actually run.
+    pub samples: usize,
+    /// How the flux answered each replica's perturbed cross sections: the
+    /// caller's on a spectrum run, and on a transport run either tallied per
+    /// replica under replica weights or, with the cross sections off, not
+    /// perturbed at all.
+    pub flux_response: FluxResponseReport,
+    /// Whether every tracked sigma reached the convergence target, so
+    /// `unconverged` is empty. With a fixed sample count, whether it did at
+    /// that count.
+    pub converged: bool,
+    /// The convergence target the run judged against, `SE(sigma) / sigma`.
+    pub convergence: f64,
+    /// Whether the run stopped on [`MAX_SAMPLES`] with some tracked sigma
+    /// still short of the target, or with replica weights, on the replicas
+    /// its transport carried ([`transport_replicas_for`]). Never set on a
+    /// fixed sample count.
+    pub hit_cap: bool,
+    /// Every tracked sigma, by output and step, that did not reach the
+    /// target, with the `SE(sigma) / sigma` it did reach, worst first.
+    pub unconverged: Vec<Unconverged>,
+    /// Whether the Monte Carlo noise in the replicas' spread was measured
+    /// and removed from every sigma reported: with transport replica weights,
+    /// each replica solved a second time from the even half of the
+    /// transport's histories (see [`Ensemble::noise_scale`]). The shift each
+    /// replica's tally makes from the nominal is resolved only to the
+    /// transport's history count, and its noise adds to the replicas' spread;
+    /// a sigma here is the spread with that removed.
+    pub noise_removed: bool,
+    /// Every tracked sigma whose removed Monte Carlo noise variance exceeded
+    /// [`NOISE_FLAG_FRACTION`] of the nuclear-data variance left, with the
+    /// replica spread, the noise and the sigma reported, the largest share
+    /// first. The sigma is still the noise-removed one; more transport
+    /// histories would sharpen it.
+    pub noisy: Vec<NoisyOutput>,
+    /// Nuclides whose cross sections were perturbed.
+    pub perturbed: BTreeSet<String>,
+    /// Nuclides with rates but no usable covariance, so no stated uncertainty.
+    pub no_covariance_data: BTreeSet<String>,
+    /// Per nuclide, blocks correlating one of its reactions with a reaction of
+    /// another evaluation, not applied: the evaluation `mat1` names is not in
+    /// the run (or carries no covariance, so its MAT is not known), or one of
+    /// the two reactions has no relative covariance to correlate. A `mat1`
+    /// naming the nuclide's own MAT is its own evaluation and is folded, and
+    /// a block is counted only on a reaction the fold reaches (a channel, or
+    /// one a channel is derived from).
+    pub skipped_cross_material: BTreeMap<String, usize>,
+    /// Per nuclide, blocks correlating one of its reactions with a reaction of
+    /// another evaluation in the run, applied: the nuclides they link are
+    /// drawn jointly, one draw per replica shared by every material of the
+    /// run (see [`crate::cross_material`]). Counted like
+    /// `skipped_cross_material`.
+    pub applied_cross_material: BTreeMap<String, usize>,
+    /// Per nuclide, blocks correlating one of its reactions with a quantity
+    /// that is not a cross section (`xmf1` other than 0 or 3), not consumed.
+    /// Counted like `skipped_cross_material`. None of ENDF/B-VIII.1,
+    /// JEFF-4.0, JENDL-5.0, FENDL-3.2d, IRDFF-II, TENDL-2017 or TENDL-2025
+    /// has one.
+    pub skipped_other_file: BTreeMap<String, usize>,
+    /// Per (nuclide, kind, kind), where a pair stored in both orientations
+    /// has copies that are not each other's transpose, the largest difference
+    /// relative to the largest entry. The lower MT's copy is the one used.
+    pub mirrored_disagree: BTreeMap<(String, String, String), f64>,
+    /// Per nuclide, NC blocks (covariance derived from other reactions) that
+    /// could not be derived, not consumed. LTY=0 blocks are derived from the
+    /// reactions they name; what is left is an LTY other than 0, a block in
+    /// a cross-reaction subsection, one whose list of reactions is empty or
+    /// does not match its coefficients, one whose own energy range is empty,
+    /// one naming a reaction with no cross section, and one met only
+    /// circularly. LTY 1 to 4 derive a covariance from a measurement's ratio
+    /// to another evaluation's standard (ENDF-102 33.2.2.1); none of the
+    /// libraries listed under `skipped_other_file` has one.
+    pub skipped_nc: BTreeMap<String, usize>,
+    /// Blocks whose `lb` layout is not implemented, counted per `lb`.
+    pub unsupported_layouts: BTreeMap<i64, usize>,
+    /// Blocks not consumed because they break ENDF-102's rules for their
+    /// layout: arrays that disagree with their declared sizes, an LB=0 to 2
+    /// block carrying a second table, an LB=3 or 4 block without one or whose
+    /// tables share no energy range, or an LB=8 block between two reactions.
+    pub malformed_blocks: usize,
+    /// Per (nuclide, reaction kind), the share of the rate over the flux range
+    /// that comes from energies where the evaluation states a nonzero variance
+    /// for that reaction. The rate is the fold's own: dilute on a dilute run,
+    /// and the shielded rate the run used on a self-shielded one. Below one
+    /// means part of the rate carries no stated uncertainty, so it dilutes the
+    /// relative sigma. An interval a covariance grid spans with a variance of
+    /// zero counts as uncovered: it states no uncertainty either. In [0, 1]
+    /// whatever rate the covariance is divided by. On a tallied run it is a
+    /// share of the dilute rate over the tally spectrum, and the covered share
+    /// of the tallied rate is not computed. See [`Info::partials_above_rate`]
+    /// for when that rate disagrees with the partials. Exact under the flat
+    /// within-group weight; under `Weighting::OneOverE` a group a covariance
+    /// edge cuts is split by energy width rather than lethargy on a nuclide
+    /// the collapse took dilute, so the share is off there. No entry for a
+    /// channel whose rate over the flux range is zero. Every consumed
+    /// self-covariance block counts where its own diagonal is nonzero,
+    /// relative (LB=1 to 6), absolute (LB=0) and short-range (LB=8) alike.
+    pub rate_fraction_covered: BTreeMap<(String, String), f64>,
+    /// Per (nuclide, reaction kind), where the partial rates a relative
+    /// covariance block was weighted with, zero variance intervals included,
+    /// add up to more than the rate it was divided by, their ratio to it. Each
+    /// is a channel whose relative sigma is overstated, because the two were
+    /// computed different ways: a tallied rate against partials weighted flat
+    /// within each bin, a grafted `(n,n')` whose rate is the metastables'
+    /// MF=10 production while its partials are MT 4's, or the `1/E`
+    /// within-group weight with a covariance edge inside a group. Its
+    /// `rate_fraction_covered` is of the fold's own rate, not of the listed
+    /// one, and under the `1/E` weight it is off as well wherever an edge cuts
+    /// a group. On a derived channel the partials of the reactions each NC
+    /// block names are checked the same way, and the check is also that they
+    /// add up to the reaction it derives over the block's range, a sum above
+    /// it landing here.
+    pub partials_above_rate: BTreeMap<(String, String), f64>,
+    /// Per (nuclide, reaction kind), where a relative block's grid spans the
+    /// whole flux range and its partial rates add up to less than the rate it
+    /// was divided by, their ratio to it: a channel whose relative sigma is
+    /// understated. A grid that stops short of the flux range cannot be
+    /// checked this way, since rate from outside it rightly leaves its
+    /// partials short. A derived channel whose NC block names reactions that
+    /// add up to less than the one it derives lands here too: ENDF/B-VIII.1
+    /// O16 `(n,d)` above 20 MeV, where its cross section holds MT 660 to 669
+    /// and the block names 650 to 659.
+    pub partials_below_rate: BTreeMap<(String, String), f64>,
+    /// Per (nuclide, reaction kind), where a channel derived through an NC
+    /// block names two reactions with opposite signs, each with a variance
+    /// block of its own, and the evaluation states no covariance between
+    /// them, those pairs by kind. The absent block is read as zero, since
+    /// ENDF-102 33.3.2 a.1 lets a tape leave a zero covariance unstated, and
+    /// with opposing signs that reading sets the sigma: FENDL-3.2d and
+    /// TENDL-2017 H2 `(n,2n)` = `σ_1 - σ_2 - σ_102` folds to about 22% at 14
+    /// MeV and thousands of percent near threshold. The tape's literal
+    /// statement, so reported rather than altered, and counted as a gap.
+    pub derived_opposing_uncorrelated: BTreeMap<(String, String), BTreeSet<(String, String)>>,
+    /// Per (nuclide, lumped MT), a lumped reaction (MT 851-870) with several
+    /// components, whose covariance ENDF-102 33.2.3 states for their sum and
+    /// for none of them, that no component could read, with the components
+    /// by kind (`MT<n>` for one that is not a channel). A lump with a single
+    /// component is that component; a lump an LTY=0 block names is folded
+    /// through that derivation, with its cross section the sum of its
+    /// components' (ENDF/B-VIII.1 and TENDL-2017 U235 and U238 MT 4 is MT 51
+    /// plus MT 851); and a component with no covariance of its own takes the
+    /// lump's relative perturbation, the components of one lump moving
+    /// together (ENDF/B-VIII.1, FENDL-3.2d and JEFF-4.0 W180 to W186 give
+    /// `(n,2n)` only as MT 852, the sum of MT 16 and 41). A level sum stating
+    /// no covariance of its own is derived from its levels, so `(n,p)` reads
+    /// W186 MT 855, the sum of MT 600 and 649. Listed only for a lump with a
+    /// block that is not relative, absolute or short-range, which states the
+    /// sum's spread in barns and nothing of how it splits, where the fold
+    /// reaches a component. No library yani reads has one. Counted as a gap.
+    pub lumped_covariance_not_assignable: BTreeMap<(String, i32), BTreeSet<String>>,
+    /// Mean of the per-channel shares in [`Info::rate_fraction_covered`],
+    /// weighted by the production each channel drove (the rate this run used
+    /// times parent density): the share of the production driven from
+    /// energies where a covariance states a nonzero variance.
+    ///
+    /// `None` for a decay-only schedule, which drove no production, and on a
+    /// transport run, where that share is not computed. There the per-channel
+    /// shares are of the dilute rate over the tally spectrum, and
+    /// self-shielding in the transport moves rate out of the resonance range,
+    /// where capture blocks often state zero, so weighting them by the tallied
+    /// production would give a figure that is not the share its name claims.
+    /// `None` under `Weighting::OneOverE`, whose shares are not exact where a
+    /// covariance edge cuts a group (see [`Info::rate_fraction_covered`]).
+    /// `None` too where a channel is listed in [`Info::partials_above_rate`] or
+    /// [`Info::partials_below_rate`]: its rate is not the one its partials and
+    /// share are of. The `(n,n')` of a nuclide with a metastable is the known
+    /// case, its rate replaced by the MF=10 partials to the metastables while
+    /// its covariance and share are MT 4's.
+    ///
+    /// The number to read before any sigma here, and not the same question as
+    /// how many nuclides carry MF=33: an evaluation can state covariance for
+    /// every isotope in the material and none of it for the channel making the
+    /// product of interest, which leaves the count reading as full coverage
+    /// while the ensemble perturbs almost nothing.
+    pub rate_fraction_covered_total: Option<f64>,
+    /// Nuclides the material can populate whose evaluated cell covariance was
+    /// not positive semi-definite past round-off, and was repaired to the
+    /// nearest correlation matrix to be sampled, with a channel a draw can
+    /// move on at least one spectrum (a positive rate on a spectrum the
+    /// schedule irradiates with).
+    ///
+    /// Populated means `yani::populated_nuclides` bounds the nuclide at or
+    /// above [`crate::DENSITY_FLOOR`] over the schedule at nominal rates. The
+    /// fold covers every chain nuclide with data, which from almost any
+    /// composition is the chain's whole closure, and in the nominal solve a
+    /// nuclide the bound leaves out cannot move any density by as much as
+    /// that floor. A replica's lognormal rates on a wide channel can sit
+    /// orders above nominal, so the bound does not hold for every replica.
+    /// Past round-off means the smallest eigenvalue of the correlation matrix
+    /// is below `-m * 1e-12`, `m` the number of cells with a positive
+    /// stated variance (see `covariance_sample::REPAIR_TOLERANCE`), or a
+    /// cell is stated with a negative variance, or with a zero one and a
+    /// covariance to another cell.
+    ///
+    /// A gap: the repair keeps every cell's evaluated sigma but moves
+    /// correlations the evaluation states, so a channel that folds several
+    /// cells can be sampled at a sigma other than its evaluation's, either
+    /// way. How much is in `covariance_repairs`, which also keeps the repairs
+    /// of populated nuclides no draw can move.
+    pub covariance_repaired: BTreeSet<String>,
+    /// Where each perturbed nuclide's covariance came from, as
+    /// `"<library>, MAT <n>"`: the library its data folder records, and the
+    /// evaluation's own MAT. `"unknown"` for a folder that recorded no library.
+    pub covariance_source: BTreeMap<String, String>,
+    /// Perturbed nuclides whose library documents a problem with this
+    /// covariance, with what it says and where: every FENDL-3.2 covariance,
+    /// and the ENDF/B-VIII.1 evaluations its release paper names. A gap: the
+    /// evaluation is sampled as it is, and its own authors say not to rely on
+    /// it as it is.
+    pub covariance_warnings: BTreeMap<String, Vec<String>>,
+    /// One record per repaired (populated nuclide, spectrum): the smallest
+    /// eigenvalue of the correlation matrix before the repair, how far the
+    /// repair moved the correlations, and every channel's evaluated sigma
+    /// beside the sigma it was sampled at. A repair
+    /// of a nuclide outside the populated bound has no record here; its
+    /// nuclide is in `covariance_repaired_outside_bound`.
+    pub covariance_repairs: Vec<Repair>,
+    /// Nuclides outside the populated bound whose covariance needed a repair
+    /// on some spectrum, with a channel a draw can move there (a positive rate
+    /// on a spectrum the schedule irradiates with). A gap: the bound holds at
+    /// nominal rates only, a replica's lognormal draw can populate them, and
+    /// whether one did is not something the stepper's end-of-step densities
+    /// can settle, since the solve applies every reachable nuclide's rates
+    /// within a step. Their per-channel records are not kept.
+    pub covariance_repaired_outside_bound: BTreeSet<String>,
+    /// The largest `|sampled / evaluated - 1|` over the repaired channels a
+    /// draw can move: a populated nuclide, present at the start or produced,
+    /// with a positive rate on a spectrum the schedule irradiates with. Zero
+    /// with no such repair; infinite when a repair gave a spread to a channel
+    /// whose stated variance is zero or negative.
+    pub worst_sigma_change: f64,
+    /// The weighted mean of `|sampled / evaluated - 1|` over every sampled
+    /// channel of a populated nuclide, each weighted by its unit-flux rate
+    /// times its spectrum's fluence in the schedule times its parent's
+    /// initial density, so a repair on a channel nothing went through reads
+    /// as nothing and one on the channels that carry the reactions reads in
+    /// full, however wide the channels beside them. The weight is the initial
+    /// composition's, so this covers first-generation reactions only: a
+    /// nuclide the material starts without carries no weight, and its repairs
+    /// are in `worst_sigma_change` and `covariance_repairs`. On a matrix
+    /// that needed no repair a channel's sampled sigma differs from the
+    /// evaluated one by the decomposition's round-off, which shows here as it
+    /// is. Infinite when a weighted channel with no evaluated sigma was
+    /// sampled with a spread; `None` when no weighted channel has an
+    /// evaluated sigma.
+    pub rate_weighted_sigma_change: Option<f64>,
+    /// Sampled channels of populated nuclides with a positive rate on a
+    /// spectrum the schedule irradiates with, keyed by (nuclide, kind), whose
+    /// folded relative sigma `sqrt(C_ii)`, as evaluated and before any repair,
+    /// was at least one, with the largest over the spectra.
+    ///
+    /// At that width the spread depends on the distribution used to carry the
+    /// evaluation's two moments (here a lognormal), not on the evaluation
+    /// alone, so a sigma these dominate is partly this code's choice.
+    pub sigma_at_least_one: BTreeMap<(String, String), f64>,
+    /// The subset at ten or more.
+    pub sigma_at_least_ten: BTreeMap<(String, String), f64>,
+    /// The same as `sigma_at_least_one` for the nuclides outside the
+    /// populated bound: sampled channels with a positive rate on a spectrum
+    /// the schedule irradiates with, evaluated at one or more. Not a gap on
+    /// the nominal bound, but named because a replica's draw on exactly such
+    /// a channel can sit orders above nominal and populate the nuclide. The
+    /// ten-or-more subset reads off the values.
+    pub sigma_at_least_one_outside_bound: BTreeMap<(String, String), f64>,
+    /// Cross-section rate draws made, one per perturbed channel per spectrum
+    /// per replica.
+    ///
+    /// Each is read off one draw of the nuclide's cross sections, whose
+    /// relative cells are lognormal multipliers, so a channel reading only
+    /// those with positive coefficients cannot go negative.
+    pub rates_sampled: usize,
+    /// Cross-section rate draws that came out negative and were floored at
+    /// zero: a channel that subtracts reactions (an NC derivation), or reads
+    /// an absolute or short-range shift, which is additive.
+    pub rates_floored: usize,
+    /// Cross-section values a coupled replica's draw took below zero, floored
+    /// at zero, over every replica and every grid point of the nuclear data
+    /// its transports read. Zero outside the coupled method, whose replicas
+    /// draw rates rather than whole cross sections.
+    pub cross_section_points_floored: usize,
+    /// Spectra that carried a per-bin flux sigma, and those that did not.
+    ///
+    /// A spectrum taken from a published reference set has no stated error, so
+    /// it contributes nothing and that has to be visible rather than read as a
+    /// flux known exactly.
+    pub spectra_with_flux_sigma: usize,
+    pub spectra_without_flux_sigma: usize,
+    /// `(nuclide, reaction)` rates under a spectrum with a stated flux error
+    /// that have no per-group terms, so the flux perturbation could not move
+    /// them and they were held at nominal. Empty unless a rate reaches the
+    /// solve by a route that is neither a collapsed channel nor a branching
+    /// list's fold.
+    pub flux_rates_without_terms: BTreeSet<(String, String)>,
+    /// Flux bins drawn, one per bin per spectrum with a stated error per
+    /// replica. Each is a lognormal factor with mean one, so none can go
+    /// negative and none is floored.
+    pub flux_bins_sampled: usize,
+    /// Spectra, by index, whose stated flux covariance is not a lognormal's,
+    /// with how far the sampled covariance is from it. Not a gap: see
+    /// [`crate::covariance_sample::LognormalLimit`].
+    pub flux_lognormal_not_carried: BTreeMap<usize, crate::covariance_sample::LognormalLimit>,
+    /// Nuclides whose evaluated relative covariance is not a lognormal's,
+    /// with how far the sampled covariance is from it. Not a gap: it is a
+    /// property of the distribution that carries the evaluation's two
+    /// moments, not a defect of the data, and the effect on each channel is
+    /// also in its sampled sigma beside the evaluated one.
+    pub lognormal_not_carried: BTreeMap<String, crate::covariance_sample::LognormalLimit>,
+    /// Per group of nuclides drawn jointly through cross-material
+    /// covariance (their names joined by `+`), where the covariance stated
+    /// between them was not admissible beside their own and the closest
+    /// admissible one was drawn: how far it is from the stated one, the
+    /// least any admissible draw could be, and the fit's convergence. Each
+    /// nuclide's own covariance is kept exactly. Counted as a gap.
+    /// See [`crate::covariance_sample::JointAdjustment`].
+    pub cross_material_adjusted: BTreeMap<String, crate::covariance_sample::JointAdjustment>,
+    /// Per nuclide with MF=2 and MF=32 resonance parameters and a rate in
+    /// this run, how its resonance-range uncertainty was sampled: the
+    /// parameters drawn per replica and the cross sections rebuilt from them,
+    /// with each range's sampler report (the repairs it made and the widths
+    /// it held), or the first-order MF=32 rows of `covariance.arrow`, with
+    /// the reason the parameters were not sampled. See
+    /// [`crate::resonance_rates`]. Empty with the cross-section source off.
+    pub resonance_parameters: BTreeMap<String, crate::resonance_rates::ResonanceMethod>,
+    /// Unstable nuclides the material can reach whose half-life was perturbed.
+    pub half_lives_perturbed: BTreeSet<String>,
+    /// Unstable nuclides the material can reach whose evaluation states no
+    /// half-life uncertainty, so their half-life was held at nominal.
+    ///
+    /// Not a claim that the half-life is exact: the evaluation said nothing.
+    pub no_half_life_uncertainty: BTreeSet<String>,
+    /// Reachable unstable nuclides whose evaluation states a half-life sigma
+    /// no draw can carry (not finite, or not finite relative to the
+    /// half-life), so their half-life was held at nominal.
+    pub half_life_uncertainty_not_carried: BTreeSet<String>,
+    /// Half-life draws made, one per perturbed nuclide per replica.
+    ///
+    /// Each is a lognormal matched to the evaluation's mean and sigma, so none
+    /// can go non-positive and there is no floor to count.
+    pub half_lives_sampled: usize,
+    /// Reachable parents whose decay branching was perturbed: every moving
+    /// mode at its evaluated mean, within `[0, T]`, with every stated sigma
+    /// realised where the sum rule and non-negative ratios allow it.
+    pub decay_branchings_perturbed: BTreeSet<String>,
+    /// Reachable parents with several decay modes held at nominal for want of
+    /// sigmas: none is stated, or one is beside modes stating none that
+    /// cannot take up its change. Not a claim that the split is exact.
+    pub no_decay_branching_uncertainty: BTreeSet<String>,
+    /// Reachable parents held at nominal because every mode that could move
+    /// states a sigma no ratio in `[0, T]` with its mean can have,
+    /// `sigma^2 >= b (T - b)` (JENDL-5.0 has ratios near 1e-16 stating 0.04),
+    /// which describes no distribution.
+    pub decay_branchings_too_wide: BTreeSet<String>,
+    /// Perturbed parents with one or more modes held at their ratios: a sigma
+    /// no ratio with its mean can have, or no sigma beside another mode
+    /// stating none or beside stated modes that trade between themselves. The
+    /// other modes share what those leave.
+    pub decay_branchings_partly_held: BTreeSet<String>,
+    /// Perturbed parents with a mode drawn more than 0.1% from its stated
+    /// sigma. Either the largest stated sigma exceeds the sum of the others',
+    /// which no split keeping the total can realise, and it was drawn as that
+    /// sum; or the modes drawn beside the complement cannot carry the
+    /// correlation its sigma needs while staying non-negative (two small
+    /// skewed modes cannot be strongly anticorrelated), and it was drawn at
+    /// the nearest sigma they allow.
+    pub decay_branchings_sigma_adjusted: BTreeSet<String>,
+    /// Branching draws whose complement fell below zero, the other modes
+    /// together exceeding the total, and were pulled back towards the nominal
+    /// ratios, and draws made, one per perturbed parent per replica.
+    pub decay_branchings_floored: usize,
+    pub decay_branchings_sampled: usize,
+    /// Reachable unstable nuclides whose decay energy was perturbed.
+    pub decay_energies_perturbed: BTreeSet<String>,
+    /// Reachable unstable nuclides with a decay energy but no stated sigma on
+    /// it, held at nominal. Not a claim that it is exact.
+    pub no_decay_energy_uncertainty: BTreeSet<String>,
+    /// Reachable unstable nuclides with a decay-energy sigma, on the total or
+    /// on a component, that no draw can carry: stated on an energy of zero,
+    /// or not finite. That energy was held at nominal; any other component of
+    /// the same nuclide with a usable sigma was still drawn.
+    pub decay_energy_uncertainty_not_carried: BTreeSet<String>,
+    /// Reachable unstable nuclides with decay photon data whose normalisation,
+    /// line intensities or line energies were perturbed.
+    pub decay_photon_lines_perturbed: BTreeSet<String>,
+    /// Reachable unstable nuclides with decay photon data but no stated sigma
+    /// on any of it, held at nominal. Not a claim that it is exact.
+    pub no_decay_photon_line_uncertainty: BTreeSet<String>,
+    /// Of `decay_photon_lines_perturbed`, the nuclides with a photon spectrum
+    /// written the ENDF/B way, and the radiation of each such spectrum
+    /// (`"gamma"`, `"xray"`): a normalisation FD of exactly 1 with no sigma,
+    /// and a sigma on its lines. The normalisation's sigma is folded into
+    /// every dRI there, so how much of them the lines share is not stated, and
+    /// these spectra are where most of the range between a photon output's
+    /// `std_dev` and `std_dev_correlated` comes from.
+    pub decay_photon_spectra_folded: BTreeMap<String, Vec<String>>,
+    /// Reachable unstable nuclides with a decay photon sigma that no draw can
+    /// carry: stated on a normalisation, intensity or energy of zero, or not
+    /// finite. That value was held at nominal; every other value of the same
+    /// nuclide with a usable sigma was still drawn.
+    pub decay_photon_line_uncertainty_not_carried: BTreeSet<String>,
+    /// Reachable fissioning parents whose independent yields were perturbed.
+    pub fission_yields_perturbed: BTreeSet<String>,
+    /// Reachable fissioning parents whose yields state no DY, or whose chain
+    /// carries no evaluated yields to read one from, held at nominal. Not a
+    /// claim that they are exact.
+    pub no_fission_yield_uncertainty: BTreeSet<String>,
+    /// Reachable fissioning parents with a DY no draw can carry (on a zero
+    /// yield, or not finite). That yield was held; every other yield of the
+    /// parent with a usable DY was still drawn.
+    pub fission_yield_uncertainty_not_carried: BTreeSet<String>,
+    /// Reachable fissioning parents whose tape yields, named and summed by the
+    /// converter's rule, do not give back the yields the solver reads, held
+    /// at nominal rather than drawn through a mapping their yields were not
+    /// built with.
+    pub fission_yields_mapping_mismatch: BTreeSet<String>,
+    /// Reachable `(parent, reaction)` whose isomeric split was drawn from the
+    /// MF=40 covariance of at least one of its final states.
+    pub isomer_branchings_perturbed: BTreeSet<(String, String)>,
+    /// Reachable `(parent, reaction)` with a split that can move (a list of
+    /// several states, or of isomers whose ground takes the rest) and no
+    /// stated MF=40 covariance on any state the run folds, held at their
+    /// nominal shares. Not a claim that the split is exact: the evaluation
+    /// said nothing, or the library publishes no `branching_covariance.arrow`
+    /// (JENDL-5.0).
+    pub no_isomer_branching_uncertainty: BTreeSet<(String, String)>,
+    /// Per reachable parent, its MF=40 blocks not used, counted by why: the
+    /// partner in another evaluation or not an MF=10 production, an NC block,
+    /// an absolute or short-range layout, a malformed block, or a state (or
+    /// partner) the branching rule folds no curve for. A gap.
+    pub isomer_branching_blocks_not_used: BTreeMap<String, BTreeMap<String, usize>>,
+    /// Drawn parents whose MF=40 matrix was not positive semi-definite past
+    /// round-off and was repaired to the nearest correlation matrix, every
+    /// interval keeping its evaluated sigma (as for MF=33, see
+    /// [`Info::covariance_repaired`]). A gap.
+    pub isomer_branching_covariance_repaired:
+        BTreeMap<String, crate::covariance_sample::FieldRepair>,
+    /// Drawn parents whose MF=40 matrix is not a lognormal's, with how far
+    /// the sampled one is from it. Not a gap, as for
+    /// [`Info::lognormal_not_carried`].
+    pub isomer_branching_lognormal_not_carried:
+        BTreeMap<String, crate::covariance_sample::LognormalLimit>,
+    /// Per `(parent, reaction, product)`, the relative sigma of the product's
+    /// stated production that MF=40 gives, folded against the spectrum, the
+    /// largest over the run's spectra: what the evaluation says before the
+    /// split re-normalises it.
+    pub isomer_production_sigma: BTreeMap<(String, String, String), f64>,
+    /// MF=40 draws made, one per drawn parent per replica.
+    pub isomer_branchings_sampled: usize,
+    /// With displacement damage asked for and the cross sections perturbed,
+    /// per nuclide of the starting composition whose damage energy a draw
+    /// moves: the share of its stored MT=444 rate its reactions' deposits
+    /// reproduce, `explained`, and the relative sigma of the drawn rate,
+    /// `sigma`, each weighted over the run's spectra by fluence. What the
+    /// deposits leave out (fission's share, for a fissile nuclide) is held at
+    /// nominal, so `1 - explained` is the gap; transport lists the same thing
+    /// as `unexplained_deposit`.
+    pub damage_energy: BTreeMap<String, DamageEnergyCoverage>,
+    /// Per `(parent, reaction, product)`, how many list draws (one per
+    /// replica per spectrum) gave the product's stated production a value
+    /// that, with the list's other productions, came out above the drawn
+    /// reaction total, and scaled it back to it. Only a list whose ground
+    /// takes the rest (isomers listed alone, and every `(n,n')` list) can
+    /// clip; every stated product of a clipped list draw is counted.
+    pub isomer_branchings_clipped: BTreeMap<(String, String, String), usize>,
+    /// Tallied rates sampled statistically, the totals and partials together;
+    /// zero off the transport path or with the source off.
+    pub statistical_rates: usize,
+    /// Statistically drawn rates that came out negative and were floored.
+    pub statistical_floored: usize,
+    pub statistical_sampled: usize,
+    /// Inputs this run held at their nominal values, for the record.
+    ///
+    /// Every input the answer depends on and no source here samples, whether
+    /// the data carries an uncertainty for it or not. MF=33 blocks that were
+    /// present but could not be used are counted in `skipped_cross_material`,
+    /// `skipped_other_file`, `skipped_nc`, `unsupported_layouts` and
+    /// `malformed_blocks`, and lumped reactions that could not be given to a
+    /// reaction in `lumped_covariance_not_assignable`. A pair stored in both
+    /// orientations is used once, and a second copy that disagrees with the
+    /// first is reported in `mirrored_disagree`. A block on a reaction the
+    /// fold does not reach (neither a channel nor one a channel's NC
+    /// derivation names) is neither listed nor counted: the chain has no rate
+    /// for it to be the uncertainty of. A partial-level section such as
+    /// MT=600-849 is reached, and its blocks folded and counted, when an LTY=0
+    /// NC block names it.
+    pub not_perturbed: Vec<String>,
+    /// Which sources this run perturbed, by name.
+    pub sources: Vec<String>,
+}
+
+impl Info {
+    /// `collapsed_flat` is whether the rates the fold was divided by are the
+    /// collapse's, dilute or self-shielded, under the flat within-group
+    /// weight, whose shares the fold computed under the same flux. Only then,
+    /// and with no channel's partials disagreeing with its rate, is the
+    /// production total the covered share; a tallied rate is not. An error
+    /// when a share is not one, see [`Coverage::rate_fraction_total`].
+    pub(crate) fn from_fold(
+        coverage: &Coverage,
+        sigmas: &SigmaReport,
+        collapsed_flat: bool,
+    ) -> Result<Self, String> {
+        let total = coverage.rate_fraction_total()?;
+        Ok(Self {
+            perturbed: coverage.covered.clone(),
+            no_covariance_data: coverage.without_data.clone(),
+            skipped_cross_material: coverage.skipped_cross_material.clone(),
+            applied_cross_material: coverage.applied_cross_material.clone(),
+            skipped_other_file: coverage.skipped_other_file.clone(),
+            mirrored_disagree: coverage.mirrored_disagree.clone(),
+            skipped_nc: coverage.skipped_nc.clone(),
+            unsupported_layouts: coverage.unsupported_layouts.clone(),
+            malformed_blocks: coverage.malformed,
+            rate_fraction_covered: coverage.rate_fraction_covered.clone(),
+            partials_above_rate: coverage.partials_above_rate.clone(),
+            partials_below_rate: coverage.partials_below_rate.clone(),
+            derived_opposing_uncorrelated: coverage.derived_opposing_uncorrelated.clone(),
+            lumped_covariance_not_assignable: coverage.lumped_covariance_not_assignable.clone(),
+            rate_fraction_covered_total: total.filter(|_| {
+                collapsed_flat
+                    && coverage.partials_above_rate.is_empty()
+                    && coverage.partials_below_rate.is_empty()
+            }),
+            // Distinct nuclides, not a count over spectra: one evaluation
+            // folded against three spectra is one evaluation that needed it.
+            covariance_repaired: sigmas.repaired.clone(),
+            covariance_repairs: sigmas.repairs.clone(),
+            covariance_repaired_outside_bound: sigmas.repaired_outside_bound.clone(),
+            worst_sigma_change: sigmas.worst_sigma_change,
+            rate_weighted_sigma_change: sigmas.rate_weighted_sigma_change(),
+            sigma_at_least_one: sigmas.sigma_at_least_one.clone(),
+            sigma_at_least_ten: sigmas.sigma_at_least_ten.clone(),
+            sigma_at_least_one_outside_bound: sigmas.sigma_at_least_one_outside_bound.clone(),
+            not_perturbed: [
+                "isomeric branching (MF=9/MF=10) of a reaction with no stated MF=40 covariance, in no_isomer_branching_uncertainty",
+                "MT=5 product multiplicities (MF=6 MT=5), whose split of the perturbed MT=5 rate is held",
+                "covariance with another evaluation the run does not hold (MAT1 naming a material not in the run, in skipped_cross_material)",
+                "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3, which no library yani reads states)",
+                "NC-derived covariance that cannot be derived (MF=33 NC LTY 1-4, which no library yani reads states, or LTY=0 in skipped_nc)",
+                "lumped-reaction covariance stated in barns, which no relative share carries to a component (MF=33 MT=851-870, in lumped_covariance_not_assignable)",
+                "resonance-parameter covariance (MF=32) of a range neither sampled nor written into covariance.arrow",
+                "decay photon spectrum covariance and continuum shape (MF=8 MT=457 LCOV, which no library states)",
+                "photon attenuation coefficient (XCOM)",
+                "air energy-absorption coefficient (NIST SRD 126)",
+                "fluence-to-dose coefficient (ICRP-116)",
+                "contact-dose build-up factor",
+                "material composition",
+                "material density",
+                "natural isotopic abundance",
+                "atomic mass (AME2020)",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            ..Default::default()
+        })
+    }
+
+    /// Record how a replica run ended: the count, the target, every tracked
+    /// sigma still short of it, and whether the cap stopped it.
+    pub(crate) fn conclude(
+        &mut self,
+        ensemble: &mut Ensemble,
+        chain: &HashMap<String, yani::ChainNuclide>,
+        request: &DataUncertainty,
+    ) {
+        ensemble.track_derived(chain);
+        self.samples = ensemble.replicas();
+        self.convergence = request.convergence;
+        self.unconverged = ensemble.unconverged(request.convergence);
+        self.converged = self.unconverged.is_empty();
+        self.noise_removed = ensemble.noise_scale().is_some();
+        self.noisy = ensemble.noisy();
+        self.hit_cap = request.samples.is_none() && !self.converged;
+    }
+
+    pub(crate) fn add_flux_coverage(&mut self, c: &crate::flux_uncertainty::FluxCoverage) {
+        self.spectra_with_flux_sigma = c.spectra_with_sigma;
+        self.spectra_without_flux_sigma = c.spectra_without_sigma;
+        self.flux_rates_without_terms = c.rates_without_terms.clone();
+        self.flux_bins_sampled = c.bins_sampled;
+        self.flux_lognormal_not_carried = c.lognormal_not_carried.clone();
+    }
+
+    /// Whether anything was left out, or is inconsistent, that a reader should
+    /// know about.
+    pub fn has_gaps(&self) -> bool {
+        !self.no_covariance_data.is_empty()
+            || !self.skipped_cross_material.is_empty()
+            || !self.skipped_other_file.is_empty()
+            || !self.mirrored_disagree.is_empty()
+            || !self.skipped_nc.is_empty()
+            || !self.unsupported_layouts.is_empty()
+            || self.malformed_blocks > 0
+            || !self.partials_above_rate.is_empty()
+            || !self.partials_below_rate.is_empty()
+            || !self.derived_opposing_uncorrelated.is_empty()
+            || !self.lumped_covariance_not_assignable.is_empty()
+            || !self.covariance_repaired.is_empty()
+            || !self.cross_material_adjusted.is_empty()
+            || !self.covariance_warnings.is_empty()
+            || !self.covariance_repaired_outside_bound.is_empty()
+            || self.spectra_without_flux_sigma > 0
+            || !self.flux_rates_without_terms.is_empty()
+            || !self.no_half_life_uncertainty.is_empty()
+            || !self.no_decay_branching_uncertainty.is_empty()
+            || !self.decay_branchings_too_wide.is_empty()
+            || !self.decay_branchings_partly_held.is_empty()
+            || !self.decay_branchings_sigma_adjusted.is_empty()
+            || !self.no_decay_energy_uncertainty.is_empty()
+            || !self.half_life_uncertainty_not_carried.is_empty()
+            || !self.decay_energy_uncertainty_not_carried.is_empty()
+            || !self.no_decay_photon_line_uncertainty.is_empty()
+            || !self.decay_photon_line_uncertainty_not_carried.is_empty()
+            || !self.no_fission_yield_uncertainty.is_empty()
+            || !self.fission_yield_uncertainty_not_carried.is_empty()
+            || !self.fission_yields_mapping_mismatch.is_empty()
+            || !self.no_isomer_branching_uncertainty.is_empty()
+            || !self.isomer_branching_blocks_not_used.is_empty()
+            || !self.isomer_branching_covariance_repaired.is_empty()
+    }
+}
+
+/// Running mean and second moment for one nuclide at one step.
+///
+/// Welford rather than a two-pass sum: for a run whose evaluations carry no
+/// covariance every replica is the same inventory, and Welford returns a
+/// standard deviation of exactly zero there, where `sum / n` would leave the
+/// mean a rounding off the sample and report a sigma a few ulps wide. On a log
+/// axis that reads as a real one. Shared with `derived`, so a density sigma and
+/// a decay-heat sigma are the same statistic and not two spellings of it.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Moments {
+    pub(crate) n: u64,
+    pub(crate) mean: f64,
+    m2: f64,
+}
+
+impl Moments {
+    pub(crate) fn update(&mut self, x: f64) {
+        self.n += 1;
+        let d = x - self.mean;
+        self.mean += d / self.n as f64;
+        self.m2 += d * (x - self.mean);
+    }
+
+    /// The sample standard deviation, or zero below two samples.
+    pub(crate) fn std_dev(&self) -> f64 {
+        if self.n < 2 {
+            return 0.0;
+        }
+        (self.m2 / (self.n - 1) as f64).max(0.0).sqrt()
+    }
+}
+
+/// Accumulates the ensemble of perturbed inventories.
+///
+/// One [`Moments`] per (step, nuclide), plus the per-replica densities so a
+/// derived quantity can be evaluated per sample rather than from the mean. That
+/// distinction is load-bearing for anything summed over nuclides: evaluating
+/// from the mean throws away the inter-nuclide correlations the resampling
+/// exists to capture.
+#[derive(Debug, Default, Clone)]
+pub struct Ensemble {
+    /// `[step][nuclide]`, one entry per schedule step.
+    moments: Vec<HashMap<String, Moments>>,
+    /// `[replica][step][nuclide]`.
+    samples: Vec<Vec<HashMap<String, f64>>>,
+    /// `[replica][spectrum][nuclide]`: the replica's damage-energy rate over
+    /// the nominal one, for the nuclides of the starting composition, when
+    /// displacement damage was asked for. A nuclide absent, or a replica
+    /// absent, is at nominal.
+    pub(crate) damage_factors: Vec<Vec<HashMap<String, f64>>>,
+    /// `[replica]`: the half-lives [s] that replica was solved with, for the
+    /// nuclides whose half-life was perturbed. Empty maps when half-lives were
+    /// not perturbed.
+    half_lives: Vec<HashMap<String, f64>>,
+    /// `[replica][step]`: the activity, decay heat and decay photon line rate
+    /// per cm^3 the stopping rule tracks, for the replicas evaluated so far.
+    tracked: Vec<Vec<[f64; 3]>>,
+    /// `[replica][step][nuclide]`: each replica solved again from the even
+    /// half of the transport's histories, when its replica tallies carried
+    /// one (`ReplicaTallied::even`); empty otherwise.
+    even: Vec<Vec<HashMap<String, f64>>>,
+    /// `[replica][step]`: [`Self::tracked`] on the even-half inventories.
+    tracked_even: Vec<Vec<[f64; 3]>>,
+    /// The even half's histories over the odd half's, when [`Self::even`] is
+    /// kept: what turns the spread of the even-half differences into the
+    /// noise variance (see [`spread_and_noise`]).
+    noise_scale: Option<f64>,
+    /// `[step][nuclide]`: the Monte Carlo noise variance in each density's
+    /// replica spread, filled by [`Self::fold_absences`] when
+    /// [`Self::even`] is kept.
+    noise: Vec<HashMap<String, f64>>,
+    /// Where the uncertainty comes from, when it was asked for.
+    pub attribution: Option<Attribution>,
+    /// The seed decay energies are drawn from, per replica and nuclide, when
+    /// they were perturbed. They do not change the inventory, so they are
+    /// drawn where decay heat is evaluated rather than stored.
+    pub decay_energy_seed: Option<u64>,
+    /// The seed decay photon lines and continua are drawn from, per replica
+    /// and nuclide, when they were perturbed. Like the decay energies they do
+    /// not change the inventory, so they are drawn where the photon spectrum
+    /// and contact dose are evaluated.
+    pub decay_photon_seed: Option<u64>,
+}
+
+/// Where an inventory's uncertainty comes from.
+///
+/// Two levels, which answer different questions:
+///
+/// - `by_source` is exact: the ensemble re-run with each source alone, so a
+///   nuclide's statistical and nuclear-data variances are measured the same
+///   way the total is. Sources are independent, so they sum to the total up to
+///   interaction and sampling noise, which is the unattributed residual. One
+///   interaction is by construction: an isomer listed alone, with a stated
+///   MF=40 covariance, takes the reaction's MF=33 uncertainty with
+///   `cross_sections` alone and its own MF=40 one in its place with
+///   `isomer_branching` on, so it is counted under both.
+/// - `contributors` is first order: within the cross sections, the
+///   half-lives and the decay branchings, one deterministic solve per nuclide
+///   (and per reaction) gives its sensitivity, and its variance is that
+///   squared against its own stated uncertainty. It says which evaluation to
+///   look at, not the total, which is always the resampled one. On a
+///   transport run its cross-section terms fold against the nominal flux
+///   while the replicas carry the flux's response, so for a self-shielded
+///   resonance they overstate the share, and the cross sections' `linearity`
+///   is then `None`.
+#[derive(Debug, Clone, Default)]
+pub struct Attribution {
+    /// Source name -> `[step][nuclide]` variance, from that source alone.
+    pub by_source: BTreeMap<String, Vec<HashMap<String, f64>>>,
+    /// First-order contributions, the largest-reaching first.
+    pub contributors: Vec<Contributor>,
+    /// How well first order explains the replicas, per source and as
+    /// `"all"` for every source together: `[step][nuclide]`. First order has
+    /// terms only for `cross_sections`, `half_life` and `decay_branching`.
+    /// `None` for every other source (`flux_spectrum`, `statistical`,
+    /// `decay_energy`, `decay_photon_lines`, `fission_yield`,
+    /// `isomer_branching`), whose variance first order does not try to
+    /// explain, and for `"all"` when any applied source is one of those. The
+    /// default source set applies several of them (`flux_spectrum` or
+    /// `statistical`, `decay_energy`, `decay_photon_lines`, `fission_yield`
+    /// and `isomer_branching`), so with the defaults `"all"` is `None`: restrict
+    /// the sources to the three above for an `"all"` entry.
+    pub linearity: BTreeMap<String, Option<Vec<HashMap<String, Linearity>>>>,
+}
+
+/// The residual share above which first order is flagged as missing a real
+/// part of an output's variance: past a tenth, a first-order ranking can
+/// misorder the inputs that matter.
+pub const LINEARITY_FLAG: f64 = 0.1;
+
+/// How well the first-order contributions explain one output's replicas.
+///
+/// Each replica's first-order prediction is the nominal output plus every
+/// sensitivity times that replica's own relative change in its input (the
+/// perturbed rate over the nominal, the drawn half-life over the nominal, the
+/// drawn branching over the nominal), so no extra solve is made. Compared
+/// with what the replica actually produced, this measures what first order
+/// leaves out: nonlinearity, and interactions between inputs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Linearity {
+    /// Squared correlation between the replicas and their first-order
+    /// predictions.
+    pub r2: f64,
+    /// `Var(actual - predicted) / Var(actual)`: the share of the output's
+    /// variance first order does not account for.
+    pub residual_share: f64,
+    /// Per (source, nuclide) contributor, the squared correlation between the
+    /// replicas and that contributor's first-order term alone.
+    pub by_contributor: BTreeMap<(String, String), f64>,
+    /// Whether the contributor ranked first by first-order variance is also
+    /// the one whose term correlates most with the replicas.
+    pub ranking_agrees: bool,
+    /// `residual_share` above [`LINEARITY_FLAG`], or the ranking disagrees.
+    pub flagged: bool,
+}
+
+/// One first-order contribution to the inventory variance.
+#[derive(Debug, Clone)]
+pub struct Contributor {
+    /// The source it belongs to, e.g. `cross_sections`.
+    pub source: String,
+    /// The nuclide whose data it is.
+    pub nuclide: String,
+    /// The reaction, for one cross-section channel alone; `None` for the
+    /// nuclide's whole evaluation (every channel with its correlations) or for
+    /// a half-life. A `decay_branching` contributor is a parent's whole
+    /// split, every direction of it, so `None` too.
+    pub reaction: Option<String>,
+    /// `[step][nuclide]` variance it contributes, only where it is non-zero.
+    pub variance: Vec<HashMap<String, f64>>,
+}
+
+impl Ensemble {
+    pub(crate) fn new(n_steps: usize) -> Self {
+        Self {
+            moments: vec![HashMap::new(); n_steps],
+            samples: Vec::new(),
+            damage_factors: Vec::new(),
+            half_lives: Vec::new(),
+            tracked: Vec::new(),
+            even: Vec::new(),
+            tracked_even: Vec::new(),
+            noise_scale: None,
+            noise: Vec::new(),
+            attribution: None,
+            decay_energy_seed: None,
+            decay_photon_seed: None,
+        }
+    }
+
+    /// Record one replica's per-step inventories, solved with nominal
+    /// half-lives.
+    #[cfg(test)]
+    pub(crate) fn push(&mut self, per_step: Vec<HashMap<String, f64>>) {
+        self.push_with_half_lives(per_step, HashMap::new());
+    }
+
+    /// Record one replica's per-step inventories and the perturbed half-lives
+    /// it was solved with, so a quantity derived from its inventory uses them
+    /// too.
+    pub(crate) fn push_with_half_lives(
+        &mut self,
+        per_step: Vec<HashMap<String, f64>>,
+        half_lives: HashMap<String, f64>,
+    ) {
+        self.half_lives.push(half_lives);
+        for (step, densities) in per_step.iter().enumerate() {
+            let Some(slot) = self.moments.get_mut(step) else {
+                continue;
+            };
+            for (name, &value) in densities {
+                slot.entry(name.clone()).or_default().update(value);
+            }
+        }
+        self.samples.push(per_step);
+    }
+
+    /// Keep, for the replica pushed next (or last), its inventories solved from
+    /// the even half of the transport's histories.
+    pub(crate) fn push_even(&mut self, per_step: Vec<HashMap<String, f64>>) {
+        self.even.push(per_step);
+    }
+
+    /// Set the even half's histories over the odd half's, for
+    /// [`Self::push_even`]'s inventories.
+    pub(crate) fn set_noise_scale(&mut self, scale: f64) {
+        self.noise_scale = Some(scale);
+    }
+
+    /// The even half's histories over the odd half's, when the Monte Carlo
+    /// noise of the replicas is measured: every replica was then solved a
+    /// second time from the even half of the transport's histories.
+    pub fn noise_scale(&self) -> Option<f64> {
+        self.noise_scale
+            .filter(|_| !self.samples.is_empty() && self.even.len() == self.samples.len())
+    }
+
+    /// A nuclide absent from a replica is a zero in that replica, not a gap.
+    ///
+    /// The stepper drops anything at or below its density floor, so a nuclide
+    /// present in one replica and absent from another differs by less than the
+    /// floor. Folding those in as zeros keeps every moment over the same number
+    /// of samples, without which the variance would be computed over a
+    /// different subset per nuclide.
+    pub(crate) fn fold_absences(&mut self) {
+        let replicas = self.samples.len() as u64;
+        for slot in &mut self.moments {
+            for m in slot.values_mut() {
+                while m.n < replicas {
+                    m.update(0.0);
+                }
+            }
+        }
+        self.noise.clear();
+        let Some(scale) = self.noise_scale() else {
+            return;
+        };
+        let mut values = Vec::with_capacity(self.samples.len());
+        let mut even = Vec::with_capacity(self.samples.len());
+        for step in 0..self.moments.len() {
+            let mut noise = HashMap::new();
+            let names: Vec<String> = self.moments[step].keys().cloned().collect();
+            for name in names {
+                values.clear();
+                even.clear();
+                values.extend(self.samples.iter().map(|r| density(r, step, &name)));
+                even.extend(self.even.iter().map(|r| density(r, step, &name)));
+                let (_, n) = spread_and_noise(&values, &even, scale);
+                noise.insert(name, n);
+            }
+            self.noise.push(noise);
+        }
+    }
+
+    /// The Monte Carlo noise variance in a nuclide's replica spread at
+    /// `step`, zero when it is not measured.
+    fn noise_variance(&self, step: usize, nuclide: &str) -> f64 {
+        self.noise
+            .get(step)
+            .and_then(|m| m.get(nuclide))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    pub fn replicas(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// Standard deviation of every nuclide's density at `step`, with the
+    /// Monte Carlo noise of the replicas removed where it was measured
+    /// ([`Self::noise_scale`]): `sqrt(spread^2 - noise^2)`, zero where the
+    /// noise is the larger.
+    pub fn std_dev_at(&self, step: usize) -> HashMap<String, f64> {
+        self.moments
+            .get(step)
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| (k.clone(), self.removed(step, k, v)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn removed(&self, step: usize, nuclide: &str, m: &Moments) -> f64 {
+        let s = m.std_dev();
+        (s * s - self.noise_variance(step, nuclide)).max(0.0).sqrt()
+    }
+
+    /// One nuclide's standard deviation across every step, as
+    /// [`Self::std_dev_at`] gives it.
+    pub fn std_dev_evolution(&self, nuclide: &str) -> Vec<f64> {
+        self.moments
+            .iter()
+            .enumerate()
+            .map(|(step, m)| {
+                m.get(nuclide)
+                    .map_or(0.0, |v| self.removed(step, nuclide, v))
+            })
+            .collect()
+    }
+
+    /// One nuclide's replica spread across every step, the standard deviation
+    /// of the replicas before any noise is removed.
+    pub fn replica_spread_evolution(&self, nuclide: &str) -> Vec<f64> {
+        self.moments
+            .iter()
+            .map(|m| m.get(nuclide).map_or(0.0, Moments::std_dev))
+            .collect()
+    }
+
+    /// One nuclide's Monte Carlo noise across every step, as the standard
+    /// deviation removed from its replica spread; zeros when it was not
+    /// measured.
+    pub fn noise_evolution(&self, nuclide: &str) -> Vec<f64> {
+        (0..self.moments.len())
+            .map(|step| self.noise_variance(step, nuclide).max(0.0).sqrt())
+            .collect()
+    }
+
+    /// The standard error of a nuclide's [`Self::std_dev_at`] at `step`:
+    /// [`std_dev_standard_error`] of its replicas, or with the noise removed
+    /// [`noise_removed_standard_error`].
+    pub fn std_dev_standard_error_at(&self, step: usize, nuclide: &str) -> Option<f64> {
+        let values = self.samples_at(step, nuclide);
+        match self.noise_scale() {
+            Some(scale) => {
+                noise_removed_standard_error(&values, &self.even_samples_at(step, nuclide), scale)
+            }
+            None => std_dev_standard_error(&values),
+        }
+    }
+
+    /// One nuclide's density in every replica at `step`, solved from the even
+    /// half of the transport's histories; empty when that was not done.
+    pub fn even_samples_at(&self, step: usize, nuclide: &str) -> Vec<f64> {
+        self.even
+            .iter()
+            .map(|r| density(r, step, nuclide))
+            .collect()
+    }
+
+    /// Every replica's full inventory at `step` solved from the even half of
+    /// the transport's histories, in replica order; empty when that was not
+    /// done (see [`Self::noise_scale`]).
+    pub fn even_inventories_at(&self, step: usize) -> Vec<&HashMap<String, f64>> {
+        if self.noise_scale().is_none() {
+            return Vec::new();
+        }
+        self.even.iter().filter_map(|r| r.get(step)).collect()
+    }
+
+    /// One nuclide's density in every replica at `step`, for a derived quantity
+    /// that has to be evaluated per sample.
+    pub fn samples_at(&self, step: usize, nuclide: &str) -> Vec<f64> {
+        self.samples
+            .iter()
+            .map(|r| density(r, step, nuclide))
+            .collect()
+    }
+
+    /// The perturbed half-lives [s] each replica was solved with, by replica.
+    ///
+    /// Empty maps when half-lives were not perturbed. A nuclide absent from a
+    /// replica's map kept its nominal half-life there.
+    pub fn half_lives(&self) -> &[HashMap<String, f64>] {
+        &self.half_lives
+    }
+
+    /// Replica `replica`'s inventory at every schedule step.
+    pub(crate) fn replica_inventories(
+        &self,
+        replica: usize,
+    ) -> impl Iterator<Item = &HashMap<String, f64>> {
+        self.samples.get(replica).into_iter().flatten()
+    }
+
+    /// Replica `replica`'s damage-energy rate of `nuclide` under `spectrum`
+    /// over the nominal one: 1 where it was not moved.
+    pub(crate) fn damage_factor(&self, replica: usize, spectrum: usize, nuclide: &str) -> f64 {
+        self.damage_factors
+            .get(replica)
+            .and_then(|r| r.get(spectrum))
+            .and_then(|s| s.get(nuclide))
+            .copied()
+            .unwrap_or(1.0)
+    }
+
+    /// Every replica's full inventory at `step`.
+    ///
+    /// The shape a derived quantity wants: `activity`, `decay_heat` and the
+    /// decay-photon spectrum are all functions of a whole inventory, and
+    /// evaluating them once per entry here is what keeps their uncertainty
+    /// correlated across nuclides.
+    pub fn inventories_at(&self, step: usize) -> Vec<&HashMap<String, f64>> {
+        self.samples.iter().filter_map(|r| r.get(step)).collect()
+    }
+
+    /// Evaluate the derived totals the stopping rule tracks on every replica
+    /// not yet evaluated, each with its own half-lives, decay energies and
+    /// decay photon data.
+    ///
+    /// Once per replica, so a run that judges after every block pays for each
+    /// replica's totals once.
+    pub(crate) fn track_derived(&mut self, chain: &HashMap<String, yani::ChainNuclide>) {
+        let evaluate = |inventories: &[Vec<HashMap<String, f64>>], k: usize| -> Vec<[f64; 3]> {
+            let half_lives = &self.half_lives[k];
+            inventories[k]
+                .iter()
+                .map(|inventory| {
+                    crate::derived::tracked_totals(
+                        inventory,
+                        chain,
+                        half_lives,
+                        self.decay_energy_seed.map(|seed| (seed, k as u64)),
+                        self.decay_photon_seed.map(|seed| (seed, k as u64)),
+                    )
+                })
+                .collect()
+        };
+        let fresh =
+            |inventories: &[Vec<HashMap<String, f64>>], from: usize| -> Vec<Vec<[f64; 3]>> {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    use rayon::prelude::*;
+                    (from..inventories.len())
+                        .into_par_iter()
+                        .map(|k| evaluate(inventories, k))
+                        .collect()
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    (from..inventories.len())
+                        .map(|k| evaluate(inventories, k))
+                        .collect()
+                }
+            };
+        let tracked = fresh(&self.samples, self.tracked.len());
+        let tracked_even = fresh(&self.even, self.tracked_even.len());
+        self.tracked.extend(tracked);
+        self.tracked_even.extend(tracked_even);
+    }
+
+    /// Whether an adaptive run may stop: at least [`MIN_SAMPLES`] replicas,
+    /// and every tracked sigma's `SE(sigma) / sigma` below `convergence` (see
+    /// [`Self::unconverged`]).
+    pub(crate) fn may_stop(
+        &mut self,
+        chain: &HashMap<String, yani::ChainNuclide>,
+        convergence: f64,
+    ) -> bool {
+        if self.replicas() < MIN_SAMPLES {
+            return false;
+        }
+        self.track_derived(chain);
+        self.unconverged(convergence).is_empty()
+    }
+
+    /// Call `visit` with every tracked output at every step, its value in
+    /// each replica and, when the noise is measured, in each replica solved
+    /// from the even half.
+    ///
+    /// Tracked, at every schedule step: the density of each nuclide within
+    /// [`SIGNIFICANCE`] of that step's largest, and the total activity, decay
+    /// heat and decay photon line rate evaluated so far by
+    /// [`Self::track_derived`].
+    fn visit_tracked(&self, mut visit: impl FnMut(Output, usize, &[f64], Option<&[f64]>)) {
+        let noise = self.noise_scale().is_some();
+        let mut values = Vec::with_capacity(self.samples.len());
+        let mut even = Vec::with_capacity(self.even.len());
+        for (step, slot) in self.moments.iter().enumerate() {
+            // The running mean is over the replicas a nuclide appeared in;
+            // scaled to all of them, an absence reads as the zero it is.
+            let replicas = self.samples.len().max(1) as f64;
+            let means: Vec<(&String, f64)> = slot
+                .iter()
+                .map(|(name, m)| (name, m.mean * m.n as f64 / replicas))
+                .collect();
+            let max = means.iter().map(|(_, m)| m.abs()).fold(0.0_f64, f64::max);
+            for (name, mean) in means {
+                if max <= 0.0 || mean.abs() < max * SIGNIFICANCE {
+                    continue;
+                }
+                values.clear();
+                values.extend(self.samples.iter().map(|r| density(r, step, name)));
+                even.clear();
+                if noise {
+                    even.extend(self.even.iter().map(|r| density(r, step, name)));
+                }
+                visit(
+                    Output::Density(name.clone()),
+                    step + 1,
+                    &values,
+                    noise.then_some(&even[..]),
+                );
+            }
+            if self.tracked.is_empty() {
+                continue;
+            }
+            let derived_noise = noise && self.tracked_even.len() == self.tracked.len();
+            for (q, output) in [Output::Activity, Output::DecayHeat, Output::DecayPhotonRate]
+                .into_iter()
+                .enumerate()
+            {
+                values.clear();
+                values.extend(
+                    self.tracked
+                        .iter()
+                        .filter_map(|r| r.get(step).map(|t| t[q])),
+                );
+                even.clear();
+                if derived_noise {
+                    even.extend(
+                        self.tracked_even
+                            .iter()
+                            .filter_map(|r| r.get(step).map(|t| t[q])),
+                    );
+                }
+                visit(
+                    output,
+                    step + 1,
+                    &values,
+                    derived_noise.then_some(&even[..]),
+                );
+            }
+        }
+    }
+
+    /// Every tracked sigma that misses `convergence`, worst first.
+    ///
+    /// Tracked, at every schedule step: the density of each nuclide within
+    /// [`SIGNIFICANCE`] of that step's largest, and the total activity, decay
+    /// heat and decay photon line rate evaluated so far by
+    /// [`Self::track_derived`]. Every step, not only the last, since a cooling
+    /// step is often the one read, and an output noisy at one step only keeps
+    /// the run going. The judgement is `SE(sigma) / sigma` from
+    /// [`std_dev_standard_error`], so a heavy-tailed output needs more
+    /// replicas than a Gaussian one, and with the Monte Carlo noise removed
+    /// from [`noise_removed_standard_error`] on the sigma reported. An output
+    /// with no spread, or a sigma under [`NEGLIGIBLE`] of its mean, has
+    /// nothing worth converging and is not tracked.
+    ///
+    /// Not tracked: the photon spectrum line by line and the contact dose,
+    /// whose dose quantity and build-up factor are chosen when it is read and
+    /// whose attenuation data a run does not load. Their emitters' densities
+    /// and the summed line rate are tracked, and every estimate reports its
+    /// own standard error.
+    pub fn unconverged(&self, convergence: f64) -> Vec<Unconverged> {
+        let mut out = Vec::new();
+        let scale = self.noise_scale().unwrap_or(0.0);
+        self.visit_tracked(|output, step, values, even| {
+            let reached = match even {
+                Some(even) => misses_noise_removed(values, even, scale, convergence),
+                None => misses(values, convergence),
+            };
+            if let Some(reached) = reached {
+                out.push(Unconverged {
+                    output,
+                    step,
+                    relative_standard_error: reached,
+                });
+            }
+        });
+        worst_first(&mut out);
+        out
+    }
+
+    /// Every tracked output whose removed Monte Carlo noise variance exceeds
+    /// [`NOISE_FLAG_FRACTION`] of the nuclear-data variance left, the largest
+    /// share first; empty when the noise was not measured. An output with a
+    /// spread under [`NEGLIGIBLE`] of its mean is not judged.
+    pub fn noisy(&self) -> Vec<NoisyOutput> {
+        let Some(scale) = self.noise_scale() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        self.visit_tracked(|output, step, values, even| {
+            let Some(even) = even else {
+                return;
+            };
+            let (spread, noise) = spread_and_noise(values, even, scale);
+            let mean = values.iter().sum::<f64>() / values.len().max(1) as f64;
+            if spread <= 0.0 || spread.sqrt() <= NEGLIGIBLE * mean.abs() {
+                return;
+            }
+            let left = spread - noise;
+            if noise > NOISE_FLAG_FRACTION * left.max(0.0) {
+                out.push(NoisyOutput {
+                    output,
+                    step,
+                    replica_spread: spread.sqrt(),
+                    noise: noise.max(0.0).sqrt(),
+                    std_dev: left.max(0.0).sqrt(),
+                });
+            }
+        });
+        let share = |n: &NoisyOutput| {
+            if n.std_dev > 0.0 {
+                (n.noise / n.std_dev).powi(2)
+            } else {
+                f64::INFINITY
+            }
+        };
+        out.sort_by(|a, b| {
+            share(b)
+                .total_cmp(&share(a))
+                .then_with(|| a.step.cmp(&b.step))
+                .then_with(|| a.output.cmp(&b.output))
+        });
+        out
+    }
+}
+
+/// A nuclide's density in one replica's per-step inventories, zero where it
+/// is absent.
+fn density(replica: &[HashMap<String, f64>], step: usize, nuclide: &str) -> f64 {
+    replica
+        .get(step)
+        .and_then(|s| s.get(nuclide))
+        .copied()
+        .unwrap_or(0.0)
+}
+
+/// The per-step nuclide densities of one replica.
+pub(crate) fn densities_of(materials: &[Material]) -> Vec<HashMap<String, f64>> {
+    materials.iter().map(|m| m.nuclides.clone()).collect()
+}
+
+/// Keeps the half-life streams clear of the per-nuclide cross-section streams,
+/// which are keyed on the same name hash without it.
+pub(crate) const HALF_LIFE_STREAM: u32 = 0x4A1F_11FE;
+
+/// Whether an evaluation states `sigma`: a stored 0.0 is "not stated", the
+/// same as a null, never an exact value.
+pub(crate) fn stated(sigma: Option<f64>) -> bool {
+    sigma.is_some_and(|s| s > 0.0)
+}
+
+/// `sigma` when a lognormal draw of `value` can carry it: stated, on a
+/// positive value, with a relative sigma that is positive and whose square
+/// is finite.
+///
+/// A mean of zero for a quantity that cannot go negative is zero in every
+/// draw, and an infinite sigma has no lognormal, so either is reported as
+/// not carried rather than drawn as a NaN or silently held. The square is
+/// checked, not just the ratio, because the lognormal is built from
+/// `ln(1 + relative^2)` and a ratio above about 1e154 overflows there into
+/// the same NaN.
+pub(crate) fn carried(value: f64, sigma: Option<f64>) -> Option<f64> {
+    let sigma = sigma.filter(|s| *s > 0.0 && s.is_finite())?;
+    let relative = sigma / value;
+    (value > 0.0 && relative > 0.0 && (relative * relative).is_finite()).then_some(sigma)
+}
+
+/// `(name, half-life, sigma)` for one nuclide whose half-life is drawn.
+pub(crate) type HalfLifeSigma = (String, f64, f64);
+
+/// The unstable nuclides of `chain` split three ways: those with a half-life
+/// sigma a draw can carry, as `(name, half-life, sigma)`; those that state
+/// none; and those that state one no draw can carry.
+pub(crate) fn half_life_candidates(
+    chain: &HashMap<String, yani::ChainNuclide>,
+) -> (Vec<HalfLifeSigma>, BTreeSet<String>, BTreeSet<String>) {
+    let mut with = Vec::new();
+    let mut without = BTreeSet::new();
+    let mut not_carried = BTreeSet::new();
+    for (name, cn) in chain {
+        let Some(t) = cn.half_life.filter(|t| *t > 0.0) else {
+            continue;
+        };
+        if let Some(sigma) = carried(t, cn.half_life_uncertainty) {
+            with.push((name.clone(), t, sigma));
+        } else if stated(cn.half_life_uncertainty) {
+            not_carried.insert(name.clone());
+        } else {
+            without.insert(name.clone());
+        }
+    }
+    with.sort_by(|a, b| a.0.cmp(&b.0));
+    (with, without, not_carried)
+}
+
+/// One replica's half-lives, from a stream keyed on `(seed, replica, nuclide)`.
+///
+/// Each is `T` times a lognormal multiplier with mean 1 and variance
+/// `(sigma / T)^2`, so the draws have the evaluation's mean and standard
+/// deviation exactly and are always positive. `T + sigma z` floored at zero
+/// did neither once the sigma was a large share of `T`: JENDL-5.0 states 120
+/// half-lives with a sigma above half of the value and 31 above all of it,
+/// and every floored draw pulled the mean up.
+///
+/// Keyed on the name, like the cross sections, so a nuclide draws the same
+/// half-life in every spectrum and every material of a run: one evaluation is
+/// uncertain in one way wherever it is used.
+pub(crate) fn sample_half_lives(
+    candidates: &[(String, f64, f64)],
+    base_seed: u64,
+    replica: u64,
+) -> HashMap<String, f64> {
+    let replica_seed = yamc_rng::history_seed(base_seed, replica);
+    candidates
+        .iter()
+        .map(|(name, t, sigma)| {
+            let seed = yamc_rng::secondary_seed(
+                replica_seed,
+                crate::covariance_sample::name_ordinal(name) ^ HALF_LIFE_STREAM,
+            );
+            let mut state = yamc_rng::expand_seed(seed);
+            let z = crate::covariance_sample::standard_normals(&mut state, 1)[0];
+            (name.clone(), t * lognormal_multiplier(z, sigma / t))
+        })
+        .collect()
+}
+
+/// Keeps the decay-energy streams clear of every other per-nuclide stream.
+pub(crate) const DECAY_ENERGY_STREAM: u32 = 0xDEC4_E6E1;
+
+/// One replica's decay energy for one nuclide, and its components, drawn
+/// from each component's own sigma, or from the total's where the data gives
+/// no split. `None` when no sigma can be carried (see
+/// [`has_decay_energy_sigma`]).
+///
+/// Each drawn energy is its nominal times [`lognormal_multiplier`], for the
+/// reason [`sample_half_lives`] gives: the evaluation's mean and sigma exactly,
+/// and never negative, where a Gaussian floored at zero raised the mean.
+pub(crate) fn sample_decay_energy(
+    cn: &yani::ChainNuclide,
+    base_seed: u64,
+    replica: u64,
+) -> Option<(f64, [Option<yani::DecayEnergyComponent>; 3])> {
+    let replica_seed = yamc_rng::history_seed(base_seed, replica);
+    let seed = yamc_rng::secondary_seed(
+        replica_seed,
+        crate::covariance_sample::name_ordinal(&cn.name) ^ DECAY_ENERGY_STREAM,
+    );
+    if !has_decay_energy_sigma(cn) {
+        return None;
+    }
+    let mut state = yamc_rng::expand_seed(seed);
+    if components_state_sigma(cn) {
+        let z = crate::covariance_sample::standard_normals(&mut state, 3);
+        let mut parts = cn.decay_energy_components;
+        let mut total = 0.0;
+        for (part, z) in parts.iter_mut().zip(z) {
+            if let Some(p) = part {
+                if let Some(sigma) = carried(p.energy, p.uncertainty) {
+                    p.energy *= lognormal_multiplier(z, sigma / p.energy);
+                }
+                total += p.energy;
+            }
+        }
+        return Some((total, parts));
+    }
+    let sigma = carried(cn.decay_energy, cn.decay_energy_uncertainty)?;
+    let z = crate::covariance_sample::standard_normals(&mut state, 1)[0];
+    Some((
+        cn.decay_energy * lognormal_multiplier(z, sigma / cn.decay_energy),
+        cn.decay_energy_components,
+    ))
+}
+
+/// Whether any component states a sigma, which makes the components, not the
+/// total, what is drawn: the total's sigma is theirs combined.
+pub(crate) fn components_state_sigma(cn: &yani::ChainNuclide) -> bool {
+    cn.decay_energy_components
+        .iter()
+        .any(|c| c.is_some_and(|c| stated(c.uncertainty)))
+}
+
+/// Whether a nuclide's decay energy carries a sigma a draw can sample from.
+pub(crate) fn has_decay_energy_sigma(cn: &yani::ChainNuclide) -> bool {
+    if components_state_sigma(cn) {
+        cn.decay_energy_components
+            .iter()
+            .any(|c| c.is_some_and(|c| carried(c.energy, c.uncertainty).is_some()))
+    } else {
+        carried(cn.decay_energy, cn.decay_energy_uncertainty).is_some()
+    }
+}
+
+/// Whether a nuclide states a decay-energy sigma that no draw can carry, on
+/// the total or a component: one on an energy of zero, or one not finite.
+/// ENDF/B-VIII.1 has none of either, but the rule is to report such a sigma,
+/// not absorb it.
+pub(crate) fn has_decay_energy_sigma_not_carried(cn: &yani::ChainNuclide) -> bool {
+    let unusable =
+        |energy: f64, sigma: Option<f64>| stated(sigma) && carried(energy, sigma).is_none();
+    if components_state_sigma(cn) {
+        cn.decay_energy_components
+            .iter()
+            .any(|c| c.is_some_and(|c| unusable(c.energy, c.uncertainty)))
+    } else {
+        unusable(cn.decay_energy, cn.decay_energy_uncertainty)
+    }
+}
+
+/// Keeps the decay-photon streams clear of every other per-nuclide stream.
+pub(crate) const DECAY_PHOTON_STREAM: u32 = 0x9A44_A11E;
+
+/// Every `(value, sigma)` pair a nuclide's photon sources state: each
+/// spectrum's normalisation, and each line's intensity and energy.
+///
+/// The normalisation is checked against its own value, not against the
+/// intensities it scaled: its sigma is relative to FD (or FC), and a draw
+/// multiplies the spectrum by `m(sigma / FD)`.
+fn photon_sigmas(cn: &yani::ChainNuclide) -> impl Iterator<Item = (f64, Option<f64>)> + '_ {
+    cn.sources
+        .iter()
+        .filter(|source| source.particle == "photon")
+        .filter_map(|source| Some((source, source.uncertainty.as_deref()?)))
+        .flat_map(|(source, u)| {
+            let normalization = u.normalization.map(|fd| (fd, u.normalization_uncertainty));
+            let lines: Vec<(f64, Option<f64>)> = match &source.distribution {
+                yani::DecaySourceDistribution::Discrete {
+                    energies,
+                    intensities,
+                } => {
+                    let intensity = intensities.iter().enumerate().map(|(i, value)| {
+                        let sigma = u
+                            .intensity_uncertainties
+                            .as_ref()
+                            .and_then(|s| s.get(i).copied());
+                        (*value, sigma)
+                    });
+                    let energy = energies.iter().enumerate().map(|(i, value)| {
+                        let sigma = u
+                            .energy_uncertainties
+                            .as_ref()
+                            .and_then(|s| s.get(i).copied());
+                        (*value, sigma)
+                    });
+                    intensity.chain(energy).collect()
+                }
+                yani::DecaySourceDistribution::Tabular { .. } => Vec::new(),
+            };
+            normalization.into_iter().chain(lines)
+        })
+}
+
+/// Whether a nuclide has any photon source at all, which is what puts it in
+/// the report either way.
+pub(crate) fn has_decay_photons(cn: &yani::ChainNuclide) -> bool {
+    cn.sources.iter().any(|source| source.particle == "photon")
+}
+
+/// Whether any of a nuclide's photon normalisations, line intensities or line
+/// energies carries a sigma a draw can sample from.
+pub(crate) fn has_decay_photon_sigma(cn: &yani::ChainNuclide) -> bool {
+    photon_sigmas(cn).any(|(value, sigma)| carried(value, sigma).is_some())
+}
+
+/// Whether a nuclide states a photon sigma no draw can carry: one on a value
+/// of zero, or one not finite. JENDL-5.0 writes 0.0 on a reference line and
+/// puts its sigma in the normalisation, which is a 0.0 sigma, not stated, and
+/// so not this.
+pub(crate) fn has_decay_photon_sigma_not_carried(cn: &yani::ChainNuclide) -> bool {
+    photon_sigmas(cn).any(|(value, sigma)| stated(sigma) && carried(value, sigma).is_none())
+}
+
+/// How the correlations a decay evaluation leaves unstated between a
+/// nuclide's photon intensities are taken in a draw.
+///
+/// ENDF-102 eq. (8.1) makes line r's absolute intensity FD * RI_r, with dFD
+/// common to the lines of one spectrum and dRI_r the line's own. No library
+/// states anything further (no photon spectrum carries LCOV), which leaves
+/// three correlations open:
+///
+/// - between the dRI of the lines of one spectrum. ENDF/B-VIII.1 writes FD = 1
+///   with dFD = 0 and folds the normalisation into every dRI in quadrature,
+///   so its dRI share a common part the file does not separate;
+/// - between FD and the RI of the same spectrum, which ENSDF often fixes from
+///   the same lines;
+/// - between the spectra of one nuclide, gamma (STYP 0) and x-ray (STYP 9),
+///   which share the conversion coefficients.
+///
+/// None is assumed. A draw is made at each end of the range instead, and an
+/// output reports the spread under both. Every photon output (a line rate,
+/// a contact dose, the gamma part of a decay heat) rises with every intensity,
+/// so each covariance term is non-negative and the variance can only grow
+/// with any of the three correlations: the two ends bound every combination of
+/// non-negative ones. Negative correlations are not considered: the common
+/// part is a shared normalisation, which moves every line it scales the same
+/// way and cannot anticorrelate them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PhotonCorrelation {
+    /// Every normalisation and every line intensity from its own deviate: the
+    /// evaluation read literally, the lower end of the range.
+    Independent,
+    /// One deviate for every normalisation and every line intensity of the
+    /// nuclide, across all of its photon spectra: the upper end.
+    Correlated,
+}
+
+/// The replica's deviates for one nuclide's photon data, in the fixed layout
+/// [`sample_decay_photons`] reads: one per photon source, then two per line
+/// (intensity, energy). Empty for a nuclide without photon sources.
+fn photon_deviates(cn: &yani::ChainNuclide, base_seed: u64, replica: u64) -> Vec<f64> {
+    let replica_seed = yamc_rng::history_seed(base_seed, replica);
+    let seed = yamc_rng::secondary_seed(
+        replica_seed,
+        crate::covariance_sample::name_ordinal(&cn.name) ^ DECAY_PHOTON_STREAM,
+    );
+    let count: usize = photon_sources(cn)
+        .map(|source| match &source.distribution {
+            yani::DecaySourceDistribution::Discrete { energies, .. } => 1 + 2 * energies.len(),
+            yani::DecaySourceDistribution::Tabular { .. } => 1,
+        })
+        .sum();
+    if count == 0 {
+        return Vec::new();
+    }
+    crate::covariance_sample::standard_normals(&mut yamc_rng::expand_seed(seed), count)
+}
+
+/// The one deviate every normalisation and line intensity of a nuclide takes
+/// under [`PhotonCorrelation::Correlated`]: that of the first one in the
+/// layout with a sigma a draw can carry. So a nuclide with a single such
+/// value draws it identically at both ends, where the range is empty.
+fn shared_photon_deviate(cn: &yani::ChainNuclide, z: &[f64]) -> Option<f64> {
+    let mut at = 0;
+    for source in photon_sources(cn) {
+        let lines = match &source.distribution {
+            yani::DecaySourceDistribution::Discrete { intensities, .. } => intensities.as_slice(),
+            yani::DecaySourceDistribution::Tabular { .. } => &[],
+        };
+        if let Some(u) = source.uncertainty.as_deref() {
+            if u.normalization
+                .is_some_and(|fd| carried(fd, u.normalization_uncertainty).is_some())
+            {
+                return Some(z[at]);
+            }
+            for (i, value) in lines.iter().enumerate() {
+                let sigma = u
+                    .intensity_uncertainties
+                    .as_ref()
+                    .and_then(|s| s.get(i).copied());
+                if carried(*value, sigma).is_some() {
+                    return Some(z[at + 1 + 2 * i]);
+                }
+            }
+        }
+        at += 1 + 2 * lines.len();
+    }
+    z.first().copied()
+}
+
+fn photon_sources(cn: &yani::ChainNuclide) -> impl Iterator<Item = &yani::DecaySource> {
+    cn.sources
+        .iter()
+        .filter(|source| source.particle == "photon")
+}
+
+/// The lognormal multiplier a `(value, sigma)` pair takes at deviate `z`, or
+/// 1 for a sigma that is not stated or that no draw can carry.
+fn photon_multiplier(value: f64, sigma: Option<f64>, z: f64) -> f64 {
+    match carried(value, sigma) {
+        Some(sigma) => lognormal_multiplier(z, sigma / value),
+        None => 1.0,
+    }
+}
+
+/// Draw one replica's decay photon data for one nuclide in place, from a
+/// stream keyed on `(seed, replica, nuclide)`.
+///
+/// Per photon source, one lognormal multiplier from the normalisation's
+/// relative sigma scales every line or continuum point of that source, so the
+/// lines of one spectrum move together, as the evaluation states. Each line
+/// then takes its own intensity multiplier from dRI / RI, and its energy its
+/// own from dER / ER. A sigma that is not stated, or that no draw can carry,
+/// leaves its value at nominal.
+///
+/// That is [`PhotonCorrelation::Independent`]. Under
+/// [`PhotonCorrelation::Correlated`] every normalisation and line intensity of
+/// the nuclide takes one deviate instead, so its spectra,
+/// their normalisations and their lines all move together. Line energies take
+/// their own deviates under both, the same ones, since the evaluation states
+/// their sigmas and nothing couples them to the intensities.
+///
+/// The deviates are taken in a fixed layout, one per source and two per line
+/// whether a sigma is stated or not, so a value draws the same number in
+/// every replica regardless of which of its neighbours carry a sigma.
+///
+/// Applied after a replica's half-life, whose rescale moves each intensity
+/// and its sigma together and leaves their ratio, which is all a draw reads.
+pub(crate) fn sample_decay_photons(
+    cn: &mut yani::ChainNuclide,
+    base_seed: u64,
+    replica: u64,
+    correlation: PhotonCorrelation,
+) {
+    let z = photon_deviates(cn, base_seed, replica);
+    let Some(shared) = shared_photon_deviate(cn, &z) else {
+        return;
+    };
+    let correlated = correlation == PhotonCorrelation::Correlated;
+    let intensity_deviate = |own: f64| if correlated { shared } else { own };
+    let mut z = z.into_iter();
+    for source in cn
+        .sources
+        .iter_mut()
+        .filter(|source| source.particle == "photon")
+    {
+        let z_norm = z.next().expect("one deviate per source");
+        let Some(u) = source.uncertainty.clone() else {
+            // Nothing stated, nothing drawn, but the layout's deviates are
+            // still spent so the sources after it read the same ones.
+            if let yani::DecaySourceDistribution::Discrete { energies, .. } = &source.distribution {
+                for _ in 0..2 * energies.len() {
+                    z.next();
+                }
+            }
+            continue;
+        };
+        let common = u.normalization.map_or(1.0, |fd| {
+            photon_multiplier(fd, u.normalization_uncertainty, intensity_deviate(z_norm))
+        });
+        match &mut source.distribution {
+            yani::DecaySourceDistribution::Discrete {
+                energies,
+                intensities,
+            } => {
+                for i in 0..energies.len() {
+                    let z_intensity = z.next().expect("two deviates per line");
+                    let z_energy = z.next().expect("two deviates per line");
+                    let sigma = |s: &Option<Vec<f64>>| s.as_ref().and_then(|s| s.get(i).copied());
+                    let own = photon_multiplier(
+                        intensities[i],
+                        sigma(&u.intensity_uncertainties),
+                        intensity_deviate(z_intensity),
+                    );
+                    let shift =
+                        photon_multiplier(energies[i], sigma(&u.energy_uncertainties), z_energy);
+                    intensities[i] *= common * own;
+                    energies[i] *= shift;
+                }
+            }
+            yani::DecaySourceDistribution::Tabular { intensities, .. } => {
+                for value in intensities.iter_mut() {
+                    *value *= common;
+                }
+            }
+        }
+    }
+}
+
+/// The photon energy one source carries per atom per second [eV/s]: each
+/// line's energy times its intensity, or a continuum's energy integral under
+/// its law. A continuum whose law cannot be read carries none here.
+fn source_photon_energy(source: &yani::DecaySource) -> f64 {
+    match &source.distribution {
+        yani::DecaySourceDistribution::Discrete {
+            energies,
+            intensities,
+        } => energies.iter().zip(intensities).map(|(e, i)| e * i).sum(),
+        yani::DecaySourceDistribution::Tabular {
+            energies,
+            intensities,
+            interpolation,
+        } => yani::Continuum::new(energies, intensities, *interpolation)
+            .map_or(0.0, |c| c.energy_integral()),
+    }
+}
+
+/// A nuclide's photon energy per atom per second [eV/s], over its lines and
+/// continua. Over the decay constant it is the photon energy per decay, which
+/// is what the electromagnetic decay energy E_EM states: in ENDF/B-VIII.1 the
+/// two agree to 1% for 1826 of the 1871 photon emitters, and the rest are
+/// fission products whose E_EM carries more than their tabulated spectra.
+pub(crate) fn photon_energy_rate(cn: &yani::ChainNuclide) -> f64 {
+    photon_sources(cn).map(source_photon_energy).sum()
+}
+
+/// The radiation names of a nuclide's photon spectra written the ENDF/B way:
+/// a normalisation of exactly 1 with no sigma on it, and a sigma stated on at
+/// least one line. Such a spectrum's dRI hold the normalisation's sigma folded
+/// in, so how much of them is common to its lines is not stated, and they are
+/// where most of the range between [`PhotonCorrelation`]'s two ends comes
+/// from. A spectrum the file names no radiation for is `"photon"`.
+pub(crate) fn folded_photon_spectra(cn: &yani::ChainNuclide) -> Vec<String> {
+    photon_sources(cn)
+        .filter(|source| {
+            let Some(u) = source.uncertainty.as_deref() else {
+                return false;
+            };
+            let unit = u.normalization.is_none_or(|fd| fd == 1.0);
+            let lines_state = u
+                .intensity_uncertainties
+                .as_ref()
+                .is_some_and(|s| s.iter().any(|s| stated(Some(*s))));
+            unit && !stated(u.normalization_uncertainty) && lines_state
+        })
+        .map(|source| {
+            source
+                .radiation
+                .clone()
+                .unwrap_or_else(|| "photon".to_string())
+        })
+        .collect()
+}
+
+/// Whether any of a nuclide's photon normalisations (FD or FC) carries a sigma
+/// a draw can sample from: the part of its photon data that scales a whole
+/// spectrum, and so the only part a per-emitter D1S tally can follow.
+pub(crate) fn has_decay_photon_normalisation_sigma(cn: &yani::ChainNuclide) -> bool {
+    photon_sources(cn).any(|source| {
+        source.uncertainty.as_deref().is_some_and(|u| {
+            u.normalization
+                .is_some_and(|fd| carried(fd, u.normalization_uncertainty).is_some())
+        })
+    })
+}
+
+/// One replica's scale on a nuclide's whole photon emission from its spectrum
+/// normalisations alone, the deviates those of [`sample_decay_photons`] for
+/// the same seed and replica, so a D1S dose and a transmutation draw the same
+/// FD.
+///
+/// A per-emitter D1S tally does not resolve spectra, so a nuclide with several
+/// is scaled by their multipliers weighted by each spectrum's share of its
+/// photon energy, the closest the tally allows to its share of the dose. In
+/// the libraries at most one spectrum of a nuclide states a normalisation
+/// sigma (the gamma one), so the weight only decides how much of the emitter's
+/// dose that one spectrum moves. 1 for a nuclide whose normalisations state no
+/// sigma.
+pub(crate) fn photon_normalisation_scale(
+    cn: &yani::ChainNuclide,
+    base_seed: u64,
+    replica: u64,
+    correlation: PhotonCorrelation,
+) -> f64 {
+    let z = photon_deviates(cn, base_seed, replica);
+    let Some(shared) = shared_photon_deviate(cn, &z) else {
+        return 1.0;
+    };
+    let mut at = 0;
+    let (mut weighted, mut total) = (0.0, 0.0);
+    for source in photon_sources(cn) {
+        let z_norm = if correlation == PhotonCorrelation::Correlated {
+            shared
+        } else {
+            z[at]
+        };
+        at += match &source.distribution {
+            yani::DecaySourceDistribution::Discrete { energies, .. } => 1 + 2 * energies.len(),
+            yani::DecaySourceDistribution::Tabular { .. } => 1,
+        };
+        let multiplier = source.uncertainty.as_deref().map_or(1.0, |u| {
+            u.normalization.map_or(1.0, |fd| {
+                photon_multiplier(fd, u.normalization_uncertainty, z_norm)
+            })
+        });
+        let energy = source_photon_energy(source);
+        weighted += energy * multiplier;
+        total += energy;
+    }
+    if total > 0.0 {
+        weighted / total
+    } else {
+        1.0
+    }
+}
+
+/// `chain` with the half-lives of `sampled` substituted.
+pub(crate) fn with_half_lives(
+    chain: &HashMap<String, yani::ChainNuclide>,
+    sampled: &HashMap<String, f64>,
+) -> HashMap<String, yani::ChainNuclide> {
+    let mut out = chain.clone();
+    for (name, t) in sampled {
+        if let Some(cn) = out.get_mut(name) {
+            set_half_life(cn, *t);
+        }
+    }
+    out
+}
+
+/// Give a chain nuclide a different half-life, and everything stored in the
+/// chain as a function of it.
+///
+/// Decay-source intensities are stored per atom per second, which is the
+/// emission probability per decay times the decay constant (Co60's 1332 keV
+/// line is `0.9998 * ln2 / T`), and a continuum's density per eV is the same
+/// product. The per-decay probability is the decay scheme's and does not
+/// change with the half-life, so the stored intensity scales as
+/// `T_nominal / T`. Leaving it would evaluate a replica's photon
+/// emission as `N_k lambda y` instead of `N_k lambda_k y`: at saturation
+/// `N_k ~ 1 / lambda_k`, so the photon rate would inherit the half-life's
+/// whole spread, which is the inconsistent-lambda inflation the per-replica
+/// half-lives exist to prevent. Each line's intensity sigma is stored in the
+/// same units and scales with it, so its ratio to the intensity stays the
+/// tape's.
+pub(crate) fn set_half_life(cn: &mut yani::ChainNuclide, half_life: f64) {
+    if let Some(nominal) = cn.half_life.filter(|t| *t > 0.0 && half_life > 0.0) {
+        let scale = nominal / half_life;
+        for source in &mut cn.sources {
+            source.scale_rates(scale);
+        }
+    }
+    cn.half_life = Some(half_life);
+}
+
+/// The standard error of the sample standard deviation of `values`, or
+/// `None` below four values, where the kurtosis it needs is not estimated.
+///
+/// `Var(s^2) = s^4 (2/(n-1) + kappa/n)` with `kappa` the sample excess
+/// kurtosis, so a heavy-tailed output (a lognormal one, say) reads as less
+/// settled than a Gaussian one at the same count, as it is. Then
+/// `SE(s) = sqrt(Var(s^2)) / (2 s)` to first order. Identical values give
+/// exactly zero.
+pub fn std_dev_standard_error(values: &[f64]) -> Option<f64> {
+    let n = values.len();
+    if n < 4 {
+        return None;
+    }
+    let nf = n as f64;
+    let mean = values.iter().sum::<f64>() / nf;
+    let m2 = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>();
+    let m4 = values.iter().map(|v| (v - mean).powi(4)).sum::<f64>();
+    Some(standard_error_from_sums(nf, m2, m4))
+}
+
+/// The share of the nuclear-data variance the Monte Carlo noise removed from
+/// a replica spread may reach before the output is flagged
+/// ([`NoisyOutput`]): past it, the noise is a large part of what the
+/// replicas measured, and more histories would sharpen the sigma more than
+/// more replicas would.
+pub const NOISE_FLAG_FRACTION: f64 = 0.25;
+
+/// The replica spread of `values` and the Monte Carlo noise in it, as
+/// variances `(spread, noise)`, from `even`, the same replicas solved from
+/// the even half of the transport's histories, and `scale`, the even half's
+/// histories over the odd half's.
+///
+/// Replica `k`'s output from the full tally is `y_k = s_k + e_k`, with `s_k`
+/// what transport under its data would give and `e_k` the Monte Carlo noise
+/// of its shift from the nominal. From the even half it is `s_k + a_k`, and
+/// with `b_k` the odd half's noise, `e_k = (n_e a_k + n_o b_k) / n`. The two
+/// halves' noise is independent, so `d_k = y^e_k - y_k = n_o (a_k - b_k) /
+/// n` carries none of `s_k` (every data draw, the nominal's statistical
+/// error included, is the same in both solves) and its variance over the
+/// replicas is `n_o / n_e` times that of `e_k`. So `scale * S^2(d)` is
+/// unbiased for the noise in `S^2(y)`, and `S^2(y) - scale * S^2(d)` for the
+/// spread with it removed, to first order in the noise wherever the solve is
+/// nonlinear in the rates.
+pub(crate) fn spread_and_noise(values: &[f64], even: &[f64], scale: f64) -> (f64, f64) {
+    let n = values.len();
+    if n < 2 || even.len() != n {
+        return (0.0, 0.0);
+    }
+    let nf = n as f64;
+    let mean = values.iter().sum::<f64>() / nf;
+    let d_mean = even.iter().zip(values).map(|(e, v)| e - v).sum::<f64>() / nf;
+    let spread = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (nf - 1.0);
+    let noise = even
+        .iter()
+        .zip(values)
+        .map(|(e, v)| (e - v - d_mean).powi(2))
+        .sum::<f64>()
+        / (nf - 1.0);
+    (spread, scale * noise)
+}
+
+/// The standard error of the noise-removed standard deviation
+/// `sqrt(S^2(y) - scale S^2(d))` (see [`spread_and_noise`]), or `None` below
+/// four values or where the removed variance is not positive.
+///
+/// The estimate is a mean over replicas of `z_k = n/(n-1) [(y_k - ȳ)^2 -
+/// scale (d_k - d̄)^2]`, so its variance is `S^2(z) / n`, and `SE(sigma) =
+/// SE(V) / (2 sigma)` to first order. Without noise it reduces to the
+/// fourth-moment form [`std_dev_standard_error`] takes.
+pub fn noise_removed_standard_error(values: &[f64], even: &[f64], scale: f64) -> Option<f64> {
+    let n = values.len();
+    if n < 4 || even.len() != n {
+        return None;
+    }
+    let nf = n as f64;
+    let mean = values.iter().sum::<f64>() / nf;
+    let d_mean = even.iter().zip(values).map(|(e, v)| e - v).sum::<f64>() / nf;
+    let z: Vec<f64> = values
+        .iter()
+        .zip(even)
+        .map(|(v, e)| nf / (nf - 1.0) * ((v - mean).powi(2) - scale * (e - v - d_mean).powi(2)))
+        .collect();
+    let v = z.iter().sum::<f64>() / nf;
+    if v <= 0.0 {
+        return None;
+    }
+    let var_z = z.iter().map(|x| (x - v).powi(2)).sum::<f64>() / (nf - 1.0);
+    Some((var_z / nf).sqrt() / (2.0 * v.sqrt()))
+}
+
+/// One tracked output whose replica spread carried Monte Carlo noise of more
+/// than [`NOISE_FLAG_FRACTION`] of the nuclear-data variance left once it was
+/// removed. The sigma reported is the noise-removed one; more source
+/// histories in the transport would make it sharper.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NoisyOutput {
+    /// What it is the sigma of.
+    pub output: Output,
+    /// The step, indexed like `TransmutationResults::get_material`.
+    pub step: usize,
+    /// The replicas' standard deviation, noise and all.
+    pub replica_spread: f64,
+    /// The standard deviation of the Monte Carlo noise removed from it.
+    pub noise: f64,
+    /// The standard deviation reported, `sqrt(spread^2 - noise^2)`, zero
+    /// where the noise is the larger.
+    pub std_dev: f64,
+}
+
+/// [`std_dev_standard_error`] from the count and the sums of the squared and
+/// fourth-power deviations from the mean.
+fn standard_error_from_sums(n: f64, m2: f64, m4: f64) -> f64 {
+    if m2 <= 0.0 {
+        return 0.0;
+    }
+    let (m2, m4) = (m2 / n, m4 / n);
+    let kurtosis = m4 / (m2 * m2) - 3.0;
+    let s2 = m2 * n / (n - 1.0);
+    let var_s2 = (s2 * s2 * (2.0 / (n - 1.0) + kurtosis / n)).max(0.0);
+    var_s2.sqrt() / (2.0 * s2.sqrt())
+}
+
+/// A sample's standard deviation and its standard error, accumulated one
+/// value at a time, for a spread over more values than are worth keeping
+/// (a D1S dose per mesh bin, say).
+///
+/// The running central moments to the fourth, updated as Pebay (Sandia
+/// SAND2008-6212, 2008) gives them, so the answer is
+/// [`std_dev_standard_error`]'s on the same values to rounding.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SpreadAccumulator {
+    n: u64,
+    mean: f64,
+    m2: f64,
+    m3: f64,
+    m4: f64,
+}
+
+impl SpreadAccumulator {
+    /// Add one value.
+    pub fn update(&mut self, x: f64) {
+        let n1 = self.n as f64;
+        self.n += 1;
+        let n = self.n as f64;
+        let delta = x - self.mean;
+        let delta_n = delta / n;
+        let delta_n2 = delta_n * delta_n;
+        let term = delta * delta_n * n1;
+        self.mean += delta_n;
+        self.m4 += term * delta_n2 * (n * n - 3.0 * n + 3.0) + 6.0 * delta_n2 * self.m2
+            - 4.0 * delta_n * self.m3;
+        self.m3 += term * delta_n * (n - 2.0) - 3.0 * delta_n * self.m2;
+        self.m2 += term;
+    }
+
+    /// The sample standard deviation, or zero below two values.
+    pub fn std_dev(&self) -> f64 {
+        if self.n < 2 {
+            return 0.0;
+        }
+        (self.m2 / (self.n - 1) as f64).max(0.0).sqrt()
+    }
+
+    /// The standard error of [`Self::std_dev`], or `None` below four values.
+    pub fn std_dev_standard_error(&self) -> Option<f64> {
+        (self.n >= 4).then(|| standard_error_from_sums(self.n as f64, self.m2, self.m4.max(0.0)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    /// Replicas with a data spread, a draw shared by both solves (the
+    /// statistical one, say) and Monte Carlo noise from two unequal halves:
+    /// the even half's solve measures the noise alone, so what is left is
+    /// the data spread and the shared draw, and nothing of the noise.
+    #[test]
+    fn the_even_half_removes_the_noise_and_keeps_every_draw() {
+        let r = 40_000;
+        let (n_e, n_o) = (3.0_f64, 1.0_f64);
+        let n = n_e + n_o;
+        // Per-history variance 2, so the full tally's noise variance is 0.5.
+        let v = 2.0_f64;
+        let mut state = yamc_rng::expand_seed(11);
+        let z = crate::covariance_sample::standard_normals(&mut state, 4 * r);
+        let (mut full, mut even) = (Vec::with_capacity(r), Vec::with_capacity(r));
+        for k in 0..r {
+            let data = z[4 * k];
+            let shared = 0.3 * z[4 * k + 1];
+            let a = (v / n_e).sqrt() * z[4 * k + 2];
+            let b = (v / n_o).sqrt() * z[4 * k + 3];
+            let noise = (n_e * a + n_o * b) / n;
+            full.push(5.0 + data + shared + noise);
+            even.push(5.0 + data + shared + a);
+        }
+        let (spread, noise) = spread_and_noise(&full, &even, n_e / n_o);
+        assert!((noise - 0.5).abs() < 0.03, "noise {noise}");
+        assert!(
+            (spread - noise - 1.09).abs() < 0.04,
+            "left {}",
+            spread - noise
+        );
+        let se = noise_removed_standard_error(&full, &even, n_e / n_o).unwrap();
+        assert!(se > 0.0 && se < 0.02, "standard error {se}");
+
+        // The ensemble reports the same, per nuclide.
+        let mut e = Ensemble::new(1);
+        for (f, h) in full.iter().zip(&even).take(2000) {
+            e.push(vec![HashMap::from([("X".to_string(), *f)])]);
+            e.push_even(vec![HashMap::from([("X".to_string(), *h)])]);
+        }
+        e.set_noise_scale(n_e / n_o);
+        e.fold_absences();
+        assert_eq!(e.noise_scale(), Some(3.0));
+        let values: Vec<f64> = full.iter().take(2000).copied().collect();
+        let halves: Vec<f64> = even.iter().take(2000).copied().collect();
+        let (spread, noise) = spread_and_noise(&values, &halves, 3.0);
+        let sigma = e.std_dev_at(0)["X"];
+        assert!((sigma - (spread - noise).sqrt()).abs() < 1e-12);
+        assert!((e.replica_spread_evolution("X")[0] - spread.sqrt()).abs() < 1e-12);
+        assert!((e.noise_evolution("X")[0] - noise.sqrt()).abs() < 1e-12);
+        assert_eq!(
+            e.std_dev_standard_error_at(0, "X"),
+            noise_removed_standard_error(&values, &halves, 3.0)
+        );
+        // Without the even half nothing is removed.
+        let mut plain = Ensemble::new(1);
+        for f in &values {
+            plain.push(vec![HashMap::from([("X".to_string(), *f)])]);
+        }
+        plain.fold_absences();
+        assert_eq!(plain.noise_scale(), None);
+        assert!((plain.std_dev_at(0)["X"] - spread.sqrt()).abs() < 1e-12);
+        assert_eq!(plain.noise_evolution("X"), vec![0.0]);
+    }
+
+    /// A tracked output whose noise is more than a quarter of the variance
+    /// left is reported, with its parts.
+    #[test]
+    fn a_noisy_output_is_reported() {
+        let mut e = Ensemble::new(1);
+        for k in 0..64 {
+            let x = k as f64;
+            // Data spread 1 per unit of `x`; the even half moves every other
+            // replica by 30, a noise variance far above it.
+            let data = 100.0 + (x % 8.0);
+            let even = data + if k % 2 == 0 { 30.0 } else { -30.0 };
+            e.push(vec![HashMap::from([("X".to_string(), data)])]);
+            e.push_even(vec![HashMap::from([("X".to_string(), even)])]);
+        }
+        e.set_noise_scale(1.0);
+        e.fold_absences();
+        let noisy = e.noisy();
+        assert_eq!(noisy.len(), 1);
+        assert_eq!(noisy[0].output, Output::Density("X".to_string()));
+        assert_eq!(noisy[0].step, 1);
+        assert!(noisy[0].noise > noisy[0].replica_spread);
+        assert_eq!(noisy[0].std_dev, 0.0);
+    }
+
+    #[test]
+    fn a_standard_error_needs_four_values_and_is_zero_without_spread() {
+        assert_eq!(std_dev_standard_error(&[1.0, 2.0, 3.0]), None);
+        assert_eq!(std_dev_standard_error(&[2.0; 8]), Some(0.0));
+    }
+
+    #[test]
+    fn a_gaussian_standard_error_is_sigma_over_sqrt_2n() {
+        // Box-Muller on a fixed stream: kurtosis near zero, so SE(s) is about
+        // s / sqrt(2(n-1)).
+        let mut state = yamc_rng::expand_seed(7);
+        let z = crate::covariance_sample::standard_normals(&mut state, 20_000);
+        let se = std_dev_standard_error(&z).unwrap();
+        let want = 1.0 / (2.0 * 19_999.0_f64).sqrt();
+        assert!((se / want - 1.0).abs() < 0.05, "{se} against {want}");
+    }
+
+    #[test]
+    fn a_heavy_tail_reads_as_less_settled() {
+        let mut state = yamc_rng::expand_seed(7);
+        let z = crate::covariance_sample::standard_normals(&mut state, 4_000);
+        let lognormal: Vec<f64> = z.iter().map(|z| (0.8 * z).exp()).collect();
+        let s = |v: &[f64]| {
+            let m = v.iter().sum::<f64>() / v.len() as f64;
+            (v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (v.len() - 1) as f64).sqrt()
+        };
+        let relative = |v: &[f64]| std_dev_standard_error(v).unwrap() / s(v);
+        assert!(relative(&lognormal) > 1.5 * relative(&z));
+    }
+    use super::*;
+
+    /// Every run states the decay photon data it holds at nominal whatever
+    /// the sources, so a reader does not take its silence for zero.
+    #[test]
+    fn the_report_names_the_photon_sources_held_at_nominal() {
+        let info = Info::from_fold(&Coverage::default(), &SigmaReport::default(), true)
+            .expect("no shares to check");
+        let source = "decay photon spectrum covariance and continuum shape \
+                      (MF=8 MT=457 LCOV, which no library states)";
+        assert!(
+            info.not_perturbed.iter().any(|s| s == source),
+            "{source:?} missing from {:?}",
+            info.not_perturbed
+        );
+    }
+
+    /// A new half-life rescales a continuum's density exactly as it rescales a
+    /// line, so both keep their per-decay yield.
+    #[test]
+    fn a_half_life_rescales_lines_and_continua_alike() {
+        let lambda = std::f64::consts::LN_2 / 318.0;
+        let source = |distribution| yani::DecaySource {
+            particle: "photon".to_string(),
+            radiation: None,
+            uncertainty: None,
+            distribution,
+        };
+        let mut cn = yani::ChainNuclide {
+            name: "Sm158".to_string(),
+            half_life: Some(318.0),
+            half_life_uncertainty: Some(1.8),
+            decay_energy: 1.0e6,
+            decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
+            level_index: None,
+            decay_energy_components: Default::default(),
+            reactions: vec![],
+            decays: vec![],
+            fission_yields: None,
+            sources: vec![
+                source(yani::DecaySourceDistribution::Discrete {
+                    energies: vec![2.0e5],
+                    intensities: vec![0.5 * lambda],
+                }),
+                source(yani::DecaySourceDistribution::Tabular {
+                    energies: vec![1.0e4, 1.0e6],
+                    intensities: vec![3.0e-6 * lambda, 0.0],
+                    interpolation: Some(yani::Interpolation::Histogram),
+                }),
+            ],
+        };
+        set_half_life(&mut cn, 636.0);
+        let lambda_k = std::f64::consts::LN_2 / 636.0;
+        let per_decay: Vec<f64> = cn
+            .sources
+            .iter()
+            .map(|s| s.distribution.emission_rate().unwrap() / lambda_k)
+            .collect();
+        assert!((per_decay[0] - 0.5).abs() < 1e-14, "{per_decay:?}");
+        assert!(
+            (per_decay[1] - 3.0e-6 * 9.9e5).abs() < 1e-14,
+            "{per_decay:?}"
+        );
+    }
+
+    /// A line's intensity sigma is a rate like the intensity, so a new
+    /// half-life moves both and leaves the tape's dRI/RI. The normalisation
+    /// and the energy sigmas are per decay and stay.
+    #[test]
+    fn a_half_life_rescales_the_intensity_sigmas_with_the_lines() {
+        let lambda = std::f64::consts::LN_2 / 318.0;
+        let stated = yani::DecaySourceUncertainty {
+            normalization: Some(0.27),
+            normalization_uncertainty: Some(0.01),
+            intensity_uncertainties: Some(vec![0.27 * 0.02 * lambda]),
+            energy_uncertainties: Some(vec![30.0]),
+            covariance: None,
+        };
+        let mut cn = yani::ChainNuclide {
+            name: "W187".to_string(),
+            half_life: Some(318.0),
+            half_life_uncertainty: None,
+            decay_energy: 0.0,
+            decay_energy_uncertainty: None,
+            decay_evaluated: true,
+            excitation_energy: None,
+            level_index: None,
+            decay_energy_components: Default::default(),
+            reactions: vec![],
+            decays: vec![],
+            fission_yields: None,
+            sources: vec![yani::DecaySource {
+                particle: "photon".to_string(),
+                radiation: Some("gamma".to_string()),
+                distribution: yani::DecaySourceDistribution::Discrete {
+                    energies: vec![6.858e5],
+                    intensities: vec![0.27 * 0.5 * lambda],
+                },
+                uncertainty: Some(std::sync::Arc::new(stated.clone())),
+            }],
+        };
+        let shared = cn.sources[0].uncertainty.clone().unwrap();
+        set_half_life(&mut cn, 636.0);
+        let scaled = cn.sources[0].uncertainty.as_deref().unwrap();
+        let lambda_k = std::f64::consts::LN_2 / 636.0;
+        let sigma = scaled.intensity_uncertainties.as_ref().unwrap()[0];
+        assert!((sigma / lambda_k - 0.27 * 0.02).abs() < 1e-15, "{sigma}");
+        assert_eq!(scaled.normalization, stated.normalization);
+        assert_eq!(
+            scaled.normalization_uncertainty,
+            stated.normalization_uncertainty
+        );
+        assert_eq!(scaled.energy_uncertainties, stated.energy_uncertainties);
+        // The nominal chain the replica was cloned from keeps its own sigmas.
+        assert_eq!(*shared, stated);
+    }
+
+    /// The production total weights the fold's shares by the production the
+    /// run drove, which is the covered share only when that production is the
+    /// rate the shares are of: the collapse's, dilute or shielded. A tallied
+    /// run reports no total rather than a figure that is not the share its
+    /// name claims, and keeps the per-channel shares, which are.
+    #[test]
+    fn only_a_collapsed_run_reports_a_production_total() {
+        let coverage = Coverage {
+            rate_fraction_covered: BTreeMap::from([(("W186".into(), "(n,gamma)".into()), 0.25)]),
+            covered_production: 1.0,
+            total_production: 4.0,
+            ..Default::default()
+        };
+        let sigmas = SigmaReport::default();
+        let collapsed = Info::from_fold(&coverage, &sigmas, true).expect("shares are shares");
+        assert_eq!(collapsed.rate_fraction_covered_total, Some(0.25));
+        let tallied = Info::from_fold(&coverage, &sigmas, false).expect("shares are shares");
+        assert_eq!(tallied.rate_fraction_covered_total, None);
+        assert_eq!(
+            tallied.rate_fraction_covered,
+            coverage.rate_fraction_covered
+        );
+    }
+
+    /// A lumped reaction the fold could not give to any reaction reaches the
+    /// report as it is, and is a gap by itself.
+    #[test]
+    fn an_unassignable_lump_is_carried_into_the_report_as_a_gap() {
+        let lump = (
+            ("W186".to_string(), 852),
+            BTreeSet::from(["(n,2n)".to_string(), "(n,2np)".to_string()]),
+        );
+        let coverage = Coverage {
+            lumped_covariance_not_assignable: BTreeMap::from([lump]),
+            ..Default::default()
+        };
+        let info =
+            Info::from_fold(&coverage, &SigmaReport::default(), true).expect("shares are shares");
+        assert_eq!(
+            info.lumped_covariance_not_assignable,
+            coverage.lumped_covariance_not_assignable
+        );
+        assert!(info.has_gaps());
+        assert!(
+            !Info::from_fold(&Coverage::default(), &SigmaReport::default(), true)
+                .expect("shares are shares")
+                .has_gaps()
+        );
+    }
+
+    /// A repair a draw can move is a gap: the sampled correlations are not
+    /// the evaluation's. One on two spectra is one repaired nuclide.
+    #[test]
+    fn a_repair_counts_once_per_nuclide_and_is_a_gap() {
+        use crate::covariance_sample::FieldRepair;
+        let repair = |spectrum| Repair {
+            nuclide: "W182".to_string(),
+            spectrum,
+            field: FieldRepair {
+                lambda_min: -1.0e-4,
+                largest_correlation_change: 1.0e-4,
+                correlation_frobenius_change: 2.0e-4,
+                cells: 2,
+                held_cells: 0,
+                converged: true,
+            },
+            channels: Vec::new(),
+        };
+        let mut sigmas = SigmaReport::default();
+        sigmas.repairs = vec![repair(0), repair(1)];
+        sigmas.repaired = BTreeSet::from(["W182".to_string()]);
+        let info =
+            Info::from_fold(&Coverage::default(), &sigmas, true).expect("no shares to check");
+        assert_eq!(
+            info.covariance_repaired,
+            BTreeSet::from(["W182".to_string()])
+        );
+        assert_eq!(info.covariance_repairs.len(), 2);
+        assert!(info.has_gaps());
+
+        // Outside the populated bound a repair is named, and is a gap too:
+        // the bound is nominal and a replica's draw can populate the nuclide.
+        let mut outside = SigmaReport::default();
+        outside.repaired_outside_bound = BTreeSet::from(["Xe135".to_string()]);
+        let info =
+            Info::from_fold(&Coverage::default(), &outside, true).expect("no shares to check");
+        assert_eq!(
+            info.covariance_repaired_outside_bound,
+            BTreeSet::from(["Xe135".to_string()])
+        );
+        assert!(info.has_gaps());
+        assert!(
+            !Info::from_fold(&Coverage::default(), &SigmaReport::default(), true)
+                .expect("no shares to check")
+                .has_gaps()
+        );
+    }
+
+    /// A dilute run whose partials disagree with a channel's rate has a
+    /// production that is not the rate its share is of, as a grafted `(n,n')`
+    /// weighted by MT 4 has. The total is withheld there too, and the
+    /// per-channel shares and the listed ratio stay.
+    #[test]
+    fn a_dilute_run_with_partials_off_the_rate_reports_no_total() {
+        let key = ("Rh103".to_string(), "(n,n')".to_string());
+        for (above, below) in [
+            (BTreeMap::from([(key.clone(), 4.0)]), BTreeMap::new()),
+            (BTreeMap::new(), BTreeMap::from([(key.clone(), 0.5)])),
+        ] {
+            let coverage = Coverage {
+                rate_fraction_covered: BTreeMap::from([(key.clone(), 0.25)]),
+                partials_above_rate: above,
+                partials_below_rate: below,
+                covered_production: 1.0,
+                total_production: 4.0,
+                ..Default::default()
+            };
+            let info = Info::from_fold(&coverage, &SigmaReport::default(), true)
+                .expect("shares are shares");
+            assert_eq!(info.rate_fraction_covered_total, None);
+            assert_eq!(info.rate_fraction_covered, coverage.rate_fraction_covered);
+        }
+    }
+
+    /// A share outside [0, 1] needs a negative cross section, flux or
+    /// production, which nothing upstream rules out. It fails the run with a
+    /// message naming it rather than panicking or being clamped into range.
+    #[test]
+    fn a_share_outside_zero_to_one_is_an_error() {
+        let channel = Coverage {
+            rate_fraction_covered: BTreeMap::from([(("W186".into(), "(n,gamma)".into()), 1.5)]),
+            ..Default::default()
+        };
+        let err = Info::from_fold(&channel, &SigmaReport::default(), true).unwrap_err();
+        assert!(err.contains("W186 (n,gamma)"), "{err}");
+        let total = Coverage {
+            covered_production: 5.0,
+            total_production: 4.0,
+            ..Default::default()
+        };
+        let err = Info::from_fold(&total, &SigmaReport::default(), true).unwrap_err();
+        assert!(err.contains("not a share"), "{err}");
+    }
+
+    /// Every input held at nominal whatever the run was, named so a reader
+    /// does not have to know the code to see what the sigma leaves out.
+    #[test]
+    fn the_report_names_every_input_held_at_nominal() {
+        let info = Info::from_fold(&Coverage::default(), &SigmaReport::default(), true)
+            .expect("no shares to check");
+        for held in [
+            "isomeric branching (MF=9/MF=10) of a reaction with no stated MF=40 covariance, in no_isomer_branching_uncertainty",
+            "MT=5 product multiplicities (MF=6 MT=5), whose split of the perturbed MT=5 rate is held",
+            "covariance with another evaluation the run does not hold (MAT1 naming a material not in the run, in skipped_cross_material)",
+            "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3, which no library yani reads states)",
+            "NC-derived covariance that cannot be derived (MF=33 NC LTY 1-4, which no library yani reads states, or LTY=0 in skipped_nc)",
+            "lumped-reaction covariance stated in barns, which no relative share carries to a component (MF=33 MT=851-870, in lumped_covariance_not_assignable)",
+            "resonance-parameter covariance (MF=32) of a range neither sampled nor written into covariance.arrow",
+            "decay photon spectrum covariance and continuum shape (MF=8 MT=457 LCOV, which no library states)",
+            "photon attenuation coefficient (XCOM)",
+            "air energy-absorption coefficient (NIST SRD 126)",
+            "fluence-to-dose coefficient (ICRP-116)",
+            "contact-dose build-up factor",
+            "material composition",
+            "material density",
+            "natural isotopic abundance",
+            "atomic mass (AME2020)",
+        ] {
+            assert!(
+                info.not_perturbed.iter().any(|s| s == held),
+                "{held:?} missing from {:?}",
+                info.not_perturbed
+            );
+        }
+        // These depend on the run and the sources asked for, so the fold
+        // alone must not claim them.
+        for conditional in [
+            "self-shielding correction",
+            "flux response to perturbed cross sections (one transport)",
+            "tallied-rate statistics",
+            "flux spectrum",
+            "flux spectrum (spectra without a sigma only)",
+            "activation cross section (MF=33)",
+            "half-life",
+            "decay branching ratio",
+            "decay energy",
+            "decay photon line energy and intensity, and continuum normalisation",
+            "fission yield",
+        ] {
+            assert!(!info.not_perturbed.iter().any(|s| s == conditional));
+        }
+    }
+
+    #[test]
+    fn moments_match_a_hand_computed_standard_deviation() {
+        let mut m = Moments::default();
+        for x in [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0] {
+            m.update(x);
+        }
+        assert_eq!(m.mean, 5.0);
+        // Sample (n-1) standard deviation of that set is sqrt(32/7).
+        assert!((m.std_dev() - (32.0f64 / 7.0).sqrt()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_single_sample_has_no_spread() {
+        let mut m = Moments::default();
+        m.update(3.0);
+        assert_eq!(m.std_dev(), 0.0);
+    }
+
+    /// A nuclide that appears in only some replicas is zero in the others, so
+    /// its variance is computed over every replica rather than over the subset
+    /// that happened to carry it.
+    #[test]
+    fn absences_fold_in_as_zeros() {
+        let mut e = Ensemble::new(1);
+        e.push(vec![HashMap::from([("Mn56".to_string(), 2.0)])]);
+        e.push(vec![HashMap::new()]);
+        e.push(vec![HashMap::from([("Mn56".to_string(), 4.0)])]);
+        e.fold_absences();
+
+        let sd = e.std_dev_at(0);
+        // Over {2, 0, 4}: mean 2, sample sd = 2.
+        assert!((sd["Mn56"] - 2.0).abs() < 1e-12, "{sd:?}");
+        assert_eq!(e.samples_at(0, "Mn56"), vec![2.0, 0.0, 4.0]);
+    }
+
+    /// `n` replicas, each a one-nuclide inventory per step drawn by `draw`
+    /// from that replica's standard normal deviate.
+    fn synthetic(steps: usize, z: &[f64], draw: impl Fn(usize, f64) -> f64) -> Ensemble {
+        let mut e = Ensemble::new(steps);
+        for &z in z {
+            e.push(
+                (0..steps)
+                    .map(|step| HashMap::from([("X".to_string(), draw(step, z))]))
+                    .collect(),
+            );
+        }
+        e
+    }
+
+    /// The driver's loop on a synthetic ensemble: blocks of [`BLOCK`] until
+    /// [`Ensemble::may_stop`] or [`MAX_SAMPLES`], and the count it stopped at.
+    fn stops_at(
+        steps: usize,
+        convergence: f64,
+        draw: impl Fn(usize, f64) -> f64 + Copy,
+    ) -> (usize, Info) {
+        let mut state = yamc_rng::expand_seed(3);
+        let z = crate::covariance_sample::standard_normals(&mut state, MAX_SAMPLES);
+        let chain = HashMap::new();
+        let mut n = 0;
+        let mut e = Ensemble::new(steps);
+        while n < MAX_SAMPLES {
+            n += BLOCK;
+            e = synthetic(steps, &z[..n], draw);
+            if e.may_stop(&chain, convergence) {
+                break;
+            }
+        }
+        let mut info = Info::default();
+        let request = DataUncertainty {
+            convergence,
+            ..Default::default()
+        };
+        info.conclude(&mut e, &chain, &request);
+        (n, info)
+    }
+
+    #[test]
+    fn a_gaussian_output_stops_near_one_over_two_t_squared() {
+        // 1 / (2 t^2) + 1 is 201 at 5%, so the block after it, 256, give or
+        // take a block for the noise in the estimated kurtosis.
+        let gaussian = |_: usize, z: f64| 1.0 + 0.1 * z;
+        let (at_5, info) = stops_at(1, 0.05, gaussian);
+        assert!((192..=320).contains(&at_5), "{at_5}");
+        assert!(info.converged && !info.hit_cap && info.unconverged.is_empty());
+        assert_eq!(info.convergence, 0.05);
+        // 557 at 3%.
+        let (at_3, _) = stops_at(1, 0.03, gaussian);
+        assert!((512..=704).contains(&at_3), "{at_3}");
+    }
+
+    #[test]
+    fn a_heavy_tail_needs_more_replicas_than_a_gaussian() {
+        let gaussian = |_: usize, z: f64| 1.0 + 0.1 * z;
+        let lognormal = |_: usize, z: f64| (0.8 * z).exp();
+        let (g, _) = stops_at(1, 0.05, gaussian);
+        let (l, _) = stops_at(1, 0.05, lognormal);
+        assert!(l > g, "lognormal {l} against Gaussian {g}");
+    }
+
+    #[test]
+    fn an_output_noisy_only_at_a_cooling_step_keeps_the_run_going() {
+        // Three steps; the middle one alone has a tail (excess kurtosis about
+        // 1.6, so about 364 replicas at 5% against 201).
+        let draw = |step: usize, z: f64| {
+            if step == 1 {
+                (0.3 * z).exp()
+            } else {
+                1.0 + 0.1 * z
+            }
+        };
+        let (with, info) = stops_at(3, 0.05, draw);
+        let (without, _) = stops_at(3, 0.05, |_, z| 1.0 + 0.1 * z);
+        assert!(with > without, "{with} against {without}");
+        assert!(info.converged, "{info:?}");
+    }
+
+    #[test]
+    fn the_cap_is_reported_with_the_outputs_that_missed() {
+        let draw = |step: usize, z: f64| if step == 1 { (1.2 * z).exp() } else { 1.0 };
+        let (n, info) = stops_at(2, 0.01, draw);
+        assert_eq!(n, MAX_SAMPLES);
+        assert!(info.hit_cap && !info.converged);
+        assert_eq!(info.samples, MAX_SAMPLES);
+        assert_eq!(info.unconverged.len(), 1, "{:?}", info.unconverged);
+        let miss = &info.unconverged[0];
+        assert_eq!(miss.output, Output::Density("X".to_string()));
+        assert_eq!(miss.step, 2, "steps count from 1, the end of the first");
+        assert!(miss.relative_standard_error.unwrap() > 0.01);
+    }
+
+    #[test]
+    fn a_fixed_count_reports_without_claiming_the_cap() {
+        let mut state = yamc_rng::expand_seed(3);
+        let z = crate::covariance_sample::standard_normals(&mut state, 64);
+        let mut e = synthetic(1, &z, |_, z| 1.0 + 0.1 * z);
+        let mut info = Info::default();
+        let request = DataUncertainty {
+            samples: Some(64),
+            ..Default::default()
+        };
+        info.conclude(&mut e, &HashMap::new(), &request);
+        // 64 Gaussian replicas give about 9%, short of 5%.
+        assert!(!info.converged && !info.hit_cap);
+        assert_eq!(info.unconverged.len(), 1);
+    }
+
+    #[test]
+    fn the_target_defaults_to_five_percent_and_is_checked() {
+        assert_eq!(DataUncertainty::default().convergence, 0.05);
+        assert!(check_convergence(0.05).is_ok());
+        for bad in [0.0, 1.0, -0.1, 2.0, f64::NAN, f64::INFINITY] {
+            let err = check_convergence(bad).unwrap_err();
+            assert!(err.contains("convergence"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_streamed_standard_error_matches_the_slice_one() {
+        let mut state = yamc_rng::expand_seed(5);
+        let z = crate::covariance_sample::standard_normals(&mut state, 500);
+        let values: Vec<f64> = z.iter().map(|z| 3.0 + (0.6 * z).exp()).collect();
+        let mut acc = SpreadAccumulator::default();
+        for &v in &values {
+            acc.update(v);
+        }
+        let want = std_dev_standard_error(&values).unwrap();
+        let got = acc.std_dev_standard_error().unwrap();
+        assert!((got / want - 1.0).abs() < 1e-9, "{got} against {want}");
+        assert_eq!(SpreadAccumulator::default().std_dev_standard_error(), None);
+    }
+
+    /// A nuclide whose every sigma is the 0.0 MT=457 writes for "not stated",
+    /// which the chain files store as 0.0 rather than as null.
+    fn stated_as_zero() -> yani::ChainNuclide {
+        yani::ChainNuclide {
+            name: "In116_m1".to_string(),
+            half_life: Some(3257.4),
+            half_life_uncertainty: Some(0.0),
+            decay_energy: 2.8e6,
+            decay_energy_uncertainty: Some(0.0),
+            decay_evaluated: true,
+            excitation_energy: None,
+            level_index: None,
+            decay_energy_components: [
+                Some(yani::DecayEnergyComponent {
+                    energy: 2.8e6,
+                    uncertainty: Some(0.0),
+                }),
+                None,
+                None,
+            ],
+            reactions: Vec::new(),
+            decays: Vec::new(),
+            fission_yields: None,
+            sources: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_stored_zero_sigma_is_not_stated_rather_than_exact() {
+        // Every reader of these sigmas has to take 0.0 as "not stated", the
+        // way it takes a null: a zero sampled as a sigma would report the
+        // nuclide as known exactly, and it would not be listed among the
+        // inputs that carry no uncertainty.
+        let cn = stated_as_zero();
+        let chain = HashMap::from([(cn.name.clone(), cn.clone())]);
+        let (with, without, not_carried) = half_life_candidates(&chain);
+        assert!(
+            with.is_empty(),
+            "a 0.0 half-life sigma was sampled: {with:?}"
+        );
+        assert!(
+            without.contains("In116_m1"),
+            "and it was not reported unstated"
+        );
+        assert!(not_carried.is_empty());
+
+        assert!(!has_decay_energy_sigma(&cn));
+        assert_eq!(sample_decay_energy(&cn, 7, 0), None);
+    }
+
+    #[test]
+    fn only_significant_nuclides_drive_convergence() {
+        let mut e = Ensemble::new(1);
+        for v in [1.0, 1.1, 0.9, 1.05, 0.95] {
+            e.push(vec![HashMap::from([
+                ("big".to_string(), 1.0),
+                ("trace".to_string(), v * 1e-12),
+            ])]);
+        }
+        assert!(
+            e.unconverged(0.05).is_empty(),
+            "a trace 12 decades down must not decide when to stop"
+        );
+    }
+
+    /// Assert `draws` have mean `mean` and standard deviation `sigma`, to five
+    /// standard errors of a lognormal with those two moments.
+    ///
+    /// The tolerance is the lognormal's own: the variance of a sample mean is
+    /// `sigma^2 / n` and of a sample variance `sigma^4 (w^4 + 2w^3 + 3w^2 - 4)
+    /// / n`, with `w = 1 + (sigma / mean)^2`. At a relative sigma of 2 that
+    /// second one is 946 / n, which is why the wide case needs a million draws.
+    fn assert_moments(draws: &[f64], mean: f64, sigma: f64) {
+        let n = draws.len() as f64;
+        let m = draws.iter().sum::<f64>() / n;
+        let var = draws.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / (n - 1.0);
+        let w = 1.0 + (sigma / mean).powi(2);
+        let mean_tol = 5.0 * sigma / n.sqrt();
+        let var_tol = 5.0 * ((w.powi(4) + 2.0 * w.powi(3) + 3.0 * w * w - 4.0) / n).sqrt();
+        assert!(
+            (m - mean).abs() < mean_tol,
+            "mean {m} against {mean}, tolerance {mean_tol}"
+        );
+        assert!(
+            (var / (sigma * sigma) - 1.0).abs() < var_tol,
+            "variance {var} against {}, relative tolerance {var_tol}",
+            sigma * sigma
+        );
+        assert!(draws.iter().all(|x| *x > 0.0), "a draw went non-positive");
+    }
+
+    const RELATIVE_SIGMAS: [f64; 3] = [0.01, 0.5, 2.0];
+    const DRAWS: u64 = 1_000_000;
+
+    #[test]
+    fn half_life_draws_carry_the_stated_mean_and_sigma() {
+        // A Gaussian floored at zero fails this at 0.5 and badly at 2: at a
+        // relative sigma of 2 its mean is 1.40 T, not T.
+        for rel in RELATIVE_SIGMAS {
+            let t = 3600.0;
+            let candidates = vec![("X".to_string(), t, rel * t)];
+            let draws: Vec<f64> = (0..DRAWS)
+                .map(|r| sample_half_lives(&candidates, 5, r)["X"])
+                .collect();
+            assert_moments(&draws, t, rel * t);
+        }
+    }
+
+    #[test]
+    fn decay_energy_draws_carry_the_stated_mean_and_sigma() {
+        let mut cn = stated_as_zero();
+        // The total, where the data gives no split.
+        cn.decay_energy_components = [None; 3];
+        for rel in RELATIVE_SIGMAS {
+            cn.decay_energy_uncertainty = Some(rel * cn.decay_energy);
+            let draws: Vec<f64> = (0..DRAWS)
+                .map(|r| sample_decay_energy(&cn, 5, r).unwrap().0)
+                .collect();
+            assert_moments(&draws, cn.decay_energy, rel * cn.decay_energy);
+        }
+
+        // The components, each from its own sigma, one of each width at once.
+        let energies = [1.5e6, 0.8e6, 5.0e6];
+        for (c, (e, rel)) in cn
+            .decay_energy_components
+            .iter_mut()
+            .zip(energies.iter().zip(RELATIVE_SIGMAS))
+        {
+            *c = Some(yani::DecayEnergyComponent {
+                energy: *e,
+                uncertainty: Some(rel * e),
+            });
+        }
+        let drawn: Vec<_> = (0..DRAWS)
+            .map(|r| sample_decay_energy(&cn, 5, r).unwrap())
+            .collect();
+        for (i, (e, rel)) in energies.iter().zip(RELATIVE_SIGMAS).enumerate() {
+            let draws: Vec<f64> = drawn.iter().map(|d| d.1[i].unwrap().energy).collect();
+            assert_moments(&draws, *e, rel * e);
+        }
+        for (total, parts) in &drawn {
+            let sum: f64 = parts.iter().flatten().map(|p| p.energy).sum();
+            assert_eq!(*total, sum, "the total is its components' sum");
+        }
+    }
+
+    /// At a small relative sigma the lognormal is the Gaussian it replaced to
+    /// first order, `T exp(s z - s^2/2) = T + sigma z + T rel^2 (z^2 - 1) / 2 +
+    /// O(rel^3)`, so a well known half-life samples as it did before. Drawn
+    /// from the same stream and the same `z`, so the seed contract is kept.
+    #[test]
+    fn a_small_sigma_draws_what_the_gaussian_did() {
+        let (t, rel) = (3600.0, 0.01);
+        let candidates = vec![("X".to_string(), t, rel * t)];
+        for replica in 0..10_000 {
+            let replica_seed = yamc_rng::history_seed(5, replica);
+            let seed = yamc_rng::secondary_seed(
+                replica_seed,
+                crate::covariance_sample::name_ordinal("X") ^ HALF_LIFE_STREAM,
+            );
+            let z =
+                crate::covariance_sample::standard_normals(&mut yamc_rng::expand_seed(seed), 1)[0];
+            let gaussian = t + rel * t * z;
+            let drawn = sample_half_lives(&candidates, 5, replica)["X"];
+            let bound = t * rel * rel * (1.0 + z * z);
+            assert!(
+                (drawn - gaussian).abs() < bound,
+                "replica {replica}: {drawn} against {gaussian} with z {z}"
+            );
+        }
+
+        let mut cn = stated_as_zero();
+        cn.decay_energy_components = [None; 3];
+        cn.decay_energy_uncertainty = Some(rel * cn.decay_energy);
+        for replica in 0..10_000 {
+            let replica_seed = yamc_rng::history_seed(5, replica);
+            let seed = yamc_rng::secondary_seed(
+                replica_seed,
+                crate::covariance_sample::name_ordinal(&cn.name) ^ DECAY_ENERGY_STREAM,
+            );
+            let z =
+                crate::covariance_sample::standard_normals(&mut yamc_rng::expand_seed(seed), 1)[0];
+            let gaussian = cn.decay_energy * (1.0 + rel * z);
+            let drawn = sample_decay_energy(&cn, 5, replica).unwrap().0;
+            let bound = cn.decay_energy * rel * rel * (1.0 + z * z);
+            assert!(
+                (drawn - gaussian).abs() < bound,
+                "replica {replica}: {drawn} against {gaussian} with z {z}"
+            );
+        }
+    }
+
+    /// A non-negative energy with a mean of zero is zero in every draw, so a
+    /// sigma stated on one cannot be carried and the energy stays at zero.
+    #[test]
+    fn a_zero_energy_stays_zero() {
+        let mut cn = stated_as_zero();
+        cn.decay_energy_components = [
+            Some(yani::DecayEnergyComponent {
+                energy: 0.0,
+                uncertainty: Some(1.0e3),
+            }),
+            None,
+            None,
+        ];
+        // A zero energy is zero in every draw, so its sigma cannot be carried:
+        // nothing is drawn, and the nuclide is reported rather than listed as
+        // perturbed.
+        assert_eq!(sample_decay_energy(&cn, 5, 0), None);
+        assert!(!has_decay_energy_sigma(&cn));
+        assert!(has_decay_energy_sigma_not_carried(&cn));
+    }
+
+    /// A finite relative sigma whose square overflows would make the
+    /// lognormal NaN, so it is reported like an infinite one.
+    #[test]
+    fn a_relative_sigma_whose_square_overflows_is_not_carried() {
+        assert_eq!(carried(1.0, Some(1.0e155)), None);
+        assert_eq!(carried(1.0e-10, Some(1.0e150)), None);
+        assert_eq!(carried(1.0, Some(1.0e150)), Some(1.0e150));
+    }
+
+    #[test]
+    fn a_sigma_no_draw_can_carry_is_reported_not_drawn() {
+        let mut cn = stated_as_zero();
+        cn.half_life = Some(10.0);
+        cn.half_life_uncertainty = Some(f64::INFINITY);
+        cn.decay_energy = 1.0e6;
+        cn.decay_energy_uncertainty = Some(f64::INFINITY);
+        let chain = HashMap::from([(cn.name.clone(), cn.clone())]);
+        let (with, without, not_carried) = half_life_candidates(&chain);
+        assert!(
+            with.is_empty() && without.is_empty(),
+            "{with:?} {without:?}"
+        );
+        assert!(not_carried.contains("In116_m1"));
+        assert_eq!(sample_decay_energy(&cn, 5, 0), None);
+        assert!(has_decay_energy_sigma_not_carried(&cn));
+
+        // One component carried and one not: the nuclide is drawn, and still
+        // reported for the component whose sigma is lost.
+        cn.decay_energy_components = [
+            Some(yani::DecayEnergyComponent {
+                energy: 0.0,
+                uncertainty: Some(1.0e3),
+            }),
+            Some(yani::DecayEnergyComponent {
+                energy: 1.0e6,
+                uncertainty: Some(1.0e5),
+            }),
+            None,
+        ];
+        assert!(has_decay_energy_sigma(&cn));
+        assert!(has_decay_energy_sigma_not_carried(&cn));
+        let (_, parts) = sample_decay_energy(&cn, 5, 0).unwrap();
+        assert_eq!(parts[0].unwrap().energy, 0.0);
+        assert_ne!(parts[1].unwrap().energy, 1.0e6);
+    }
+
+    /// A nuclide with one gamma spectrum of two lines and one continuum: FD
+    /// sigma 2%, the first line dRI 3% and dER 50 eV, the second line only
+    /// `second_line_sigma` (relative), and the continuum FC sigma 10%.
+    fn photon_emitter(second_line_sigma: f64) -> yani::ChainNuclide {
+        let lambda = std::f64::consts::LN_2 / 1000.0;
+        let intensities = vec![0.5 * lambda, 0.25 * lambda];
+        let mut cn = stated_as_zero();
+        cn.name = "X100".to_string();
+        cn.half_life = Some(1000.0);
+        cn.sources = vec![
+            yani::DecaySource {
+                particle: "photon".to_string(),
+                radiation: Some("gamma".to_string()),
+                distribution: yani::DecaySourceDistribution::Discrete {
+                    energies: vec![5.0e5, 1.2e6],
+                    intensities: intensities.clone(),
+                },
+                uncertainty: Some(std::sync::Arc::new(yani::DecaySourceUncertainty {
+                    normalization: Some(0.8),
+                    normalization_uncertainty: Some(0.016),
+                    intensity_uncertainties: Some(vec![
+                        0.03 * intensities[0],
+                        second_line_sigma * intensities[1],
+                    ]),
+                    energy_uncertainties: Some(vec![50.0, 0.0]),
+                    covariance: None,
+                })),
+            },
+            yani::DecaySource {
+                particle: "photon".to_string(),
+                radiation: Some("gamma".to_string()),
+                distribution: yani::DecaySourceDistribution::Tabular {
+                    energies: vec![1.0e4, 1.0e6],
+                    intensities: vec![1.0e-9, 1.0e-9],
+                    interpolation: None,
+                },
+                uncertainty: Some(std::sync::Arc::new(yani::DecaySourceUncertainty {
+                    normalization: Some(0.5),
+                    normalization_uncertainty: Some(0.05),
+                    ..Default::default()
+                })),
+            },
+        ];
+        cn
+    }
+
+    /// `(line intensities, line energies, continuum value)` of one draw.
+    fn photon_draw(cn: &yani::ChainNuclide, seed: u64, replica: u64) -> (Vec<f64>, Vec<f64>, f64) {
+        let mut cn = cn.clone();
+        sample_decay_photons(&mut cn, seed, replica, PhotonCorrelation::Independent);
+        let yani::DecaySourceDistribution::Discrete {
+            energies,
+            intensities,
+        } = &cn.sources[0].distribution
+        else {
+            unreachable!()
+        };
+        let yani::DecaySourceDistribution::Tabular {
+            intensities: continuum,
+            ..
+        } = &cn.sources[1].distribution
+        else {
+            unreachable!()
+        };
+        (intensities.clone(), energies.clone(), continuum[0])
+    }
+
+    /// The draws carry the stated sigmas: a line's relative sigma is FD's and
+    /// its own dRI in quadrature, the lines of one spectrum are correlated
+    /// through FD alone, a line's energy moves by its dER, and a continuum by
+    /// its FC sigma, every one centred on the nominal value.
+    #[test]
+    fn photon_draws_carry_the_stated_sigmas_and_the_common_normalisation() {
+        let cn = photon_emitter(0.0);
+        let (i0, e0, c0) = photon_draw(&cn, 0, 0);
+        let nominal = {
+            let yani::DecaySourceDistribution::Discrete { intensities, .. } =
+                &cn.sources[0].distribution
+            else {
+                unreachable!()
+            };
+            intensities.clone()
+        };
+        assert_ne!(i0, nominal, "the draw moved the lines");
+        assert_ne!(e0[0], 5.0e5, "the draw moved the first line's energy");
+        assert_eq!(e0[1], 1.2e6, "a 0.0 dER is not stated, so not drawn");
+        assert_ne!(c0, 1.0e-9);
+
+        let n = 40_000;
+        let (mut a, mut b, mut e, mut c) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for replica in 0..n {
+            let (i, energies, continuum) = photon_draw(&cn, 9, replica);
+            a.push(i[0] / nominal[0]);
+            b.push(i[1] / nominal[1]);
+            e.push(energies[0]);
+            c.push(continuum / 1.0e-9);
+        }
+        let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+        let sd = |v: &[f64]| {
+            let m = mean(v);
+            (v.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / (v.len() - 1) as f64).sqrt()
+        };
+        let close = |got: f64, want: f64, tol: f64, what: &str| {
+            assert!(
+                (got - want).abs() <= tol * want,
+                "{what}: {got} against {want}"
+            );
+        };
+        let fd = 0.016 / 0.8;
+        close(mean(&a), 1.0, 0.002, "first line mean");
+        close(mean(&b), 1.0, 0.002, "second line mean");
+        close(
+            sd(&a),
+            (fd * fd + 0.03 * 0.03_f64).sqrt(),
+            0.03,
+            "first line sigma",
+        );
+        close(sd(&b), fd, 0.03, "second line sigma");
+        close(mean(&e), 5.0e5, 1e-5, "first line energy mean");
+        close(sd(&e), 50.0, 0.03, "first line energy sigma");
+        close(mean(&c), 1.0, 0.003, "continuum mean");
+        close(sd(&c), 0.1, 0.03, "continuum sigma");
+
+        let (ma, mb) = (mean(&a), mean(&b));
+        let cov = a
+            .iter()
+            .zip(&b)
+            .map(|(x, y)| (x - ma) * (y - mb))
+            .sum::<f64>()
+            / (n - 1) as f64;
+        let rho = cov / (sd(&a) * sd(&b));
+        let want = fd / (fd * fd + 0.03 * 0.03_f64).sqrt();
+        assert!(
+            (rho - want).abs() < 0.03,
+            "correlation {rho} against {want}"
+        );
+    }
+
+    /// The deviates are laid out by position, not by which values state a
+    /// sigma, so giving one line a sigma moves that line and nothing else.
+    #[test]
+    fn a_line_draws_the_same_deviate_whatever_its_neighbours_state() {
+        let without = photon_emitter(0.0);
+        let with = photon_emitter(0.04);
+        for replica in 0..32 {
+            let (i_without, e_without, c_without) = photon_draw(&without, 3, replica);
+            let (i_with, e_with, c_with) = photon_draw(&with, 3, replica);
+            assert_eq!(i_without[0], i_with[0]);
+            assert_ne!(i_without[1], i_with[1]);
+            assert_eq!(e_without, e_with);
+            assert_eq!(c_without, c_with);
+        }
+        // A source with no uncertainty at all still spends its deviates.
+        let mut bare = photon_emitter(0.0);
+        bare.sources[0].uncertainty = None;
+        let mut zeros = photon_emitter(0.0);
+        zeros.sources[0].uncertainty = Some(std::sync::Arc::new(yani::DecaySourceUncertainty {
+            intensity_uncertainties: Some(vec![0.0, 0.0]),
+            energy_uncertainties: Some(vec![0.0, 0.0]),
+            ..Default::default()
+        }));
+        for replica in 0..32 {
+            assert_eq!(
+                photon_draw(&bare, 3, replica),
+                photon_draw(&zeros, 3, replica)
+            );
+        }
+    }
+
+    /// A nuclide whose only photon sigmas are 0.0 states none, and one with a
+    /// sigma on a zero intensity states one no draw can carry.
+    #[test]
+    fn photon_sigmas_are_classified_as_stated_carried_or_not() {
+        let emitter = photon_emitter(0.0);
+        assert!(has_decay_photons(&emitter));
+        assert!(has_decay_photon_sigma(&emitter));
+        assert!(!has_decay_photon_sigma_not_carried(&emitter));
+
+        let mut silent = photon_emitter(0.0);
+        silent.sources[0].uncertainty = Some(std::sync::Arc::new(yani::DecaySourceUncertainty {
+            normalization: Some(1.0),
+            normalization_uncertainty: Some(0.0),
+            intensity_uncertainties: Some(vec![0.0, 0.0]),
+            energy_uncertainties: Some(vec![0.0, 0.0]),
+            covariance: None,
+        }));
+        silent.sources[1].uncertainty = None;
+        assert!(has_decay_photons(&silent));
+        assert!(!has_decay_photon_sigma(&silent));
+        assert!(!has_decay_photon_sigma_not_carried(&silent));
+        let before = photon_draw(&silent, 1, 0);
+        assert_eq!(before.0, {
+            let yani::DecaySourceDistribution::Discrete { intensities, .. } =
+                &silent.sources[0].distribution
+            else {
+                unreachable!()
+            };
+            intensities.clone()
+        });
+
+        let mut lost = silent.clone();
+        if let yani::DecaySourceDistribution::Discrete { intensities, .. } =
+            &mut lost.sources[0].distribution
+        {
+            intensities[1] = 0.0;
+        }
+        lost.sources[0].uncertainty = Some(std::sync::Arc::new(yani::DecaySourceUncertainty {
+            intensity_uncertainties: Some(vec![0.0, 1.0e-6]),
+            ..Default::default()
+        }));
+        assert!(!has_decay_photon_sigma(&lost));
+        assert!(has_decay_photon_sigma_not_carried(&lost));
+
+        assert!(!has_decay_photons(&stated_as_zero()));
+    }
+
+    // --- the range of the unstated photon correlations -------------------------
+
+    /// A source's stored values, lines or continuum points alike.
+    fn values(d: &yani::DecaySourceDistribution) -> &[f64] {
+        match d {
+            yani::DecaySourceDistribution::Discrete { intensities, .. }
+            | yani::DecaySourceDistribution::Tabular { intensities, .. } => intensities,
+        }
+    }
+
+    /// A photon line source of `radiation` with intensities `per_decay` (times
+    /// the decay constant of a 1000 s half-life), relative dRI `dri`, and a
+    /// normalisation FD with relative sigma `dfd` (`None` for the ENDF/B way:
+    /// FD = 1, dFD = 0).
+    fn line_source(
+        radiation: &str,
+        energies: &[f64],
+        per_decay: &[f64],
+        dri: &[f64],
+        dfd: Option<f64>,
+    ) -> yani::DecaySource {
+        let lambda = std::f64::consts::LN_2 / 1000.0;
+        let intensities: Vec<f64> = per_decay.iter().map(|p| p * lambda).collect();
+        yani::DecaySource {
+            particle: "photon".to_string(),
+            radiation: Some(radiation.to_string()),
+            uncertainty: Some(std::sync::Arc::new(yani::DecaySourceUncertainty {
+                normalization: Some(if dfd.is_some() { 0.9 } else { 1.0 }),
+                normalization_uncertainty: Some(dfd.map_or(0.0, |r| 0.9 * r)),
+                intensity_uncertainties: Some(
+                    intensities.iter().zip(dri).map(|(i, r)| i * r).collect(),
+                ),
+                energy_uncertainties: Some(vec![0.0; energies.len()]),
+                covariance: None,
+            })),
+            distribution: yani::DecaySourceDistribution::Discrete {
+                energies: energies.to_vec(),
+                intensities,
+            },
+        }
+    }
+
+    fn emitter_of(sources: Vec<yani::DecaySource>) -> yani::ChainNuclide {
+        let mut cn = stated_as_zero();
+        cn.name = "X101".to_string();
+        cn.half_life = Some(1000.0);
+        cn.sources = sources;
+        cn
+    }
+
+    /// The relative spread of the summed photon intensity over `n` draws at
+    /// one end of the range.
+    fn summed_spread(cn: &yani::ChainNuclide, correlation: PhotonCorrelation, n: u64) -> f64 {
+        let total = |cn: &yani::ChainNuclide| -> f64 {
+            cn.sources
+                .iter()
+                .map(|s| values(&s.distribution).iter().sum::<f64>())
+                .sum()
+        };
+        let nominal = total(cn);
+        let draws: Vec<f64> = (0..n)
+            .map(|replica| {
+                let mut drawn = cn.clone();
+                sample_decay_photons(&mut drawn, 21, replica, correlation);
+                total(&drawn) / nominal
+            })
+            .collect();
+        let mean = draws.iter().sum::<f64>() / n as f64;
+        (draws.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1) as f64).sqrt()
+    }
+
+    fn assert_near(got: f64, want: f64, tolerance: f64, what: &str) {
+        assert!(
+            (got / want - 1.0).abs() < tolerance,
+            "{what}: {got:.5e} against {want:.5e}"
+        );
+    }
+
+    /// An ENDF/B-style spectrum (FD = 1, dFD = 0, the normalisation folded
+    /// into every dRI): read independently its summed intensity moves by the
+    /// lines' dRI in quadrature, sqrt(sum (dRI_r I_r)^2) / sum I_r, and fully
+    /// correlated by their linear sum, sum dRI_r I_r / sum I_r.
+    #[test]
+    fn folded_line_sigmas_range_from_quadrature_to_the_linear_sum() {
+        let per_decay = [0.5, 0.3, 0.15, 0.05];
+        let dri = [0.02, 0.025, 0.03, 0.04];
+        let cn = emitter_of(vec![line_source(
+            "gamma",
+            &[1.0e5, 3.0e5, 6.0e5, 9.0e5],
+            &per_decay,
+            &dri,
+            None,
+        )]);
+        assert_eq!(folded_photon_spectra(&cn), vec!["gamma".to_string()]);
+        let sum: f64 = per_decay.iter().sum();
+        let quadrature = per_decay
+            .iter()
+            .zip(&dri)
+            .map(|(i, r)| (i * r).powi(2))
+            .sum::<f64>()
+            .sqrt()
+            / sum;
+        let linear = per_decay.iter().zip(&dri).map(|(i, r)| i * r).sum::<f64>() / sum;
+        let n = 40_000;
+        assert_near(
+            summed_spread(&cn, PhotonCorrelation::Independent, n),
+            quadrature,
+            0.03,
+            "independent",
+        );
+        assert_near(
+            summed_spread(&cn, PhotonCorrelation::Correlated, n),
+            linear,
+            0.03,
+            "fully correlated",
+        );
+    }
+
+    /// One line with a normalisation sigma a and its own sigma b: independent
+    /// they add in quadrature, fully correlated linearly.
+    #[test]
+    fn a_normalisation_and_its_lines_range_from_quadrature_to_the_sum() {
+        let (a, b) = (0.02, 0.03);
+        let cn = emitter_of(vec![line_source("gamma", &[5.0e5], &[0.8], &[b], Some(a))]);
+        assert!(folded_photon_spectra(&cn).is_empty(), "dFD is stated");
+        let n = 40_000;
+        assert_near(
+            summed_spread(&cn, PhotonCorrelation::Independent, n),
+            (a * a + b * b).sqrt(),
+            0.03,
+            "independent",
+        );
+        assert_near(
+            summed_spread(&cn, PhotonCorrelation::Correlated, n),
+            a + b,
+            0.03,
+            "fully correlated",
+        );
+    }
+
+    /// A gamma and an x-ray spectrum of one nuclide, each with a normalisation
+    /// sigma only: independent their sum moves by the quadrature of the two,
+    /// fully correlated by the linear sum.
+    #[test]
+    fn gamma_and_x_ray_spectra_range_from_quadrature_to_the_sum() {
+        let (a, b) = (0.03, 0.05);
+        let (ig, ix) = (0.7, 0.3);
+        let cn = emitter_of(vec![
+            line_source("xray", &[6.0e4], &[ix], &[0.0], Some(b)),
+            line_source("gamma", &[5.0e5], &[ig], &[0.0], Some(a)),
+        ]);
+        let n = 40_000;
+        assert_near(
+            summed_spread(&cn, PhotonCorrelation::Independent, n),
+            ((ig * a).powi(2) + (ix * b).powi(2)).sqrt() / (ig + ix),
+            0.03,
+            "independent",
+        );
+        assert_near(
+            summed_spread(&cn, PhotonCorrelation::Correlated, n),
+            (ig * a + ix * b) / (ig + ix),
+            0.03,
+            "fully correlated",
+        );
+    }
+
+    /// Line energies draw the same deviates at both ends, and a single
+    /// spectrum with only a normalisation sigma is drawn identically at both.
+    #[test]
+    fn energies_and_a_lone_normalisation_draw_the_same_at_both_ends() {
+        let cn = photon_emitter(0.0);
+        for replica in 0..16 {
+            let mut independent = cn.clone();
+            let mut correlated = cn.clone();
+            sample_decay_photons(&mut independent, 4, replica, PhotonCorrelation::Independent);
+            sample_decay_photons(&mut correlated, 4, replica, PhotonCorrelation::Correlated);
+            let energies = |cn: &yani::ChainNuclide| match &cn.sources[0].distribution {
+                yani::DecaySourceDistribution::Discrete { energies, .. } => energies.clone(),
+                _ => unreachable!(),
+            };
+            assert_eq!(energies(&independent), energies(&correlated));
+        }
+        let lone = emitter_of(vec![line_source(
+            "gamma",
+            &[5.0e5, 7.0e5],
+            &[0.5, 0.4],
+            &[0.0, 0.0],
+            Some(0.02),
+        )]);
+        for replica in 0..16 {
+            let mut independent = lone.clone();
+            let mut correlated = lone.clone();
+            sample_decay_photons(&mut independent, 4, replica, PhotonCorrelation::Independent);
+            sample_decay_photons(&mut correlated, 4, replica, PhotonCorrelation::Correlated);
+            assert_eq!(independent.sources, correlated.sources);
+        }
+    }
+
+    /// The D1S scale is the normalisation multiplier a transmutation draws for
+    /// the same seed and replica, so the two agree draw for draw.
+    #[test]
+    fn the_d1s_scale_is_the_transmutation_draw_of_the_normalisation() {
+        let cn = emitter_of(vec![line_source(
+            "gamma",
+            &[5.0e5, 7.0e5],
+            &[0.5, 0.4],
+            &[0.0, 0.0],
+            Some(0.02),
+        )]);
+        assert!(has_decay_photon_normalisation_sigma(&cn));
+        for replica in 0..16 {
+            let mut drawn = cn.clone();
+            sample_decay_photons(&mut drawn, 8, replica, PhotonCorrelation::Independent);
+            let ratio =
+                values(&drawn.sources[0].distribution)[0] / values(&cn.sources[0].distribution)[0];
+            let scale = photon_normalisation_scale(&cn, 8, replica, PhotonCorrelation::Independent);
+            assert!(
+                (scale / ratio - 1.0).abs() < 1e-12,
+                "{scale} against {ratio}"
+            );
+        }
+        let folded = emitter_of(vec![line_source("gamma", &[5.0e5], &[0.5], &[0.02], None)]);
+        assert!(!has_decay_photon_normalisation_sigma(&folded));
+        assert_eq!(
+            photon_normalisation_scale(&folded, 8, 0, PhotonCorrelation::Correlated),
+            1.0
+        );
+    }
+
+    /// The photon energy per atom per second is each line's energy times its
+    /// intensity plus each continuum's energy integral.
+    #[test]
+    fn the_photon_energy_rate_sums_lines_and_continua() {
+        let mut cn = emitter_of(vec![line_source(
+            "gamma",
+            &[5.0e5, 1.0e6],
+            &[0.5, 0.25],
+            &[0.0, 0.0],
+            None,
+        )]);
+        cn.sources.push(yani::DecaySource {
+            particle: "photon".to_string(),
+            radiation: Some("gamma".to_string()),
+            uncertainty: None,
+            distribution: yani::DecaySourceDistribution::Tabular {
+                energies: vec![0.0, 2.0e3],
+                intensities: vec![1.0e-6, 1.0e-6],
+                interpolation: Some(yani::Interpolation::Histogram),
+            },
+        });
+        let lambda = std::f64::consts::LN_2 / 1000.0;
+        let want = (5.0e5 * 0.5 + 1.0e6 * 0.25) * lambda + 1.0e-6 * 2.0e3 * 1.0e3;
+        assert!((photon_energy_rate(&cn) / want - 1.0).abs() < 1e-12);
+    }
+}

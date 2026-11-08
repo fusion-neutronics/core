@@ -1,0 +1,86 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+rust-version = "1.99"
+
+# There was no `[profile.*]` anywhere in this repo, so every release build --
+# including the wheels published to PyPI, which the four `maturin-action` jobs
+# in `.github/workflows/ci-python.yml` all build with `--release` -- used
+# cargo's defaults of `lto = false` and `codegen-units = 16`. Most of the
+# transmutation collapse's cost is in calls that cross a crate boundary
+# (`Reaction::cross_section_at` and the `F64Buffer` `Deref`, from
+# `yani-transmute` into `yamc-nuclide`), and without LTO none of them inline.
+#
+# Accuracy-safe: LLVM does not reassociate floating point without `fast-math`,
+# which Rust never enables, so this changes how the same operations are
+# scheduled and not which operations they are.
+[profile.release]
+codegen-units = 1
+# "thin" rather than "fat". Fat gains another percent or so and links arrow,
+# faer and reqwest as one LTO unit, which is where the manylinux wheel
+# containers run out of memory.
+lto = "thin"
+# NOT "abort". pyo3 turns a Rust panic into a Python exception by unwinding
+# across the extension boundary, so aborting here would turn every recoverable
+# error in the bindings into a killed interpreter.
+panic = "unwind"
+
+# Dev and test builds carried full DWARF, and this workspace cannot afford it.
+# There was no `[profile.dev]`, so cargo's default `debug = 2` applied to every
+# `cargo test`: full type and variable-location info for arrow, faer, wgpu,
+# cubecl, rustpython and nalgebra, plus a copy in each of the ~40 test
+# binaries. A local `target/debug` reached 103 GB, and CI does not have that:
+# on 2026-09-02 the ubuntu runner logged "Free space left: 0 MB" and one second
+# later `ld` died with SIGBUS writing its own mmapped output, which is what a
+# full filesystem looks like from inside the linker rather than a clean ENOSPC.
+# The same failure hit `main` and an unrelated pull request in the same hour, so
+# it was the workspace outgrowing the runner and not anything either change did.
+#
+# `line-tables-only` keeps the line-number program and drops the rest, so a
+# panic backtrace still names the file and line that panicked, which is what
+# these builds are actually read for. What is lost is stepping in a debugger
+# with variable inspection; anyone who needs that can build with
+# `RUSTFLAGS=-Cdebuginfo=2` for the one crate they are debugging.
+#
+# The next lever, if this stops being enough, is `debug = false` under
+# `[profile.dev.package."*"]`, which keeps line tables for this workspace's own
+# crates and drops them for every dependency. Not done yet because it makes a
+# backtrace through faer or arrow unreadable, and those are exactly the frames a
+# numerical bug tends to sit in.
+[profile.dev]
+debug = "line-tables-only"
+
+# The nuclear-data uncertainty sampler factorizes each nuclide's covariance
+# field once per run, an O(n³) eigendecomposition on a few hundred to over a
+# thousand cells (ENDF/B-VIII.1 O16 has 1255). Unoptimized, one such
+# factorization takes about a minute, which turned two `yani-transmute` test
+# binaries from seconds into over a minute each under `cargo test`. Optimizing
+# this one crate keeps those tests near release speed and leaves every other
+# crate's debug build as it was.
+[profile.dev.package.yani-transmute]
+opt-level = 2
+
+# The endf goldens and fixtures are xz-compressed and the tests decompress
+# over 20 MB of text, some of it more than once. Unoptimized, the pure-Rust
+# decoder spent most of the golden test's time on it (20 s against 4 s).
+# Dev-only: nothing shipped depends on it.
+[profile.dev.package.lzma-rust2]
+opt-level = 3
+
+# The resonance covariance folds differentiate every resonance parameter at
+# every integration point; unoptimized, the W183 fold alone took two minutes
+# under `cargo test`. Optimizing this one crate keeps its tests near release
+# speed and leaves every other crate's debug build as it was.
+[profile.dev.package.endf]
+opt-level = 2
+
+# Flux and offset surfaces find each distance by Newton's method over a
+# Fourier series and march rays with dozens of such evaluations; unoptimized,
+# the flux oracle tests took a minute and a debug-built transport test with
+# flux layers is many times slower again. Optimizing this one small crate
+# keeps those near release speed and leaves every other crate's debug build
+# as it was.
+[profile.dev.package.yamc-geo]
+opt-level = 2

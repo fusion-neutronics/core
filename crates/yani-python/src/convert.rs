@@ -1,0 +1,766 @@
+//! `yani.convert_transmutation`: ENDF evaluations to the format yani reads.
+//!
+//! The point of the whole exercise. A user who wants transmutation data types
+//! `pip install yani` and calls this: no `endf` package from a git branch, no
+//! separate converter distribution, no NJOY. The parser is an implementation
+//! detail this module never names in its signature.
+//!
+//! Every function here does its work with the GIL released. One call can take
+//! minutes (NJOY over an evaluation, or a whole sublibrary through the chain
+//! builder), and holding the GIL for it would stop every other Python thread,
+//! so a thread pool over evaluations would run them one at a time. The
+//! arguments are extracted and checked first, only Rust values go into the
+//! work, and its result becomes Python objects afterwards.
+
+use std::error::Error;
+use std::path::PathBuf;
+
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::prelude::*;
+use pyo3_stub_gen::derive::gen_stub_pyfunction;
+
+/// Run `convert` with the GIL released, raising its error as `RuntimeError`.
+fn detached<T: Send>(
+    py: Python<'_>,
+    convert: impl Send + FnOnce() -> Result<T, Box<dyn Error>>,
+) -> PyResult<T> {
+    // `Box<dyn Error>` is not `Send`, so it cannot come back out through
+    // `detach`; the message is what the caller sees anyway.
+    py.detach(|| convert().map_err(|e| e.to_string()))
+        .map_err(PyRuntimeError::new_err)
+}
+
+/// Convert ENDF decay, fission product yield and neutron evaluations into a
+/// transmutation Arrow directory.
+///
+/// Parameters
+/// ----------
+/// decay_files, fpy_files, neutron_files : list[str]
+///     ENDF inputs. All three are needed to build a network: the decay data
+///     says what decays into what, the neutron data what transmutes into what,
+///     and the fission yields what fission produces. A file may hold one
+///     evaluation or a whole tape of them, such as JEFF-4.0's decay and
+///     fission yield tapes; every material in it is read.
+/// output_path : str
+///     Directory to write. Created if absent, merged into if it already holds
+///     other subsections of the same library.
+/// library : str
+///     Library name recorded in the provenance, e.g. ``"endf-b8.1"``.
+/// data_version : str
+///     Identifier of the published release. This is what a consumer compares a
+///     cached copy against, so a rebuild that changes values must change this.
+///     It is not the converter version: two rebuilds from one converter are
+///     different data.
+/// created_utc : str, optional
+///     Timestamp recorded in the provenance. Supply one for a reproducible
+///     directory; left unset, the current time is used.
+/// branch_ratios : str, optional
+///     Path to a JSON branching table in ``openmc_data`` shape,
+///     ``{reaction: {parent: {target: fraction}}}``. Splits a reaction between
+///     a ground state and its metastable partners. Without it every
+///     ``(n,gamma)`` gives its whole rate to the ground state and the
+///     metastable product is absent from the network entirely.
+/// subsections : list[str], optional
+///     Which of ``decay``, ``reactions`` and ``fission_yields`` to write.
+///     Defaults to all three. A caller assembling a chain from more than one
+///     library writes each subsection from the library that has it, and the
+///     manifest merges rather than being overwritten.
+/// reactions : list[str], optional
+///     Reaction names to follow. Defaults to every reaction the chain builder
+///     knows, not the six-name short set, so nothing is silently left out.
+/// decay_fill_files : list[str], optional
+///     Decay evaluations from a second library, read only to replace the
+///     placeholder average decay energies in ``decay_files``. Some libraries
+///     write a stand-in for nuclides nobody has evaluated: a third of each
+///     beta or electron-capture branch's Q to the light particles and a third
+///     to the photons, which for an electron-capture emitter can be several
+///     times the recoverable energy (Sn111 in ENDF/B-VIII.1 is 1.63 MeV per
+///     decay against 0.69 MeV from its decay scheme). A placeholder is
+///     replaced only where the second library has an evaluated decay scheme
+///     for the same nuclide with a half-life within 25% of the first's.
+///     Half-lives and decay modes are never touched. The decay subsection's
+///     ``provenance.json`` lists every placeholder and every replacement,
+///     with or without a fill. A tape is read whole, as for ``decay_files``.
+/// decay_fill_library : str, optional
+///     The library ``decay_fill_files`` came from, e.g. ``"jendl-5.0"``.
+///     Required with ``decay_fill_files``.
+///
+/// Returns
+/// -------
+/// int
+///     The number of nuclides in the network written.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (
+    decay_files,
+    fpy_files,
+    neutron_files,
+    output_path,
+    library = "",
+    decay_library = "",
+    data_version = "",
+    created_utc = None,
+    reactions = None,
+    branch_ratios = None,
+    subsections = None,
+    decay_fill_files = Vec::new(),
+    decay_fill_library = "",
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn convert_transmutation(
+    py: Python<'_>,
+    decay_files: Vec<String>,
+    fpy_files: Vec<String>,
+    neutron_files: Vec<String>,
+    output_path: &str,
+    library: &str,
+    decay_library: &str,
+    data_version: &str,
+    created_utc: Option<&str>,
+    reactions: Option<Vec<String>>,
+    branch_ratios: Option<&str>,
+    subsections: Option<Vec<String>>,
+    decay_fill_files: Vec<String>,
+    decay_fill_library: &str,
+) -> PyResult<usize> {
+    // Which inputs are required depends on what is being written. A caller
+    // asking only for the reaction topology, to graft onto decay data from
+    // another library, legitimately has no fission yields to give.
+    let wants = |name: &str| {
+        subsections
+            .as_ref()
+            .map(|s| s.iter().any(|x| x == name))
+            .unwrap_or(true)
+    };
+    if decay_files.is_empty() {
+        return Err(PyValueError::new_err(
+            "decay_files is required: the decay data is what says which \
+             nuclides exist, so without it every reaction target is unknown",
+        ));
+    }
+    if neutron_files.is_empty() && wants("reactions") {
+        return Err(PyValueError::new_err(
+            "neutron_files is required to write the reactions subsection",
+        ));
+    }
+    if fpy_files.is_empty() && wants("fission_yields") {
+        return Err(PyValueError::new_err(
+            "fpy_files is required to write the fission_yields subsection; \
+             pass subsections=[...] without it to skip that subsection",
+        ));
+    }
+
+    let provenance = yani_convert::Provenance {
+        library: library.to_string(),
+        decay_library: decay_library.to_string(),
+        data_version: data_version.to_string(),
+        created_utc: created_utc.map(str::to_string).unwrap_or_default(),
+    };
+
+    detached(py, || {
+        yani_convert::convert_transmutation_files(
+            &decay_files,
+            &fpy_files,
+            &neutron_files,
+            &decay_fill_files,
+            decay_fill_library,
+            reactions.as_deref(),
+            branch_ratios.map(PathBuf::from).as_deref(),
+            subsections.as_deref(),
+            &PathBuf::from(output_path),
+            &provenance,
+        )
+    })
+}
+
+/// Extract isomeric branching from neutron evaluations and write the
+/// ``branching/`` subsection.
+///
+/// Separate from :func:`convert_transmutation` because the branching curves and
+/// the decay data routinely come from different libraries: TENDL branching
+/// beside ENDF/B decay is the usual combination. Both calls merge into the same
+/// ``manifest.json``.
+///
+/// Parameters
+/// ----------
+/// neutron_files : list[str]
+///     Neutron evaluations of the parent nuclides. MF=8/9/10 radionuclide
+///     production is what carries the branching. A file may hold many
+///     materials, such as IRDFF-II's tape of 70, and every one is read.
+/// decay_files : list[str]
+///     Decay evaluations, read only to build the isomer table, so the
+///     metastable ones suffice. A tape is read whole, as for the neutron files.
+/// output_path : str
+///     The transmutation directory to write ``branching/`` into.
+/// library, data_version, created_utc
+///     As for :func:`convert_transmutation`. The library here is the branching
+///     source, which need not match the chain's.
+/// tol_ev : float, optional
+///     Energy tolerance when matching a nuclear level to an isomeric state.
+/// linearize_tol : float, optional
+///     Relative tolerance for resampling a non-lin-lin region onto the lin-lin
+///     pairs the format stores.
+///
+/// Returns
+/// -------
+/// dict
+///     Coverage: parents read, parents with data, curves linearized, duplicate
+///     groups merged, the metastable targets found, ``level_routes`` (how many
+///     excited production levels were matched to an isomer by energy, by
+///     energy within a tenth, by level index, as the only isomer, or not at
+///     all) and ``flagged_levels`` (one line per level that was unresolved,
+///     taken as ground because the decay data has no isomer for its product,
+///     matched only by the looser energy pass, matched by energy while its
+///     level index pointed at another isomer, or taken as its product's only
+///     isomer while further from it than either energy pass accepts; every
+///     excited level that ends up at ground is listed), ``partial_sum_mismatches``
+///     (one line per reaction whose MF=10 partial cross sections do not sum to
+///     its MF=3 total, or whose MF=9 yields do not sum to one, within two
+///     percent below 20 MeV), and ``skipped_states`` (one line per production
+///     state that names no single product nuclide, and so gives no row:
+///     fission, an IZAP of zero that no single MF=8 subsection resolves, or
+///     any other ZAP whose Z or A is not positive), ``list_facts`` (one line
+///     per production list, a parent's MT in MF=9 or MF=10: whether the ground
+///     state is listed, whether the file has an MF=3 section for the MT, each
+///     state's LFS, LMF, target, route and level energy difference, and the
+///     MF=1 normalisation lines naming the MT) and ``list_counts`` (how many
+///     lists are complete or isomers only in each file, have no MF=3 section
+///     for their MT, or are normalised). The same facts are stored per row in
+///     ``branching.arrow``; they change no rate.
+///     The MF=40 production
+///     covariance, written as the tape gives it to
+///     ``branching/branching_covariance.arrow``, is counted by
+///     ``mf40_sections`` (sections read, whatever the MT), ``mf40_blocks``
+///     (blocks written), ``mf40_blocks_by_lb`` (the NI blocks by layout),
+///     ``mf40_nc_blocks``, ``mf40_unmatched_states`` (one line per product
+///     state that matches no MF=9 or MF=10 state, matches several within the
+///     tolerance, or is excited with no stated excitation to confirm a level
+///     by, written with no target), ``mf40_states_without_chain_kind``
+///     (states of an MT with no chain reaction, such as MT 18, written with
+///     no reaction),
+///     ``mf40_on_yield_channels`` (states matched to a level whose production
+///     MF=9 gives as a yield rather than an MF=10 cross section; where that
+///     yield is merged with another state's, the row carries the state's own
+///     yield with quantity ``"yield"``),
+///     ``mf40_mat1_naming_itself`` (sub-subsections whose MAT1 is the
+///     evaluation's own MAT, written as given), ``mf40_cross_state_blocks``
+///     (blocks other than a state's covariance with itself; key them on MT,
+///     LFS, MT1 and XLFS1, since both states can resolve to one target),
+///     ``mf40_blocks_outside_mf10`` (blocks whose partner is in another
+///     material or has XMF1 other than 10), ``mf40_without_blocks`` (one line
+///     per section, state or sub-subsection holding no block, with its tape
+///     values, the only part of MF=40 the file cannot show),
+///     ``mf40_partner_unresolved`` (one line per sub-subsection written
+///     with no partner target because the tape does not pin the partner to
+///     one state, among them a partner whose level XLFS1 MF=10 numbers
+///     differently from MF=40), and ``mf40_states_placed_by_excitation`` (one
+///     line per product state whose target was matched by excitation because
+///     MF=9 and MF=10 give its IZAP and LFS no state or one at another
+///     excitation; its self blocks name it by MF=40's own LFS). The four line
+///     lists are also written to ``branching/provenance.json``. An evaluation
+///     set without MF=40 writes no covariance file, and removes one an
+///     earlier conversion left there.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (
+    neutron_files,
+    decay_files,
+    output_path,
+    library = "",
+    decay_library = "",
+    data_version = "",
+    created_utc = None,
+    tol_ev = 3000.0,
+    linearize_tol = yani_convert::branching::DEFAULT_LINEARIZE_TOL,
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn convert_branching(
+    py: Python<'_>,
+    neutron_files: Vec<String>,
+    decay_files: Vec<String>,
+    output_path: &str,
+    library: &str,
+    decay_library: &str,
+    data_version: &str,
+    created_utc: Option<&str>,
+    tol_ev: f64,
+    linearize_tol: f64,
+) -> PyResult<Py<pyo3::types::PyDict>> {
+    if neutron_files.is_empty() || decay_files.is_empty() {
+        return Err(PyValueError::new_err(
+            "branching needs neutron_files for the production data and \
+             decay_files for the isomer table",
+        ));
+    }
+
+    let provenance = yani_convert::Provenance {
+        library: library.to_string(),
+        decay_library: decay_library.to_string(),
+        data_version: data_version.to_string(),
+        created_utc: created_utc.map(str::to_string).unwrap_or_default(),
+    };
+
+    let stats = detached(py, || {
+        yani_convert::convert_branching_files(
+            &neutron_files,
+            &decay_files,
+            &PathBuf::from(output_path),
+            &provenance,
+            tol_ev,
+            linearize_tol,
+        )
+    })?;
+
+    let out = pyo3::types::PyDict::new(py);
+    out.set_item("parents", stats.parents)?;
+    out.set_item("parents_with_data", stats.parents_with_data)?;
+    out.set_item("linearized_curves", stats.linearized_curves)?;
+    out.set_item("merged_duplicate_groups", stats.merged_duplicate_groups)?;
+    out.set_item("metastable_targets", stats.metastable_targets)?;
+    out.set_item("level_routes", stats.level_routes)?;
+    out.set_item("flagged_levels", stats.flagged_levels)?;
+    out.set_item("partial_sum_mismatches", stats.partial_sum_mismatches)?;
+    out.set_item("skipped_states", stats.skipped_states)?;
+    out.set_item("list_facts", stats.list_facts)?;
+    out.set_item("list_counts", stats.list_counts)?;
+    out.set_item("mf40_sections", stats.mf40_sections)?;
+    out.set_item("mf40_blocks", stats.mf40_blocks)?;
+    out.set_item("mf40_blocks_by_lb", stats.mf40_blocks_by_lb)?;
+    out.set_item("mf40_nc_blocks", stats.mf40_nc_blocks)?;
+    out.set_item("mf40_unmatched_states", stats.mf40_unmatched_states)?;
+    out.set_item(
+        "mf40_states_without_chain_kind",
+        stats.mf40_states_without_chain_kind,
+    )?;
+    out.set_item("mf40_on_yield_channels", stats.mf40_on_yield_channels)?;
+    out.set_item("mf40_mat1_naming_itself", stats.mf40_mat1_naming_itself)?;
+    out.set_item("mf40_cross_state_blocks", stats.mf40_cross_state_blocks)?;
+    out.set_item("mf40_without_blocks", stats.mf40_without_blocks)?;
+    out.set_item("mf40_blocks_outside_mf10", stats.mf40_blocks_outside_mf10)?;
+    out.set_item("mf40_partner_unresolved", stats.mf40_partner_unresolved)?;
+    out.set_item(
+        "mf40_states_placed_by_excitation",
+        stats.mf40_states_placed_by_excitation,
+    )?;
+    Ok(out.unbind())
+}
+
+/// Convert an evaluation into the cross-section data an activation
+/// calculation reads.
+///
+/// Writes a ``{nuclide}.arrow/`` directory holding ``nuclide.arrow``,
+/// ``energy.arrow``, ``reactions.arrow`` and ``version.json``, which is exactly
+/// what a transport-free reaction-rate collapse reads. The secondary distributions and
+/// lookup tables a transport run needs are deliberately not written: an
+/// activation calculation never touches them, and building them from an ACE
+/// table would cost heating data it does not carry.
+///
+/// Parameters
+/// ----------
+/// input_path : str
+///     An ENDF evaluation, or an ACE table when ``source_format="ace"``.
+/// output_dir : str
+///     Directory to write ``{nuclide}.arrow/`` into. With
+///     ``source_format="endf"``, NJOY also works in a hidden directory here,
+///     so this disk needs room for its tapes; the directory is removed when
+///     the conversion ends.
+/// source_format : {"endf", "ace"}
+///     ``"endf"`` runs NJOY to reconstruct resonances and Doppler broaden,
+///     which is the documented route and the only one that can reach an
+///     arbitrary temperature. ``"ace"`` reads a table you already have and
+///     needs no NJOY, at the cost of being stuck with the temperature it was
+///     processed at.
+/// njoy_exec : str, optional
+///     The NJOY executable, for ``source_format="endf"``. Note that FENDL is
+///     processed with the IAEA-NDS fork and upstream NJOY does not reproduce
+///     the official release; both builds succeed, so the wrong choice is quiet.
+/// temperatures : list[float], optional
+///     Temperatures in Kelvin. Defaults to NJOY's own default. Ignored for
+///     ``source_format="ace"``.
+/// library, data_version, created_utc
+///     Recorded in ``version.json``. ``data_version`` identifies the published
+///     release and is what a consumer compares a cached copy against.
+/// covariance : bool
+///     Also write ``covariance.arrow``, the MF=33 cross-section covariance,
+///     and the evaluation's other covariance sections where it has them:
+///     ``angular_covariance.arrow`` (MF=34), ``nubar_covariance.arrow``
+///     (MF=31), ``spectrum_covariance.arrow`` (MF=35) and
+///     ``resonance_parameters.arrow`` (the MF=2 resonance parameters with
+///     their MF=32 covariance). Off by default: the matrices are large and
+///     only an uncertainty
+///     calculation reads them. Requires ``source_format="endf"`` -- MF=33 is
+///     not carried through ACER, so asking for it from an ACE table raises.
+///
+/// Returns
+/// -------
+/// str
+///     Path to the directory written.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (
+    input_path,
+    output_dir,
+    source_format = "endf",
+    njoy_exec = "njoy",
+    temperatures = None,
+    library = "",
+    data_version = "",
+    created_utc = None,
+    covariance = false,
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn convert_neutron_xs(
+    py: Python<'_>,
+    input_path: &str,
+    output_dir: &str,
+    source_format: &str,
+    njoy_exec: &str,
+    temperatures: Option<Vec<f64>>,
+    library: &str,
+    data_version: &str,
+    created_utc: Option<&str>,
+    covariance: bool,
+) -> PyResult<String> {
+    let input = PathBuf::from(input_path);
+    let source = match source_format {
+        "ace" => yamc_convert::entry::Source::Ace { path: &input },
+        "endf" => yamc_convert::entry::Source::Endf {
+            path: &input,
+            njoy_exec,
+            temperatures: temperatures.unwrap_or_default(),
+        },
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown source_format {other:?}; expected \"endf\" or \"ace\""
+            )));
+        }
+    };
+
+    let provenance = yamc_convert::entry::Provenance {
+        library: library.to_string(),
+        data_version: data_version.to_string(),
+        created_utc: created_utc.map(str::to_string).unwrap_or_default(),
+    };
+
+    detached(py, || {
+        yamc_convert::entry::convert_neutron_xs(
+            &source,
+            &PathBuf::from(output_dir),
+            &provenance,
+            covariance,
+        )
+    })
+    .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Convert an ENDF evaluation into the full neutron transport data set.
+///
+/// Everything :func:`convert_neutron_xs` writes, plus the reaction products,
+/// their secondary angle and energy distributions, the lookup accelerator the
+/// transport hot path reads, and the two fissile-only sections.
+///
+/// ENDF only, deliberately. An ACE table holds one temperature, carries no
+/// MT 901 heating and no fission energy release, so a transport conversion
+/// from one would be missing the local KERMA and the fission photon scaling
+/// with nothing on disk to say so.
+///
+/// Parameters
+/// ----------
+/// input_path : str
+///     Path to the ENDF evaluation.
+/// output_dir : str
+///     Directory to write ``{Nuclide}.arrow/`` into. NJOY also works in a
+///     hidden directory here, so this disk needs room for its tapes; the
+///     directory is removed when the conversion ends.
+/// njoy_exec : str
+///     The NJOY executable. FENDL needs the IAEA-NDS fork; upstream NJOY does
+///     not reproduce the official release, and both builds succeed, so the
+///     wrong choice is quiet.
+/// temperatures : list[float], optional
+///     Temperatures in Kelvin. Defaults to NJOY's own default.
+/// library, data_version, created_utc
+///     Recorded in ``version.json``.
+/// covariance : bool
+///     Also write ``covariance.arrow``, the MF=33 cross-section covariance,
+///     and the evaluation's other covariance sections where it has them:
+///     ``angular_covariance.arrow`` (MF=34), ``nubar_covariance.arrow``
+///     (MF=31), ``spectrum_covariance.arrow`` (MF=35) and
+///     ``resonance_parameters.arrow`` (the MF=2 resonance parameters with
+///     their MF=32 covariance). Off by default: the matrices are large and
+///     only an uncertainty
+///     calculation reads them.
+///
+/// Returns
+/// -------
+/// str
+///     Path to the directory written.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (
+    input_path,
+    output_dir,
+    njoy_exec = "njoy",
+    temperatures = None,
+    library = "",
+    data_version = "",
+    created_utc = None,
+    covariance = false,
+))]
+pub fn convert_neutron_transport(
+    py: Python<'_>,
+    input_path: &str,
+    output_dir: &str,
+    njoy_exec: &str,
+    temperatures: Option<Vec<f64>>,
+    library: &str,
+    data_version: &str,
+    created_utc: Option<&str>,
+    covariance: bool,
+) -> PyResult<String> {
+    let input = PathBuf::from(input_path);
+    let source = yamc_convert::entry::Source::Endf {
+        path: &input,
+        njoy_exec,
+        temperatures: temperatures.unwrap_or_default(),
+    };
+    let provenance = yamc_convert::entry::Provenance {
+        library: library.to_string(),
+        data_version: data_version.to_string(),
+        created_utc: created_utc.map(str::to_string).unwrap_or_default(),
+    };
+
+    detached(py, || {
+        yamc_convert::entry::convert_neutron_transport(
+            &source,
+            &PathBuf::from(output_dir),
+            &provenance,
+            covariance,
+        )
+    })
+    .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Preserve a photonuclear ENDF evaluation as lossless Arrow tables.
+/// Writes native-grid MF=3 cross sections with their ENDF interpolation and
+/// every original section, including outgoing-particle data. Requires NSUB=0.
+/// No neutron Doppler broadening or photoatomic relaxation is applied. This
+/// processes evaluated data; it does not enable photonuclear transport.
+/// ``library``, ``data_version`` and ``created_utc`` are recorded in version.json.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (input_path, output_dir, library = "", data_version = "", created_utc = None))]
+pub fn convert_photonuclear(
+    py: Python<'_>,
+    input_path: &str,
+    output_dir: &str,
+    library: &str,
+    data_version: &str,
+    created_utc: Option<&str>,
+) -> PyResult<String> {
+    let provenance = yamc_convert::entry::Provenance {
+        library: library.to_string(),
+        data_version: data_version.to_string(),
+        created_utc: created_utc.map(str::to_string).unwrap_or_default(),
+    };
+    detached(py, || {
+        yamc_convert::photonuclear::convert_photonuclear(
+            &PathBuf::from(input_path),
+            &PathBuf::from(output_dir),
+            &provenance,
+        )
+    })
+    .map(|path| path.to_string_lossy().into_owned())
+}
+
+/// Convert a photoatomic evaluation into the per-element photon sections.
+///
+/// Writes ``element.arrow`` always, and ``subshells.arrow``, ``compton.arrow``
+/// and ``bremsstrahlung.arrow`` where there is data for them. No NJOY: a
+/// photoatomic evaluation is already pointwise.
+///
+/// Parameters
+/// ----------
+/// photoatomic_path : str
+///     The photoatomic evaluation. One file may hold several elements, and
+///     each is written to its own directory.
+/// output_dir : str
+///     Directory to write ``{Element}.arrow/`` into.
+/// relaxation_path : str, optional
+///     The atomic relaxation evaluation for the same element, carrying binding
+///     energies, occupancies and the transition cascade. Without it the
+///     subshells are written with zero binding energy and no transitions,
+///     which is a fluorescence-free atom rather than an error.
+/// compton_profiles, density_effect, bremsstrahlung : str or path, optional
+///     Other copies of the auxiliary tabulations, which no evaluation carries
+///     (Compton profiles, the density effect and bremsstrahlung). The default
+///     is the copies compiled into this package, the same in yamc and yani.
+///     Give all three or none.
+/// library, data_version, created_utc
+///     Recorded in ``version.json``.
+///
+/// Returns
+/// -------
+/// list[str]
+///     One path per element written.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (
+    photoatomic_path,
+    output_dir,
+    relaxation_path = None,
+    compton_profiles = None,
+    density_effect = None,
+    bremsstrahlung = None,
+    library = "",
+    data_version = "",
+    created_utc = None,
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn convert_photon(
+    py: Python<'_>,
+    photoatomic_path: PathBuf,
+    output_dir: PathBuf,
+    relaxation_path: Option<PathBuf>,
+    compton_profiles: Option<PathBuf>,
+    density_effect: Option<PathBuf>,
+    bremsstrahlung: Option<PathBuf>,
+    library: &str,
+    data_version: &str,
+    created_utc: Option<&str>,
+) -> PyResult<Vec<String>> {
+    let photoatomic = photoatomic_path;
+    let relaxation = relaxation_path;
+
+    let tabulation_paths = match (compton_profiles, density_effect, bremsstrahlung) {
+        (Some(c), Some(d), Some(b)) => Some((c, d, b)),
+        (None, None, None) => None,
+        _ => {
+            return Err(PyValueError::new_err(
+                "compton_profiles, density_effect and bremsstrahlung must be given \
+                 together or not at all: the three are read as one set, and a \
+                 partial set would silently drop a section",
+            ));
+        }
+    };
+    let tabulations =
+        tabulation_paths
+            .as_ref()
+            .map(|(c, d, b)| yamc_convert::entry::PhotonTabulations {
+                compton_profiles: c,
+                density_effect: d,
+                bremsstrahlung: b,
+            });
+
+    let provenance = yamc_convert::entry::Provenance {
+        library: library.to_string(),
+        data_version: data_version.to_string(),
+        created_utc: created_utc.map(str::to_string).unwrap_or_default(),
+    };
+
+    detached(py, || {
+        yamc_convert::entry::convert_photon(
+            &photoatomic,
+            relaxation.as_deref(),
+            tabulations.as_ref(),
+            &output_dir,
+            &provenance,
+        )
+    })
+    .map(|dirs| {
+        dirs.into_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect()
+    })
+}
+
+/// List the final states each reaction of an evaluation can leave its product
+/// in.
+///
+/// A reaction that can leave its product in a metastable state says so in
+/// MF=8, one subsection per final state. An evaluation that lists only the
+/// ground state is not merely less accurate: the isomer is absent from any
+/// network built from it, so no code can make it, and a measurement that sees
+/// its decay heat cannot be reproduced by any means. TENDL-2017 omits the
+/// 1706 keV state from ``Os190(n,n')``, which is why the FNS osmium foil comes
+/// out at a third of the measured heat with that library, in yani and in
+/// FISPACT-II alike. Nothing about the reaction looks wrong from outside: it
+/// is present, its cross section is reasonable, and only the state list is
+/// short. So comparing the state lists of several libraries is how such a gap
+/// is found, and this is the read that makes the comparison possible.
+///
+/// A read, not a conversion. Nothing is written, no decay data is involved,
+/// and the answer is what the files say rather than what a network built from
+/// them would hold.
+///
+/// Parameters
+/// ----------
+/// neutron_files : list[str]
+///     Neutron evaluations, one or many materials per file. Read one file at
+///     a time rather than held, so a whole sublibrary is a valid argument.
+///
+/// Returns
+/// -------
+/// list[dict]
+///     One entry per (parent, reaction) carrying MF=9 or MF=10, in file order
+///     and then tape order, each with ``parent``, ``mt``, ``reaction`` (the
+///     transmutation reaction name, or ``None`` for an MT no chain reaction
+///     covers) and ``states``.
+///     Each state has ``excitation_energy_eV``, ``level_index``, ``product``
+///     and ``source``. ``excitation_energy_eV`` is ``None`` for an excited
+///     state whose evaluation gives neither a positive MF=8 ELFS nor a
+///     positive ``QM - QI``.
+///
+///     ``product`` is the product's **ground-state** name even for an excited
+///     state, because naming the isomer needs decay data to say which
+///     isomeric ordinal a level is; pair it with ``excitation_energy_eV``.
+///     It is ``None`` for a state naming no single nuclide: fission, a
+///     subsection whose IZAP is zero with no single MF=8 subsection to name
+///     it, or any other ZAP whose Z or A is not positive.
+///     ``level_index`` is the evaluation's own LFS and is not comparable
+///     between libraries: Ir190's 377 keV isomer is level 3 in ENDF/B-VIII.1
+///     and level 37 in JEFF-4.0. ``source`` is ``"cross_section"`` for MF=10
+///     or ``"yield"`` for MF=9.
+///
+/// Examples
+/// --------
+///     >>> [c for c in yani.radionuclide_production(["n-Os190.tendl"])
+///     ...  if c["mt"] == 4][0]["states"]
+///     [{'excitation_energy_eV': 0.0, 'level_index': 0, 'product': 'Os190',
+///       'source': 'cross_section'}]
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (neutron_files))]
+pub fn radionuclide_production(
+    py: Python<'_>,
+    neutron_files: Vec<String>,
+) -> PyResult<Py<pyo3::types::PyList>> {
+    if neutron_files.is_empty() {
+        return Err(PyValueError::new_err(
+            "neutron_files is required: the production data is in the neutron \
+             evaluations, so there is nothing to read without them",
+        ));
+    }
+    let channels = detached(py, || {
+        yani_convert::production::production_from_files(&neutron_files)
+    })?;
+
+    let out = pyo3::types::PyList::empty(py);
+    for channel in channels {
+        let entry = pyo3::types::PyDict::new(py);
+        entry.set_item("parent", channel.parent)?;
+        entry.set_item("mt", channel.mt)?;
+        entry.set_item("reaction", channel.reaction)?;
+        let states = pyo3::types::PyList::empty(py);
+        for state in channel.states {
+            let row = pyo3::types::PyDict::new(py);
+            row.set_item("excitation_energy_eV", state.excitation_energy)?;
+            row.set_item("level_index", state.level_index)?;
+            row.set_item("product", state.product)?;
+            row.set_item("source", state.source)?;
+            states.append(row)?;
+        }
+        entry.set_item("states", states)?;
+        out.append(entry)?;
+    }
+    Ok(out.unbind())
+}

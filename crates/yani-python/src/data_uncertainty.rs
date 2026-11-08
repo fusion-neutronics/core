@@ -1,0 +1,1176 @@
+//! `DataUncertainty`: ask a transmutation for nuclear-data uncertainty.
+//!
+//! Optional everywhere it appears. Without it nothing is read, folded,
+//! factorized or sampled, and the inventories are bit-identical to a build that
+//! never had this feature.
+
+use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
+
+use yani_transmute::nearest_correlation::CorrelationRepair;
+use yani_transmute::resonance_rates::ResonanceMethod;
+use yani_transmute::resonance_sampling::NotedParameter;
+use yani_transmute::uncertainty::{
+    check_convergence, DataUncertainty, Info, Source, Unconverged, DEFAULT_CONVERGENCE,
+};
+
+/// Request nuclear-data uncertainty on a transmutation.
+///
+/// Pass one to :meth:`Material.transmute` and the result carries a standard
+/// deviation on every nuclide density alongside the mean.
+///
+/// What it can cover, by source (``DataUncertainty.available_sources()``):
+///
+/// - ``"cross_sections"``: the activation cross sections, sampled from the
+///   ENDF MF=33 covariance folded against this material's own spectrum, and
+///   where the library folder carries the evaluation's resonance parameters
+///   (MF=2 and MF=32, ``resonance_parameters.arrow``), the parameters
+///   themselves: each replica draws them from their covariance, rebuilds the
+///   resonance range's cross sections from the draw and Doppler broadens the
+///   change to the temperature in use, so the resonance range's uncertainty
+///   is exact in the parameters rather than first order. On a
+///   transport-coupled run the change is folded against the flux the
+///   transport tallied on the nuclide's own energy grid through its
+///   resonances, so a self-shielded resonance is weighted with its own flux
+///   dip. A nuclide whose parameters cannot be sampled keeps the first-order
+///   MF=32 rows of ``covariance.arrow``, and the report says which and why;
+/// - ``"flux_spectrum"``: the spectrum itself, from the per-bin
+///   ``flux_std_dev`` given on a ``Pulse``;
+/// - ``"half_life"``: every reachable nuclide's half-life, from the decay
+///   data's own standard deviation. A replica's half-lives are used in its
+///   solve AND in the activity, decay heat and dose evaluated from it, so a
+///   saturated activity (``lambda N = R``) is correctly insensitive to its
+///   own half-life rather than inheriting the density's spread;
+/// - ``"decay_branching"``: the decay branching ratios of every reachable
+///   parent with several modes and a stated sigma, drawn so the parent's
+///   total is kept and every ratio stays between zero and it: each mode but
+///   one from a logit-normal with the evaluated ratio as its mean and the
+///   stated sigma as its standard deviation, the last their complement,
+///   coupled so the modes carry the zero-sum covariance of largest entropy
+///   that realises every stated sigma (for two or three modes the only one).
+///   A small branch with a large relative sigma is drawn skewed, never below
+///   zero. A largest sigma above the sum of the others' is drawn as that sum;
+///   a single mode stating no sigma is the complement of the rest when it is
+///   the largest or the only way to trade; a mode whose sigma no ratio with
+///   its mean can have (``sigma**2 >= b * (T - b)``), and a mode stating none
+///   otherwise, are held at their ratios and the rest share what is left.
+///   The report names every parent short of its stated sigmas by why;
+/// - ``"statistical"``: the Monte Carlo uncertainty of transport-tallied
+///   reaction rates, from their per-history covariance, drawn independently
+///   for each material since their tallies are separate estimates. It
+///   applies to ``Model.simulate_transmutation``, as ``"flux_spectrum"``
+///   applies only to ``Material.transmute``; each call ignores the other's,
+///   and the report's ``sources`` lists what actually applied;
+/// - ``"decay_energy"``: each nuclide's mean decay energy, from the sigma the
+///   decay data gives each recoverable-heat component (beta, gamma, alpha),
+///   or the total's where it gives no split. It moves decay heat only: a decay
+///   energy never enters the solve, so the inventory and activity are
+///   untouched;
+/// - ``"decay_photon_lines"``: each decay photon spectrum's normalisation
+///   (FD for lines, FC for a continuum), one draw per spectrum common to all
+///   its lines, and each line's own intensity (dRI) and energy (dER), from
+///   the decay data's MT=457 sigmas. It moves the decay photon spectrum, the
+///   contact dose and, through the gamma decay energy E_EM, which follows
+///   each replica's drawn lines in place of a ``"decay_energy"`` draw, the
+///   decay heat; no photon enters the solve. The decay data do not state how
+///   a nuclide's photon intensities are correlated beyond the normalisation
+///   (between the lines' dRI, between a normalisation and its lines, between
+///   gamma and x-ray spectra), so each output is evaluated at both ends:
+///   ``Estimate.std_dev`` takes them independent and
+///   ``Estimate.std_dev_correlated`` fully correlated. A D1S dose
+///   (``PulseSchedule.time_correct_tally``) draws the normalisations alone;
+/// - ``"fission_yield"``: each fissioning parent's independent yields (MT=454),
+///   from the DY the evaluation states on each, drawn on the tape's own
+///   products and summed onto the chain's the way the converter summed the
+///   nominal yields. No evaluation states a correlation between yields, so
+///   each is drawn independently and the yields of a draw are not
+///   renormalised. An actinide that borrows another's yields shares its draw.
+///   Needs a chain that carries the evaluated yields
+///   (``fission_yields/evaluated_yields.arrow``); without one every parent is
+///   listed under ``no_fission_yield_uncertainty``;
+/// - ``"isomer_branching"``: the isomeric split of every reachable reaction
+///   whose evaluation states the MF=40 covariance of its final states'
+///   production cross sections (the MF=10 partials of the branching
+///   subsection, from its ``branching_covariance.arrow``). Each stated
+///   state's production is drawn on the covariance's own energy grid, folded
+///   against the same spectrum and weight as the nominal split, and the
+///   split re-made from the draw by the nominal branching rule. Where the
+///   list names its ground state only the shares move, and they still sum to
+///   one, while the reaction's total stays the cross sections' (MF=33), so
+///   the uncertainty of the total is not counted twice. An isomer listed
+///   alone, and every ``(n,n')`` isomer, is an absolute production: it is
+///   made at its drawn value, the ground state taking the rest of the total,
+///   so its own MF=40 sigma replaces the MF=33 sigma of its reaction that it
+///   carries with ``"cross_sections"`` alone, and can be the smaller. Applies
+///   to ``Material.transmute``; a transport run's split comes from tallied
+///   partials and is held.
+///
+/// Each cross-section draw is a lognormal multiplier with the covariance's
+/// own mean and variance, so a sampled rate is never negative and nothing is
+/// floored. The correlated Gaussian deviates are kept (a Gaussian copula), so
+/// the ordering between channels is preserved, but the Pearson correlations
+/// come out weaker than evaluated as the sigmas grow. Half-lives and decay
+/// energies are drawn the same way, one nuclide at a time: the decay data
+/// states a mean and a sigma for each and no correlation, so the draws carry
+/// exactly what the evaluation states and are never negative. So are the decay
+/// photon normalisations, intensities and energies, with the one correlation
+/// the data does state, a spectrum's normalisation common to its lines, and
+/// the ones it does not state bounded rather than assumed.
+///
+/// Held at their nominal values, with uncertainties of their own that this
+/// does not propagate:
+///
+/// - the decay branching ratios ``"decay_branching"`` does not sample (a
+///   sigma wider than the ratio allows, or no sigma to draw), and the per-decay
+///   photon lines and decay energy of a drawn parent, which follow its
+///   nominal branching;
+/// - the isomeric split of a reaction whose evaluation states no MF=40
+///   covariance on any of its states, listed in
+///   ``no_isomer_branching_uncertainty``, and
+///   MF=40 blocks ``"isomer_branching"`` cannot use (another evaluation's
+///   partner, a partner that is not an MF=10 production, NC, absolute and
+///   short-range layouts, a state the branching rule folds no curve for),
+///   counted in ``isomer_branching_blocks_not_used``;
+/// - covariance correlating an evaluation with one the run does not hold
+///   (MAT1 naming a material not in the run, counted in
+///   ``skipped_cross_material``), covariance with a quantity that is not a
+///   cross section (XMF1 not 0 or 3), covariance derived from other sections
+///   by an NC block that cannot be derived (LTY 1-4, or an LTY=0 block
+///   counted in ``skipped_nc``), the covariance of a lumped reaction
+///   (MT=851-870) stated in barns, listed in
+///   ``lumped_covariance_not_assignable``, and the resonance-parameter
+///   covariance (MF=32) of a range neither sampled nor in
+///   ``covariance.arrow``: a library converted before the converter wrote
+///   either, or a resonance range whose formalism ``endf`` does not
+///   reconstruct. No library yani reads states an XMF1 other than 0 or 3,
+///   an NC block with LTY 1-4, or a lump in barns. What is sampled is each
+///   reaction's explicit MF=33 blocks, the resonance parameters where the
+///   folder carries them and otherwise the resonance-range blocks the
+///   converter derives from MF=32 and writes beside them, the blocks of a
+///   lumped reaction for each of its components (one component is the lump;
+///   several each take the lump's relative perturbation, moving together),
+///   for a level sum with no covariance of its own its levels' (W186
+///   ``(n,p)`` as the lumped MT 855 of MT 600 and 649), and for a reaction
+///   an LTY=0 NC block states as a sum of others (ENDF/B-VIII.1 O16 (n,p) as
+///   MT 600 to 603, U235 MT 4 as MT 51 plus the lumped MT 851), the
+///   covariance derived from the named reactions' own blocks and the cross
+///   blocks between them. A block correlating two evaluations the run both
+///   holds (the neutron standards: ENDF/B-VIII.1 U235 fission with U238
+///   fission and capture, Pu239 fission, Au197 capture and Li6 (n,t)) is
+///   applied, counted in ``applied_cross_material``: the two nuclides are
+///   drawn jointly, one draw per replica shared by every material;
+/// - the self-shielding correction, when ``self_shielding_chord`` or
+///   ``self_shielding_shape`` is given: the shielded flux is built once from
+///   the nominal cross sections and reused by every replica, sampled
+///   resonance parameters included;
+/// - on a transport run, the flux's response to a perturbed cross section:
+///   there is one transport, not one per replica. The tallied values
+///   themselves are still drawn by the ``"statistical"`` source;
+/// - the decay photon spectrum covariance and continuum shape (MF=8 MT=457
+///   LCOV, which no library states), photon attenuation (XCOM), air energy
+///   absorption (NIST SRD 126), the ICRP-116 fluence-to-dose coefficients and
+///   the contact-dose build-up factor;
+/// - the material's composition, density, natural isotopic abundances and the
+///   AME2020 atomic masses used to convert mass fractions;
+/// - any source switched off with ``sources``, or with nothing to act on (a
+///   spectrum given without ``flux_std_dev``). When only some of a material's
+///   spectra have one, the entry is ``"flux spectrum (spectra without a sigma
+///   only)"`` and ``spectra_without_flux_sigma`` gives the count. A rate
+///   under a spectrum with a sigma that the flux draw cannot move is named
+///   in ``flux_rates_without_terms``.
+///
+/// ``TransmutationResults.get_data_uncertainty_info`` lists every one of these
+/// that applied to a material under ``not_perturbed``, along with any nuclide
+/// whose evaluation carries no covariance, any unstable nuclide whose
+/// half-life or decay energy has no stated sigma, and any whose stated
+/// half-life or decay-energy sigma no draw can carry.
+///
+/// Args:
+///     seed (int): Base seed. A given nuclide's perturbation in a given replica
+///         is a pure function of ``(seed, replica, nuclide)``, so the same seed
+///         reproduces the same answer regardless of replica count, iteration
+///         order, or what else is in the material.
+///     samples (int, optional): Fixed replica count. Leave as ``None`` (the
+///         default) to let the solver add replicas, 64 at a time, until every
+///         tracked standard deviation is known to ``convergence``. A number
+///         here bounds cost or reproduces a specific run: exactly that many
+///         replicas run, and the info still lists any standard deviation that
+///         did not reach ``convergence``.
+///     sources (list[str], optional): Which inputs to perturb. ``None`` (the
+///         default) means every source this build implements. Restricting it is
+///         how a run isolates one contribution, so that adding a source and
+///         watching the inventory sigma grow is a measurement rather than a
+///         guess.
+///
+///         Naming a source this build cannot perturb **raises**, rather than
+///         being ignored. A source that has not landed yet must not look like
+///         one that contributed nothing. ``DataUncertainty.available_sources()``
+///         lists what there is.
+///     attribution (bool): Also say where the uncertainty comes from, read
+///         with ``TransmutationResults.get_uncertainty_breakdown``. Off by
+///         default because it costs further solves: one ensemble per source,
+///         each source alone, and one deterministic solve per contributor. It
+///         changes none of the numbers the run otherwise reports.
+///     convergence (float, optional): How well each standard deviation must
+///         be known before the run stops: the standard error of the sample
+///         standard deviation, relative to it, ``SE(sigma) / sigma``. ``None``
+///         (the default) means 0.05.
+///         The standard error allows for a heavy tail (it carries the sample
+///         kurtosis), so a skewed output needs more replicas than a Gaussian
+///         one, for which a target ``t`` needs about ``1 / (2 t^2) + 1``: 201
+///         at 0.05. It is judged at every step, not only the last, on every
+///         nuclide density within 1e-6 of the largest at that step and on the
+///         total activity, decay heat and decay photon line rate, leaving out
+///         any whose standard deviation is under 0.01% of its value. The
+///         photon spectrum line by line and the contact dose are not judged,
+///         as their dose quantity and build-up are chosen when they are read.
+///         At least 128 replicas run whatever the target, since the kurtosis
+///         is too noisy to trust on fewer, and at most 1024: a run that stops
+///         there sets ``hit_cap`` in the info and lists every output, nuclide
+///         and step that missed under ``unconverged``. Must be between 0 and 1.
+///
+/// Examples:
+///     >>> results = iron.transmute(
+///     ...     schedule=sched,
+///     ...     data_uncertainty=yamc.DataUncertainty(seed=42),
+///     ... )
+///     >>> results.get_nuclide_density(iron.id, "Mn56", 1)
+///     1.234e-08
+///     >>> results.get_nuclide_uncertainty(iron.id, "Mn56", 1)
+///     8.7e-10
+#[gen_stub_pyclass]
+// `from_py_object` because this is taken as an ARGUMENT to
+// `Material.transmute`, so it has to convert back out of Python.
+#[pyclass(name = "DataUncertainty", from_py_object)]
+#[derive(Clone)]
+pub struct PyDataUncertainty {
+    pub inner: DataUncertainty,
+    /// Whether `sources` was given, rather than left to mean every source
+    /// the build implements. A caller that perturbs only some sources (a
+    /// transport run perturbs cross sections) refuses an explicit request for
+    /// the others but takes the default as everything it can do.
+    pub sources_given: bool,
+    /// Whether `convergence` was given, so a caller that runs a fixed replica
+    /// count (a transport run) can refuse it rather than ignore it.
+    pub convergence_given: bool,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyDataUncertainty {
+    #[new]
+    #[pyo3(signature = (seed = 1, samples = None, sources = None, attribution = false, convergence = None))]
+    fn new(
+        seed: u64,
+        samples: Option<usize>,
+        sources: Option<Vec<String>>,
+        attribution: bool,
+        convergence: Option<f64>,
+    ) -> PyResult<Self> {
+        if samples == Some(0) {
+            return Err(PyValueError::new_err(
+                "samples must be at least 1; pass samples=None to let the solver \
+                 choose when the standard deviations are known to `convergence`",
+            ));
+        }
+        let convergence_given = convergence.is_some();
+        let convergence = convergence.unwrap_or(DEFAULT_CONVERGENCE);
+        check_convergence(convergence).map_err(PyValueError::new_err)?;
+        let sources_given = sources.is_some();
+        let sources = match sources {
+            None => Source::IMPLEMENTED.to_vec(),
+            Some(names) => {
+                if names.is_empty() {
+                    return Err(PyValueError::new_err(
+                        "sources must name at least one source; pass sources=None \
+                         for every source this build implements",
+                    ));
+                }
+                names
+                    .iter()
+                    .map(|n| Source::parse(n).map_err(PyValueError::new_err))
+                    .collect::<PyResult<Vec<_>>>()?
+            }
+        };
+        Ok(Self {
+            inner: DataUncertainty {
+                seed,
+                samples,
+                sources,
+                attribution,
+                convergence,
+            },
+            sources_given,
+            convergence_given,
+        })
+    }
+
+    /// The uncertainty sources this build can perturb.
+    ///
+    /// Returns:
+    ///     list[str]: Names accepted by the ``sources`` argument.
+    #[staticmethod]
+    fn available_sources() -> Vec<String> {
+        Source::IMPLEMENTED
+            .iter()
+            .map(|s| s.name().to_string())
+            .collect()
+    }
+
+    #[getter]
+    fn seed(&self) -> u64 {
+        self.inner.seed
+    }
+
+    #[getter]
+    fn samples(&self) -> Option<usize> {
+        self.inner.samples
+    }
+
+    /// Whether the run also says where the uncertainty comes from.
+    #[getter]
+    fn attribution(&self) -> bool {
+        self.inner.attribution
+    }
+
+    /// The target for each standard deviation's standard error, relative to
+    /// it, that an adaptive run stops on.
+    #[getter]
+    fn convergence(&self) -> f64 {
+        self.inner.convergence
+    }
+
+    #[getter]
+    fn sources(&self) -> Vec<String> {
+        self.inner
+            .sources
+            .iter()
+            .map(|s| s.name().to_string())
+            .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        let samples = match self.inner.samples {
+            Some(n) => n.to_string(),
+            None => "None".to_string(),
+        };
+        format!(
+            "DataUncertainty(seed={}, samples={samples}, sources={:?}, convergence={})",
+            self.inner.seed,
+            self.sources(),
+            self.inner.convergence,
+        )
+    }
+}
+
+/// Render the sigmas that missed the convergence target as a list of dicts,
+/// worst first: ``output`` (``"density"``, ``"activity"``, ``"decay_heat"``,
+/// ``"decay_photon_rate"`` or ``"time_correction_factor"``), ``nuclide`` (the
+/// nuclide or emitter, ``None`` for a total), ``campaign`` (for a
+/// time-correction factor), ``step`` and ``relative_standard_error`` (the
+/// ``SE(sigma) / sigma`` reached, ``None`` below four replicas).
+pub fn unconverged_to_list<'py>(
+    py: Python<'py>,
+    unconverged: &[Unconverged],
+) -> PyResult<Bound<'py, PyList>> {
+    let list = PyList::empty(py);
+    for u in unconverged {
+        let d = PyDict::new(py);
+        d.set_item("output", u.output.name())?;
+        d.set_item("nuclide", u.output.nuclide())?;
+        if let yani_transmute::uncertainty::Output::TimeCorrectionFactor { campaign, .. } =
+            &u.output
+        {
+            d.set_item("campaign", campaign)?;
+        }
+        d.set_item("step", u.step)?;
+        d.set_item("relative_standard_error", u.relative_standard_error)?;
+        list.append(d)?;
+    }
+    Ok(list)
+}
+
+/// Render an [`Info`] as a plain dict.
+///
+/// A dict rather than a class because it is a report, not an interface: a
+/// caller prints it, logs it, or checks one key. Every entry exists so that a
+/// gap is visible, since a nuclide with no published covariance and a nuclide
+/// whose covariance is genuinely zero would otherwise both read as a confident
+/// zero.
+pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("samples", info.samples)?;
+    d.set_item("converged", info.converged)?;
+    d.set_item("convergence", info.convergence)?;
+    d.set_item("hit_cap", info.hit_cap)?;
+    // How the flux answered each replica's cross sections, and how many
+    // replicas the transport carried when it tallied them itself.
+    d.set_item("flux_response", info.flux_response.name())?;
+    d.set_item(
+        "transport_replicas",
+        match info.flux_response {
+            yani_transmute::uncertainty::FluxResponseReport::ReplicaWeights { replicas } => {
+                Some(replicas)
+            }
+            _ => None,
+        },
+    )?;
+    d.set_item("unconverged", unconverged_to_list(py, &info.unconverged)?)?;
+    d.set_item("noise_removed", info.noise_removed)?;
+    let noisy = PyList::empty(py);
+    for n in &info.noisy {
+        let e = PyDict::new(py);
+        e.set_item("output", n.output.name())?;
+        e.set_item("nuclide", n.output.nuclide())?;
+        e.set_item("step", n.step)?;
+        e.set_item("replica_spread", n.replica_spread)?;
+        e.set_item("noise", n.noise)?;
+        e.set_item("std_dev", n.std_dev)?;
+        noisy.append(e)?;
+    }
+    d.set_item("noisy", noisy)?;
+    d.set_item(
+        "perturbed",
+        info.perturbed.iter().cloned().collect::<Vec<_>>(),
+    )?;
+    d.set_item(
+        "no_covariance_data",
+        info.no_covariance_data.iter().cloned().collect::<Vec<_>>(),
+    )?;
+    let cross = PyDict::new(py);
+    for (nuclide, n) in &info.skipped_cross_material {
+        cross.set_item(nuclide, n)?;
+    }
+    d.set_item("skipped_cross_material", cross)?;
+    let applied = PyDict::new(py);
+    for (nuclide, n) in &info.applied_cross_material {
+        applied.set_item(nuclide, n)?;
+    }
+    d.set_item("applied_cross_material", applied)?;
+    let other_file = PyDict::new(py);
+    for (nuclide, n) in &info.skipped_other_file {
+        other_file.set_item(nuclide, n)?;
+    }
+    d.set_item("skipped_other_file", other_file)?;
+    // Keyed "Nuclide (n,a) (n,b)", the two kinds in MT order, like the
+    // per-channel maps below.
+    let mirrored = PyDict::new(py);
+    for ((nuclide, a, b), mismatch) in &info.mirrored_disagree {
+        mirrored.set_item(format!("{nuclide} {a} {b}"), mismatch)?;
+    }
+    d.set_item("mirrored_disagree", mirrored)?;
+    let nc = PyDict::new(py);
+    for (nuclide, n) in &info.skipped_nc {
+        nc.set_item(nuclide, n)?;
+    }
+    d.set_item("skipped_nc", nc)?;
+
+    let layouts = PyDict::new(py);
+    for (lb, n) in &info.unsupported_layouts {
+        layouts.set_item(lb, n)?;
+    }
+    d.set_item("unsupported_layouts", layouts)?;
+    d.set_item("malformed_blocks", info.malformed_blocks)?;
+
+    // Keyed "Nuclide (n,gamma)" rather than by a tuple, so the dict survives
+    // JSON and a glance.
+    let covered = PyDict::new(py);
+    for ((nuclide, kind), fraction) in &info.rate_fraction_covered {
+        covered.set_item(format!("{nuclide} {kind}"), fraction)?;
+    }
+    d.set_item("rate_fraction_covered", covered)?;
+
+    // The one number that says whether the sigmas above are a spread over the
+    // answer or over a corner of it. `None` for a decay-only schedule, which
+    // drove no production and so has no share to report, and on a transport
+    // run, where the share of the tallied production is not computed.
+    d.set_item(
+        "rate_fraction_covered_total",
+        info.rate_fraction_covered_total,
+    )?;
+
+    // Keyed like `rate_fraction_covered`. Each entry is a channel whose sigma
+    // is overstated, so it is a warning and not a detail: `has_gaps` counts it.
+    let above = PyDict::new(py);
+    for ((nuclide, kind), ratio) in &info.partials_above_rate {
+        above.set_item(format!("{nuclide} {kind}"), ratio)?;
+    }
+    d.set_item("partials_above_rate", above)?;
+    // The same inconsistency the other way, a sigma understated.
+    let below = PyDict::new(py);
+    for ((nuclide, kind), ratio) in &info.partials_below_rate {
+        below.set_item(format!("{nuclide} {kind}"), ratio)?;
+    }
+    d.set_item("partials_below_rate", below)?;
+    // A derived channel whose sigma rests on reading an absent covariance
+    // between two opposing terms as zero, each pair as `[a, b]`.
+    let opposing = PyDict::new(py);
+    for ((nuclide, kind), pairs) in &info.derived_opposing_uncorrelated {
+        let pairs: Vec<[&str; 2]> = pairs
+            .iter()
+            .map(|(a, b)| [a.as_str(), b.as_str()])
+            .collect();
+        opposing.set_item(format!("{nuclide} {kind}"), pairs)?;
+    }
+    d.set_item("derived_opposing_uncorrelated", opposing)?;
+    // Keyed "Nuclide MT852", each a lumped reaction with several components
+    // whose covariance was not folded, to the components by kind.
+    let lumped = PyDict::new(py);
+    for ((nuclide, mtl), components) in &info.lumped_covariance_not_assignable {
+        lumped.set_item(
+            format!("{nuclide} MT{mtl}"),
+            components.iter().cloned().collect::<Vec<_>>(),
+        )?;
+    }
+    d.set_item("lumped_covariance_not_assignable", lumped)?;
+
+    d.set_item(
+        "covariance_repaired",
+        info.covariance_repaired.iter().cloned().collect::<Vec<_>>(),
+    )?;
+    d.set_item("covariance_source", &info.covariance_source)?;
+    d.set_item("covariance_warnings", &info.covariance_warnings)?;
+    // What one repair of a nuclide's cells did, into `entry`.
+    let field_repair = |entry: &Bound<'py, PyDict>,
+                        r: &yani_transmute::covariance_sample::FieldRepair|
+     -> PyResult<()> {
+        entry.set_item("lambda_min", r.lambda_min)?;
+        entry.set_item("largest_correlation_change", r.largest_correlation_change)?;
+        entry.set_item(
+            "correlation_frobenius_change",
+            r.correlation_frobenius_change,
+        )?;
+        entry.set_item("cells", r.cells)?;
+        entry.set_item("held_cells", r.held_cells)?;
+        entry.set_item("converged", r.converged)?;
+        Ok(())
+    };
+    let repairs = PyList::empty(py);
+    for r in &info.covariance_repairs {
+        let entry = PyDict::new(py);
+        entry.set_item("nuclide", &r.nuclide)?;
+        entry.set_item("spectrum", r.spectrum)?;
+        field_repair(&entry, &r.field)?;
+        // Keyed by kind, each the evaluated variance and the evaluated and
+        // sampled relative sigmas, so the change reads off a single entry.
+        // A negative stated variance has no sigma and reads as None.
+        let channels = PyDict::new(py);
+        for c in &r.channels {
+            let pair = PyDict::new(py);
+            pair.set_item("evaluated_variance", c.evaluated_variance)?;
+            pair.set_item("evaluated_sigma", c.evaluated_sigma())?;
+            pair.set_item("sampled_sigma", c.sampled)?;
+            channels.set_item(&c.kind, pair)?;
+        }
+        entry.set_item("channels", channels)?;
+        repairs.append(entry)?;
+    }
+    d.set_item("covariance_repairs", repairs)?;
+    d.set_item(
+        "covariance_repaired_outside_bound",
+        info.covariance_repaired_outside_bound
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
+    d.set_item("worst_sigma_change", info.worst_sigma_change)?;
+    d.set_item(
+        "rate_weighted_sigma_change",
+        info.rate_weighted_sigma_change,
+    )?;
+    for (key, channels) in [
+        ("sigma_at_least_one", &info.sigma_at_least_one),
+        ("sigma_at_least_ten", &info.sigma_at_least_ten),
+        (
+            "sigma_at_least_one_outside_bound",
+            &info.sigma_at_least_one_outside_bound,
+        ),
+    ] {
+        let wide = PyDict::new(py);
+        for ((nuclide, kind), sigma) in channels {
+            wide.set_item(format!("{nuclide} {kind}"), sigma)?;
+        }
+        d.set_item(key, wide)?;
+    }
+    d.set_item("rates_sampled", info.rates_sampled)?;
+    d.set_item("rates_floored", info.rates_floored)?;
+    d.set_item(
+        "cross_section_points_floored",
+        info.cross_section_points_floored,
+    )?;
+    d.set_item("spectra_with_flux_sigma", info.spectra_with_flux_sigma)?;
+    d.set_item(
+        "spectra_without_flux_sigma",
+        info.spectra_without_flux_sigma,
+    )?;
+    d.set_item(
+        "flux_rates_without_terms",
+        info.flux_rates_without_terms
+            .iter()
+            .map(|(nuclide, kind)| format!("{nuclide} {kind}"))
+            .collect::<Vec<_>>(),
+    )?;
+    let limit_dict =
+        |l: &yani_transmute::covariance_sample::LognormalLimit| -> PyResult<Bound<'py, PyDict>> {
+            let e = PyDict::new(py);
+            e.set_item("cells", l.cells)?;
+            e.set_item("largest_sigma_change", l.largest_sigma_change)?;
+            e.set_item("largest_correlation_change", l.largest_correlation_change)?;
+            match &l.log_space_repair {
+                Some(r) => {
+                    let repair = PyDict::new(py);
+                    field_repair(&repair, r)?;
+                    e.set_item("log_space_repair", repair)?;
+                }
+                None => e.set_item("log_space_repair", py.None())?,
+            }
+            Ok(e)
+        };
+    let flux_limits = PyDict::new(py);
+    for (spectrum, l) in &info.flux_lognormal_not_carried {
+        flux_limits.set_item(*spectrum, limit_dict(l)?)?;
+    }
+    d.set_item("flux_lognormal_not_carried", flux_limits)?;
+    let adjusted = PyDict::new(py);
+    for (group, a) in &info.cross_material_adjusted {
+        let e = PyDict::new(py);
+        e.set_item("relative_change", a.relative_change)?;
+        e.set_item("least_relative_change", a.least_relative_change)?;
+        e.set_item("largest_stated_correlation", a.largest_stated_correlation)?;
+        e.set_item("largest_correlation_change", a.largest_correlation_change)?;
+        e.set_item("iterations", a.iterations)?;
+        e.set_item("converged", a.converged)?;
+        adjusted.set_item(group, e)?;
+    }
+    d.set_item("cross_material_adjusted", adjusted)?;
+    let limits = PyDict::new(py);
+    for (nuclide, l) in &info.lognormal_not_carried {
+        limits.set_item(nuclide, limit_dict(l)?)?;
+    }
+    d.set_item("lognormal_not_carried", limits)?;
+    d.set_item(
+        "resonance_parameters",
+        resonance_parameters_dict(py, &info.resonance_parameters)?,
+    )?;
+    d.set_item("flux_bins_sampled", info.flux_bins_sampled)?;
+    d.set_item(
+        "half_lives_perturbed",
+        info.half_lives_perturbed
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
+    d.set_item(
+        "no_half_life_uncertainty",
+        info.no_half_life_uncertainty
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
+    d.set_item(
+        "half_life_uncertainty_not_carried",
+        info.half_life_uncertainty_not_carried
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
+    d.set_item("half_lives_sampled", info.half_lives_sampled)?;
+    for (key, set) in [
+        (
+            "decay_branchings_perturbed",
+            &info.decay_branchings_perturbed,
+        ),
+        (
+            "no_decay_branching_uncertainty",
+            &info.no_decay_branching_uncertainty,
+        ),
+        ("decay_branchings_too_wide", &info.decay_branchings_too_wide),
+        (
+            "decay_branchings_partly_held",
+            &info.decay_branchings_partly_held,
+        ),
+        (
+            "decay_branchings_sigma_adjusted",
+            &info.decay_branchings_sigma_adjusted,
+        ),
+    ] {
+        d.set_item(key, set.iter().cloned().collect::<Vec<_>>())?;
+    }
+    d.set_item("decay_branchings_floored", info.decay_branchings_floored)?;
+    d.set_item("decay_branchings_sampled", info.decay_branchings_sampled)?;
+    d.set_item(
+        "decay_energies_perturbed",
+        info.decay_energies_perturbed
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
+    d.set_item(
+        "no_decay_energy_uncertainty",
+        info.no_decay_energy_uncertainty
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
+    d.set_item(
+        "decay_energy_uncertainty_not_carried",
+        info.decay_energy_uncertainty_not_carried
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
+    for (key, set) in [
+        (
+            "decay_photon_lines_perturbed",
+            &info.decay_photon_lines_perturbed,
+        ),
+        (
+            "no_decay_photon_line_uncertainty",
+            &info.no_decay_photon_line_uncertainty,
+        ),
+        (
+            "decay_photon_line_uncertainty_not_carried",
+            &info.decay_photon_line_uncertainty_not_carried,
+        ),
+    ] {
+        d.set_item(key, set.iter().cloned().collect::<Vec<_>>())?;
+    }
+    d.set_item(
+        "decay_photon_spectra_folded",
+        info.decay_photon_spectra_folded.clone(),
+    )?;
+    for (key, set) in [
+        ("fission_yields_perturbed", &info.fission_yields_perturbed),
+        (
+            "no_fission_yield_uncertainty",
+            &info.no_fission_yield_uncertainty,
+        ),
+        (
+            "fission_yield_uncertainty_not_carried",
+            &info.fission_yield_uncertainty_not_carried,
+        ),
+        (
+            "fission_yields_mapping_mismatch",
+            &info.fission_yields_mapping_mismatch,
+        ),
+    ] {
+        d.set_item(key, set.iter().cloned().collect::<Vec<_>>())?;
+    }
+    // Keyed "Parent reaction", as the other per-channel entries are.
+    for (key, set) in [
+        (
+            "isomer_branchings_perturbed",
+            &info.isomer_branchings_perturbed,
+        ),
+        (
+            "no_isomer_branching_uncertainty",
+            &info.no_isomer_branching_uncertainty,
+        ),
+    ] {
+        d.set_item(
+            key,
+            set.iter()
+                .map(|(parent, kind)| format!("{parent} {kind}"))
+                .collect::<Vec<_>>(),
+        )?;
+    }
+    d.set_item(
+        "isomer_branching_blocks_not_used",
+        info.isomer_branching_blocks_not_used.clone(),
+    )?;
+    let isomer_repairs = PyDict::new(py);
+    for (parent, r) in &info.isomer_branching_covariance_repaired {
+        let entry = PyDict::new(py);
+        field_repair(&entry, r)?;
+        isomer_repairs.set_item(parent, entry)?;
+    }
+    d.set_item("isomer_branching_covariance_repaired", isomer_repairs)?;
+    let isomer_limits = PyDict::new(py);
+    for (parent, l) in &info.isomer_branching_lognormal_not_carried {
+        isomer_limits.set_item(parent, limit_dict(l)?)?;
+    }
+    d.set_item("isomer_branching_lognormal_not_carried", isomer_limits)?;
+    // Keyed "Parent reaction Product".
+    let production_sigma = PyDict::new(py);
+    for ((parent, kind, product), sigma) in &info.isomer_production_sigma {
+        production_sigma.set_item(format!("{parent} {kind} {product}"), sigma)?;
+    }
+    d.set_item("isomer_production_sigma", production_sigma)?;
+    d.set_item("isomer_branchings_sampled", info.isomer_branchings_sampled)?;
+    let clipped = PyDict::new(py);
+    for ((parent, kind, product), n) in &info.isomer_branchings_clipped {
+        clipped.set_item(format!("{parent} {kind} {product}"), n)?;
+    }
+    d.set_item("isomer_branchings_clipped", clipped)?;
+    let damage = PyDict::new(py);
+    for (name, c) in &info.damage_energy {
+        let entry = PyDict::new(py);
+        entry.set_item("explained", c.explained)?;
+        entry.set_item("sigma", c.sigma)?;
+        damage.set_item(name, entry)?;
+    }
+    d.set_item("damage_energy", damage)?;
+    d.set_item("statistical_rates", info.statistical_rates)?;
+    d.set_item("statistical_floored", info.statistical_floored)?;
+    d.set_item("statistical_sampled", info.statistical_sampled)?;
+    d.set_item("not_perturbed", info.not_perturbed.clone())?;
+    d.set_item("sources", info.sources.clone())?;
+    d.set_item("has_gaps", info.has_gaps())?;
+    Ok(d)
+}
+
+/// `Info::resonance_parameters` as a dict keyed by nuclide: each entry's
+/// `method`, the `reason` it fell back to the first-order rows (`None` where
+/// the parameters were sampled), and per sampled range its sampler report.
+/// `yamc`'s transport coverage report gives its own the same shape.
+pub fn resonance_parameters_dict<'py>(
+    py: Python<'py>,
+    methods: &std::collections::BTreeMap<String, ResonanceMethod>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let noted = |p: &NotedParameter| -> PyResult<Bound<'py, PyDict>> {
+        let e = PyDict::new(py);
+        e.set_item("index", p.index)?;
+        e.set_item("location", format!("{:?}", p.location))?;
+        e.set_item("quantity", format!("{:?}", p.quantity))?;
+        e.set_item("value", p.value)?;
+        e.set_item("sigma", p.sigma)?;
+        Ok(e)
+    };
+    let repair = |r: &Option<CorrelationRepair>| -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(r) = r else { return Ok(None) };
+        let e = PyDict::new(py);
+        e.set_item("lambda_min", r.lambda_min)?;
+        e.set_item("frobenius_change", r.frobenius_change)?;
+        e.set_item("max_change", r.max_change)?;
+        e.set_item("parameters", r.parameters)?;
+        e.set_item("iterations", r.iterations)?;
+        e.set_item("converged", r.converged)?;
+        Ok(Some(e))
+    };
+    let out = PyDict::new(py);
+    for (nuclide, method) in methods {
+        let entry = PyDict::new(py);
+        entry.set_item("method", method.name())?;
+        let (largest, frobenius) = method.correlation_change();
+        entry.set_item("largest_correlation_change", largest)?;
+        entry.set_item("correlation_frobenius_change", frobenius)?;
+        let ranges = PyList::empty(py);
+        match method {
+            ResonanceMethod::Sampled { ranges: reports } => {
+                entry.set_item("reason", py.None())?;
+                for r in reports {
+                    let range = PyDict::new(py);
+                    range.set_item("isotope", r.isotope)?;
+                    range.set_item("range", r.range)?;
+                    range.set_item("gaussian", r.gaussian)?;
+                    range.set_item("lognormal", r.lognormal)?;
+                    range.set_item("held", r.held)?;
+                    let zero = PyList::empty(py);
+                    for p in &r.zero_mean_widths {
+                        zero.append(noted(p)?)?;
+                    }
+                    range.set_item("zero_mean_widths", zero)?;
+                    let negative = PyList::empty(py);
+                    for p in &r.negative_mean_widths {
+                        negative.append(noted(p)?)?;
+                    }
+                    range.set_item("negative_mean_widths", negative)?;
+                    range.set_item(
+                        "zero_variance_with_covariance",
+                        r.zero_variance_with_covariance,
+                    )?;
+                    range.set_item("stated_repair", repair(&r.stated_repair)?)?;
+                    range.set_item("unattainable_pairs", r.unattainable_pairs)?;
+                    range.set_item("transformed_repair", repair(&r.transformed_repair)?)?;
+                    range.set_item("largest_correlation_change", r.correlation_change)?;
+                    range.set_item(
+                        "correlation_frobenius_change",
+                        r.correlation_frobenius_change,
+                    )?;
+                    ranges.append(range)?;
+                }
+            }
+            ResonanceMethod::FirstOrder { reason } => {
+                entry.set_item("reason", reason)?;
+            }
+        }
+        entry.set_item("ranges", ranges)?;
+        out.set_item(nuclide, entry)?;
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use yani_transmute::covariance_sample::{ChannelSigma, FieldRepair, Repair};
+
+    /// A repaired, wide-sigma report reaches Python with the nested layout the
+    /// docstring promises: channels keyed by kind, a negative stated variance
+    /// as None rather than a zero sigma, and "Nuclide kind" string keys.
+    #[test]
+    fn a_repair_and_a_wide_channel_reach_the_dict() {
+        let info = Info {
+            covariance_repaired: ["W182".to_string()].into(),
+            covariance_repairs: vec![Repair {
+                nuclide: "W182".to_string(),
+                spectrum: 1,
+                field: FieldRepair {
+                    lambda_min: -1.0e-4,
+                    largest_correlation_change: 2.0e-4,
+                    correlation_frobenius_change: 3.0e-4,
+                    cells: 4,
+                    held_cells: 1,
+                    converged: true,
+                },
+                channels: vec![
+                    ChannelSigma {
+                        kind: "(n,2n)".to_string(),
+                        evaluated_variance: 0.0036,
+                        sampled: 0.084,
+                    },
+                    ChannelSigma {
+                        kind: "(n,a)".to_string(),
+                        evaluated_variance: -0.001,
+                        sampled: 0.02,
+                    },
+                ],
+            }],
+            covariance_repaired_outside_bound: ["Xe135".to_string()].into(),
+            worst_sigma_change: f64::INFINITY,
+            rate_weighted_sigma_change: Some(0.25),
+            sigma_at_least_one: [(("W186".to_string(), "(n,p)".to_string()), 12.0)].into(),
+            sigma_at_least_ten: [(("W186".to_string(), "(n,p)".to_string()), 12.0)].into(),
+            sigma_at_least_one_outside_bound: [(("W186".to_string(), "(n,p)".to_string()), 12.0)]
+                .into(),
+            ..Default::default()
+        };
+        Python::initialize();
+        Python::attach(|py| {
+            let d = info_to_dict(py, &info).unwrap();
+            let get = |key: &str| d.get_item(key).unwrap().unwrap();
+            assert_eq!(
+                get("covariance_repaired").extract::<Vec<String>>().unwrap(),
+                ["W182"]
+            );
+            assert_eq!(
+                get("covariance_repaired_outside_bound")
+                    .extract::<Vec<String>>()
+                    .unwrap(),
+                ["Xe135"]
+            );
+            assert!(get("worst_sigma_change")
+                .extract::<f64>()
+                .unwrap()
+                .is_infinite());
+            assert_eq!(
+                get("rate_weighted_sigma_change").extract::<f64>().unwrap(),
+                0.25
+            );
+            assert!(get("has_gaps").extract::<bool>().unwrap());
+
+            let repairs = get("covariance_repairs");
+            let repair = repairs.get_item(0).unwrap();
+            assert_eq!(
+                repair
+                    .get_item("nuclide")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "W182"
+            );
+            assert_eq!(
+                repair
+                    .get_item("spectrum")
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                repair
+                    .get_item("lambda_min")
+                    .unwrap()
+                    .extract::<f64>()
+                    .unwrap(),
+                -1.0e-4
+            );
+            assert_eq!(
+                repair
+                    .get_item("largest_correlation_change")
+                    .unwrap()
+                    .extract::<f64>()
+                    .unwrap(),
+                2.0e-4
+            );
+            assert_eq!(
+                repair
+                    .get_item("correlation_frobenius_change")
+                    .unwrap()
+                    .extract::<f64>()
+                    .unwrap(),
+                3.0e-4
+            );
+            assert_eq!(
+                repair
+                    .get_item("held_cells")
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                1
+            );
+            let channels = repair.get_item("channels").unwrap();
+            let n2n = channels.get_item("(n,2n)").unwrap();
+            assert_eq!(
+                n2n.get_item("evaluated_variance")
+                    .unwrap()
+                    .extract::<f64>()
+                    .unwrap(),
+                0.0036
+            );
+            assert!(
+                (n2n.get_item("evaluated_sigma")
+                    .unwrap()
+                    .extract::<f64>()
+                    .unwrap()
+                    - 0.06)
+                    .abs()
+                    < 1e-15
+            );
+            assert_eq!(
+                n2n.get_item("sampled_sigma")
+                    .unwrap()
+                    .extract::<f64>()
+                    .unwrap(),
+                0.084
+            );
+            let na = channels.get_item("(n,a)").unwrap();
+            assert_eq!(
+                na.get_item("evaluated_variance")
+                    .unwrap()
+                    .extract::<f64>()
+                    .unwrap(),
+                -0.001
+            );
+            assert!(na.get_item("evaluated_sigma").unwrap().is_none());
+
+            for key in [
+                "sigma_at_least_one",
+                "sigma_at_least_ten",
+                "sigma_at_least_one_outside_bound",
+            ] {
+                let wide = get(key);
+                assert_eq!(
+                    wide.get_item("W186 (n,p)")
+                        .unwrap()
+                        .extract::<f64>()
+                        .unwrap(),
+                    12.0
+                );
+            }
+        });
+    }
+    /// Each nuclide's resonance method reaches the dict: a sampled one with
+    /// its ranges' reports and no reason, a fallback with its reason and no
+    /// ranges.
+    #[test]
+    fn resonance_methods_reach_the_dict() {
+        use yani_transmute::resonance_sampling::SamplerReport;
+        let report = SamplerReport {
+            isotope: 0,
+            range: 0,
+            gaussian: 3,
+            lognormal: 5,
+            held: 1,
+            zero_mean_widths: Vec::new(),
+            negative_mean_widths: Vec::new(),
+            zero_variance_with_covariance: 0,
+            stated_repair: Some(CorrelationRepair {
+                lambda_min: -1e-3,
+                frobenius_change: 2e-3,
+                max_change: 1e-3,
+                parameters: 9,
+                iterations: 4,
+                converged: true,
+            }),
+            unattainable_pairs: 0,
+            transformed_repair: None,
+            correlation_change: 1e-3,
+            correlation_frobenius_change: 2e-3,
+        };
+        let info = Info {
+            resonance_parameters: [
+                (
+                    "W186".to_string(),
+                    ResonanceMethod::Sampled {
+                        ranges: vec![report],
+                    },
+                ),
+                (
+                    "La138".to_string(),
+                    ResonanceMethod::FirstOrder {
+                        reason: "MF=32 does not match MF=2".to_string(),
+                    },
+                ),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        Python::initialize();
+        Python::attach(|py| {
+            let d = info_to_dict(py, &info).unwrap();
+            let methods = d.get_item("resonance_parameters").unwrap().unwrap();
+            let w = methods.get_item("W186").unwrap();
+            assert_eq!(
+                w.get_item("method").unwrap().extract::<String>().unwrap(),
+                "parameters sampled"
+            );
+            assert!(w.get_item("reason").unwrap().is_none());
+            let range = w.get_item("ranges").unwrap().get_item(0).unwrap();
+            assert_eq!(
+                range
+                    .get_item("lognormal")
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                5
+            );
+            let repair = range.get_item("stated_repair").unwrap();
+            assert_eq!(
+                repair
+                    .get_item("iterations")
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                4
+            );
+            assert!(range.get_item("transformed_repair").unwrap().is_none());
+            assert_eq!(
+                w.get_item("largest_correlation_change")
+                    .unwrap()
+                    .extract::<f64>()
+                    .unwrap(),
+                1e-3
+            );
+            assert_eq!(
+                w.get_item("correlation_frobenius_change")
+                    .unwrap()
+                    .extract::<f64>()
+                    .unwrap(),
+                2e-3
+            );
+            let la = methods.get_item("La138").unwrap();
+            assert_eq!(
+                la.get_item("method").unwrap().extract::<String>().unwrap(),
+                "first-order rows"
+            );
+            assert_eq!(
+                la.get_item("reason").unwrap().extract::<String>().unwrap(),
+                "MF=32 does not match MF=2"
+            );
+            assert_eq!(la.get_item("ranges").unwrap().len().unwrap(), 0);
+        });
+    }
+}

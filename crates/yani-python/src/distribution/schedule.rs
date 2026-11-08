@@ -1,0 +1,1425 @@
+//! `PulseSchedule`: an irradiation/cooling timeline plus the single
+//! post-processing entry point for decay-photon shutdown-dose-rate (SDR).
+//!
+//! This replaces the three free `decay_photons` functions (the verbatim
+//! `openmc.deplete.d1s` names) with one object that owns the irradiation
+//! history. Each `Pulse` carries its own neutron source + rate + duration, so
+//! a mixed DD/DT campaign with cooling in between is one schedule. The
+//! per-nuclide time-correction maths stays in the `yamc-physics` core; this
+//! module is the orchestration + typed result wrapper.
+//!
+//! Mixed-spectrum (e.g. DD + DT) schedules are handled **exactly**: each
+//! distinct source's activation is reconstructed from its own transport run
+//! (one tally result per source) and the corrected doses are summed
+//! (independent runs, so variances add in quadrature).
+
+use std::collections::BTreeMap;
+
+use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
+use pyo3::prelude::*;
+use pyo3::types::{PyBool, PyDict, PyList};
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
+
+use super::decay_photons::resolve_chain;
+use super::source::PyNeutronSource;
+use yamc_nuclide::config::ChainUse;
+use yani_transmute::uncertainty::SpreadAccumulator;
+
+/// Extract a duration -- either a plain number of seconds or a `(value, unit)`
+/// tuple -- from a Python object and convert it to seconds via the core unit
+/// table (`yani_transmute::duration_to_seconds`). Shared with
+/// `Model.simulate_transport`'s `max_runtime` kwarg.
+pub fn parse_duration(obj: &Bound<'_, PyAny>) -> PyResult<f64> {
+    // (value, unit) tuple/list, e.g. (1, "a"). Checked before the plain-number
+    // arm so a 2-sequence isn't mis-read.
+    if let Ok((value, unit)) = obj.extract::<(f64, String)>() {
+        return yani_transmute::duration_to_seconds(value, &unit).map_err(PyValueError::new_err);
+    }
+    // Plain number -> seconds.
+    if let Ok(secs) = obj.extract::<f64>() {
+        if !secs.is_finite() || secs < 0.0 {
+            return Err(PyValueError::new_err(
+                "duration must be a finite, non-negative number",
+            ));
+        }
+        return Ok(secs);
+    }
+    Err(PyTypeError::new_err(
+        "duration must be a number of seconds or a (value, unit) tuple, e.g. (1, 'a') or (30, 'd')",
+    ))
+}
+
+/// Where a step's moved cells sit: cell name -> homogeneous 4x4 rigid motion
+/// from the cell's reference position (cm). Checked to be rigid by yamc.
+pub type Moves = Vec<(String, [[f64; 4]; 4])>;
+
+/// One step of a staged schedule, with its machine configuration resolved
+/// (a step that names no `model` takes the previous step's).
+pub struct StagedStep {
+    pub rate: f64,
+    pub duration: f64,
+    pub model: Py<PyAny>,
+    pub moves: Moves,
+}
+
+/// Parse `moves`: ``{cell or cell name: (dx, dy, dz) or 4x4 matrix}``. A key
+/// that is not a str is read by its ``name``, so a ``Cell`` works directly.
+fn parse_moves(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Moves> {
+    let Some(obj) = obj else {
+        return Ok(Vec::new());
+    };
+    let dict = obj.cast::<PyDict>().map_err(|_| {
+        PyTypeError::new_err("moves must be a dict {cell: translation or 4x4 matrix}")
+    })?;
+    let mut out = Vec::new();
+    for (k, v) in dict.iter() {
+        let name: String = match k.extract::<String>() {
+            Ok(n) => n,
+            Err(_) => k
+                .getattr("name")
+                .and_then(|n| n.extract::<Option<String>>())
+                .ok()
+                .flatten()
+                .ok_or_else(|| {
+                    PyValueError::new_err(
+                        "moves keys must be cell names or named cells: cells are matched \
+                         across models by name",
+                    )
+                })?,
+        };
+        let m = if let Ok(t) = v.extract::<[f64; 3]>() {
+            [
+                [1.0, 0.0, 0.0, t[0]],
+                [0.0, 1.0, 0.0, t[1]],
+                [0.0, 0.0, 1.0, t[2]],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        } else if let Ok(rows) = v.extract::<[[f64; 4]; 4]>() {
+            rows
+        } else {
+            return Err(PyValueError::new_err(format!(
+                "moves['{name}'] must be a translation (dx, dy, dz) in cm or a 4x4 rigid \
+                 transformation matrix"
+            )));
+        };
+        out.push((name, m));
+    }
+    Ok(out)
+}
+
+/// The `model` / `moves` pair a step was given, checked for shape only (the
+/// model's type is yamc's to check).
+fn parse_stage(
+    model: Option<&Bound<'_, PyAny>>,
+    moves: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<(Py<PyAny>, Moves)>> {
+    let moves = parse_moves(moves)?;
+    match model {
+        Some(m) => Ok(Some((m.clone().unbind(), moves))),
+        None if moves.is_empty() => Ok(None),
+        None => Err(PyValueError::new_err(
+            "moves needs the model the cells moved within: give model= as well",
+        )),
+    }
+}
+
+fn stage_model(py: Python<'_>, stage: &Option<(Py<PyAny>, Moves)>) -> Option<Py<PyAny>> {
+    stage.as_ref().map(|(m, _)| m.clone_ref(py))
+}
+
+fn stage_moves(stage: &Option<(Py<PyAny>, Moves)>) -> BTreeMap<String, [[f64; 4]; 4]> {
+    stage
+        .as_ref()
+        .map(|(_, m)| m.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn clone_stage(py: Python<'_>, stage: &Option<(Py<PyAny>, Moves)>) -> Option<(Py<PyAny>, Moves)> {
+    stage.as_ref().map(|(m, mv)| (m.clone_ref(py), mv.clone()))
+}
+
+/// One irradiation campaign: a neutron source held at a constant `rate` (n/s)
+/// for `duration`.
+#[gen_stub_pyclass]
+#[pyclass(name = "Pulse")]
+pub struct PyPulse {
+    /// The neutron source for this campaign (kept by identity so a schedule can
+    /// group steps that share a source). `None` is allowed for
+    /// `Model.simulate_transmutation` (transport uses the model's source);
+    /// `Material.transmute` requires a source whose energy is a `Histogram`.
+    source: Option<Py<PyAny>>,
+    rate: f64,
+    duration_seconds: f64,
+    /// The flux's stated error, when the caller knows it: a per-bin standard
+    /// deviation or a full covariance, against the `Histogram`'s own values.
+    ///
+    /// Lives here rather than on `Histogram` because `Histogram` is a shared
+    /// transport source distribution and this is an activation-only concern.
+    /// It also sits beside `rate`, which is the other half of the flux.
+    flux_error: Option<FluxErrorInput>,
+    /// The machine configuration this pulse irradiates in, for
+    /// `yamc.simulate_shutdown_dose`: a yamc `Model` and its moved cells.
+    stage: Option<(Py<PyAny>, Moves)>,
+}
+
+/// A pulse's flux error as given, before the spectrum it is relative to is
+/// known.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum FluxErrorInput {
+    StdDev(Vec<f64>),
+    Covariance(Vec<Vec<f64>>),
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyPulse {
+    /// Create an irradiation pulse.
+    ///
+    /// Args:
+    ///     rate: For ``Model.simulate_transmutation``, the source emission rate
+    ///         in particles/second (n/s). For ``Material.transmute``, the total
+    ///         flux magnitude [n/cm^2/s] (the source's ``Histogram`` energy gives
+    ///         the spectrum shape).
+    ///     duration: A number of seconds, or a ``(value, unit)`` tuple such as
+    ///         ``(1, "a")`` or ``(30, "d")``. Units: s, min, h, d, a (year).
+    ///     source: The NeutronSource for this campaign. Defaults to ``None``,
+    ///         which ``Model.simulate_transmutation`` accepts (transport uses the
+    ///         model's source); ``Material.transmute`` requires a source whose
+    ///         energy is a ``Histogram`` and ignores its position/direction.
+    ///     flux_std_dev: Per-bin standard deviation of the flux, in the same
+    ///         units and the same order as the ``Histogram`` values. Optional,
+    ///         and omitting it is the common case: a spectrum taken from a
+    ///         published reference set carries no stated error. From a yamc
+    ///         run it is ``results[tally].standard_deviation``.
+    ///
+    ///         Used only by ``Material.transmute(data_uncertainty=...)`` with
+    ///         the ``flux_spectrum`` source enabled. Omitted, that source
+    ///         contributes nothing and says so in
+    ///         ``data_uncertainty_info["spectra_without_flux_sigma"]`` rather
+    ///         than reading as a flux known exactly.
+    ///
+    ///         Treats the bins as independent. A spectrum from a Monte Carlo
+    ///         tally is not: its bins are scored by the same histories and
+    ///         move together, and a per-bin sigma then understates the error
+    ///         of every rate that sums over a band. Give ``flux_covariance``
+    ///         instead when the correlations are known.
+    ///     flux_covariance: The full covariance of the ``Histogram`` values, a
+    ///         square matrix (nested lists or a 2-D array) with one row and
+    ///         column per bin, in the square of their units. The alternative
+    ///         to ``flux_std_dev``, whose diagonal it contains: give one or
+    ///         the other. It must be symmetric and positive semi-definite, and
+    ///         is checked. Each replica's flux perturbation is drawn through
+    ///         its factor, so correlated bins move together.
+    ///     model: The yamc ``Model`` this pulse irradiates, for
+    ///         ``yamc.simulate_shutdown_dose``: its geometry, materials and
+    ///         neutron source are the machine during this pulse. Give it
+    ///         instead of ``source``. A later step without a ``model`` stays in
+    ///         this one.
+    ///     moves: Cells of ``model`` that sit away from their reference
+    ///         position, as ``{cell or cell name: (dx, dy, dz)}`` in cm or a
+    ///         4x4 rigid transformation matrix. Only with ``model``; see
+    ///         ``Cooldown`` for how moves work.
+    #[new]
+    #[pyo3(signature = (rate, duration, source=None, flux_std_dev=None, flux_covariance=None, model=None, moves=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        rate: f64,
+        duration: &Bound<'_, PyAny>,
+        source: Option<&Bound<'_, PyAny>>,
+        flux_std_dev: Option<Vec<f64>>,
+        flux_covariance: Option<Vec<Vec<f64>>>,
+        model: Option<&Bound<'_, PyAny>>,
+        moves: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        if source.is_some() && model.is_some() {
+            return Err(PyValueError::new_err(
+                "give a Pulse a source or a model, not both: a model's own source \
+                 irradiates it",
+            ));
+        }
+        let stage = parse_stage(model, moves)?;
+        // Validate any source is a neutron source (activation is by neutrons),
+        // but keep the original object so identity grouping works across steps.
+        if let Some(s) = source
+            && !s.is_instance_of::<PyNeutronSource>()
+        {
+            return Err(PyTypeError::new_err("Pulse source must be a NeutronSource"));
+        }
+        if rate < 0.0 {
+            return Err(PyValueError::new_err("rate must be non-negative"));
+        }
+        if flux_std_dev.is_some() && flux_covariance.is_some() {
+            return Err(PyValueError::new_err(
+                "give flux_std_dev or flux_covariance, not both: the covariance's \
+                 diagonal already states each bin's standard deviation",
+            ));
+        }
+        if (flux_std_dev.is_some() || flux_covariance.is_some()) && source.is_none() {
+            return Err(PyValueError::new_err(
+                "a flux error needs a source: it is the error on that source's \
+                 Histogram values, and a sourceless pulse has no flux",
+            ));
+        }
+        if let Some(sigma) = &flux_std_dev {
+            // A NaN fails every comparison, so `s < 0.0` let it through, and
+            // downstream it read as an exact bin.
+            if let Some(bad) = sigma.iter().position(|s| !s.is_finite() || *s < 0.0) {
+                return Err(PyValueError::new_err(format!(
+                    "flux_std_dev entry {bad} is {}; entries must be finite and non-negative",
+                    sigma[bad]
+                )));
+            }
+        }
+        let flux_error = match (flux_std_dev, flux_covariance) {
+            (Some(sigma), None) => Some(FluxErrorInput::StdDev(sigma)),
+            (None, Some(cov)) => Some(FluxErrorInput::Covariance(cov)),
+            _ => None,
+        };
+        Ok(PyPulse {
+            source: source.map(|s| s.clone().unbind()),
+            rate,
+            duration_seconds: parse_duration(duration)?,
+            flux_error,
+            stage,
+        })
+    }
+
+    /// The Model this pulse irradiates, or ``None``.
+    #[getter]
+    fn model(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        stage_model(py, &self.stage)
+    }
+
+    /// The moved cells, ``{name: 4x4 matrix}``.
+    #[getter]
+    fn moves(&self) -> BTreeMap<String, [[f64; 4]; 4]> {
+        stage_moves(&self.stage)
+    }
+
+    /// The neutron source active during this pulse, or ``None`` if sourceless.
+    #[getter]
+    fn source(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.source.as_ref().map(|s| s.clone_ref(py))
+    }
+
+    /// The per-bin flux standard deviation, or ``None`` if none was given.
+    #[getter]
+    fn flux_std_dev(&self) -> Option<Vec<f64>> {
+        match &self.flux_error {
+            Some(FluxErrorInput::StdDev(sigma)) => Some(sigma.clone()),
+            _ => None,
+        }
+    }
+
+    /// The flux covariance, or ``None`` if none was given.
+    #[getter]
+    fn flux_covariance(&self) -> Option<Vec<Vec<f64>>> {
+        match &self.flux_error {
+            Some(FluxErrorInput::Covariance(cov)) => Some(cov.clone()),
+            _ => None,
+        }
+    }
+
+    /// Source emission rate in particles/second.
+    #[getter]
+    fn rate(&self) -> f64 {
+        self.rate
+    }
+
+    /// Pulse duration in seconds.
+    #[getter]
+    fn duration(&self) -> f64 {
+        self.duration_seconds
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Pulse(rate={:e}, duration={} s)",
+            self.rate, self.duration_seconds
+        )
+    }
+}
+
+/// A cooling step: no source, the materials just decay for `duration`.
+#[gen_stub_pyclass]
+#[pyclass(name = "Cooldown")]
+pub struct PyCooldown {
+    duration_seconds: f64,
+    /// The machine configuration during cooling, for
+    /// `yamc.simulate_shutdown_dose`.
+    stage: Option<(Py<PyAny>, Moves)>,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyCooldown {
+    /// Create a cooling step.
+    ///
+    /// Args:
+    ///     duration: A number of seconds, or a ``(value, unit)`` tuple such as
+    ///         ``(7, "d")``. Units: s, min, h, d, a (year).
+    ///     model: The yamc ``Model`` the machine is in while it cools, for
+    ///         ``yamc.simulate_shutdown_dose``: the decay photons of every
+    ///         earlier irradiation are transported through its geometry. It
+    ///         needs no source. Cells absent from it have been removed and no
+    ///         longer emit; a cell of the same name is the same component. A
+    ///         later step without a ``model`` stays in this one.
+    ///     moves: Cells of ``model`` that sit away from their reference
+    ///         position (where they were built in the model they were
+    ///         irradiated in, unless that step moved them too), as
+    ///         ``{cell or cell name: (dx, dy, dz)}`` in cm or a 4x4 rigid
+    ///         transformation matrix. The activation moves with the cell;
+    ///         ``model`` must already hold the cell at its moved position.
+    #[new]
+    #[pyo3(signature = (duration, model=None, moves=None))]
+    fn new(
+        duration: &Bound<'_, PyAny>,
+        model: Option<&Bound<'_, PyAny>>,
+        moves: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        Ok(PyCooldown {
+            duration_seconds: parse_duration(duration)?,
+            stage: parse_stage(model, moves)?,
+        })
+    }
+
+    /// The Model the machine cools in, or ``None``.
+    #[getter]
+    fn model(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        stage_model(py, &self.stage)
+    }
+
+    /// The moved cells, ``{name: 4x4 matrix}``.
+    #[getter]
+    fn moves(&self) -> BTreeMap<String, [[f64; 4]; 4]> {
+        stage_moves(&self.stage)
+    }
+
+    /// Cooldown duration in seconds.
+    #[getter]
+    fn duration(&self) -> f64 {
+        self.duration_seconds
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Cooldown(duration={} s)", self.duration_seconds)
+    }
+}
+
+/// Build a run of cooling steps at log-spaced *cumulative* times.
+///
+/// `Cooldown` takes the duration OF THAT STEP, which is the right primitive and
+/// the wrong thing to type. Anyone plotting a decay curve wants points at
+/// cumulative times, and would otherwise have to difference them by hand:
+///
+/// ```text
+/// HOUR, YEAR = 3600.0, 365.25 * 86400.0
+/// cum  = [HOUR * (10 * YEAR / HOUR) ** (k / (n - 1)) for k in range(n)]
+/// gaps = [cum[0]] + [cum[k] - cum[k - 1] for k in range(1, n)]
+/// ```
+///
+/// Log spacing is the default because decay is exponential, so a linear sweep
+/// is wrong twice over: it wastes steps in the flat tail and misses the early
+/// fall entirely. Activity and decay heat are plotted on log-log axes, so
+/// evenly spaced PLOTTED points means log-spaced times.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (start, stop, n, spacing="log"))]
+pub fn cooldown_steps(
+    start: &Bound<'_, PyAny>,
+    stop: &Bound<'_, PyAny>,
+    n: usize,
+    spacing: &str,
+) -> PyResult<Vec<PyCooldown>> {
+    let start_s = parse_duration(start)?;
+    let stop_s = parse_duration(stop)?;
+    if n < 2 {
+        return Err(PyValueError::new_err(
+            "n must be at least 2: one point is a single Cooldown, which needs no help",
+        ));
+    }
+    if stop_s.is_nan() || start_s.is_nan() || stop_s <= start_s {
+        return Err(PyValueError::new_err(format!(
+            "stop ({stop_s} s) must be after start ({start_s} s)"
+        )));
+    }
+
+    // Cumulative times, then the gaps between them. The first step runs from
+    // the end of the irradiation to `start`, so the durations sum to `stop`
+    // exactly rather than to `stop - start`.
+    let cumulative: Vec<f64> = match spacing {
+        "log" => {
+            if start_s <= 0.0 {
+                return Err(PyValueError::new_err(
+                    "start must be positive for log spacing: the first point is a ratio from \
+                     it, and zero has no logarithm. Use a short first time such as (1, 'h'), \
+                     or spacing='linear'.",
+                ));
+            }
+            let ratio = stop_s / start_s;
+            (0..n)
+                .map(|k| start_s * ratio.powf(k as f64 / (n - 1) as f64))
+                .collect()
+        }
+        "linear" => {
+            let step = (stop_s - start_s) / (n - 1) as f64;
+            (0..n).map(|k| start_s + step * k as f64).collect()
+        }
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown spacing={other:?}; expected 'log' or 'linear'"
+            )));
+        }
+    };
+
+    let mut steps = Vec::with_capacity(n);
+    let mut previous = 0.0;
+    for time in cumulative {
+        steps.push(PyCooldown {
+            stage: None,
+            duration_seconds: time - previous,
+        });
+        previous = time;
+    }
+    Ok(steps)
+}
+
+/// The result of time-correcting a tally: dose at the selected cooling step(s).
+///
+/// `mean` / `std_dev` are 1-D (one selected step, when ``steps`` was a single
+/// int) or 2-D (one row per selected step). `by_nuclide` maps each parent
+/// radionuclide to its mean contribution, in the same shape. `times` is the
+/// elapsed time (seconds) at the end of each selected step.
+#[gen_stub_pyclass]
+#[pyclass(name = "DoseResult")]
+pub struct PyDoseResult {
+    mean: Py<PyAny>,
+    std_dev: Py<PyAny>,
+    by_nuclide: Py<PyAny>,
+    times: Py<PyAny>,
+    data_std_dev: Option<Py<PyAny>>,
+    data_std_dev_standard_error: Option<Py<PyAny>>,
+    data_std_dev_correlated: Option<Py<PyAny>>,
+    total_std_dev: Option<Py<PyAny>>,
+    total_std_dev_correlated: Option<Py<PyAny>>,
+    data_uncertainty_info: Option<Py<PyAny>>,
+}
+
+impl PyDoseResult {
+    /// A result with one row per step and no nuclear-data uncertainty, as
+    /// `yamc.simulate_shutdown_dose` returns.
+    pub fn from_rows(
+        py: Python<'_>,
+        mean: Vec<Vec<f64>>,
+        std_dev: Vec<Vec<f64>>,
+        by_nuclide: BTreeMap<String, Vec<Vec<f64>>>,
+        times: Vec<f64>,
+    ) -> PyResult<Self> {
+        let by_nuc = PyDict::new(py);
+        for (name, rows) in by_nuclide {
+            by_nuc.set_item(name, shape_rows(py, rows, false)?)?;
+        }
+        Ok(Self {
+            mean: shape_rows(py, mean, false)?,
+            std_dev: shape_rows(py, std_dev, false)?,
+            by_nuclide: by_nuc.into_any().unbind(),
+            times: times.into_pyobject(py)?.into_any().unbind(),
+            data_std_dev: None,
+            data_std_dev_standard_error: None,
+            data_std_dev_correlated: None,
+            total_std_dev: None,
+            total_std_dev_correlated: None,
+            data_uncertainty_info: None,
+        })
+    }
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyDoseResult {
+    /// Mean dose rate, 1-D for a single selected step or 2-D (one row per step).
+    #[getter]
+    fn mean(&self, py: Python<'_>) -> Py<PyAny> {
+        self.mean.clone_ref(py)
+    }
+
+    /// Standard error on `mean`, same shape: the transport's statistical
+    /// uncertainty alone.
+    #[getter]
+    fn std_dev(&self, py: Python<'_>) -> Py<PyAny> {
+        self.std_dev.clone_ref(py)
+    }
+
+    /// The nuclear-data uncertainty on `mean`, same shape, when
+    /// ``time_correct_tally`` was given ``data_uncertainty``; ``None``
+    /// otherwise. From the half-lives behind the time-correction factors and
+    /// the decay photon spectrum normalisations that scale each emitter's
+    /// tally, with an emitter's gamma and x-ray normalisations drawn
+    /// independently: the lower end of the range ``data_std_dev_correlated``
+    /// closes.
+    #[getter]
+    fn data_std_dev(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.data_std_dev.as_ref().map(|v| v.clone_ref(py))
+    }
+
+    /// The standard error of `data_std_dev`, same shape: how far another
+    /// ensemble of the same size could put it. It allows for a heavy tail
+    /// (it carries the sample kurtosis). ``None`` when ``data_std_dev`` is,
+    /// and NaN in a bin below four replicas.
+    #[getter]
+    fn data_std_dev_standard_error(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.data_std_dev_standard_error
+            .as_ref()
+            .map(|v| v.clone_ref(py))
+    }
+
+    /// ``data_std_dev`` with each emitter's gamma and x-ray normalisations
+    /// drawn fully correlated, the upper end of the range the decay data
+    /// leave by not stating their correlation. Equal to ``data_std_dev`` when
+    /// no normalisation is drawn. Negative correlations are not considered:
+    /// what the spectra share (a decay scheme's normalisation, its conversion
+    /// coefficients) moves them the same way.
+    #[getter]
+    fn data_std_dev_correlated(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.data_std_dev_correlated
+            .as_ref()
+            .map(|v| v.clone_ref(py))
+    }
+
+    /// `std_dev` and `data_std_dev` in quadrature, when both exist. They are
+    /// independent: one is the transport's sampling, the other the evaluated
+    /// decay data.
+    #[getter]
+    fn total_std_dev(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.total_std_dev.as_ref().map(|v| v.clone_ref(py))
+    }
+
+    /// `std_dev` and `data_std_dev_correlated` in quadrature, when both exist.
+    #[getter]
+    fn total_std_dev_correlated(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.total_std_dev_correlated
+            .as_ref()
+            .map(|v| v.clone_ref(py))
+    }
+
+    /// What the nuclear-data uncertainty covered, when asked for: the
+    /// half-lives sampled, those with no stated sigma, the emitters whose
+    /// photon normalisation was drawn (``decay_photon_normalisations_perturbed``)
+    /// and those with a spectrum whose normalisation is folded into its line
+    /// sigmas (``decay_photon_spectra_folded``), the replica count, the
+    /// ``convergence`` target, whether every time-correction factor's sigma
+    /// reached it (``converged``), whether the replica cap stopped the run
+    /// (``hit_cap``), the ones that missed (``unconverged``), and what was
+    /// held at nominal (``not_perturbed``).
+    #[getter]
+    fn data_uncertainty_info(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.data_uncertainty_info.as_ref().map(|v| v.clone_ref(py))
+    }
+
+    /// Per-radionuclide mean contribution: ``{nuclide: values}`` in the same
+    /// shape as `mean`.
+    #[getter]
+    fn by_nuclide(&self, py: Python<'_>) -> Py<PyAny> {
+        self.by_nuclide.clone_ref(py)
+    }
+
+    /// Elapsed time (seconds) at the end of each selected step.
+    #[getter]
+    fn times(&self, py: Python<'_>) -> Py<PyAny> {
+        self.times.clone_ref(py)
+    }
+
+    fn __repr__(&self) -> String {
+        "DoseResult(mean=..., std_dev=..., by_nuclide=..., times=...)".to_string()
+    }
+}
+
+/// An irradiation/cooling timeline built from `Pulse` and `Cooldown` steps.
+///
+/// `time_correct_tally` post-processes a decay-photon tally into shutdown dose
+/// rates over the schedule.
+#[gen_stub_pyclass]
+#[pyclass(name = "PulseSchedule")]
+pub struct PyPulseSchedule {
+    /// The core numeric `(rate, dt)` timeline that drives transmutation.
+    schedule: yani_transmute::Schedule,
+    /// Per-step neutron source (by Python identity), aligned 1:1 with
+    /// `schedule.steps()`. `None` for a cooldown or a sourceless pulse. Held
+    /// here (not in the core) because source identity is only needed for the
+    /// decay-photon SDR grouping in `time_correct_tally`.
+    sources: Vec<Option<Py<PyAny>>>,
+    /// Per-step flux error, parallel to `sources`.
+    flux_error: Vec<Option<FluxErrorInput>>,
+    /// Per-step machine configuration as given, parallel to `sources`.
+    stages: Vec<Option<(Py<PyAny>, Moves)>>,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyPulseSchedule {
+    /// Build a schedule from a list of `Pulse` / `Cooldown` steps.
+    #[new]
+    fn new(steps: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let mut core_steps = Vec::new();
+        let mut sources: Vec<Option<Py<PyAny>>> = Vec::new();
+        let mut flux_error: Vec<Option<FluxErrorInput>> = Vec::new();
+        let mut stages: Vec<Option<(Py<PyAny>, Moves)>> = Vec::new();
+        for item in steps.try_iter()? {
+            let item = item?;
+            if let Ok(pulse) = item.cast::<PyPulse>() {
+                let p = pulse.borrow();
+                stages.push(clone_stage(item.py(), &p.stage));
+                sources.push(p.source.as_ref().map(|s| s.clone_ref(item.py())));
+                flux_error.push(p.flux_error.clone());
+                core_steps.push(yani_transmute::ScheduleStep {
+                    rate: p.rate,
+                    dt: p.duration_seconds,
+                    is_pulse: true,
+                });
+            } else if let Ok(cool) = item.cast::<PyCooldown>() {
+                let c = cool.borrow();
+                stages.push(clone_stage(item.py(), &c.stage));
+                sources.push(None);
+                flux_error.push(None);
+                core_steps.push(yani_transmute::ScheduleStep {
+                    rate: 0.0,
+                    dt: c.duration_seconds,
+                    is_pulse: false,
+                });
+            } else {
+                return Err(PyTypeError::new_err(
+                    "PulseSchedule steps must be Pulse or Cooldown objects",
+                ));
+            }
+        }
+        let schedule = yani_transmute::Schedule::new(core_steps).map_err(PyValueError::new_err)?;
+        if stages.iter().any(Option::is_some) {
+            if stages[0].is_none() {
+                return Err(PyValueError::new_err(
+                    "the first step of a schedule with models needs a model: later steps \
+                     without one stay in the previous step's",
+                ));
+            }
+            if sources.iter().any(Option::is_some) {
+                return Err(PyValueError::new_err(
+                    "a schedule with models takes each pulse's source from its model; \
+                     leave Pulse.source unset",
+                ));
+            }
+        }
+        Ok(PyPulseSchedule {
+            schedule,
+            sources,
+            flux_error,
+            stages,
+        })
+    }
+
+    /// The distinct neutron sources used by the pulses, in first-appearance
+    /// order. For a mixed-spectrum schedule, pass ``time_correct_tally`` a dict
+    /// mapping each of these to its transport run's tally result.
+    #[getter]
+    fn sources(&self, py: Python<'_>) -> Vec<Py<PyAny>> {
+        self.distinct_sources(py)
+            .into_iter()
+            .map(|(s, _)| s)
+            .collect()
+    }
+
+    /// Number of steps in the schedule.
+    fn __len__(&self) -> usize {
+        self.schedule.len()
+    }
+
+    fn __repr__(&self) -> String {
+        let pulses = self.schedule.pulse_count();
+        format!(
+            "PulseSchedule({} steps: {} pulses, {} cooldowns)",
+            self.schedule.len(),
+            pulses,
+            self.schedule.len() - pulses
+        )
+    }
+
+    /// Time-correct a decay-photon tally into shutdown dose rate(s).
+    ///
+    /// Args:
+    ///     results: For a single-source schedule, the ``TallyResult`` from the
+    ///         decay-photon run. For a mixed-spectrum (multi-source) schedule, a
+    ///         dict mapping each source in ``self.sources`` to its run's
+    ///         ``TallyResult``; the per-source corrections are summed exactly.
+    ///     steps: Which schedule step(s) to evaluate the dose at the END of.
+    ///         ``None`` (default) selects every step; an ``int`` selects one
+    ///         (returns 1-D arrays; negative counts from the end); a sequence of
+    ///         ints selects a subset in order. The pre-irradiation baseline is
+    ///         never included, so there is no row-0 footgun.
+    ///
+    /// The transmutation network is assembled from the configured per-subsection
+    /// sources: the decay data (``yamc.transmutation_decay_data``) and the
+    /// reactions (``yamc.transmutation_reactions``), which say which emitters
+    /// a collision makes. There is no default library, so either one unset
+    /// raises ``ValueError``, naming it.
+    ///
+    ///     data_uncertainty (DataUncertainty, optional): Also propagate the
+    ///         nuclear-data uncertainty of the dose. Two sources act on it.
+    ///         ``"half_life"`` acts through the time correction: a
+    ///         time-correction factor is an activity over the schedule, and the
+    ///         tally's in-line photon yield is per decay, so the half-lives
+    ///         enter there and nowhere else. Each replica draws every half-life
+    ///         feeding an emitter once and uses it for every campaign, so one
+    ///         evaluation is one uncertainty. ``"decay_photon_lines"`` acts
+    ///         through the photon spectrum normalisation (FD, FC), which scales
+    ///         an emitter's whole spectrum and so its tally, and is applied to
+    ///         it after the fact; an emitter with several spectra is scaled by
+    ///         their multipliers weighted by each one's share of its photon
+    ///         energy. The draws are those a transmutation with the same seed
+    ///         makes. Read ``.data_std_dev``, its standard error
+    ///         ``.data_std_dev_standard_error``, and ``.total_std_dev``, and
+    ///         ``.data_std_dev_correlated`` and ``.total_std_dev_correlated``
+    ///         for the upper end of the range the unstated correlation between
+    ///         an emitter's gamma and x-ray normalisations leaves. Replicas are
+    ///         added until every emitter's time-correction factor has a
+    ///         standard deviation known to the request's ``convergence`` at
+    ///         every schedule step, or the request's ``samples`` fixes the
+    ///         count. The line intensities (dRI) and energies change the
+    ///         spectrum's shape, which needs line-resolved tallies, and are
+    ///         held at nominal; ENDF/B-VIII.1 folds the normalisation into the
+    ///         dRI, so under it almost nothing is drawn. Decay branching ratios
+    ///         also shape a time correction and are held at nominal.
+    ///         ``.data_uncertainty_info`` lists everything held under
+    ///         ``not_perturbed``.
+    ///
+    /// Returns:
+    ///     DoseResult with ``.mean`` / ``.std_dev`` / ``.by_nuclide`` / ``.times``,
+    ///     and ``.data_std_dev`` / ``.data_std_dev_standard_error`` /
+    ///     ``.total_std_dev`` / ``.data_uncertainty_info`` when
+    ///     ``data_uncertainty`` was given.
+    #[pyo3(signature = (results, steps=None, data_uncertainty=None))]
+    fn time_correct_tally(
+        &self,
+        py: Python<'_>,
+        results: &Bound<'_, PyAny>,
+        steps: Option<&Bound<'_, PyAny>>,
+        data_uncertainty: Option<crate::data_uncertainty::PyDataUncertainty>,
+    ) -> PyResult<PyDoseResult> {
+        if self.is_staged() {
+            return Err(PyValueError::new_err(
+                "this schedule changes the machine between steps (its steps have models); \
+                 use yamc.simulate_shutdown_dose(schedule, tallies=...) instead",
+            ));
+        }
+        let distinct = self.distinct_sources(py);
+        if distinct.is_empty() {
+            return Err(PyValueError::new_err(
+                "schedule has no pulses (all cooldowns); nothing to time-correct",
+            ));
+        }
+
+        // Match each distinct source to its transport-run tally result.
+        let per_source: Vec<Bound<'_, PyAny>> = self.match_results(py, results, &distinct)?;
+
+        let timesteps: Vec<f64> = self.schedule.timesteps();
+        let n = self.schedule.len();
+        let (tcf_indices, single) = resolve_steps(steps, n)?;
+
+        let chain = resolve_chain(ChainUse::Activation)?.chain;
+
+        // Elapsed time at the end of each schedule step (cumulative dt).
+        // tcf index t corresponds to the end of schedule step t-1.
+        let cumulative = self.schedule.cumulative_times();
+        let times: Vec<f64> = tcf_indices.iter().map(|&t| cumulative[t - 1]).collect();
+
+        let n_steps = tcf_indices.len();
+        let mut total_mean: Vec<Vec<f64>> = Vec::new();
+        let mut total_var: Vec<Vec<f64>> = Vec::new();
+        let mut by_nuclide: BTreeMap<String, Vec<Vec<f64>>> = BTreeMap::new();
+        // Each campaign's tally and rate history, for the replicas below.
+        type Campaign = (Vec<String>, usize, Vec<f64>, Vec<f64>, Vec<f64>);
+        let mut campaigns: Vec<Campaign> = Vec::new();
+
+        for (src_idx, (src_obj, _)) in distinct.iter().enumerate() {
+            let tr = &per_source[src_idx];
+            let (nuclides, n_scores, mean, std_dev) = extract_tally(tr)?;
+
+            // This source's rate history: its own steps carry their rate, every
+            // other step (cooldowns and other campaigns) contributes 0.
+            let src_bound = src_obj.bind(py);
+            let core_steps = self.schedule.steps();
+            let source_rates: Vec<f64> = self
+                .sources
+                .iter()
+                .enumerate()
+                .map(|(i, s)| match s {
+                    Some(o) if o.bind(py).is(src_bound) => core_steps[i].rate,
+                    _ => 0.0,
+                })
+                .collect();
+
+            let tcf =
+                yani_decay::time_correction_factors(&nuclides, &timesteps, &source_rates, &chain)
+                    .map_err(PyValueError::new_err)?;
+            if data_uncertainty.is_some() {
+                campaigns.push((
+                    nuclides.clone(),
+                    n_scores,
+                    mean.clone(),
+                    std_dev.clone(),
+                    source_rates.clone(),
+                ));
+            }
+
+            let (summed_means, summed_stds) = yani_decay::apply_time_correction(
+                &mean,
+                &std_dev,
+                &nuclides,
+                n_scores,
+                &tcf,
+                &tcf_indices,
+                true,
+            )
+            .map_err(PyValueError::new_err)?;
+
+            let (per_nuc_means, _) = yani_decay::apply_time_correction(
+                &mean,
+                &std_dev,
+                &nuclides,
+                n_scores,
+                &tcf,
+                &tcf_indices,
+                false,
+            )
+            .map_err(PyValueError::new_err)?;
+
+            // Accumulate the summed-over-nuclide dose (means add, variances add).
+            if total_mean.is_empty() {
+                total_mean = summed_means;
+                total_var = summed_stds
+                    .iter()
+                    .map(|row| row.iter().map(|&v| v * v).collect())
+                    .collect();
+            } else {
+                for (r, row) in summed_means.iter().enumerate() {
+                    if row.len() != total_mean[r].len() {
+                        return Err(PyValueError::new_err(
+                            "per-source tally results have mismatched bin counts; \
+                             all runs must use the same tally shape and parent_nuclides",
+                        ));
+                    }
+                    for (k, &v) in row.iter().enumerate() {
+                        total_mean[r][k] += v;
+                    }
+                }
+                for (r, row) in summed_stds.iter().enumerate() {
+                    for (k, &v) in row.iter().enumerate() {
+                        total_var[r][k] += v * v;
+                    }
+                }
+            }
+
+            // Per-nuclide breakdown (mean only): slice parent -> (score*em).
+            // Skipped when there are no parent nuclides (empty-filter zero
+            // result): there is nothing to break down, and it avoids dividing
+            // the row length by zero parents.
+            let n_parent = nuclides.len();
+            for (r, row) in per_nuc_means.iter().enumerate().filter(|_| n_parent > 0) {
+                let stride = row.len() / n_parent;
+                for (p, name) in nuclides.iter().enumerate() {
+                    let slice = &row[p * stride..(p + 1) * stride];
+                    let entry = by_nuclide
+                        .entry(name.clone())
+                        .or_insert_with(|| vec![vec![0.0; stride]; n_steps]);
+                    for (k, &v) in slice.iter().enumerate() {
+                        entry[r][k] += v;
+                    }
+                }
+            }
+        }
+
+        let total_std: Vec<Vec<f64>> = total_var
+            .iter()
+            .map(|row| row.iter().map(|&v| v.sqrt()).collect())
+            .collect();
+
+        // The time correction's nuclear-data uncertainty: each replica's TCFs
+        // applied to the same tallies, and the spread taken per bin.
+        let mut data_std_dev = None;
+        let mut data_std_dev_standard_error = None;
+        let mut data_std_dev_correlated = None;
+        let mut total_std_dev = None;
+        let mut total_std_dev_correlated = None;
+        let mut data_uncertainty_info = None;
+        if let Some(request) = data_uncertainty {
+            let emitters = campaigns.first().map(|c| c.0.clone()).unwrap_or_default();
+            let rates: Vec<Vec<f64>> = campaigns.iter().map(|c| c.4.clone()).collect();
+            let ensemble = yani_transmute::d1s_uncertainty::time_correction_factor_ensemble(
+                &emitters,
+                &timesteps,
+                &rates,
+                &chain,
+                &request.inner,
+            )
+            .map_err(PyValueError::new_err)?;
+            // Running moments per (row, bin): replicas never held all at once.
+            // Each bin's sigma and the standard error of that sigma.
+            type Spread = (Vec<Vec<f64>>, Vec<Vec<f64>>);
+            let spread =
+                |replicas: &[yani_transmute::d1s_uncertainty::ReplicaTcfs]| -> PyResult<Spread> {
+                    let mut acc: Vec<Vec<SpreadAccumulator>> = total_mean
+                        .iter()
+                        .map(|r| vec![SpreadAccumulator::default(); r.len()])
+                        .collect();
+                    for tcfs in replicas {
+                        let mut rows: Vec<Vec<f64>> =
+                            total_mean.iter().map(|r| vec![0.0; r.len()]).collect();
+                        for ((nuclides, n_scores, mean, std_dev, _), tcf) in
+                            campaigns.iter().zip(tcfs)
+                        {
+                            let (corrected, _) = yani_decay::apply_time_correction(
+                                mean,
+                                std_dev,
+                                nuclides,
+                                *n_scores,
+                                tcf,
+                                &tcf_indices,
+                                true,
+                            )
+                            .map_err(PyValueError::new_err)?;
+                            for (row, c) in rows.iter_mut().zip(corrected) {
+                                for (v, x) in row.iter_mut().zip(c) {
+                                    *v += x;
+                                }
+                            }
+                        }
+                        for (a, row) in acc.iter_mut().zip(rows) {
+                            for (a, x) in a.iter_mut().zip(row) {
+                                a.update(x);
+                            }
+                        }
+                    }
+                    let sigma = acc
+                        .iter()
+                        .map(|row| row.iter().map(SpreadAccumulator::std_dev).collect())
+                        .collect();
+                    let se = acc
+                        .iter()
+                        .map(|row| {
+                            row.iter()
+                                .map(|a| a.std_dev_standard_error().unwrap_or(f64::NAN))
+                                .collect()
+                        })
+                        .collect();
+                    Ok((sigma, se))
+                };
+            let with_transport = |data: &[Vec<f64>]| -> Vec<Vec<f64>> {
+                data.iter()
+                    .zip(&total_std)
+                    .map(|(d, s)| {
+                        d.iter()
+                            .zip(s)
+                            .map(|(d, s)| (d * d + s * s).sqrt())
+                            .collect()
+                    })
+                    .collect()
+            };
+            let (data, data_se) = spread(&ensemble.replicas)?;
+            let data_correlated = if ensemble.replicas_correlated == ensemble.replicas {
+                data.clone()
+            } else {
+                spread(&ensemble.replicas_correlated)?.0
+            };
+            let total = with_transport(&data);
+            let total_correlated = with_transport(&data_correlated);
+            let info = PyDict::new(py);
+            info.set_item(
+                "half_lives_perturbed",
+                ensemble
+                    .half_lives_perturbed
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )?;
+            info.set_item(
+                "no_half_life_uncertainty",
+                ensemble
+                    .no_half_life_uncertainty
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )?;
+            info.set_item(
+                "half_life_uncertainty_not_carried",
+                ensemble
+                    .half_life_uncertainty_not_carried
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )?;
+            info.set_item(
+                "decay_photon_normalisations_perturbed",
+                ensemble
+                    .decay_photon_normalisations_perturbed
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )?;
+            info.set_item(
+                "decay_photon_spectra_folded",
+                ensemble.decay_photon_spectra_folded.clone(),
+            )?;
+            info.set_item("samples", ensemble.replicas.len())?;
+            info.set_item("converged", ensemble.converged)?;
+            info.set_item("convergence", ensemble.convergence)?;
+            info.set_item("hit_cap", ensemble.hit_cap)?;
+            info.set_item(
+                "unconverged",
+                crate::data_uncertainty::unconverged_to_list(py, &ensemble.unconverged)?,
+            )?;
+            info.set_item("sources", ensemble.sources.clone())?;
+            info.set_item("not_perturbed", ensemble.not_perturbed.clone())?;
+            data_std_dev = Some(shape_rows(py, data, single)?);
+            data_std_dev_standard_error = Some(shape_rows(py, data_se, single)?);
+            data_std_dev_correlated = Some(shape_rows(py, data_correlated, single)?);
+            total_std_dev = Some(shape_rows(py, total, single)?);
+            total_std_dev_correlated = Some(shape_rows(py, total_correlated, single)?);
+            data_uncertainty_info = Some(info.into_any().unbind());
+        }
+
+        // Shape the output: drop the step dimension for a single int selection.
+        let mean_obj = shape_rows(py, total_mean, single)?;
+        let std_obj = shape_rows(py, total_std, single)?;
+        let times_obj: Py<PyAny> = if single {
+            times[0].into_pyobject(py)?.into_any().unbind()
+        } else {
+            times.into_pyobject(py)?.into_any().unbind()
+        };
+
+        let by_nuc_dict = PyDict::new(py);
+        for (name, rows) in by_nuclide {
+            by_nuc_dict.set_item(name, shape_rows(py, rows, single)?)?;
+        }
+
+        Ok(PyDoseResult {
+            mean: mean_obj,
+            std_dev: std_obj,
+            by_nuclide: by_nuc_dict.into_any().unbind(),
+            times: times_obj,
+            data_std_dev,
+            data_std_dev_standard_error,
+            data_std_dev_correlated,
+            total_std_dev,
+            total_std_dev_correlated,
+            data_uncertainty_info,
+        })
+    }
+}
+
+impl PyPulseSchedule {
+    /// The core numeric timeline backing this schedule. The transmutation
+    /// bindings hand this straight to the core driver; the per-pulse Python
+    /// sources live separately (see `sources` / `distinct_sources`) because
+    /// source identity is only needed for decay-photon SDR grouping.
+    pub fn core_schedule(&self) -> &yani_transmute::Schedule {
+        &self.schedule
+    }
+
+    /// Number of distinct pulse sources (by Python identity); 0 if every pulse
+    /// is sourceless. Used to reject multi-spectrum schedules in
+    /// `simulate_transmutation` (which honours only the model's source).
+    pub fn distinct_source_count(&self, py: Python<'_>) -> usize {
+        self.distinct_sources(py).len()
+    }
+
+    /// Build the per-spectrum / per-step plan for `Material.transmute`.
+    ///
+    /// Each irradiation `Pulse` must carry a `NeutronSource` whose energy is a
+    /// `Histogram` (the spectrum); its `rate` is the total flux magnitude
+    /// [n/cm^2/s]. Distinct sources (by Python identity) become distinct
+    /// spectra, collapsed once each. A `Cooldown` is a decay-only step. A
+    /// sourceless `Pulse` is rejected (irradiation needs a spectrum source).
+    /// The source's position/direction are unused here (no transport runs).
+    pub fn transmute_plan(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<(
+        Vec<yani_transmute::MultigroupSpectrum>,
+        Vec<yani_transmute::TransmuteStep>,
+    )> {
+        use yani_transmute::TransmuteStep;
+        let core_steps = self.schedule.steps();
+        let mut spectra: Vec<yani_transmute::MultigroupSpectrum> = Vec::new();
+        let mut distinct: Vec<(Py<PyAny>, Option<FluxErrorInput>)> = Vec::new();
+        let mut steps: Vec<TransmuteStep> = Vec::with_capacity(self.sources.len());
+
+        for (i, src_opt) in self.sources.iter().enumerate() {
+            let dt = core_steps[i].dt;
+            match src_opt {
+                Some(src) => {
+                    let src_b = src.bind(py);
+                    let sigma = self.flux_error[i].as_ref();
+                    // Keyed on the source AND its stated error: two pulses may
+                    // share a spectrum object and give it different errors, and
+                    // collapsing those onto one spectrum would silently apply
+                    // one pulse's uncertainty to the other.
+                    let idx = match distinct
+                        .iter()
+                        .position(|(d, s)| d.bind(py).is(src_b) && s.as_ref() == sigma)
+                    {
+                        Some(j) => j,
+                        None => {
+                            spectra.push(histogram_spectrum(src_b, sigma)?);
+                            distinct.push((src.clone_ref(py), sigma.cloned()));
+                            spectra.len() - 1
+                        }
+                    };
+                    steps.push(TransmuteStep {
+                        dt,
+                        irradiation: Some((idx, core_steps[i].rate)),
+                    });
+                }
+                None => {
+                    if core_steps[i].is_pulse {
+                        return Err(PyValueError::new_err(
+                            "Material.transmute irradiation pulses must carry a NeutronSource \
+                             whose energy is a Histogram (the spectrum); use Cooldown for \
+                             decay-only steps",
+                        ));
+                    }
+                    steps.push(TransmuteStep {
+                        dt,
+                        irradiation: None,
+                    });
+                }
+            }
+        }
+        Ok((spectra, steps))
+    }
+
+    /// Distinct pulse sources in first-appearance order, paired with the index
+    /// of the first step that uses each.
+    /// True when the steps carry models (a schedule for
+    /// `yamc.simulate_shutdown_dose`).
+    pub fn is_staged(&self) -> bool {
+        self.stages.iter().any(Option::is_some)
+    }
+
+    /// Every step with its configuration resolved: a step without a model
+    /// takes the previous step's. Errors if the schedule has no models.
+    pub fn staged_steps(&self, py: Python<'_>) -> PyResult<Vec<StagedStep>> {
+        if !self.is_staged() {
+            return Err(PyValueError::new_err(
+                "simulate_shutdown_dose needs a schedule whose steps name the Model the \
+                 machine is in (Pulse(model=...), Cooldown(model=...)); for one machine \
+                 throughout, use Model(use_decay_photons=True) and \
+                 schedule.time_correct_tally",
+            ));
+        }
+        let mut out: Vec<StagedStep> = Vec::with_capacity(self.stages.len());
+        for (step, stage) in self.schedule.steps().iter().zip(&self.stages) {
+            let (model, moves) = match (stage, out.last()) {
+                (Some((m, mv)), _) => (m.clone_ref(py), mv.clone()),
+                (None, Some(prev)) => (prev.model.clone_ref(py), prev.moves.clone()),
+                (None, None) => unreachable!("the first step's model is checked at construction"),
+            };
+            out.push(StagedStep {
+                rate: step.rate,
+                duration: step.dt,
+                model,
+                moves,
+            });
+        }
+        Ok(out)
+    }
+
+    fn distinct_sources(&self, py: Python<'_>) -> Vec<(Py<PyAny>, usize)> {
+        let mut out: Vec<(Py<PyAny>, usize)> = Vec::new();
+        for (i, source) in self.sources.iter().enumerate() {
+            if let Some(src) = source {
+                let src_b = src.bind(py);
+                if !out.iter().any(|(o, _)| o.bind(py).is(src_b)) {
+                    out.push((src.clone_ref(py), i));
+                }
+            }
+        }
+        out
+    }
+
+    /// Resolve the `results` argument to one tally result per distinct source.
+    fn match_results<'py>(
+        &self,
+        py: Python<'py>,
+        results: &Bound<'py, PyAny>,
+        distinct: &[(Py<PyAny>, usize)],
+    ) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        if let Ok(dict) = results.cast::<PyDict>() {
+            // Mixed-spectrum: dict {source: tally_result}, matched by identity.
+            let mut out = Vec::with_capacity(distinct.len());
+            for (src, _) in distinct {
+                let src_b = src.bind(py);
+                let mut found = None;
+                for (k, v) in dict.iter() {
+                    if k.is(src_b) {
+                        found = Some(v);
+                        break;
+                    }
+                }
+                match found {
+                    Some(v) => out.push(v),
+                    None => {
+                        return Err(PyValueError::new_err(
+                            "results dict is missing a tally result for one of the schedule's \
+                             sources; pass {source: results[tally]} for every source in \
+                             schedule.sources",
+                        ));
+                    }
+                }
+            }
+            Ok(out)
+        } else {
+            // Single tally result: only valid when there is exactly one source.
+            if distinct.len() != 1 {
+                return Err(PyValueError::new_err(format!(
+                    "this schedule uses {} distinct sources, so pass a dict \
+                     {{source: results[tally]}} mapping each source in schedule.sources \
+                     to its transport run's tally result",
+                    distinct.len()
+                )));
+            }
+            Ok(vec![results.clone()])
+        }
+    }
+}
+
+/// Extract a normalized multigroup spectrum from a pulse's `NeutronSource`,
+/// whose energy must be a `Histogram`. The per-group probabilities are
+/// normalized to masses (only the shape matters; `rate` carries the magnitude).
+fn histogram_spectrum(
+    src: &Bound<'_, PyAny>,
+    flux_error: Option<&FluxErrorInput>,
+) -> PyResult<yani_transmute::MultigroupSpectrum> {
+    use yamc_source::source::{ParticleSource, SourceEnergyDistribution};
+    let ns = src.cast::<PyNeutronSource>().map_err(|_| {
+        PyValueError::new_err("Material.transmute pulse source must be a NeutronSource")
+    })?;
+    let ns = ns.borrow();
+    let energy = match &ns.inner {
+        ParticleSource::Neutron(s) => &s.energy,
+        _ => {
+            return Err(PyValueError::new_err(
+                "Material.transmute pulse source must be a NeutronSource",
+            ));
+        }
+    };
+    match energy {
+        SourceEnergyDistribution::Histogram(h) => {
+            let probs = h.probabilities();
+            let total: f64 = probs.iter().sum();
+            if total <= 0.0 {
+                return Err(PyValueError::new_err(
+                    "Material.transmute pulse source Histogram has zero total probability",
+                ));
+            }
+            let masses: Vec<f64> = probs.iter().map(|p| p / total).collect();
+            // The sigma is given against the Histogram's own values, so it is
+            // relativized against those rather than against `masses`: the two
+            // differ by the normalization, which divides out of a relative
+            // error but not an absolute one.
+            let flux_error = match flux_error {
+                None => None,
+                Some(FluxErrorInput::StdDev(sigma)) => {
+                    Some(yani_transmute::flux_uncertainty::FluxError::RelativeStdDev(
+                        yani_transmute::flux_uncertainty::relative_std_dev(probs, sigma)
+                            .map_err(PyValueError::new_err)?,
+                    ))
+                }
+                Some(FluxErrorInput::Covariance(cov)) => Some(
+                    yani_transmute::flux_uncertainty::FluxError::RelativeCovariance(
+                        yani_transmute::flux_uncertainty::RelativeFluxCovariance::from_absolute(
+                            probs, cov,
+                        )
+                        .map_err(PyValueError::new_err)?,
+                    ),
+                ),
+            };
+            Ok(yani_transmute::MultigroupSpectrum {
+                boundaries: h.boundaries().to_vec(),
+                masses,
+                flux_error,
+            })
+        }
+        _ => Err(PyValueError::new_err(
+            "Material.transmute pulse source energy must be a Histogram, e.g. \
+             NeutronSource(energy=yamc.sources.Histogram(boundaries, flux)); the pulse rate \
+             gives the flux magnitude [n/cm^2/s]",
+        )),
+    }
+}
+
+/// Pull (parent_nuclides, n_scores, mean, std_dev) off a tally result via its
+/// public attributes (so this stays decoupled from the core Tally internals).
+fn extract_tally(tr: &Bound<'_, PyAny>) -> PyResult<(Vec<String>, usize, Vec<f64>, Vec<f64>)> {
+    let tally = tr.getattr("tally")?;
+    let nuclides: Vec<String> = tally
+        .getattr("parent_nuclides")?
+        .extract::<Option<Vec<String>>>()?
+        .ok_or_else(|| {
+            PyValueError::new_err(
+                "tally has no parent_nuclides; build the Tally with \
+                 parent_nuclides=model.radionuclides() for a decay-photon dose tally",
+            )
+        })?;
+    let scores: Vec<String> = tally.getattr("scores")?.extract()?;
+    let mean: Vec<f64> = tr.getattr("mean")?.extract()?;
+    let std_dev: Vec<f64> = tr.getattr("standard_deviation")?.extract()?;
+    Ok((nuclides, scores.len(), mean, std_dev))
+}
+
+/// Resolve the `steps` argument into TCF indices (end-of-step), returning
+/// `(indices, single)` where `single` is true for a bare-int selection (so the
+/// caller drops the step dimension). Step `i` maps to TCF index `i + 1`; the
+/// baseline (index 0) is never selectable.
+fn resolve_steps(steps: Option<&Bound<'_, PyAny>>, n: usize) -> PyResult<(Vec<usize>, bool)> {
+    let resolve_one = |i: i64| -> PyResult<usize> {
+        let j = if i < 0 { i + n as i64 } else { i };
+        if j < 0 || j >= n as i64 {
+            return Err(PyIndexError::new_err(format!(
+                "schedule step {i} out of range for {n} steps"
+            )));
+        }
+        Ok(j as usize + 1)
+    };
+    match steps {
+        None => Ok(((1..=n).collect(), false)),
+        Some(obj) if obj.is_none() => Ok(((1..=n).collect(), false)),
+        Some(obj) => {
+            if obj.is_instance_of::<PyBool>() {
+                return Err(PyTypeError::new_err(
+                    "steps must be None, an int, or a sequence of ints",
+                ));
+            }
+            if let Ok(i) = obj.extract::<i64>() {
+                return Ok((vec![resolve_one(i)?], true));
+            }
+            if let Ok(v) = obj.extract::<Vec<i64>>() {
+                let mut out = Vec::with_capacity(v.len());
+                for i in v {
+                    out.push(resolve_one(i)?);
+                }
+                return Ok((out, false));
+            }
+            Err(PyTypeError::new_err(
+                "steps must be None, an int, or a sequence of ints",
+            ))
+        }
+    }
+}
+
+/// Turn per-step rows into a Python object: a flat 1-D list for a single
+/// selected step, else a 2-D list (one row per step).
+fn shape_rows(py: Python<'_>, mut rows: Vec<Vec<f64>>, single: bool) -> PyResult<Py<PyAny>> {
+    if single {
+        let row = rows.pop().unwrap_or_default();
+        Ok(row.into_pyobject(py)?.into_any().unbind())
+    } else {
+        Ok(PyList::new(py, rows)?.into_any().unbind())
+    }
+}

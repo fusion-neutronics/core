@@ -1,0 +1,30 @@
+/* Left-hand site navigation (the primary nav / main menu).
+ *
+ * Goal: make the top-level "main sections" read as headings -- bolder, with a
+ * little breathing room between them -- and indent the pages nested beneath a
+ * section (e.g. the Usage guide) behind a subtle guide line so the menu
+ * hierarchy is obvious at a glance.
+ *
+ * Everything here is scoped to `.md-nav--primary` so the in-page table of
+ * contents (the secondary nav on the right) keeps its default styling. */
+
+/* Main sections: the top-level menu entries. Bold so they stand out. */
+.md-nav--primary > .md-nav__list > .md-nav__item > .md-nav__link {
+  font-weight: 700;
+}
+
+/* A little space above each main section (except the first) so the top-level
+ * entries group visually rather than running together. */
+.md-nav--primary > .md-nav__list > .md-nav__item + .md-nav__item {
+  margin-top: 0.3rem;
+}
+
+/* Subsections: the pages nested under a section. Indent them behind a subtle
+ * left guide line -- the same left-border idiom the API reference uses for
+ * class members -- and keep them at normal weight so they sit visually below
+ * the bold main sections. */
+.md-nav--primary > .md-nav__list > .md-nav__item .md-nav__list {
+  margin-left: 0.45rem;
+  padding-left: 0.55rem;
+  border-left: 0.1rem solid var(--md-default-fg-color--lightest);
+}

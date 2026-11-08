@@ -1,0 +1,563 @@
+use crate::geometry::PyBoundingBox;
+use crate::material::PyMaterial;
+use pyo3::prelude::*;
+use pyo3::types::PyDict;
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
+use std::collections::HashMap;
+use std::sync::Arc;
+use yamc::geometry::mesh::MeshGeometry;
+
+/// Mesh-based geometry loaded from a mesh file.
+///
+/// The mesh format is the YAMC Arrow IPC mesh (``.arrow``), as produced by
+/// ``cad_to_yamc``. Other meshers are supported by writing that format.
+///
+/// Each volume in the mesh is named by a ``mat:<name>`` physical group. The
+/// *materials* dictionary maps the bare ``<name>`` (as listed by
+/// :attr:`volume_names`, e.g. ``{"first_wall": steel}``) to a
+/// :class:`Material`. A key that matches no volume raises ``ValueError``
+/// with a close match when one exists; volumes with no key are void.
+///
+/// Outer boundary surfaces should be tagged with a physical group named
+/// ``boundary:vacuum`` (reflecting boundaries are not yet supported for
+/// mesh geometry).
+///
+/// The implicit complement (unmeshed space between volumes) is void by
+/// default -- particles free-stream through it with no collisions.  To
+/// model air or coolant interactions in the gaps, pass a :class:`Material`
+/// as *implicit_complement_material*.
+///
+/// A vacuum boundary box can be added by setting *graveyard_offset*.  This
+/// adds an axis-aligned bounding box expanded by the given offset (cm)
+/// around the geometry, with vacuum boundary conditions on all 6 faces.
+/// Particles reaching this boundary are killed.
+///
+/// When this geometry is the whole model and the mesh has no vacuum
+/// boundary (no *graveyard_offset* and no ``boundary:vacuum`` group, as is
+/// usual for a mesh made from CAD), the :class:`Model` closes it before
+/// transport:
+///
+/// - with a void implicit complement it adds a vacuum box 10 cm outside the
+///   mesh's bounding box and prints its extent.  In a void the margin
+///   changes no result; set *graveyard_offset* to choose it.
+/// - with an *implicit_complement_material* it raises ``ValueError``: the
+///   box position sets how much of that material surrounds the model, so
+///   *graveyard_offset* must be given explicitly.
+///
+/// Used as the fill of a CSG cell, the mesh gets no box: the CSG geometry
+/// bounds it.  Without any of these, a particle with no surface ahead of it
+/// is a lost particle.
+///
+/// A mesh written without imprinting (``CadToYamc.mesh(imprint=False)``)
+/// gives each solid its own surface, so touching solids meet along two
+/// independently faceted surfaces that may overlap or leave thin gaps. Such a
+/// mesh is tracked discontinuously: a particle leaving a solid is placed in
+/// whichever touching solid contains it. Solids closer than the contact
+/// tolerance count as touching, so an overlap or a gap thinner than it is
+/// crossed straight into the next solid (an overlap stays with the solid the
+/// particle was already in); a wider gap, or one the file records as being in
+/// the CAD, is the implicit complement. The file records all this;
+/// *contact_tolerance* forces it on for a mesh from another writer, or
+/// overrides the tolerance the file records.
+///
+/// Loading warns when a mesh tracked conformally has solids that touch
+/// without sharing a surface where they meet: a particle leaving one of them
+/// is not placed in the solid it enters.
+///
+/// Args:
+///     filename: Path to an Arrow IPC mesh file (``.arrow``).
+///     materials: Mapping of volume name (no ``mat:`` prefix) to :class:`Material`.
+///     implicit_complement_material: Optional material for the unmeshed
+///         space between volumes.  Default ``None`` means void (free-streaming).
+///     graveyard_offset: Optional offset (cm) of a vacuum boundary box
+///         around the mesh.  ``None`` lets the :class:`Model` add one with a
+///         10 cm offset around a void implicit complement, as above.
+///     contact_tolerance: Optional distance (cm) within which two solids'
+///         surfaces count as touching. Setting it tracks the mesh
+///         discontinuously. It must be at least the deepest overlap between
+///         touching solids, and gaps narrower than it are filled by the solid
+///         on the far side, except between solids the file records as apart
+///         in the CAD (``CadToYamc`` checks this when meshing without
+///         imprinting).
+///
+/// Raises:
+///     ValueError: If the file is not an Arrow IPC mesh, or if it contains a
+///         negatively oriented tetrahedron. Transport reads outward tet face
+///         normals off a fixed vertex ordering, so an inverted tet is rejected
+///         rather than silently re-wound; regenerate the mesh with
+///         a writer that emits positively oriented tets.
+///
+/// Examples:
+///     >>> fuel = yamc.Material(composition={"Li6": 1.0}, density=0.534, name="fuel")
+///     >>> fuel.read_nuclear_data({"Li6": "tests/Li6.arrow"})
+///     >>>
+///     >>> mesh_geom = yamc.MeshGeometry("model.arrow", {"fuel": fuel},
+///     ...                               graveyard_offset=5.0)
+///     >>> model = yamc.Model(geometry=mesh_geom, source=source)
+#[gen_stub_pyclass]
+#[pyclass(
+    module = "yamc._core",
+    name = "MeshGeometry",
+    unsendable,
+    from_py_object
+)]
+#[derive(Clone)]
+pub struct PyMeshGeometry {
+    pub inner: MeshGeometry,
+    /// Stored Arrow mesh data for rebuild when graveyard_offset changes.
+    /// Shared, so cloning the wrapper does not copy it.
+    arrow_data: Arc<yamt::ArrowMeshData>,
+    /// Material map stored for rebuild.
+    mat_map: HashMap<String, Arc<yamc_materials::material::Material>>,
+    /// Implicit complement material stored for rebuild.
+    ic_mat: Option<Arc<yamc_materials::material::Material>>,
+    /// The Material objects given (the dict's values, then the implicit
+    /// complement), so a Geometry this fills can refuse two different
+    /// objects with one id across its cells and fills.
+    pub(crate) py_materials: Arc<Vec<Py<PyMaterial>>>,
+    /// Current graveyard offset.
+    graveyard_offset: Option<f64>,
+    /// Contact tolerance passed by the caller, re-applied on rebuild.
+    contact_tolerance: Option<f64>,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyMeshGeometry {
+    #[new]
+    #[pyo3(signature = (filename, materials, implicit_complement_material=None, graveyard_offset=None, contact_tolerance=None))]
+    pub fn new<'py>(
+        filename: &str,
+        materials: &Bound<'py, PyDict>,
+        implicit_complement_material: Option<&Bound<'py, PyMaterial>>,
+        graveyard_offset: Option<f64>,
+        contact_tolerance: Option<f64>,
+    ) -> PyResult<Self> {
+        if let Some(tol) = contact_tolerance
+            && !(tol.is_finite() && tol >= 0.0)
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "contact_tolerance must be a non-negative number of cm, got {tol}"
+            )));
+        }
+        // Two different Material objects with one id are refused. One object
+        // under several names (or also as the implicit complement) is one
+        // material, so materials are told apart by Python object identity.
+        let mut material_ids = crate::geometry::DistinctMaterialIds::default();
+        let mut py_materials: Vec<Py<PyMaterial>> = Vec::with_capacity(materials.len() + 1);
+        for (_key, value) in materials.iter() {
+            let py_mat: Bound<'py, PyMaterial> = value.cast_into()?;
+            material_ids.check(&py_mat)?;
+            py_materials.push(py_mat.unbind());
+        }
+        if let Some(ic) = implicit_complement_material {
+            material_ids.check(ic)?;
+            py_materials.push(ic.clone().unbind());
+        }
+
+        let mut mat_map: HashMap<String, Arc<yamc_materials::material::Material>> = HashMap::new();
+        for (key, value) in materials.iter() {
+            let name: String = key.extract()?;
+            let py_mat: Bound<'py, PyMaterial> = value.cast_into()?;
+            mat_map.insert(name, Arc::new(py_mat.try_borrow()?.internal.clone()));
+        }
+
+        // Convert optional complement material
+        let ic_mat = implicit_complement_material
+            .map(|py_mat| -> PyResult<_> { Ok(Arc::new(py_mat.try_borrow()?.internal.clone())) })
+            .transpose()?;
+
+        // Load the mesh. The Arrow IPC mesh is the only supported format.
+        let path = std::path::Path::new(filename);
+        if path.extension().and_then(|e| e.to_str()) != Some("arrow") {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Unsupported mesh file '{filename}': MeshGeometry reads YAMC Arrow IPC \
+                 meshes (.arrow), as written by cad_to_yamc"
+            )));
+        }
+
+        let mut data = yamt::read_arrow_mesh(path).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to load Arrow mesh: {e}"))
+        })?;
+        let arrow_data = Arc::new(data.clone()); // Store original for rebuild
+        if let Some(offset) = graveyard_offset {
+            yamt::add_vacuum_boundary(&mut data, offset);
+        }
+        let topo = yamt::build_topology(data).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid mesh '{filename}': {e}"))
+        })?;
+        let mut mesh = yamt::MeshGeometry::from_topology(topo);
+        if contact_tolerance.is_some() {
+            mesh.set_contact_tolerance(contact_tolerance);
+        }
+        if mesh.touches_without_shared_surface(4096) {
+            let message = if mesh.topology.imprinted == Some(true) {
+                format!(
+                    "'{filename}': the file says its solids were imprinted, but some of them \
+                     touch without sharing a surface, so the imprint did not join them. A \
+                     particle leaving one of these solids is not placed in the solid it \
+                     enters, so tallies come out wrong. Mesh the CAD with imprint=False \
+                     instead, or pass contact_tolerance=<distance in cm> to track this file \
+                     discontinuously, which crosses these contacts but cannot repair anything \
+                     else the imprint got wrong."
+                )
+            } else {
+                format!(
+                    "'{filename}': some solids touch without sharing a surface, as in a mesh \
+                     made without imprinting, but the file does not say it was made that way. \
+                     Tracked as an imprinted mesh, a particle leaving one of these solids is \
+                     not placed in the solid it enters, so tallies come out wrong without any \
+                     lost particles. Pass contact_tolerance=<distance in cm> to track it \
+                     discontinuously."
+                )
+            };
+            materials
+                .py()
+                .import("warnings")?
+                .call_method1("warn", (message,))?;
+        }
+
+        let inner = MeshGeometry::new(mesh, &mat_map, ic_mat.clone())
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("'{filename}': {e}")))?;
+
+        Ok(PyMeshGeometry {
+            inner,
+            arrow_data,
+            mat_map,
+            ic_mat,
+            py_materials: Arc::new(py_materials),
+            graveyard_offset,
+            contact_tolerance,
+        })
+    }
+
+    /// True when the mesh is tracked discontinuously: its solids were meshed
+    /// one by one without imprinting, so a particle leaving one is placed in
+    /// whichever touching solid contains it rather than read off a shared
+    /// surface.
+    #[getter]
+    pub fn discontinuous(&self) -> bool {
+        self.inner.mesh.is_discontinuous()
+    }
+
+    /// Distance (cm) within which two solids' surfaces count as touching, for
+    /// a discontinuously tracked mesh; ``None`` for an imprinted one.
+    #[getter]
+    pub fn contact_tolerance(&self) -> Option<f64> {
+        self.inner.mesh.contact_tolerance()
+    }
+
+    /// Number of volumes (cells) in the mesh (excluding implicit complement).
+    #[getter]
+    pub fn num_volumes(&self) -> u32 {
+        self.inner.mesh.topology.num_volumes
+    }
+
+    /// Material names for each volume, in volume-ID order.
+    ///
+    /// These are the names from ``mat:<name>`` physical groups.
+    /// Pass any of these strings as the second element of a tally's
+    /// ``unstructured_mesh=(mesh, name)`` argument to bin on that volume by name
+    /// (an integer volume ID is also accepted).
+    #[getter]
+    pub fn volume_names(&self) -> Vec<Option<String>> {
+        (0..self.inner.mesh.topology.num_volumes)
+            .map(|v| self.inner.mesh.material_name(v).map(|s| s.to_owned()))
+            .collect()
+    }
+
+    /// All vertex coordinates as a list of ``[x, y, z]`` triples.
+    #[getter]
+    pub fn vertices(&self) -> Vec<[f64; 3]> {
+        self.inner.mesh.topology.vertices.clone()
+    }
+
+    /// All triangle connectivity as a list of ``[v0, v1, v2]`` triples
+    /// (vertex indices).
+    #[getter]
+    pub fn triangles(&self) -> Vec<[u32; 3]> {
+        self.inner.mesh.topology.triangles.clone()
+    }
+
+    /// Number of triangles in the entire mesh.
+    #[getter]
+    pub fn num_triangles(&self) -> usize {
+        self.inner.mesh.topology.triangles.len()
+    }
+
+    /// Analytical volume of each mesh volume (cm³), computed via the
+    /// divergence theorem over the bounding surface triangles.
+    #[getter]
+    pub fn volume_measures(&self) -> Vec<f64> {
+        self.inner.mesh.topology.volume_measures.clone()
+    }
+
+    /// Compute the volume of every mesh volume.
+    ///
+    /// Mesh geometries already know their volumes analytically (via the
+    /// divergence theorem applied to their bounding triangles when the
+    /// mesh is loaded), so this method is exact: ``std_dev`` is always 0
+    /// and no stochastic sampling is performed. The signature matches
+    /// :meth:`Geometry.calculate_volume` so the same call works on both
+    /// CSG and mesh geometries.
+    ///
+    /// Args:
+    ///     samples: Ignored (kept for signature compatibility).
+    ///     bounding_box: Ignored (kept for signature compatibility).
+    ///     seed: Ignored (kept for signature compatibility).
+    ///
+    /// Returns:
+    ///     dict[int, VolumeResult]: Mapping volume_id -> VolumeResult.
+    #[pyo3(signature = (samples=0, bounding_box=None, seed=None))]
+    pub fn calculate_volume(
+        &self,
+        samples: u64,
+        bounding_box: Option<&PyBoundingBox>,
+        seed: Option<u64>,
+    ) -> HashMap<u32, crate::geometry::PyVolumeResult> {
+        let _ = (samples, bounding_box, seed);
+        let measures = &self.inner.mesh.topology.volume_measures;
+        let mut out = HashMap::with_capacity(measures.len());
+        for (i, &v) in measures.iter().enumerate() {
+            out.insert(
+                i as u32,
+                crate::geometry::PyVolumeResult {
+                    volume: v,
+                    std_dev: 0.0,
+                    num_hits: 0,
+                },
+            );
+        }
+        out
+    }
+
+    /// Triangle indices belonging to a specific volume.
+    ///
+    /// Returns the global triangle indices for every surface that bounds
+    /// the given volume.  These can be used to index into :attr:`triangles`.
+    ///
+    /// Args:
+    ///     volume_id (int): Volume index (0-based).
+    ///
+    /// Returns:
+    ///     list[int]: Triangle indices for that volume.
+    fn volume_triangle_indices(&self, volume_id: u32) -> PyResult<Vec<u32>> {
+        let topo = &self.inner.mesh.topology;
+        if volume_id >= topo.num_volumes {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "volume_id {volume_id} out of range (num_volumes={})",
+                topo.num_volumes
+            )));
+        }
+        let mut tri_ids = Vec::new();
+        for &(surf_id, _sense) in &topo.volume_surfaces[volume_id as usize] {
+            let range = &topo.surface_tri_ranges[surf_id as usize];
+            for idx in range.clone() {
+                tri_ids.push(topo.surface_tri_indices[idx as usize]);
+            }
+        }
+        tri_ids.sort_unstable();
+        tri_ids.dedup();
+        Ok(tri_ids)
+    }
+
+    /// Bounding box of the entire mesh geometry.
+    ///
+    /// Returns:
+    ///     BoundingBox: Axis-aligned bounding box enclosing all mesh volumes.
+    pub fn bounding_box(&self) -> PyBoundingBox {
+        let bbox = self.inner.bounding_box();
+        PyBoundingBox::new(bbox.lower_left, bbox.upper_right)
+    }
+
+    /// Bounding box of volumes matching a specific material.
+    ///
+    /// Args:
+    ///     material: A :class:`Material`, matched to volumes by its ``id``.
+    ///
+    /// Returns:
+    ///     BoundingBox: Axis-aligned bounding box enclosing only the volumes
+    ///         that use the given material.
+    ///
+    /// Raises:
+    ///     ValueError: If no volumes match.
+    pub fn bounding_box_for_material(&self, material: &PyMaterial) -> PyResult<PyBoundingBox> {
+        let mat_id = material.material_id()?;
+        let bbox = self
+            .inner
+            .bounding_box_for_material(mat_id)
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "No mesh volumes match material id {mat_id}"
+                ))
+            })?;
+        Ok(PyBoundingBox::new(bbox.lower_left, bbox.upper_right))
+    }
+
+    /// The vacuum boundary (graveyard) offset in cm.
+    ///
+    /// Setting this property triggers a full rebuild (re-reads stored mesh
+    /// data, adds the vacuum boundary box, and rebuilds the BVH).  Set to
+    /// ``None`` to remove the boundary.
+    #[getter]
+    pub fn get_graveyard_offset(&self) -> Option<f64> {
+        self.graveyard_offset
+    }
+
+    #[setter]
+    pub fn set_graveyard_offset(&mut self, offset: Option<f64>) -> PyResult<()> {
+        let mut data = (*self.arrow_data).clone();
+        if let Some(off) = offset {
+            yamt::add_vacuum_boundary(&mut data, off);
+        }
+        let topo = yamt::build_topology(data)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid mesh: {e}")))?;
+        let mut mesh = yamt::MeshGeometry::from_topology(topo);
+        if self.contact_tolerance.is_some() {
+            mesh.set_contact_tolerance(self.contact_tolerance);
+        }
+
+        self.inner = MeshGeometry::new(mesh, &self.mat_map, self.ic_mat.clone())
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        self.graveyard_offset = offset;
+        Ok(())
+    }
+
+    /// Generate an interactive 2D geometry viewer as a self-contained HTML page.
+    ///
+    /// Produces an interactive viewer where you can switch slice planes (xy/xz/yz),
+    /// pan with mouse drag, zoom with scroll wheel, and adjust all parameters
+    /// in real time.
+    ///
+    /// Args:
+    ///     origin: Origin of the plot (tuple/list of 3 floats). Defaults to bbox center or (0,0,0).
+    ///     width: Width of the plot (tuple/list of 2 floats). Defaults to bbox width or (10,10).
+    ///     resolution: Raster resolution as a total pixel budget (int) or an explicit (h, v) tuple. Defaults to 40000.
+    ///     basis: The plane to slice - "xy", "xz", or "yz". Defaults to "xy".
+    ///     color_by: What to color by - "cell" or "material". Defaults to "cell".
+    ///     outline: Add outline around regions - "material", "cell", or None. Defaults to "cell".
+    ///     axis_units: Units for axis labels - "mm", "cm", "m", or "km". Defaults to "cm".
+    ///     colors: Dictionary mapping integer IDs to color strings. Defaults to None.
+    ///     font_size: Font scale for PNG axis labels (1=tiny, 2=normal, 3=large).
+    ///         Defaults to 2.
+    ///     contour_kwargs: Outline appearance options. Supported keys:
+    ///         ``"colors"`` (hex string, default ``"#000000"``),
+    ///         ``"linewidths"`` (int, default ``1``).
+    ///
+    /// Returns:
+    ///     InteractivePlot: Result object that renders in Jupyter and supports
+    ///         ``.save("file.html")`` and ``.save("file.png")``.
+    #[gen_stub(skip)] // FIXME(stub): pyo3-stub-gen mishandles Option<&str> default; hand-add in stub patch-merge
+    #[pyo3(signature = (origin=None, width=None, resolution=None, basis="xy", color_by="cell", outline="cell", axis_units="cm", colors=None, font_size=2, contour_kwargs=None))]
+    pub fn plot(
+        &self,
+        origin: Option<pyo3::Py<pyo3::PyAny>>,
+        width: Option<pyo3::Py<pyo3::PyAny>>,
+        resolution: Option<pyo3::Py<pyo3::PyAny>>,
+        basis: &str,
+        color_by: &str,
+        outline: Option<&str>,
+        axis_units: &str,
+        #[allow(unused_variables)] colors: Option<pyo3::prelude::Bound<'_, pyo3::types::PyDict>>,
+        font_size: usize,
+        contour_kwargs: Option<pyo3::prelude::Bound<'_, pyo3::types::PyDict>>,
+        py: pyo3::Python<'_>,
+    ) -> PyResult<crate::ui::PyInteractivePlot> {
+        use crate::ui::{
+            build_interactive_html, parse_contour_kwargs, InteractiveViewParams, PyInteractivePlot,
+            SourceParams,
+        };
+        use yamc::geometry::conversion::mesh_geometry_to_geo_mesh;
+
+        let contour = parse_contour_kwargs(contour_kwargs.as_ref())?;
+        let source = SourceParams::default();
+        let bbox = self.inner.bounding_box();
+        let params = crate::id_map_helper::parse_sample_slice_params(
+            origin, width, resolution, basis, &bbox, py,
+        )?;
+
+        let geo_mesh = mesh_geometry_to_geo_mesh(&self.inner);
+        let geometry_json = serde_json::to_string(&geo_mesh)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        let mut cell_names = std::collections::HashMap::new();
+        let mut material_names = std::collections::HashMap::new();
+        for vol in &geo_mesh.volumes {
+            cell_names.insert(vol.cell_id, format!("Volume {}", vol.cell_id));
+            if vol.material_id != -1
+                && let Some(ref name) = vol.material_name
+            {
+                material_names.insert(vol.material_id, name.clone());
+            }
+        }
+
+        let view_params = InteractiveViewParams {
+            origin: params.origin,
+            width: params.width,
+            total_pixels: params.pixels.0 * params.pixels.1,
+            basis: params.basis.clone(),
+            color_by: color_by.to_string(),
+            outline: outline.map(|s| s.to_string()),
+            axis_units: axis_units.to_string(),
+            bbox_widths: self.inner.bounding_box().width(),
+            outline_color: contour.colors.clone(),
+            outline_thickness: contour.linewidths,
+            n_samples: None,
+            plane_tolerance: 1.0,
+            source_color: source.color.clone(),
+            source_size: source.size,
+        };
+
+        // Pre-sample the initial view with native Rust (BVH)
+        let presampled = {
+            use crate::id_map_helper::{cell_to_ids, generate_presampled_grid};
+            let mesh = &self.inner;
+            generate_presampled_grid(&params, |point| {
+                mesh.find_cell_index(point)
+                    .map(|idx| cell_to_ids(&mesh.cells[idx], &mesh.materials))
+                    .unwrap_or((-1, -1))
+            })
+        };
+
+        let html = build_interactive_html(
+            &geometry_json,
+            "mesh",
+            "",
+            &view_params,
+            &cell_names,
+            &material_names,
+            None,
+            None,
+            Some(&presampled),
+            // A pure mesh geometry has no CSG fills; the WASM mesh sampler
+            // resolves its volumes directly.
+            false,
+            // Mesh geometries don't carry CSG surfaces to hover over.
+            None,
+        );
+
+        Ok(PyInteractivePlot::new(
+            html,
+            &presampled,
+            color_by,
+            outline,
+            None,
+            params.origin,
+            params.width,
+            basis,
+            axis_units,
+            font_size,
+            &contour.colors,
+            contour.linewidths,
+            None,
+        ))
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "MeshGeometry(volumes={}, triangles={})",
+            self.inner.mesh.topology.num_volumes,
+            self.inner.mesh.topology.triangles.len(),
+        )
+    }
+}
