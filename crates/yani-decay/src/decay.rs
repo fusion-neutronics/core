@@ -247,7 +247,7 @@ pub fn decay_photon_continua(
         let Some(chain_nuclide) = chain.get(name.as_str()) else {
             continue;
         };
-        for source in &chain_nuclide.sources {
+        for source in chain_nuclide.sources.iter() {
             if source.particle != "photon" {
                 continue;
             }
@@ -282,7 +282,7 @@ mod tests {
             reactions: vec![],
             decays: vec![],
             fission_yields: None,
-            sources: vec![],
+            sources: Default::default(),
             half_life_uncertainty: None,
             decay_energy_uncertainty: None,
             decay_energy_components: Default::default(),
@@ -446,7 +446,8 @@ mod tests {
                     interpolation,
                 },
             },
-        ];
+        ]
+        .into();
         HashMap::from([("Sm158".to_string(), sm158)])
     }
 

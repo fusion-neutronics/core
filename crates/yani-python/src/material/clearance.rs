@@ -305,7 +305,7 @@ mod tests {
                 reactions: vec![],
                 decays: vec![],
                 fission_yields: None,
-                sources: vec![],
+                sources: Default::default(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
                 decay_energy_components: Default::default(),

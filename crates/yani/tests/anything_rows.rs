@@ -23,7 +23,7 @@ fn nuclide(name: &str, reactions: Vec<ChainReaction>) -> ChainNuclide {
         reactions,
         decays: Vec::new(),
         fission_yields: None,
-        sources: Vec::new(),
+        sources: Default::default(),
     }
 }
 

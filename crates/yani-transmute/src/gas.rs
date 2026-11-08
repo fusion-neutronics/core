@@ -236,7 +236,7 @@ mod tests {
             reactions: vec![],
             decays: vec![],
             fission_yields: None,
-            sources: vec![],
+            sources: Default::default(),
         }
     }
 

@@ -743,7 +743,7 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
                     reactions: Vec::new(),
                     decays: Vec::new(),
                     fission_yields: None,
-                    sources: Vec::new(),
+                    sources: Default::default(),
                 },
             );
         }
@@ -825,7 +825,7 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
             }
             for (name, source) in read_sources(&batch)? {
                 if let Some(nuc) = chain.get_mut(&name) {
-                    nuc.sources.push(source);
+                    Arc::make_mut(&mut nuc.sources).push(source);
                 }
             }
         }
@@ -964,7 +964,7 @@ fn ensure_nuclide<'a>(
             decays: Vec::new(),
             half_life_uncertainty: None,
             fission_yields: None,
-            sources: Vec::new(),
+            sources: Default::default(),
             decay_energy_uncertainty: None,
             decay_energy_components: Default::default(),
         })
@@ -1307,7 +1307,7 @@ pub fn parse_chain_parts_from_bytes(
     if let Some(bytes) = parts.decay.get("sources.arrow") {
         for batch in read_section_bytes(bytes, "decay/sources.arrow", "decay/sources.arrow")? {
             for (name, source) in read_sources(&batch)? {
-                ensure_nuclide(&mut chain, &name).sources.push(source);
+                Arc::make_mut(&mut ensure_nuclide(&mut chain, &name).sources).push(source);
             }
         }
     }
@@ -2079,7 +2079,7 @@ pub fn export_chain_parts<P: AsRef<Path>>(
         let mut columns = SourceColumns::default();
         for name in &names {
             let nuc = &chain[*name];
-            for s in &nuc.sources {
+            for s in nuc.sources.iter() {
                 columns.push(&nuc.name, s);
             }
         }
@@ -2367,7 +2367,7 @@ pub fn export_chain_arrow<P: AsRef<Path>>(
         let mut columns = SourceColumns::default();
         for name in &names {
             let nuc = &chain[*name];
-            for s in &nuc.sources {
+            for s in nuc.sources.iter() {
                 columns.push(&nuc.name, s);
             }
         }
@@ -2611,7 +2611,7 @@ mod tests {
                 reactions: Vec::new(),
                 decays: Vec::new(),
                 fission_yields: None,
-                sources: Vec::new(),
+                sources: Default::default(),
             },
         );
         chain.insert(
@@ -2624,7 +2624,7 @@ mod tests {
                 reactions: Vec::new(),
                 decays: Vec::new(),
                 fission_yields: None,
-                sources: Vec::new(),
+                sources: Default::default(),
                 decay_energy_uncertainty: None,
                 decay_energy_components: Default::default(),
             },
@@ -2665,7 +2665,7 @@ mod tests {
                 reactions: Vec::new(),
                 decays: Vec::new(),
                 fission_yields: None,
-                sources: Vec::new(),
+                sources: Default::default(),
             },
         )]);
 
@@ -2712,7 +2712,7 @@ mod tests {
             reactions: Vec::new(),
             decays,
             fission_yields: None,
-            sources: Vec::new(),
+            sources: Default::default(),
         };
         std::collections::HashMap::from([
             (
@@ -2978,7 +2978,8 @@ mod tests {
                             interpolation: None,
                         },
                     },
-                ],
+                ]
+                .into(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
                 decay_energy_components: Default::default(),
@@ -3078,7 +3079,7 @@ mod tests {
                     reactions: Vec::new(),
                     decays: Vec::new(),
                     fission_yields: None,
-                    sources: Vec::new(),
+                    sources: Default::default(),
                 },
             );
             super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
@@ -3153,7 +3154,7 @@ mod tests {
                 reactions: Vec::new(),
                 decays: Vec::new(),
                 fission_yields: None,
-                sources: Vec::new(),
+                sources: Default::default(),
             },
         );
         super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
@@ -3203,7 +3204,7 @@ mod tests {
         for chain in [parts.unwrap(), flat.unwrap()] {
             let sources = &chain["Co60"].sources;
             assert_eq!(sources.len(), 2, "both rows load");
-            for source in sources {
+            for source in sources.iter() {
                 assert_eq!(source.radiation, None);
                 assert!(source.uncertainty.is_none(), "{source:?}");
             }
@@ -3242,7 +3243,8 @@ mod tests {
                             intensity_uncertainties,
                             ..Default::default()
                         })),
-                    }],
+                    }]
+                    .into(),
                 },
             );
             let dir = std::env::temp_dir().join(format!(
@@ -3310,7 +3312,8 @@ mod tests {
                             covariance,
                             ..Default::default()
                         })),
-                    }],
+                    }]
+                    .into(),
                 },
             );
             let dir = std::env::temp_dir().join(format!(
@@ -3379,7 +3382,8 @@ mod tests {
                             }),
                             ..Default::default()
                         })),
-                    }],
+                    }]
+                    .into(),
                 },
             );
             let dir = std::env::temp_dir().join(format!(
@@ -3422,7 +3426,7 @@ mod tests {
                 reactions: Vec::new(),
                 decays: Vec::new(),
                 fission_yields: None,
-                sources: Vec::new(),
+                sources: Default::default(),
             },
         );
         super::export_chain_arrow(&chain, &dir, Some("test")).expect("export succeeds");
@@ -3531,7 +3535,7 @@ mod tests {
             reactions: Vec::new(),
             decays: Vec::new(),
             fission_yields: Some(std::sync::Arc::new(FissionYieldSet::new(yields))),
-            sources: Vec::new(),
+            sources: Default::default(),
         }
     }
 
@@ -3990,7 +3994,7 @@ mod tests {
                 reactions: Vec::new(),
                 decays: Vec::new(),
                 fission_yields: None,
-                sources: Vec::new(),
+                sources: Default::default(),
             },
         );
         super::export_chain_parts(&chain, &root, Some("test")).expect("export succeeds");
@@ -4141,7 +4145,7 @@ mod tests {
             reactions,
             decays: Vec::new(),
             fission_yields: None,
-            sources: Vec::new(),
+            sources: Default::default(),
         };
         let plain = |kind: &str, target: &str| ChainReaction {
             kind: kind.to_string(),

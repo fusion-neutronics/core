@@ -27,8 +27,7 @@ fn chain(fd: f64, own: bool) -> Arc<HashMap<String, yani::ChainNuclide>> {
         .join("../yani/tests/transmutation-endf-b8.1-sfr.arrow");
     let mut chain = yani::parse_chain_arrow(&path).expect("parse chain");
     let co60 = chain.get_mut("Co60").expect("Co60");
-    let source = co60
-        .sources
+    let source = std::sync::Arc::make_mut(&mut co60.sources)
         .iter_mut()
         .find(|s| s.particle == "photon")
         .expect("Co60 photon lines");

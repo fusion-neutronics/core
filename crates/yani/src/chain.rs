@@ -825,7 +825,7 @@ pub struct ChainNuclide {
     /// Most read sites reach through `Deref` unchanged.
     pub fission_yields: Option<Arc<FissionYieldSet>>,
     /// Decay photon sources (empty if nuclide has no decay gamma data)
-    pub sources: Vec<DecaySource>,
+    pub sources: Arc<Vec<DecaySource>>,
 }
 
 impl ChainNuclide {
@@ -1641,7 +1641,8 @@ mod tests {
                 ),
                 source("electron", lines(vec![2.0e5], vec![5.0])),
                 source("photon", lines(vec![3.0e5, 2.0e4], vec![0.7, 0.4])),
-            ],
+            ]
+            .into(),
         };
         assert_eq!(
             nuclide.photon_lines(),
@@ -1729,7 +1730,7 @@ mod tests {
             decays,
             half_life_uncertainty: None,
             fission_yields: None,
-            sources: Vec::new(),
+            sources: Default::default(),
             decay_energy_uncertainty: None,
             decay_energy_components: Default::default(),
         }

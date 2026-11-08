@@ -59,7 +59,7 @@ fn nuclide(name: &str, decays: Vec<yani::ChainReaction>) -> yani::ChainNuclide {
         reactions: Vec::new(),
         decays,
         fission_yields: None,
-        sources: Vec::new(),
+        sources: Default::default(),
     }
 }
 

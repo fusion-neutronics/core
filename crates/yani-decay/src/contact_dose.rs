@@ -357,7 +357,7 @@ pub fn contact_dose_by_nuclide(
             }
             folded += term;
         }
-        for source in &chain_nuclide.sources {
+        for source in chain_nuclide.sources.iter() {
             if source.particle != "photon" {
                 continue;
             }
@@ -463,7 +463,8 @@ mod tests {
                     energies: vec![1_173_228.0, 1_332_492.0],
                     intensities: vec![0.9985 * lambda, 0.9998 * lambda],
                 },
-            }],
+            }]
+            .into(),
             half_life_uncertainty: None,
             decay_energy_uncertainty: None,
             decay_energy_components: Default::default(),
@@ -482,7 +483,7 @@ mod tests {
                 reactions: vec![],
                 decays: vec![],
                 fission_yields: None,
-                sources: vec![],
+                sources: Default::default(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
                 decay_energy_components: Default::default(),
@@ -581,7 +582,7 @@ mod tests {
                 reactions: vec![],
                 decays: vec![],
                 fission_yields: None,
-                sources: vec![],
+                sources: Default::default(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
                 decay_energy_components: Default::default(),
@@ -618,7 +619,7 @@ mod tests {
     fn a_line_outside_the_tabulated_range_is_dropped() {
         let mut chain = chain_with_cobalt();
         // A 30 MeV line is past the 20 MeV top of both tabulations.
-        chain.get_mut("Co60").unwrap().sources[0].distribution =
+        std::sync::Arc::make_mut(&mut chain.get_mut("Co60").unwrap().sources)[0].distribution =
             DecaySourceDistribution::Discrete {
                 energies: vec![3.0e7],
                 intensities: vec![1.0e-8],
@@ -693,7 +694,7 @@ mod tests {
                     reactions: vec![],
                     decays: vec![],
                     fission_yields: None,
-                    sources,
+                    sources: sources.into(),
                     half_life_uncertainty: None,
                     decay_energy_uncertainty: None,
                     decay_energy_components: Default::default(),
@@ -894,7 +895,7 @@ mod tests {
         );
         let as_continuum =
             contact_dose_total(&densities, &chain, DoseQuantity::AbsorbedAir, 2.0).unwrap();
-        chain.get_mut("Fe59").unwrap().sources[0].distribution =
+        std::sync::Arc::make_mut(&mut chain.get_mut("Fe59").unwrap().sources)[0].distribution =
             DecaySourceDistribution::Discrete {
                 energies,
                 intensities: values,

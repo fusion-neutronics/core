@@ -12,10 +12,12 @@
 //!    - Cells: every material-filled cell is a region with its own material,
 //!      solved with its own continuous-energy rates (`Model::transmute`,
 //!      independent method).
-//!    - Cell-under-mesh: every (voxel, material-filled cell) overlap is a
-//!      region with the cell's material and the overlap's volume, estimated by
-//!      jittered sampling of the voxel. Its rates are collapsed from the
-//!      voxel's neutron spectrum, tallied on [`GROUPS`]
+//!    - Cell-under-mesh: every (element, material-filled cell) overlap is a
+//!      region with the cell's material and the overlap's volume. On a
+//!      rectangular or cylindrical mesh the volume is estimated by jittered
+//!      sampling of the element (uniform in volume); a tet lies in one cell,
+//!      so it is one region, its volume exact. Its rates are collapsed from
+//!      the element's neutron spectrum, tallied on [`GROUPS`]
 //!      (`yani_transmute::transmute_materials`, which collapses each distinct
 //!      spectrum and composition once).
 //! 2. **Decay photons.** At the end of every step, each region emits the decay
@@ -45,9 +47,10 @@ use yamc_nuclide::config::ChainUse;
 use yamc_nuclide::nuclide_registry::NuclideId;
 use yamc_particle::particle::{Particle, ParticleType};
 use yamc_physics::photon::decay_photon_production::{decay_photon_spectra, DecayPhotonSpectrum};
+use yamc_source::distribution::mesh::Element;
 use yamc_tallies::filter::Filter;
 use yamc_tallies::score::{FluxScore, Score};
-use yamc_tallies::{EnergyFilter, MeshFilter, RegularRectangularMesh, Tally};
+use yamc_tallies::{CylindricalMesh, EnergyFilter, MeshFilter, RegularRectangularMesh, Tally};
 
 use crate::geo::BoundingBox;
 use crate::geometry::backend::GeometryKind;
@@ -65,14 +68,18 @@ const BARN_PER_CM_SQ: f64 = 1.0e24;
 /// fraction of a percent on a cell that fills half its box, and the volume
 /// only enters the inventory through reactions on activation products.
 const VOLUME_SAMPLES: u64 = 100_000;
-/// Jittered points per voxel axis for the cell-under-mesh volumes: 512 per
-/// voxel resolve a cell to about 0.2% of the voxel, and a part the points
-/// miss is that small.
+/// Jittered points per element axis for the cell-under-mesh volumes: 512 per
+/// element resolve a cell to about 0.2% of it, and a part the points miss is
+/// that small.
 const VOXEL_SAMPLES_PER_AXIS: usize = 8;
 /// The neutron groups a voxel's spectrum is tallied on. 175 groups resolve
 /// the thresholds and the resonance region for activation, at a quarter of
 /// the per-thread tally memory of 709 on a large mesh.
 pub const GROUPS: &str = "VITAMIN-J-175";
+/// Mesh regions solved per transmutation call, which holds a copy of the
+/// chain for each distinct spectrum: a bound on that memory, while keeping
+/// every thread busy.
+const TRANSMUTE_BATCH: usize = 256;
 /// Rejected positions before a region is declared too thin to sample in.
 const MAX_REJECTIONS: usize = 1_000_000;
 
@@ -142,25 +149,32 @@ fn describe(geometry: &GeometryKind, cell: usize) -> String {
     }
 }
 
-/// A uniform point of `cell` within `bounds`, or `None` after
+/// `b` as an element to sample in.
+fn as_box(b: &BoundingBox) -> Element {
+    Element::Box {
+        lower: b.lower_left,
+        width: b.width(),
+    }
+}
+
+/// A uniform point of `cell` within `within`, or `None` after
 /// [`MAX_REJECTIONS`] misses.
 fn point_in<R: rand::Rng>(
     geometry: &GeometryKind,
     cell: usize,
-    bounds: &BoundingBox,
+    within: &Element,
     rng: &mut R,
 ) -> Option<[f64; 3]> {
-    let (lo, w) = (bounds.lower_left, bounds.width());
     (0..MAX_REJECTIONS)
-        .map(|_| std::array::from_fn(|k| lo[k] + w[k] * rng.random::<f64>()))
-        .find(|p: &[f64; 3]| geometry.find_cell_index((p[0], p[1], p[2])) == Some(cell))
+        .map(|_| within.sample(rng))
+        .find(|p| geometry.find_cell_index((p[0], p[1], p[2])) == Some(cell))
 }
 
 /// Where a region's photons are born: uniformly over the points of `cell` (in
-/// the source's frame geometry) within `bounds`, then placed by `placement`.
+/// the source's frame geometry) within `within`, then placed by `placement`.
 struct Site {
     cell: usize,
-    bounds: BoundingBox,
+    within: Element,
     placement: Placement,
 }
 
@@ -194,9 +208,9 @@ impl<'a> CellDecaySource<'a> {
         let (s, em, _) = self.entries[i.min(self.entries.len() - 1)];
         let energy = self.emitters[em as usize].sample(rng);
         let site = &self.sites[s as usize];
-        let point = point_in(self.frame, site.cell, &site.bounds, rng).unwrap_or_else(|| {
+        let point = point_in(self.frame, site.cell, &site.within, rng).unwrap_or_else(|| {
             panic!(
-                "no point of cell {} found in {MAX_REJECTIONS} draws in its bounding box",
+                "no point of cell {} found in {MAX_REJECTIONS} draws in its region",
                 describe(self.frame, site.cell)
             )
         });
@@ -216,10 +230,10 @@ impl<'a> CellDecaySource<'a> {
 }
 
 /// An activated region: a cell of the irradiation model, or its part in one
-/// voxel, and its atoms at every composition of the schedule.
+/// mesh element, and its atoms at every composition of the schedule.
 struct Activated {
     cell: usize,
-    voxel: Option<BoundingBox>,
+    element: Option<Element>,
     atoms: Vec<HashMap<String, f64>>,
 }
 
@@ -299,7 +313,7 @@ fn activate_cells(
         .map(|(cell, id, volume)| {
             Ok(Activated {
                 cell,
-                voxel: None,
+                element: None,
                 atoms: results.materials[&id]
                     .iter()
                     .map(|m| atoms_in(m, volume))
@@ -309,32 +323,92 @@ fn activate_cells(
         .collect()
 }
 
-/// Voxel `v`'s box.
-fn voxel_box(mesh: &RegularRectangularMesh, v: usize) -> BoundingBox {
-    let ([nx, ny, _], ll, w) = (mesh.shape(), mesh.lower_left(), mesh.width());
-    let i = [v % nx, (v / nx) % ny, v / (nx * ny)];
-    let lo: [f64; 3] = std::array::from_fn(|k| ll[k] + w[k] * i[k] as f64);
-    BoundingBox::new(lo, std::array::from_fn(|k| lo[k] + w[k]))
+/// The mesh cell-under-mesh R2S activates on, its elements numbered as a
+/// tally on it numbers its bins.
+#[derive(Clone)]
+pub enum R2sMesh {
+    Rectangular(RegularRectangularMesh),
+    Cylindrical(CylindricalMesh),
+    /// Every tetrahedron of a tet mesh, each inside a single cell: the
+    /// model's own `MeshGeometry`, or one conforming to its cells.
+    #[cfg(feature = "mesh")]
+    Tetrahedral(Arc<yamt::MeshGeometry>),
 }
 
-/// The material-filled cells under voxel `v` and their volumes in it, by
-/// jittered sampling: one point in each of the voxel's subcells.
-fn cells_under(
-    geometry: &GeometryKind,
-    mesh: &RegularRectangularMesh,
-    v: usize,
-    seed: u64,
-) -> Vec<(usize, f64)> {
+impl R2sMesh {
+    fn len(&self) -> usize {
+        match self {
+            Self::Rectangular(m) => m.num_voxels(),
+            Self::Cylindrical(m) => m.num_bins(),
+            #[cfg(feature = "mesh")]
+            Self::Tetrahedral(m) => m.topology.tetrahedra.len(),
+        }
+    }
+
+    /// Element `e`.
+    fn element(&self, e: usize) -> Element {
+        match self {
+            Self::Rectangular(m) => {
+                let ([nx, ny, _], ll, w) = (m.shape(), m.lower_left(), m.width());
+                let i = [e % nx, (e / nx) % ny, e / (nx * ny)];
+                Element::Box {
+                    lower: std::array::from_fn(|k| ll[k] + w[k] * i[k] as f64),
+                    width: w,
+                }
+            }
+            Self::Cylindrical(m) => {
+                let [nr, np, _] = m.shape();
+                let [ir, ip, iz] = [e % nr, (e / nr) % np, e / (nr * np)];
+                let (r, p, z) = (m.r_grid(), m.phi_grid(), m.z_grid());
+                Element::Cylindrical {
+                    origin: m.origin(),
+                    r: [r[ir], r[ir + 1]],
+                    phi: [p[ip], p[ip + 1]],
+                    z: [z[iz], z[iz + 1]],
+                }
+            }
+            #[cfg(feature = "mesh")]
+            Self::Tetrahedral(m) => {
+                let t = &m.topology;
+                Element::Tetrahedron(t.tetrahedra[e].map(|v| t.vertices[v as usize]))
+            }
+        }
+    }
+
+    /// The spatial filter whose bins are the elements: for a tet mesh, every
+    /// tet-meshed volume in one set of bins, so the spectra cost one tally.
+    fn filter(&self) -> Result<Filter, String> {
+        Ok(match self {
+            Self::Rectangular(m) => Filter::Mesh(MeshFilter::new(m.clone())),
+            Self::Cylindrical(m) => Filter::Mesh(MeshFilter::new_cylindrical(m.clone())),
+            #[cfg(feature = "mesh")]
+            Self::Tetrahedral(m) => {
+                let volumes: Vec<u32> = (0..m.topology.num_volumes)
+                    .filter(|&v| !m.topology.volume_tet_ranges[v as usize].is_empty())
+                    .collect();
+                if volumes.is_empty() {
+                    return Err("the mesh has no tetrahedra to activate".into());
+                }
+                Filter::UnstructuredMesh(yamc_tallies::UnstructuredMeshFilter::over_volumes(
+                    Arc::clone(m),
+                    volumes,
+                ))
+            }
+        })
+    }
+}
+
+/// The material-filled cells in `element` and their volumes in it, by
+/// jittered sampling: one point in each of its subcells, uniform in volume.
+fn cells_under(geometry: &GeometryKind, element: &Element, seed: u64) -> Vec<(usize, f64)> {
     const N: usize = VOXEL_SAMPLES_PER_AXIS;
-    let b = voxel_box(mesh, v);
-    let w = b.width();
-    let mut rng = FastRng::new(seed ^ (v as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    let mut rng = FastRng::new(seed);
     let mut hits: Vec<(usize, u32)> = Vec::new();
     for i in 0..N * N * N {
         let s = [i % N, (i / N) % N, i / (N * N)];
-        let p: [f64; 3] = std::array::from_fn(|k| {
-            b.lower_left[k] + w[k] * (s[k] as f64 + rng.random()) / N as f64
-        });
+        let p = element.point(std::array::from_fn(|k| {
+            (s[k] as f64 + rng.random()) / N as f64
+        }));
         let Some(c) = geometry.find_cell_index((p[0], p[1], p[2])) else {
             continue;
         };
@@ -346,48 +420,97 @@ fn cells_under(
             None => hits.push((c, 1)),
         }
     }
-    let per_hit = mesh.get_voxel_volume(v) / (N * N * N) as f64;
+    let per_hit = element.volume() / (N * N * N) as f64;
     hits.into_iter()
         .map(|(c, n)| (c, n as f64 * per_hit))
         .collect()
 }
 
-/// Every (voxel, material-filled cell) overlap of `model` the neutrons reach,
-/// with the cell's material, solved through `steps` on the voxel's tallied
-/// spectrum.
+/// The material-filled cell tet `e` lies in, with the tet's volume, or `None`
+/// for a tet in void. Its centroid and a point just inside each corner must
+/// all be in that cell: a tet spanning cells has no single material.
+fn tet_cell(
+    geometry: &GeometryKind,
+    e: usize,
+    tet: &Element,
+) -> Result<Option<(usize, f64)>, String> {
+    let Element::Tetrahedron(v) = tet else {
+        unreachable!("tet_cell is given tets")
+    };
+    let c: [f64; 3] = std::array::from_fn(|k| v.iter().map(|p| p[k]).sum::<f64>() / 4.0);
+    let probes = std::iter::once(c).chain(
+        v.iter()
+            .map(|p| std::array::from_fn(|k| p[k] + 0.05 * (c[k] - p[k]))),
+    );
+    let mut cell = None;
+    for (i, p) in probes.enumerate() {
+        let here = geometry.find_cell_index((p[0], p[1], p[2]));
+        if i == 0 {
+            cell = here;
+        } else if here != cell {
+            let name = |c: Option<usize>| c.map_or("no cell".into(), |c| describe(geometry, c));
+            return Err(format!(
+                "tet {e} lies in cell {} and in {}; R2S on a tet mesh needs every tet \
+                 inside one cell, as the tets of the model's own MeshGeometry are",
+                name(cell),
+                name(here)
+            ));
+        }
+    }
+    Ok(cell
+        .filter(|&c| geometry.material_for(&geometry.cells()[c]).is_some())
+        .map(|c| (c, tet.volume())))
+}
+
+/// Every (element, material-filled cell) overlap of `model` the neutrons
+/// reach, with the cell's material, solved through `steps` on the element's
+/// tallied spectrum.
 fn activate_mesh(
     model: &mut Model,
-    mesh: &RegularRectangularMesh,
+    mesh: &R2sMesh,
     steps: &[yani_transmute::ScheduleStep],
     loaded: yani::LoadedChain,
     settings: &TransportSettings,
 ) -> Result<Vec<Activated>, String> {
     let groups = yamc_nuclide::group_structures::get_group_structure(GROUPS)?.to_vec();
     let mut t = Tally::new();
-    t.name = Some("R2S voxel neutron spectra".into());
+    t.name = Some("R2S element neutron spectra".into());
     t.scores = vec![Score::Flux(FluxScore)];
     t.filters = vec![
         Filter::Energy(EnergyFilter::new(groups.clone())),
-        Filter::Mesh(MeshFilter::new(mesh.clone())),
+        mesh.filter()?,
     ];
     t.reset_accumulation();
     let t = Arc::new(t);
     model.tallies = vec![Arc::clone(&t)];
     model.run_internal::<NoOpTracker>(settings, None, None, false)?;
-    // Track length per source neutron, energy-major then voxel.
+    // Track length per source neutron, energy-major then element.
     let flux = t.finalize().mean;
-    let (nv, ng) = (mesh.num_voxels(), groups.len() - 1);
+    let (nv, ng) = (mesh.len(), groups.len() - 1);
     let reached: Vec<usize> = (0..nv)
         .filter(|&v| (0..ng).any(|g| flux[g * nv + v] > 0.0))
         .collect();
     let geometry = &model.geometry;
+    let parts = |v: usize| -> Result<Vec<(usize, usize, f64)>, String> {
+        let element = mesh.element(v);
+        Ok(match element {
+            Element::Tetrahedron(_) => tet_cell(geometry, v, &element)?.into_iter().collect(),
+            _ => cells_under(
+                geometry,
+                &element,
+                settings.seed ^ (v as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+            ),
+        }
+        .into_iter()
+        .map(|(c, vol)| (v, c, vol))
+        .collect())
+    };
     let regions: Vec<(usize, usize, f64)> = reached
         .par_iter()
-        .flat_map_iter(|&v| {
-            cells_under(geometry, mesh, v, settings.seed)
-                .into_iter()
-                .map(move |(c, vol)| (v, c, vol))
-        })
+        .map(|&v| parts(v))
+        .collect::<Result<Vec<_>, String>>()?
+        .into_iter()
+        .flatten()
         .collect();
     if regions.is_empty() {
         return Err(
@@ -397,18 +520,31 @@ fn activate_mesh(
         );
     }
 
+    // One cache-free copy of each cell's material, cloned per region: a
+    // cleared cache keeps its allocation, so clearing per clone would hold a
+    // transport cache for every one of a mesh's regions.
+    let mut templates: HashMap<usize, yamc_materials::material::Material> = HashMap::new();
+    for &(_, c, _) in &regions {
+        templates.entry(c).or_insert_with(|| {
+            let mut m = (**geometry
+                .material_for(&geometry.cells()[c])
+                .expect("regions are material-filled"))
+            .clone();
+            // Transport caches and bremsstrahlung tables, which an
+            // inventory solve never reads.
+            m.invalidate_xs_cache();
+            m.ttb = None;
+            m
+        });
+    }
     let mut materials = Vec::with_capacity(regions.len());
     let mut plans = Vec::with_capacity(regions.len());
     for &(v, c, volume) in &regions {
         let masses: Vec<f64> = (0..ng).map(|g| flux[g * nv + v]).collect();
         let total: f64 = masses.iter().sum();
         // n/cm^2 per source neutron.
-        let per_source = total / mesh.get_voxel_volume(v);
-        let mut m = (**geometry
-            .material_for(&geometry.cells()[c])
-            .expect("regions are material-filled"))
-        .clone();
-        m.invalidate_xs_cache();
+        let per_source = total / mesh.element(v).volume();
+        let mut m = templates[&c].clone();
         m.volume = Some(volume);
         m.assign_material_id(None)?;
         materials.push(m);
@@ -431,36 +567,44 @@ fn activate_mesh(
         .iter()
         .map(|m| m.get_material_id().expect("assigned above"))
         .collect();
-    let cases = materials
-        .iter_mut()
-        .zip(plans)
-        .map(
-            |(material, (spectrum, steps))| yani_transmute::TransmuteCase {
-                material,
-                spectra: vec![spectrum],
-                steps,
-                shielding: None,
-                product_threshold: yani_transmute::DEFAULT_PRODUCT_THRESHOLD,
-            },
+    // In batches: the solve folds each distinct spectrum's branchings into
+    // its own copy of the chain, and every element has its own spectrum, so
+    // a mesh solved at once would hold a chain copy per element.
+    let mut inventories: HashMap<u32, Vec<yamc_materials::material::Material>> = HashMap::new();
+    let mut plans = plans.into_iter();
+    for batch in materials.chunks_mut(TRANSMUTE_BATCH) {
+        let cases = batch
+            .iter_mut()
+            .zip(plans.by_ref())
+            .map(
+                |(material, (spectrum, steps))| yani_transmute::TransmuteCase {
+                    material,
+                    spectra: vec![spectrum],
+                    steps,
+                    shielding: None,
+                    product_threshold: yani_transmute::DEFAULT_PRODUCT_THRESHOLD,
+                },
+            )
+            .collect();
+        let results = yani_transmute::transmute_materials(
+            cases,
+            Arc::clone(&loaded.chain),
+            &loaded.branch,
+            loaded.parts,
+            None,
+            None,
         )
-        .collect();
-    let results = yani_transmute::transmute_materials(
-        cases,
-        loaded.chain,
-        &loaded.branch,
-        loaded.parts,
-        None,
-        None,
-    )
-    .map_err(|e| format!("cell-under-mesh inventories: {e}"))?;
+        .map_err(|e| format!("cell-under-mesh inventories: {e}"))?;
+        inventories.extend(results.materials);
+    }
     regions
         .iter()
         .zip(ids)
         .map(|(&(v, cell, volume), id)| {
             Ok(Activated {
                 cell,
-                voxel: Some(voxel_box(mesh, v)),
-                atoms: results.materials[&id]
+                element: Some(mesh.element(v)),
+                atoms: inventories[&id]
                     .iter()
                     .map(|m| atoms_in(m, volume))
                     .collect::<Result<_, String>>()?,
@@ -470,8 +614,8 @@ fn activate_mesh(
 }
 
 /// Simulate the shutdown dose rate over `steps` by R2S, on the cells of the
-/// irradiation model or, with `mesh`, on the parts of its cells under each
-/// voxel.
+/// irradiation model or, with `mesh`, on the parts of its cells in each mesh
+/// element.
 ///
 /// Inputs and result are those of
 /// [`crate::shutdown_dose::simulate_shutdown_dose`]; `total_particles` in
@@ -483,7 +627,7 @@ pub fn simulate_r2s(
     steps: &[Step],
     tallies: &[Arc<Tally>],
     settings: &TransportSettings,
-    mesh: Option<&RegularRectangularMesh>,
+    mesh: Option<&R2sMesh>,
 ) -> Result<ShutdownDose, String> {
     let (campaigns, _) = check_inputs(models, stages, steps, tallies, settings)?;
     let irradiated: BTreeSet<usize> = campaigns.iter().map(|&c| stages[c].model).collect();
@@ -499,7 +643,7 @@ pub fn simulate_r2s(
     if mesh.is_some() && campaigns.len() > 1 {
         return Err(
             "cell-under-mesh R2S needs every pulse to irradiate with the cells in the same \
-             place (one set of moves), so the voxels say where the inventory is"
+             place (one set of moves), so the elements say where the inventory is"
                 .into(),
         );
     }
@@ -579,8 +723,8 @@ pub fn simulate_r2s(
         } else {
             cell_names(to)?
         };
-        // Cells sample in the step's model; voxel parts in the irradiation
-        // model, where the voxels say the inventory is, then move.
+        // Cells sample in the step's model; element parts in the irradiation
+        // model, where the elements say the inventory is, then move.
         let mut src = CellDecaySource {
             frame: if mesh.is_some() {
                 &model.geometry
@@ -620,7 +764,7 @@ pub fn simulate_r2s(
             if rates.is_empty() {
                 continue;
             }
-            let site = match &a.voxel {
+            let site = match &a.element {
                 None => {
                     let dst = if same {
                         a.cell
@@ -641,11 +785,11 @@ pub fn simulate_r2s(
                     };
                     Site {
                         cell: dst,
-                        bounds,
+                        within: as_box(&bounds),
                         placement: Placement::IDENTITY,
                     }
                 }
-                Some(voxel) => {
+                Some(element) => {
                     let key = (irr, a.cell);
                     let cb = match boxes.get(&key) {
                         Some(b) => b.clone(),
@@ -655,7 +799,15 @@ pub fn simulate_r2s(
                             b
                         }
                     };
-                    let bounds = voxel.intersection(&cb);
+                    // A box clips to the cell's bounds, to waste fewer draws;
+                    // a curved element or a tet is sampled whole.
+                    let within = match *element {
+                        Element::Box { lower, width } => as_box(
+                            &BoundingBox::new(lower, std::array::from_fn(|k| lower[k] + width[k]))
+                                .intersection(&cb),
+                        ),
+                        other => other,
+                    };
                     let named = model.geometry.cells()[a.cell].name.as_deref();
                     let at = |s: &Stage| {
                         named
@@ -669,9 +821,9 @@ pub fn simulate_r2s(
                         let Some(&dst) = dst_names.get(name).or(same.then_some(&a.cell)) else {
                             continue;
                         };
-                        // A voxel part lands in its cell where the stage's
+                        // An element part lands in its cell where the stage's
                         // model has the cell where its moves put it.
-                        let landed = point_in(&model.geometry, a.cell, &bounds, &mut rng)
+                        let landed = point_in(&model.geometry, a.cell, &within, &mut rng)
                             .map(|p| placement.apply(p))
                             .and_then(|p| to.geometry.find_cell_index((p[0], p[1], p[2])));
                         if landed != Some(dst) {
@@ -683,7 +835,7 @@ pub fn simulate_r2s(
                     }
                     Site {
                         cell: a.cell,
-                        bounds,
+                        within,
                         placement,
                     }
                 }

@@ -282,7 +282,7 @@ fn the_rows_reach_yanis_reader() {
                 reactions: Vec::new(),
                 decays: Vec::new(),
                 fission_yields: None,
-                sources: Vec::new(),
+                sources: Default::default(),
             },
         )]),
         dir.join("stub"),

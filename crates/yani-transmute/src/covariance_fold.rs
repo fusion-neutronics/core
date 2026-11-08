@@ -6609,7 +6609,7 @@ mod lumped_tests {
             }],
             decays: Vec::new(),
             fission_yields: None,
-            sources: Vec::new(),
+            sources: Default::default(),
         };
         assert_eq!(
             reachable_mts(&chain, &blocks),

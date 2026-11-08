@@ -74,7 +74,8 @@ fn chain() -> HashMap<String, ChainNuclide> {
                         energies,
                         intensities,
                     },
-                }],
+                }]
+                .into(),
             },
         );
     }

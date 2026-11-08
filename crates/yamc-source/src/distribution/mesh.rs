@@ -30,6 +30,79 @@ pub enum MeshElements {
     Tetrahedra(Vec<[[f64; 3]; 4]>),
 }
 
+/// One element's shape, onto which the unit cube maps uniformly in volume:
+/// stratified points in the cube stay stratified in the element.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum Element {
+    /// An axis-aligned box: its lower corner and widths.
+    Box { lower: [f64; 3], width: [f64; 3] },
+    /// A cylindrical cell about the +z axis through `origin`: radius, angle
+    /// (radians) and z (offset from `origin[2]`) edges.
+    Cylindrical {
+        origin: [f64; 3],
+        r: [f64; 2],
+        phi: [f64; 2],
+        z: [f64; 2],
+    },
+    /// A tetrahedron's corners.
+    Tetrahedron([[f64; 3]; 4]),
+}
+
+impl Element {
+    /// Volume in cm³.
+    pub fn volume(&self) -> f64 {
+        match *self {
+            Self::Box { width, .. } => width.iter().product(),
+            Self::Cylindrical { r, phi, z, .. } => {
+                0.5 * (r[1] * r[1] - r[0] * r[0]) * (phi[1] - phi[0]) * (z[1] - z[0])
+            }
+            Self::Tetrahedron([a, b, c, d]) => {
+                let e = |p: [f64; 3]| [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
+                let (u, v, w) = (e(b), e(c), e(d));
+                (u[0] * (v[1] * w[2] - v[2] * w[1]) - u[1] * (v[0] * w[2] - v[2] * w[0])
+                    + u[2] * (v[0] * w[1] - v[1] * w[0]))
+                    .abs()
+                    / 6.0
+            }
+        }
+    }
+
+    /// The point `u` of the unit cube maps to.
+    pub fn point(&self, u: [f64; 3]) -> [f64; 3] {
+        match *self {
+            Self::Box { lower, width } => std::array::from_fn(|k| lower[k] + width[k] * u[k]),
+            Self::Cylindrical { origin, r, phi, z } => {
+                // r² uniform between the edges is uniform in volume.
+                let (r0, r1) = (r[0] * r[0], r[1] * r[1]);
+                let rad = (r0 + (r1 - r0) * u[0]).sqrt();
+                let (s, c) = (phi[0] + (phi[1] - phi[0]) * u[1]).sin_cos();
+                let zz = z[0] + (z[1] - z[0]) * u[2];
+                [origin[0] + rad * c, origin[1] + rad * s, origin[2] + zz]
+            }
+            Self::Tetrahedron(v) => {
+                // Fold the cube onto the corner simplex (Rocchini and Cignoni
+                // 2000), measure-preserving piece by piece.
+                let [mut s, mut t, mut w] = u;
+                if s + t > 1.0 {
+                    (s, t) = (1.0 - s, 1.0 - t);
+                }
+                if t + w > 1.0 {
+                    (t, w) = (1.0 - w, 1.0 - s - t);
+                } else if s + t + w > 1.0 {
+                    (s, w) = (1.0 - t - w, s + t + w - 1.0);
+                }
+                let b = [1.0 - s - t - w, s, t, w];
+                std::array::from_fn(|k| (0..4).map(|j| b[j] * v[j][k]).sum())
+            }
+        }
+    }
+
+    /// A uniform point in the element.
+    pub fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> [f64; 3] {
+        self.point(std::array::from_fn(|_| rng.random::<f64>()))
+    }
+}
+
 impl MeshElements {
     /// Number of elements.
     pub fn len(&self) -> usize {
@@ -44,30 +117,8 @@ impl MeshElements {
         self.len() == 0
     }
 
-    /// Volume of element `i` in cm³.
-    pub fn volume(&self, i: usize) -> f64 {
-        match self {
-            Self::Rectangular { width, .. } => width.iter().product(),
-            Self::Cylindrical { r, phi, z, .. } => {
-                let [ir, ip, iz] = cyl_indices(r.len() - 1, phi.len() - 1, i);
-                0.5 * (r[ir + 1].powi(2) - r[ir].powi(2))
-                    * (phi[ip + 1] - phi[ip])
-                    * (z[iz + 1] - z[iz])
-            }
-            Self::Tetrahedra(t) => {
-                let [a, b, c, d] = t[i];
-                let e = |p: [f64; 3]| [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
-                let (u, v, w) = (e(b), e(c), e(d));
-                (u[0] * (v[1] * w[2] - v[2] * w[1]) - u[1] * (v[0] * w[2] - v[2] * w[0])
-                    + u[2] * (v[0] * w[1] - v[1] * w[0]))
-                    .abs()
-                    / 6.0
-            }
-        }
-    }
-
-    /// A uniform point in element `i`.
-    pub fn sample<R: Rng + ?Sized>(&self, i: usize, rng: &mut R) -> [f64; 3] {
+    /// Element `i`.
+    pub fn element(&self, i: usize) -> Element {
         match self {
             Self::Rectangular {
                 lower_left,
@@ -79,29 +130,33 @@ impl MeshElements {
                     (i / shape[0]) % shape[1],
                     i / (shape[0] * shape[1]),
                 ];
-                std::array::from_fn(|k| {
-                    lower_left[k] + width[k] * (idx[k] as f64 + rng.random::<f64>())
-                })
+                Element::Box {
+                    lower: std::array::from_fn(|k| lower_left[k] + width[k] * idx[k] as f64),
+                    width: *width,
+                }
             }
             Self::Cylindrical { origin, r, phi, z } => {
-                let [ir, ip, iz] = cyl_indices(r.len() - 1, phi.len() - 1, i);
-                // Uniform in volume: r² is uniform between the ring's edges.
-                let (r0, r1) = (r[ir] * r[ir], r[ir + 1] * r[ir + 1]);
-                let rad = (r0 + (r1 - r0) * rng.random::<f64>()).sqrt();
-                let p = phi[ip] + (phi[ip + 1] - phi[ip]) * rng.random::<f64>();
-                let zz = z[iz] + (z[iz + 1] - z[iz]) * rng.random::<f64>();
-                let (s, c) = p.sin_cos();
-                [origin[0] + rad * c, origin[1] + rad * s, origin[2] + zz]
+                let (nr, np) = (r.len() - 1, phi.len() - 1);
+                let [ir, ip, iz] = [i % nr, (i / nr) % np, i / (nr * np)];
+                Element::Cylindrical {
+                    origin: *origin,
+                    r: [r[ir], r[ir + 1]],
+                    phi: [phi[ip], phi[ip + 1]],
+                    z: [z[iz], z[iz + 1]],
+                }
             }
-            Self::Tetrahedra(t) => {
-                // Sorted uniforms split [0, 1] into four uniform barycentric weights.
-                let mut u: [f64; 3] = std::array::from_fn(|_| rng.random::<f64>());
-                u.sort_unstable_by(f64::total_cmp);
-                let w = [u[0], u[1] - u[0], u[2] - u[1], 1.0 - u[2]];
-                let v = &t[i];
-                std::array::from_fn(|k| (0..4).map(|j| w[j] * v[j][k]).sum())
-            }
+            Self::Tetrahedra(t) => Element::Tetrahedron(t[i]),
         }
+    }
+
+    /// Volume of element `i` in cm³.
+    pub fn volume(&self, i: usize) -> f64 {
+        self.element(i).volume()
+    }
+
+    /// A uniform point in element `i`.
+    pub fn sample<R: Rng + ?Sized>(&self, i: usize, rng: &mut R) -> [f64; 3] {
+        self.element(i).sample(rng)
     }
 
     /// The elements `keep` names, renumbered from zero, for tetrahedra (whose
@@ -111,10 +166,6 @@ impl MeshElements {
             *t = keep.iter().map(|&i| t[i as usize]).collect();
         }
     }
-}
-
-fn cyl_indices(nr: usize, nphi: usize, i: usize) -> [usize; 3] {
-    [i % nr, (i / nr) % nphi, i / (nr * nphi)]
 }
 
 /// Where in each element a mesh source may emit: only points in these cells,

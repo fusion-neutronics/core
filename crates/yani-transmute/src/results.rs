@@ -962,7 +962,7 @@ mod tests {
                     reactions,
                     decays,
                     fission_yields: None,
-                    sources: Vec::new(),
+                    sources: Default::default(),
                 }
             };
         let rx = |kind: &str, target: &str| yani::ChainReaction {
@@ -1071,7 +1071,7 @@ mod tests {
             reactions,
             decays: Vec::new(),
             fission_yields: None,
-            sources: Vec::new(),
+            sources: Default::default(),
         };
         let chain = Arc::new(HashMap::from([
             (

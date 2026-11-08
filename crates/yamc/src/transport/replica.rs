@@ -1383,7 +1383,7 @@ impl ReplicaContext {
                 continue;
             };
             let g = nuc.band(e, urr_random).map(|b| band_factors(&b));
-            for s in &nuc.sources {
+            for s in nuc.sources.iter() {
                 let sum = match &g {
                     Some(g) => ReplicaNuclide::banded(s, at, g, &Channel::ALL),
                     None => ReplicaNuclide::at(&s.sum, at),
@@ -1638,7 +1638,7 @@ impl ReplicaContext {
                         }
                         out.fill(0.0);
                         let e = nuc.grid[i];
-                        for s in &nuc.sources {
+                        for s in nuc.sources.iter() {
                             let sum = ReplicaNuclide::at(&s.sum, at);
                             if sum != 0.0 {
                                 let own = ReplicaNuclide::at(&s.own, at);
@@ -1715,7 +1715,7 @@ impl ReplicaContext {
                 denominator +=
                     nuc.density * channels.iter().map(|c| values[c.index()]).sum::<f64>();
                 let g = band_factors(&band);
-                for src in &nuc.sources {
+                for src in nuc.sources.iter() {
                     let own = ReplicaNuclide::at(&src.own, at);
                     let sum = ReplicaNuclide::banded(src, at, &g, channels);
                     src.add_change(e, own, nuc.density * sum, &mut change, &mut change_grad);
