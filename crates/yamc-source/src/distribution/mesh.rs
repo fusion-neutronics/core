@@ -128,9 +128,17 @@ pub enum SourceDomain {
     Materials(Vec<u32>),
 }
 
-/// Draws within one element before it is declared to have no point in the
-/// domain: enough for a part of 0.01% of it to be found with certainty.
-pub const MAX_DOMAIN_TRIES: usize = 100_000;
+/// Draws a run's up-front check makes in each emitting element before
+/// declaring it has no point in the domain. An element passes on its first
+/// hit, so one mostly in the domain costs a draw or two; the smallest part
+/// found reliably is about a millionth of its element.
+pub const DOMAIN_CHECK_TRIES: usize = 1_000_000;
+
+/// Draws one birth may take before giving up: far past what an element that
+/// passed [`DOMAIN_CHECK_TRIES`] needs. A part a millionth of its element
+/// misses all of them with probability about e^-100, so a run that started
+/// never stops for want of a point.
+pub const MAX_DOMAIN_TRIES: usize = 100_000_000;
 
 /// Positions spread over a mesh: element `i` is chosen in proportion to its
 /// strength, then a point uniform within it.
@@ -319,7 +327,7 @@ impl MeshDistribution {
     }
 
     /// The mesh bin of the first emitting element with no point `inside`
-    /// accepts in [`MAX_DOMAIN_TRIES`] draws, if any: its strength could
+    /// accepts in [`DOMAIN_CHECK_TRIES`] draws, if any: its strength could
     /// never be emitted.
     pub fn unreachable_bin<R: Rng + ?Sized>(
         &self,
@@ -329,7 +337,7 @@ impl MeshDistribution {
         (0..self.bins.len())
             .find(|&k| {
                 let i = self.index(k);
-                !(0..MAX_DOMAIN_TRIES).any(|_| inside(self.elements.sample(i, rng)))
+                !(0..DOMAIN_CHECK_TRIES).any(|_| inside(self.elements.sample(i, rng)))
             })
             .map(|k| self.bins[k])
     }
@@ -483,6 +491,29 @@ mod tests {
         .unwrap()
         .with_domain(SourceDomain::Cells(vec![]))
         .is_err());
+    }
+
+    #[test]
+    fn a_sliver_in_the_domain_passes_the_check_and_always_samples() {
+        // 5e-6 of the box is inside: the old 1e5-draw check refused it on
+        // most seeds, and a birth missed all its draws about once in 1.5.
+        let d = MeshDistribution::new(
+            MeshElements::Rectangular {
+                lower_left: [0.0; 3],
+                width: [1.0; 3],
+                shape: [1, 1, 1],
+            },
+            None,
+        )
+        .unwrap();
+        let inside = |p: [f64; 3]| p[0] < 5e-6;
+        let mut rng = StdRng::seed_from_u64(11);
+        assert_eq!(d.unreachable_bin(&mut rng, inside), None);
+        for _ in 0..50 {
+            assert!(inside(d.sample_within(&mut rng, inside).unwrap()));
+        }
+        // Nothing inside is still refused.
+        assert_eq!(d.unreachable_bin(&mut rng, |_| false), Some(0));
     }
 
     #[test]
