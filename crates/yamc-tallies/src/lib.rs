@@ -33,8 +33,8 @@ pub use mesh::{CylindricalMesh, RegularRectangularMesh};
 pub use mt::Mt;
 pub use result::{ConvergencePoint, StatisticalChecks, TallyResult};
 pub use score::{
-    CurrentScore, DamageEnergyScore, FluxScore, HeatingLocalScore, HeatingScore, PhotonComponent,
-    PhotonXSScore, ProductionScore, ReactionRateScore, Score, ScoreKind,
+    CurrentDirection, CurrentScore, DamageEnergyScore, FluxScore, HeatingLocalScore, HeatingScore,
+    PhotonComponent, PhotonXSScore, ProductionScore, ReactionRateScore, Score, ScoreKind,
 };
 pub use simulation_results::SimulationResults;
 pub use tally::{NuclideBin, Tally};
