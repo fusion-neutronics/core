@@ -663,9 +663,12 @@ pub fn transmute_materials(
             results.add_step_rates(id, Default::default());
             results.add_step(id, state);
         }
-        results
-            .branching_report
-            .insert(id, vec![Arc::new(BranchingReport::default()); n]);
+        results.branching_report.insert(
+            id,
+            (0..n)
+                .map(|_| Arc::new(BranchingReport::default()))
+                .collect(),
+        );
         results.product_screening.insert(id, Default::default());
         results.shielding_info.insert(id, Default::default());
         results.collapse.insert(

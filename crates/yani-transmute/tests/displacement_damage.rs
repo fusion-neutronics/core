@@ -91,6 +91,7 @@ fn run(material: &mut Material, damage: Option<&DamageRequest>) -> Transmutation
         Default::default(),
         None,
         damage,
+        None,
     )
     .expect("transmute")
 }
@@ -216,6 +217,7 @@ fn an_element_without_a_displacement_energy_is_refused() {
         Default::default(),
         None,
         Some(&DamageRequest::default()),
+        None,
     )
     .unwrap_err()
     .to_string();
