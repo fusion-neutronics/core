@@ -60,10 +60,9 @@ pub struct ScatteringLaw {
 pub struct ScatteringLawTemperature {
     pub t: f64,
     pub beta: f64,
-    /// The Python reader stores the outer LT here rather than the LI it reads
-    /// from the record, so the interpolation flag is lost. Reproduced so the
-    /// two agree.
-    pub lt: i64,
+    /// Interpolation between this temperature and the previous one (the
+    /// record's own LI), the flag the format gives each further temperature.
+    pub li: i64,
     pub s: Vec<f64>,
 }
 
@@ -208,9 +207,7 @@ pub fn parse_mf7_mt4(reader: &mut Reader) -> Result<Mf7Mt4> {
                 law.others.push(ScatteringLawTemperature {
                     t: list.cont.c1,
                     beta: list.cont.c2,
-                    // The record's own LI is read and discarded upstream; the
-                    // outer LT is stored instead, matching the Python reader.
-                    lt,
+                    li: list.cont.l1,
                     s: list.values,
                 });
             }

@@ -46,6 +46,7 @@ pub mod records;
 pub mod resonance;
 pub mod resonance_covariance;
 pub mod spline;
+pub mod thermal_scattering;
 
 #[cfg(test)]
 mod testdata;
@@ -82,4 +83,5 @@ pub use radionuclide_production::{
 pub use reaction::{reaction_mt, reaction_name, Reaction, FISSION_MTS};
 pub use records::{float_endf, int_endf, Cont, Head, ListRecord, Matrix, Reader, Tab1, Tab2};
 pub use spline::CubicSpline;
+pub use thermal_scattering::{ThermalElastic, ThermalScattering};
 pub use urr::ProbabilityTables;

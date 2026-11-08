@@ -164,6 +164,7 @@ fn read_text(path: &Path) -> Result<String> {
 pub enum Interpretation {
     IncidentNeutron(Box<crate::IncidentNeutron>),
     IncidentPhoton(Box<crate::IncidentPhoton>),
+    ThermalScattering(Box<crate::ThermalScattering>),
 }
 
 impl Material {
@@ -399,6 +400,30 @@ impl Material {
         }
     }
 
+    /// The MF=7 MT=2 elastic thermal scattering.
+    pub fn mf7_mt2(&self) -> Option<&mf::mf7::Mf7Mt2> {
+        match self.section_data.get(&(7, 2))? {
+            Section::Mf7Mt2(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The MF=7 MT=4 incoherent inelastic scattering law.
+    pub fn mf7_mt4(&self) -> Option<&mf::mf7::Mf7Mt4> {
+        match self.section_data.get(&(7, 4))? {
+            Section::Mf7Mt4(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The MF=7 MT=451 list of the atoms a thermal scattering law describes.
+    pub fn mf7_mt451(&self) -> Option<&mf::mf7::Mf7Mt451> {
+        match self.section_data.get(&(7, 451))? {
+            Section::Mf7Mt451(s) => Some(s),
+            _ => None,
+        }
+    }
+
     /// The MF=32 MT=151 resonance parameter covariances.
     pub fn mf32(&self) -> Option<&mf::mf32::Mf32> {
         match self.section_data.get(&(32, 151))? {
@@ -476,7 +501,8 @@ impl Material {
 
     /// Build the high-level interface the material's sublibrary calls for.
     ///
-    /// NSUB in MF=1 MT=451 says which: 3 is photoatomic, 10 incident neutron.
+    /// NSUB in MF=1 MT=451 says which: 3 is photoatomic, 10 incident
+    /// neutron, 12 thermal scattering.
     /// A photoatomic evaluation is interpreted on its own, so any atomic
     /// relaxation data has to come from its own MF=28; pass a separate
     /// evaluation to [`IncidentPhoton::from_endf`] directly when there is one.
@@ -494,8 +520,11 @@ impl Material {
             10 => Ok(Interpretation::IncidentNeutron(Box::new(
                 crate::IncidentNeutron::from_endf(self)?,
             ))),
+            12 => Ok(Interpretation::ThermalScattering(Box::new(
+                crate::ThermalScattering::from_endf(self)?,
+            ))),
             _ => Err(Error::Unsupported {
-                what: "a sublibrary with no high-level interface (NSUB is not 3 or 10)",
+                what: "a sublibrary with no high-level interface (NSUB is not 3, 10 or 12)",
             }),
         }
     }
@@ -752,10 +781,19 @@ mod tests {
 
     #[test]
     fn a_sublibrary_with_no_interface_says_so() {
-        // Thermal scattering: NSUB=12, which has no high-level class in either
-        // reader.
+        // Decay data: NSUB=4, read through `Decay` rather than `interpret`.
+        const DECAY: &[u8] = include_bytes!("../fixtures/dec-041_Nb_092.endf.xz");
+        let m = Material::from_str(&crate::testdata::text(DECAY)).unwrap();
+        assert!(m.interpret().is_err());
+    }
+
+    #[test]
+    fn thermal_scattering_is_interpreted() {
         const TSL: &[u8] = include_bytes!("../fixtures/tsl-s-CH4.endf.xz");
         let m = Material::from_str(&crate::testdata::text(TSL)).unwrap();
-        assert!(m.interpret().is_err());
+        match m.interpret().unwrap() {
+            Interpretation::ThermalScattering(t) => assert_eq!(t.temperatures.len(), 1),
+            other => panic!("NSUB=12 gave {other:?}"),
+        }
     }
 }
