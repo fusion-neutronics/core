@@ -61,6 +61,7 @@ type MakeScore = fn() -> Score;
 /// list of valid names in the error cannot drift from what actually parses.
 const NAMED_SCORES: &[(&str, MakeScore)] = &[
     ("flux", || Score::Flux(FluxScore)),
+    ("current", || Score::Current(CurrentScore)),
     ("heating", || Score::Heating(HeatingScore)),
     ("heating-local", || Score::HeatingLocal(HeatingLocalScore)),
     ("damage-energy", || Score::DamageEnergy(DamageEnergyScore)),

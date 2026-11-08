@@ -719,7 +719,7 @@ fn score_mt(score: &Score) -> Option<i32> {
         Score::Heating(_) => Some(Response::Heating.mt()),
         Score::HeatingLocal(_) => Some(Response::HeatingLocal.mt()),
         Score::DamageEnergy(_) => Some(Response::DamageEnergy.mt()),
-        Score::Flux(_) | Score::PhotonXS(_) => None,
+        Score::Flux(_) | Score::PhotonXS(_) | Score::Current(_) => None,
     }
 }
 

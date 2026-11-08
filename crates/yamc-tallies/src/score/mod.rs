@@ -23,6 +23,7 @@ pub enum Score {
     DamageEnergy(DamageEnergyScore),
     ReactionRate(ReactionRateScore),
     PhotonXS(PhotonXSScore),
+    Current(CurrentScore),
 }
 
 impl Score {
@@ -36,6 +37,7 @@ impl Score {
             Self::DamageEnergy(_) => ScoreKind::DamageEnergy,
             Self::ReactionRate(_) => ScoreKind::ReactionRate,
             Self::PhotonXS(_) => ScoreKind::PhotonXS,
+            Self::Current(_) => ScoreKind::Current,
         }
     }
 
@@ -52,13 +54,14 @@ impl Score {
                 None => r.mt.to_string(),
             },
             Self::PhotonXS(p) => p.component.name().to_string(),
+            Self::Current(_) => "current".to_string(),
         }
     }
 
     /// MT number, if applicable (returns `None` for flux).
     pub fn mt(&self) -> Option<Mt> {
         match self {
-            Self::Flux(_) => None,
+            Self::Flux(_) | Self::Current(_) => None,
             Self::Heating(_) => Some(Mt::HEATING),
             Self::HeatingLocal(_) => Some(Mt::HEATING_LOCAL),
             Self::DamageEnergy(_) => Some(Mt::DAMAGE_ENERGY),
@@ -74,6 +77,9 @@ impl Score {
         match self {
             Self::Flux(_) => panic!(
                 "Direct integer value for flux score is not supported. Use 'flux' string only."
+            ),
+            Self::Current(_) => panic!(
+                "Direct integer value for current score is not supported. Use 'current' string only."
             ),
             _ => self.mt().unwrap().as_i32(),
         }
@@ -122,6 +128,7 @@ impl Score {
             Self::Production(_) => None,
             Self::DamageEnergy(_) => None,
             Self::PhotonXS(_) => None,
+            Self::Current(_) => None,
         }
     }
 
@@ -132,6 +139,7 @@ impl Score {
             Self::Heating(_) | Self::HeatingLocal(_) | Self::DamageEnergy(_) => "eV",
             Self::Production(_) => "particles",
             Self::ReactionRate(_) | Self::PhotonXS(_) => "reactions",
+            Self::Current(_) => "particles",
         }
     }
 

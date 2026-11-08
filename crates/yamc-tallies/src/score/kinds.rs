@@ -14,6 +14,7 @@ pub enum ScoreKind {
     DamageEnergy,
     ReactionRate,
     PhotonXS,
+    Current,
 }
 
 // ---------------------------------------------------------------------------
@@ -25,6 +26,12 @@ pub struct FluxScore;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HeatingScore;
+
+/// Net current through a surface: each crossing adds its weight, positive
+/// towards the surface's positive side (`Surface.above`) and negative
+/// towards the negative side. Scored only by surface tallies.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CurrentScore;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HeatingLocalScore;

@@ -115,17 +115,17 @@ def test_invalid_set_boundary():
         s.boundary = "invalid"
 
 
-def test_surface_optional_id():
-    """Test that surface IDs are optional and default to None."""
-    # Create surfaces without specifying surface_id
+def test_surface_ids_are_assigned_automatically():
+    """A surface built without an id gets a distinct one, above any explicit id."""
+    explicit = Sphere(radius=1.0, surface_id=5000)
     sphere = Sphere(x0=0.0, y0=0.0, z0=0.0, radius=1.0)
     plane = Plane(axis="x", offset=0.0)
     cylinder = Cylinder(axis="z", x0=0.0, y0=0.0, radius=1.0)
 
-    # Surface IDs should default to None
-    assert sphere.surface_id is None
-    assert plane.surface_id is None
-    assert cylinder.surface_id is None
+    ids = [sphere.surface_id, plane.surface_id, cylinder.surface_id]
+    assert all(isinstance(i, int) for i in ids)
+    assert len(set(ids)) == 3
+    assert min(ids) > explicit.surface_id
 
 
 def test_surface_explicit_id():
@@ -144,9 +144,9 @@ def test_surface_explicit_id():
 def test_surface_id_setter():
     """Test that surface IDs can be changed after creation."""
     sphere = Sphere(x0=0.0, y0=0.0, z0=0.0, radius=1.0)
-    
-    # Initially None
-    assert sphere.surface_id is None
+
+    # Initially an automatic id
+    assert isinstance(sphere.surface_id, int)
     
     # Set an ID
     sphere.surface_id = 42
@@ -298,9 +298,8 @@ def test_surface_types_without_ids():
         Cylinder(axis="x", y0=0.0, z0=0.0, radius=1.0),
     ]
 
-    # Check that all surfaces have None IDs
-    for surface in surfaces:
-        assert surface.surface_id is None
+    # Each surface has its own automatic id
+    assert len({surface.surface_id for surface in surfaces}) == len(surfaces)
 
 
 def test_complex_geometry_surface_validation():

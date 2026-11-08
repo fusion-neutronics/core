@@ -5335,6 +5335,17 @@ class Tally:
         Set the cell filter. Accepts a single Cell or a list of Cells.
         """
     @property
+    def surfaces(self) -> typing.Optional[builtins.list[builtins.int]]:
+        r"""
+        Surface ids of the surface filter, or None for a tally that is not a
+        surface tally.
+        """
+    @property
+    def cosine_bins(self) -> typing.Optional[builtins.list[builtins.float]]:
+        r"""
+        Cosine bin edges of a surface tally, or None if it has none.
+        """
+    @property
     def materials(self) -> typing.Optional[builtins.list[builtins.int]]:
         r"""
         Material IDs of the material filter, or None if no material filter is set.
@@ -5415,7 +5426,7 @@ class Tally:
         Returns:
             list[float]: Relative error per bin.
         """
-    def __new__(cls, scores: typing.Sequence[builtins.str | builtins.int] | None = None, name: typing.Optional[builtins.str] = None, id: typing.Optional[builtins.int] = None, nuclides: typing.Optional[typing.Sequence[builtins.str]] = None, response: str | typing.Sequence[str] | Material | None = None, cells: Cell | typing.Sequence[Cell] | None = None, materials: Material | typing.Sequence[Material] | None = None, mesh: RegularRectangularMesh | RegularCylindricalMesh | None = None, unstructured_mesh: tuple[MeshGeometry, builtins.float] | None = None, energy_bins: typing.Optional[typing.Sequence[builtins.float]] = None, energy_group_structure: typing.Optional[builtins.str] = None, energy_function: tuple[typing.Sequence[builtins.float], typing.Sequence[builtins.float]] | tuple[typing.Sequence[builtins.float], typing.Sequence[builtins.float], builtins.str] | tuple[typing.Sequence[builtins.float], typing.Sequence[builtins.float], builtins.str, builtins.str] | None = None, interpolation: typing.Optional[builtins.str] = None, dose_coefficients: tuple[builtins.str, builtins.str] | tuple[builtins.str, builtins.str, builtins.str] | None = None, particle: typing.Optional[builtins.str] = None, parent_nuclides: typing.Optional[typing.Sequence[builtins.str]] = None, estimator: typing.Optional[builtins.str] = None, covariance: builtins.bool = False) -> Tally:
+    def __new__(cls, scores: typing.Sequence[builtins.str | builtins.int] | None = None, name: typing.Optional[builtins.str] = None, id: typing.Optional[builtins.int] = None, nuclides: typing.Optional[typing.Sequence[builtins.str]] = None, response: str | typing.Sequence[str] | Material | None = None, cells: Cell | typing.Sequence[Cell] | None = None, materials: Material | typing.Sequence[Material] | None = None, surfaces: Surface | typing.Sequence[Surface] | None = None, cosine_bins: typing.Optional[typing.Sequence[builtins.float]] = None, mesh: RegularRectangularMesh | RegularCylindricalMesh | None = None, unstructured_mesh: tuple[MeshGeometry, builtins.float] | None = None, energy_bins: typing.Optional[typing.Sequence[builtins.float]] = None, energy_group_structure: typing.Optional[builtins.str] = None, energy_function: tuple[typing.Sequence[builtins.float], typing.Sequence[builtins.float]] | tuple[typing.Sequence[builtins.float], typing.Sequence[builtins.float], builtins.str] | tuple[typing.Sequence[builtins.float], typing.Sequence[builtins.float], builtins.str, builtins.str] | None = None, interpolation: typing.Optional[builtins.str] = None, dose_coefficients: tuple[builtins.str, builtins.str] | tuple[builtins.str, builtins.str, builtins.str] | None = None, particle: typing.Optional[builtins.str] = None, parent_nuclides: typing.Optional[typing.Sequence[builtins.str]] = None, estimator: typing.Optional[builtins.str] = None, covariance: builtins.bool = False) -> Tally:
         r"""
         Create a new Tally.
         
@@ -5440,6 +5451,22 @@ class Tally:
             materials (Material | list[Material], optional): Material(s) to bin over --
                 one result bin per material. A single material (not in a list) is also
                 accepted.
+            surfaces (Surface | list[Surface], optional): Score at crossings of these
+                surfaces instead of along tracks: a surface-current tally, one result
+                bin per surface. Its only score is ``"current"``: each crossing adds
+                the particle weight, positive towards the surface's ``.above`` side
+                and negative towards ``.below``, so it is the net current through the
+                surface per source particle. For the outer surface of a body in vacuum
+                nothing comes back, and that is the leakage. Takes ``energy_bins``,
+                ``cosine_bins``, ``particle`` and an energy function, but no cells,
+                materials, mesh, nuclides or estimator. Surface tracking and CSG
+                surfaces only.
+            cosine_bins (list[float], optional): Bin a surface tally by the cosine
+                between the particle's direction and the surface normal, which points
+                to ``.above`` (outwards on a sphere). Ascending edges within
+                ``[-1, 1]``; for example ``[math.cos(math.radians(17.28)), 1.0]`` keeps
+                particles leaving within 17.28 degrees of the normal. Needs
+                ``surfaces``.
             mesh (RegularRectangularMesh, optional): Mesh for spatial binning
             unstructured_mesh (tuple, optional): (MeshGeometry, volume) for tet mesh scoring
             energy_bins (list[float], optional): Energy bin boundaries in eV

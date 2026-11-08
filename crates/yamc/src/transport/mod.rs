@@ -163,6 +163,8 @@ pub(crate) struct TransportCtx<'a> {
     pub(crate) inelastic_flat_cache: &'a InelasticFlatCache,
     /// The nuclear-data replica draws, when the run carries replica weights.
     pub(crate) replica: Option<&'a replica::ReplicaContext>,
+    /// The surfaces surface-current tallies score on, when any tally does.
+    pub(crate) surface_scoring: Option<&'a SurfaceScoring>,
 }
 
 /// Sample the distance the particle will travel before its next
@@ -701,6 +703,15 @@ pub(crate) fn transport_particle<T: Tracker>(
                 );
                 if let Some(segment) = &segment {
                     segment.apply(particle);
+                }
+                if let Some(surface_scoring) = ctx.surface_scoring {
+                    surface_scoring.score_crossing(
+                        particle,
+                        boundary_hit.surface_id,
+                        end_position,
+                        ctx.tallies,
+                        welford_worker,
+                    );
                 }
                 handle_surface_crossing(
                     particle,

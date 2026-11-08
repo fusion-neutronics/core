@@ -6,12 +6,13 @@ pub mod material;
 pub mod mesh;
 pub mod parent_nuclide;
 pub mod particle_type;
+pub mod surface;
 #[cfg(feature = "mesh")]
 pub mod unstructured_mesh;
 
 use crate::{
-    CellFilter, EnergyFilter, EnergyFunctionFilter, MaterialFilter, MeshFilter,
-    ParentNuclideFilter, ParticleTypeFilter,
+    CellFilter, CosineFilter, EnergyFilter, EnergyFunctionFilter, MaterialFilter, MeshFilter,
+    ParentNuclideFilter, ParticleTypeFilter, SurfaceFilter,
 };
 
 /// Unified filter enum for tallies
@@ -31,6 +32,11 @@ pub enum Filter {
     /// Parent nuclide filter for D1S decay photon tallies.
     /// Bins photon scores by the nuclide that produced the decay photon.
     ParentNuclide(ParentNuclideFilter),
+    /// Surfaces a surface-current tally scores crossings on. A tally with
+    /// this filter scores at surface crossings instead of along tracks.
+    Surface(SurfaceFilter),
+    /// Bins surface crossings by the cosine between direction and normal.
+    Cosine(CosineFilter),
 }
 
 impl Filter {
@@ -46,6 +52,8 @@ impl Filter {
             Filter::UnstructuredMesh(_) => "UnstructuredMeshFilter",
             Filter::ParticleType(_) => "ParticleTypeFilter",
             Filter::ParentNuclide(_) => "ParentNuclideFilter",
+            Filter::Surface(_) => "SurfaceFilter",
+            Filter::Cosine(_) => "CosineFilter",
         }
     }
 
@@ -65,6 +73,8 @@ impl Filter {
             Filter::UnstructuredMesh(f) => f.num_bins(),
             Filter::ParticleType(_) => 1,
             Filter::ParentNuclide(f) => f.num_bins(),
+            Filter::Surface(f) => f.num_bins(),
+            Filter::Cosine(f) => f.num_bins(),
         }
     }
 }

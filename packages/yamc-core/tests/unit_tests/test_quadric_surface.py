@@ -31,7 +31,10 @@ def test_quadric_accepts_name():
                          name="ellipsoid")
     unnamed = yamc.Quadric(a=1.0, b=1.0, c=1.0, k=-100.0, boundary="vacuum")
     assert "Quadric" in repr(named)
-    assert repr(named) == repr(unnamed)
+    # Each surface has its own automatic id; otherwise the two are identical.
+    assert repr(named).replace(f"id={named.surface_id}", "id=") == repr(unnamed).replace(
+        f"id={unnamed.surface_id}", "id="
+    )
 
 
 def test_sphere_as_quadric_is_bit_identical():

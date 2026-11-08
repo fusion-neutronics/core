@@ -1958,6 +1958,26 @@ impl Model {
             ));
         }
 
+        // Surface tallies score at exact surface crossings, which only
+        // surface tracking produces: delta tracking flies through surfaces
+        // against a majorant and never stops on them.
+        let has_surface_tallies = self.tallies.iter().any(|t| t.is_surface_tally());
+        if has_surface_tallies && self.tracking_mode != TrackingMode::Surface {
+            return Err(format!(
+                "tracking_mode='{}' does not support surface tallies: delta tracking \
+                 does not stop on surfaces, so it cannot score crossings. Use \
+                 tracking_mode='surface'.",
+                self.tracking_mode
+            ));
+        }
+        if has_surface_tallies && settings.data_uncertainty.is_some() {
+            return Err(
+                "data_uncertainty does not yet cover surface tallies: run them without \
+                 data_uncertainty, or tally a cell instead"
+                    .to_string(),
+            );
+        }
+
         // Auto-enable transport_secondary_photons if any source emits photons
         if self
             .sources
@@ -2524,6 +2544,8 @@ impl Model {
             // run: it is dropped here, well before the nuclide data it was
             // filled from.
             let inelastic_flat_cache = InelasticFlatCache::default();
+            let surface_scoring =
+                crate::transport::SurfaceScoring::build(&self.geometry, &tallies)?;
             let transport_ctx = TransportCtx {
                 geometry: &self.geometry,
                 photon_cutoff_energy: self.photon_cutoff_energy,
@@ -2545,6 +2567,7 @@ impl Model {
                 debug,
                 inelastic_flat_cache: &inelastic_flat_cache,
                 replica: replica_ctx.as_ref(),
+                surface_scoring: surface_scoring.as_ref(),
             };
             let transport_ctx = &transport_ctx;
 
