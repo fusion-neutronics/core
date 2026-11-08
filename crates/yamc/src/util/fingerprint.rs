@@ -7,14 +7,13 @@
 //! the run-varying `verbose` knob and the skipped diagnostics (the other
 //! run parameters -- seed, particle count, threads, time budget -- are
 //! per-call `TransportSettings` and never on the Model at all), the
-//! `tallies` subtree (tallies are
-//! observation-only and may legitimately differ between combinable
-//! runs), and the values of the material ids. An id labels a material
-//! rather than changing what is sampled, and an automatic one depends on
-//! what else the process built, so each is replaced by the first slot of
-//! the material store holding it: which slots share a material stays part
-//! of the identity. `combine_results` matches material filters the same
-//! way, through [`Model::material_slots`].
+//! `tallies` subtree (tallies are observation-only and may legitimately
+//! differ between combinable runs), and the values of the material and
+//! surface ids. These ids label geometry objects rather than changing what
+//! is sampled, and automatic ones depend on what else the process built.
+//! They are replaced by their first slot in the serialized geometry, keeping
+//! the sharing pattern part of the identity. `combine_results` matches
+//! material filters through [`Model::material_slots`].
 //!
 //! `combine_results` refuses to pool results whose fingerprints differ:
 //! two runs only estimate the same quantities if they sampled the same
@@ -148,6 +147,7 @@ impl Model {
             }
             if let Some(geometry) = map.get_mut("geometry") {
                 label_materials_by_slot(geometry);
+                label_surfaces_by_slot(geometry);
             }
         }
         let combined = serde_json::json!({
@@ -192,6 +192,40 @@ fn label_materials_by_slot(geometry: &mut serde_json::Value) {
     }
 }
 
+/// Replace serialized surface IDs with their first slot in the geometry.
+///
+/// Surface IDs link tallies to boundaries, but do not change the sampled
+/// physics. Keeping the sharing pattern while discarding the numeric labels
+/// lets separately built copies of one model have the same fingerprint.
+fn label_surfaces_by_slot(geometry: &mut serde_json::Value) {
+    fn visit(value: &mut serde_json::Value, slots: &mut HashMap<u64, u64>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(id_value) = map.get_mut("surface_id")
+                    && let Some(id) = id_value.as_u64()
+                {
+                    let slot = slots.len() as u64;
+                    let label = slots.entry(id).or_insert(slot);
+                    *id_value = (*label).into();
+                }
+                for (key, value) in map.iter_mut() {
+                    if key != "surface_id" {
+                        visit(value, slots);
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    visit(item, slots);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    visit(geometry, &mut HashMap::new());
+}
+
 /// Last two components of a data path: `"/home/x/endf-b8.1/Co58.arrow"`
 /// becomes `"endf-b8.1/Co58.arrow"`. Keeps the identity stable across
 /// machines with different data roots while still distinguishing
@@ -225,7 +259,7 @@ mod tests {
     /// Two nested spheres, one material each: `ids[i]` is the id of the
     /// material in slot `i` (`None` leaves it to the geometry), `densities[i]`
     /// its density.
-    fn shells_model(ids: [Option<u32>; 2], densities: [f64; 2]) -> Model {
+    fn shells_model(ids: [Option<u32>; 2], densities: [f64; 2], surface_ids: [usize; 2]) -> Model {
         let sphere = |surface_id, radius, boundary| {
             Arc::new(Surface {
                 surface_id: Some(surface_id),
@@ -239,8 +273,8 @@ mod tests {
                 name: None,
             })
         };
-        let inner = sphere(1, 5.0, BoundaryType::Transmission);
-        let outer = sphere(2, 10.0, BoundaryType::Vacuum);
+        let inner = sphere(surface_ids[0], 5.0, BoundaryType::Transmission);
+        let outer = sphere(surface_ids[1], 10.0, BoundaryType::Vacuum);
         let materials = ids
             .iter()
             .zip(densities)
@@ -270,21 +304,32 @@ mod tests {
 
     #[test]
     fn material_ids_are_not_part_of_the_fingerprint() {
-        let reference = shells_model([Some(1), Some(2)], [2.0, 3.0])
+        let reference = shells_model([Some(1), Some(2)], [2.0, 3.0], [1, 2])
             .fingerprint()
             .unwrap();
         for ids in [[Some(7), Some(3)], [None, None], [Some(2), Some(1)]] {
-            let relabelled = shells_model(ids, [2.0, 3.0]).fingerprint().unwrap();
+            let relabelled = shells_model(ids, [2.0, 3.0], [1, 2]).fingerprint().unwrap();
             assert_eq!(relabelled, reference, "{ids:?}");
         }
         // The materials, and which slot holds which, still are.
-        let swapped = shells_model([Some(1), Some(2)], [3.0, 2.0]);
+        let swapped = shells_model([Some(1), Some(2)], [3.0, 2.0], [1, 2]);
         assert_ne!(swapped.fingerprint().unwrap(), reference);
     }
 
     #[test]
+    fn surface_ids_are_not_part_of_the_fingerprint() {
+        let reference = shells_model([Some(1), Some(2)], [2.0, 3.0], [1, 2])
+            .fingerprint()
+            .unwrap();
+        let relabelled = shells_model([Some(1), Some(2)], [2.0, 3.0], [20, 40])
+            .fingerprint()
+            .unwrap();
+        assert_eq!(relabelled, reference);
+    }
+
+    #[test]
     fn material_slots_map_each_id_to_its_slot() {
-        let model = shells_model([Some(7), Some(3)], [2.0, 3.0]);
+        let model = shells_model([Some(7), Some(3)], [2.0, 3.0], [1, 2]);
         assert_eq!(model.material_slots(), BTreeMap::from([(7, 0), (3, 1)]));
     }
 
