@@ -28,6 +28,28 @@ const GRID_RATIO: f64 = 1.02;
 /// How far below a Bragg edge the point marking the step is put, relative.
 const EDGE_GAP: f64 = 1e-9;
 
+impl crate::material::Material {
+    /// The elastic cross section of `nuclide` at `energy` with its thermal
+    /// table applied, given its free-atom elastic cross section there:
+    /// `f (sigma_el,b + sigma_inel,b) + (1 - f) sigma_el,free`. `None` when no
+    /// table binds the nuclide or `energy` is at or above its energy_max.
+    pub fn bound_elastic_xs(&self, nuclide: &str, energy: f64, free_elastic: f64) -> Option<f64> {
+        let bound = self.thermal_for(nuclide)?;
+        if energy >= bound.table.energy_max {
+            return None;
+        }
+        let f = bound.fraction;
+        Some(f * (bound.elastic_xs(energy) + bound.inelastic_xs(energy)) + (1.0 - f) * free_elastic)
+    }
+
+    /// The thermal table bound to `nuclide` in this material, if one is.
+    pub fn thermal_for(&self, nuclide: &str) -> Option<&BoundThermal> {
+        self.thermal
+            .iter()
+            .find(|b| b.nuclides.iter().any(|n| n == nuclide))
+    }
+}
+
 impl BoundThermal {
     /// The table temperatures in use and the weight of the upper one: the
     /// single table the material sits on (weight 0), or the two it falls
@@ -244,6 +266,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_total_asked_for_alone_is_still_corrected() {
+        // The override reads the free elastic cross section; a caller that
+        // asked for MT 1 only must still get the bound total (the caller adds
+        // MT 2 before and drops it after, see calculate_microscopic_xs_neutron_at).
+        let b = bound(400.0, 1.0);
+        let grid = vec![0.003];
+        let mut micro = HashMap::from([(
+            "C12".to_string(),
+            HashMap::from([(1, vec![7.0]), (2, vec![5.0])]),
+        )]);
+        apply_bound_xs(std::slice::from_ref(&b), &grid, &mut micro);
+        let th = b.elastic_xs(0.003) + b.inelastic_xs(0.003);
+        assert!((micro["C12"][&1][0] - (7.0 + th - 5.0)).abs() < 1e-12);
     }
 
     #[test]
