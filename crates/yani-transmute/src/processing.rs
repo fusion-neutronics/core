@@ -795,7 +795,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             fission_yields: None,
-            sources: Vec::new(),
+            sources: Vec::new().into(),
             half_life_uncertainty: None,
             decay_energy_uncertainty: None,
             decay_evaluated: true,
