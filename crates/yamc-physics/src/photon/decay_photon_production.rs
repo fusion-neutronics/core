@@ -130,7 +130,7 @@ pub fn decay_photon_spectra(
     emitter: &ChainNuclide,
 ) -> Result<Vec<(f64, DecayPhotonSpectrum)>, String> {
     let mut spectra = Vec::new();
-    for source in &emitter.sources {
+    for source in emitter.sources.iter() {
         let DecaySourceDistribution::Tabular {
             energies,
             intensities,
@@ -694,7 +694,7 @@ mod tests {
                 }],
                 decays: vec![],
                 fission_yields: None,
-                sources: vec![],
+                sources: Default::default(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
                 decay_evaluated: true,
@@ -722,7 +722,8 @@ mod tests {
                         energies: vec![846764.0, 1810726.0],
                         intensities: vec![7.381e-5, 2.030e-5],
                     },
-                }],
+                }]
+                .into(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
                 decay_evaluated: true,
@@ -883,7 +884,7 @@ mod tests {
                 }],
                 decays: vec![],
                 fission_yields: None,
-                sources: vec![],
+                sources: Default::default(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
                 decay_evaluated: true,
@@ -910,7 +911,7 @@ mod tests {
                     multiplicity: None,
                 }],
                 fission_yields: None,
-                sources: vec![],
+                sources: Default::default(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
                 decay_evaluated: true,
@@ -937,7 +938,8 @@ mod tests {
                         energies: vec![1000000.0],
                         intensities: vec![1.0e-3],
                     },
-                }],
+                }]
+                .into(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
                 decay_evaluated: true,
@@ -1087,7 +1089,8 @@ mod tests {
                         intensities: vec![0.05 * lambda],
                     },
                 },
-            ],
+            ]
+            .into(),
             half_life_uncertainty: None,
             decay_energy_uncertainty: None,
             decay_evaluated: true,
@@ -1114,7 +1117,7 @@ mod tests {
                     }],
                     decays: vec![],
                     fission_yields: None,
-                    sources: vec![],
+                    sources: Default::default(),
                     half_life_uncertainty: None,
                     decay_energy_uncertainty: None,
                     decay_evaluated: true,
@@ -1219,7 +1222,8 @@ mod tests {
                     energies: vec![1000000.0],
                     intensities: vec![1.0e-3],
                 },
-            }],
+            }]
+            .into(),
             half_life_uncertainty: None,
             decay_energy_uncertainty: None,
             decay_evaluated: true,

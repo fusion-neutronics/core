@@ -37,6 +37,8 @@ pub(crate) fn woodcock_mesh_track_length_eligible(tally: &Tally) -> bool {
     };
     tally.estimator == yamc_tallies::Estimator::TrackLength
         && has_spatial_mesh
+        // Parts bin by the cell, which a segment here does not identify.
+        && tally.mesh_parts.is_none()
         && tally
             .scores
             .iter()

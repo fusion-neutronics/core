@@ -2131,8 +2131,7 @@ pub(crate) fn sample_decay_photons(
     let correlated = correlation == PhotonCorrelation::Correlated;
     let intensity_deviate = |own: f64| if correlated { shared } else { own };
     let mut z = z.into_iter();
-    for source in cn
-        .sources
+    for source in std::sync::Arc::make_mut(&mut cn.sources)
         .iter_mut()
         .filter(|source| source.particle == "photon")
     {
@@ -2328,7 +2327,7 @@ pub(crate) fn with_half_lives(
 pub(crate) fn set_half_life(cn: &mut yani::ChainNuclide, half_life: f64) {
     if let Some(nominal) = cn.half_life.filter(|t| *t > 0.0 && half_life > 0.0) {
         let scale = nominal / half_life;
-        for source in &mut cn.sources {
+        for source in std::sync::Arc::make_mut(&mut cn.sources) {
             source.scale_rates(scale);
         }
     }
@@ -2675,7 +2674,8 @@ mod tests {
                     intensities: vec![3.0e-6 * lambda, 0.0],
                     interpolation: Some(yani::Interpolation::Histogram),
                 }),
-            ],
+            ]
+            .into(),
         };
         set_half_life(&mut cn, 636.0);
         let lambda_k = std::f64::consts::LN_2 / 636.0;
@@ -2725,7 +2725,8 @@ mod tests {
                     intensities: vec![0.27 * 0.5 * lambda],
                 },
                 uncertainty: Some(std::sync::Arc::new(stated.clone())),
-            }],
+            }]
+            .into(),
         };
         let shared = cn.sources[0].uncertainty.clone().unwrap();
         set_half_life(&mut cn, 636.0);
@@ -3131,7 +3132,7 @@ mod tests {
             reactions: Vec::new(),
             decays: Vec::new(),
             fission_yields: None,
-            sources: Vec::new(),
+            sources: Default::default(),
         }
     }
 
@@ -3409,7 +3410,8 @@ mod tests {
                     ..Default::default()
                 })),
             },
-        ];
+        ]
+        .into();
         cn
     }
 
@@ -3521,13 +3523,14 @@ mod tests {
         }
         // A source with no uncertainty at all still spends its deviates.
         let mut bare = photon_emitter(0.0);
-        bare.sources[0].uncertainty = None;
+        std::sync::Arc::make_mut(&mut bare.sources)[0].uncertainty = None;
         let mut zeros = photon_emitter(0.0);
-        zeros.sources[0].uncertainty = Some(std::sync::Arc::new(yani::DecaySourceUncertainty {
-            intensity_uncertainties: Some(vec![0.0, 0.0]),
-            energy_uncertainties: Some(vec![0.0, 0.0]),
-            ..Default::default()
-        }));
+        std::sync::Arc::make_mut(&mut zeros.sources)[0].uncertainty =
+            Some(std::sync::Arc::new(yani::DecaySourceUncertainty {
+                intensity_uncertainties: Some(vec![0.0, 0.0]),
+                energy_uncertainties: Some(vec![0.0, 0.0]),
+                ..Default::default()
+            }));
         for replica in 0..32 {
             assert_eq!(
                 photon_draw(&bare, 3, replica),
@@ -3546,21 +3549,22 @@ mod tests {
         assert!(!has_decay_photon_sigma_not_carried(&emitter));
 
         let mut silent = photon_emitter(0.0);
-        silent.sources[0].uncertainty = Some(std::sync::Arc::new(yani::DecaySourceUncertainty {
-            normalization: Some(1.0),
-            normalization_uncertainty: Some(0.0),
-            intensity_uncertainties: Some(vec![0.0, 0.0]),
-            energy_uncertainties: Some(vec![0.0, 0.0]),
-            covariance: None,
-        }));
-        silent.sources[1].uncertainty = None;
+        std::sync::Arc::make_mut(&mut silent.sources)[0].uncertainty =
+            Some(std::sync::Arc::new(yani::DecaySourceUncertainty {
+                normalization: Some(1.0),
+                normalization_uncertainty: Some(0.0),
+                intensity_uncertainties: Some(vec![0.0, 0.0]),
+                energy_uncertainties: Some(vec![0.0, 0.0]),
+                covariance: None,
+            }));
+        std::sync::Arc::make_mut(&mut silent.sources)[1].uncertainty = None;
         assert!(has_decay_photons(&silent));
         assert!(!has_decay_photon_sigma(&silent));
         assert!(!has_decay_photon_sigma_not_carried(&silent));
         let before = photon_draw(&silent, 1, 0);
         assert_eq!(before.0, {
             let yani::DecaySourceDistribution::Discrete { intensities, .. } =
-                &silent.sources[0].distribution
+                &std::sync::Arc::make_mut(&mut silent.sources)[0].distribution
             else {
                 unreachable!()
             };
@@ -3569,14 +3573,15 @@ mod tests {
 
         let mut lost = silent.clone();
         if let yani::DecaySourceDistribution::Discrete { intensities, .. } =
-            &mut lost.sources[0].distribution
+            &mut std::sync::Arc::make_mut(&mut lost.sources)[0].distribution
         {
             intensities[1] = 0.0;
         }
-        lost.sources[0].uncertainty = Some(std::sync::Arc::new(yani::DecaySourceUncertainty {
-            intensity_uncertainties: Some(vec![0.0, 1.0e-6]),
-            ..Default::default()
-        }));
+        std::sync::Arc::make_mut(&mut lost.sources)[0].uncertainty =
+            Some(std::sync::Arc::new(yani::DecaySourceUncertainty {
+                intensity_uncertainties: Some(vec![0.0, 1.0e-6]),
+                ..Default::default()
+            }));
         assert!(!has_decay_photon_sigma(&lost));
         assert!(has_decay_photon_sigma_not_carried(&lost));
 
@@ -3629,7 +3634,7 @@ mod tests {
         let mut cn = stated_as_zero();
         cn.name = "X101".to_string();
         cn.half_life = Some(1000.0);
-        cn.sources = sources;
+        cn.sources = sources.into();
         cn
     }
 
@@ -3823,7 +3828,7 @@ mod tests {
             &[0.0, 0.0],
             None,
         )]);
-        cn.sources.push(yani::DecaySource {
+        std::sync::Arc::make_mut(&mut cn.sources).push(yani::DecaySource {
             particle: "photon".to_string(),
             radiation: Some("gamma".to_string()),
             uncertainty: None,

@@ -25,7 +25,7 @@ fn exported(tag: &str) -> PathBuf {
         reactions,
         decays: Vec::new(),
         fission_yields: None,
-        sources: Vec::new(),
+        sources: Default::default(),
     };
     let capture = ChainReaction {
         kind: "(n,gamma)".to_string(),

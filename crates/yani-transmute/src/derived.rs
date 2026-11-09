@@ -1089,7 +1089,8 @@ mod tests {
                         energies: vec![1_173_228.0, 1_332_492.0],
                         intensities: vec![0.9985 * lambda, 0.9998 * lambda],
                     },
-                }],
+                }]
+                .into(),
             },
         );
         chain.insert(
@@ -1107,7 +1108,7 @@ mod tests {
                 reactions: vec![],
                 decays: vec![],
                 fission_yields: None,
-                sources: vec![],
+                sources: Default::default(),
             },
         );
         chain
@@ -1134,7 +1135,7 @@ mod tests {
                         reactions: vec![],
                         decays: vec![],
                         fission_yields: None,
-                        sources: vec![],
+                        sources: Default::default(),
                     },
                 )
             })
@@ -1540,13 +1541,14 @@ mod tests {
         let mut chain = cobalt_chain();
         let co60 = chain.get_mut("Co60").unwrap();
         let intensities = values(&co60.sources[0].distribution).to_vec();
-        co60.sources[0].uncertainty = Some(std::sync::Arc::new(yani::DecaySourceUncertainty {
-            normalization: Some(1.0),
-            normalization_uncertainty: Some(0.01),
-            intensity_uncertainties: Some(vec![0.02 * intensities[0], 0.03 * intensities[1]]),
-            energy_uncertainties: Some(vec![30.0, 20.0]),
-            covariance: None,
-        }));
+        std::sync::Arc::make_mut(&mut co60.sources)[0].uncertainty =
+            Some(std::sync::Arc::new(yani::DecaySourceUncertainty {
+                normalization: Some(1.0),
+                normalization_uncertainty: Some(0.01),
+                intensity_uncertainties: Some(vec![0.02 * intensities[0], 0.03 * intensities[1]]),
+                energy_uncertainties: Some(vec![30.0, 20.0]),
+                covariance: None,
+            }));
         let component = |energy: f64, sigma: f64| {
             Some(yani::DecayEnergyComponent {
                 energy,

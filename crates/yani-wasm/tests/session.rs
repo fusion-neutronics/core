@@ -669,7 +669,7 @@ fn session_with_sm158_law(law: Option<yani::Interpolation>) -> Option<YaniSessio
     .expect("fixture chain parses");
     let sm158 = chain.get_mut("Sm158").expect("Sm158 is in the fixture");
     let mut continua = 0;
-    for source in &mut sm158.sources {
+    for source in std::sync::Arc::make_mut(&mut sm158.sources) {
         if source.particle != "photon" {
             continue;
         }

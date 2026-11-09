@@ -1500,7 +1500,7 @@ mod tests {
                 reactions,
                 decays: Vec::new(),
                 fission_yields: None,
-                sources: Vec::new(),
+                sources: Default::default(),
             },
         )])
     }

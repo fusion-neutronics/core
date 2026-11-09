@@ -376,7 +376,7 @@ mod tests {
             reactions,
             decays,
             fission_yields: None,
-            sources,
+            sources: sources.into(),
             half_life_uncertainty: None,
             decay_energy_uncertainty: None,
             decay_evaluated: true,

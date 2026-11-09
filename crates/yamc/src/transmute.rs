@@ -1793,7 +1793,7 @@ mod tests {
                     .collect(),
                 decays: vec![],
                 fission_yields: None,
-                sources: Vec::new(),
+                sources: Default::default(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
                 decay_evaluated: true,

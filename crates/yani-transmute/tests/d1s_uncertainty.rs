@@ -191,7 +191,10 @@ fn mn56_photons(gamma: Option<f64>, xray: Option<f64>) -> Arc<HashMap<String, ya
     let mn56 = chain.get_mut("Mn56").expect("Mn56");
     let mut kinds = ["gamma", "xray"].into_iter();
     let mut spectra = 0;
-    for source in mn56.sources.iter_mut().filter(|s| s.particle == "photon") {
+    for source in std::sync::Arc::make_mut(&mut mn56.sources)
+        .iter_mut()
+        .filter(|s| s.particle == "photon")
+    {
         let yani::DecaySourceDistribution::Discrete { intensities, .. } = &source.distribution
         else {
             continue;
@@ -303,7 +306,7 @@ fn a_d1s_dose_ranges_over_the_correlation_between_spectra() {
         })
         .sum();
     let intensity = 0.2 * gamma_energy / 6.0e3;
-    mn56.sources.push(yani::DecaySource {
+    std::sync::Arc::make_mut(&mut mn56.sources).push(yani::DecaySource {
         particle: "photon".to_string(),
         radiation: Some("xray".to_string()),
         distribution: yani::DecaySourceDistribution::Discrete {
