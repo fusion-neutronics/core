@@ -153,7 +153,7 @@ def test_births_limited_to_cells_or_materials_in_the_voxel(by):
 
 def test_an_element_holding_none_of_its_cells_is_refused():
     geometry, inner, _, mesh = _iron_ball()
-    with pytest.raises(ValueError, match="mesh element 1 has a strength but none"):
+    with pytest.raises(ValueError, match="mesh element 1 has a strength but no point in its cells"):
         _births(geometry, MeshDistribution(mesh, [1.0, 1.0], cells=inner))
 
 

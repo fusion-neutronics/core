@@ -15,7 +15,7 @@ use std::sync::Mutex;
 use yamc_nuclide::config::ChainUse;
 use yamc_physics::gpu::flat::inelastic_flat::InelasticFlatCache;
 use yamc_physics::util::bank::ParticleBank;
-use yamc_source::distribution::mesh::{SourceDomain, MAX_DOMAIN_TRIES};
+use yamc_source::distribution::mesh::{SourceDomain, DOMAIN_CHECK_TRIES, MAX_DOMAIN_TRIES};
 use yamc_source::source::{ParticleSource, SourceSelector, SourceSpatialDistribution};
 use yamc_tallies::tally::Tally;
 use yani_transmute::TransmutationTallies;
@@ -879,9 +879,10 @@ impl Model {
             let mut rng = FastRng::new(0x5EED_D0A1);
             if let Some(bin) = mesh.unreachable_bin(&mut rng, |p| self.in_domain(domain, p)) {
                 return Err(format!(
-                    "source {n}: mesh element {bin} has a strength but none of its {kind}s \
-                     inside it, so it could never emit; give it no strength or include the \
-                     {kind} it holds"
+                    "source {n}: mesh element {bin} has a strength but no point in its \
+                     {kind}s in {DOMAIN_CHECK_TRIES} draws, so it could never emit (or \
+                     they fill less than about a millionth of it); give it no strength or \
+                     include the {kind} it holds"
                 ));
             }
         }
