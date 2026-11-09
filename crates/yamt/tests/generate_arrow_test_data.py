@@ -226,23 +226,16 @@ def generate(name, builder, tet_volumes, tag_exterior_vacuum, mesh_kwargs):
 def _read(path):
     f = ipc.open_file(path)
     meta = {k.decode(): v.decode() for k, v in (f.schema.metadata or {}).items()}
-    verts, tris, tri_sid, tets, tet_vid = [], [], [], [], []
-    for i in range(f.num_record_batches):
-        batch = f.get_batch(i)
-        col = batch.column(0)
-        if col.null_count < len(col):
-            verts += [tuple(v) for v in col.to_pylist()]
-        col = batch.column(1)
-        if col.null_count < len(col):
-            n = len(col) - col.null_count
-            tris += col.to_pylist()[:n]
-            tri_sid += batch.column(2).to_pylist()[:n]
-        col = batch.column(4)
-        if col.null_count < len(col):
-            n = len(col) - col.null_count
-            tets += col.to_pylist()[:n]
-            tet_vid += batch.column(5).to_pylist()[:n]
-    return meta, verts, tris, tri_sid, tets, tet_vid
+    (row,) = f.read_all().to_pylist()
+    verts = [tuple(v) for v in row["vertices"]]
+    return (
+        meta,
+        verts,
+        row["triangles"],
+        row["triangle_surface_ids"],
+        row["tetrahedra"],
+        row["tet_volume_ids"],
+    )
 
 
 def _cross(a, b):

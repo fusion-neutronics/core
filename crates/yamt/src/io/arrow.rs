@@ -1,12 +1,21 @@
 //! Read YAMC Arrow IPC mesh files produced by cad_to_yamc.
 //!
-//! The Arrow IPC file contains up to 3 record batches sharing a single schema:
-//! - Batch 0 "vertices": coordinates as FixedSizeList<3, Float64>
-//! - Batch 1 "triangles": indices as FixedSizeList<3, UInt32> + surface_id + physical_group
-//! - Batch 2 "tetrahedra" (optional): indices as FixedSizeList<4, UInt32> + volume_id + physical_group
+//! The Arrow IPC file holds one record batch of one row. Each column is a whole
+//! table, stored as a list of its rows, so the tables keep their own lengths and
+//! no column is padded:
+//! - "vertices": List<FixedSizeList<3, Float64>>
+//! - "triangles": List<FixedSizeList<3, UInt32>>, with "triangle_surface_ids"
+//!   (List<UInt32>, 1-based) and "triangle_physical_groups" (List<Int32>)
+//! - "tetrahedra": List<FixedSizeList<4, UInt32>>, with "tet_volume_ids"
+//!   (List<UInt32>), "tet_physical_groups" (List<Int32>) and "tet_adjacency"
+//!   (List<FixedSizeList<4, Int32>>, -1 for a face on no other tet); empty for
+//!   a surface-only mesh
+//!
+//! Bounding boxes are not stored: the reader computes them from the vertices.
 //!
 //! Schema metadata:
-//! - "yamc.version": format version
+//! - "yamc.version": format version, "2" (version 1 padded every table to a
+//!   shared schema with null columns, and is refused)
 //! - "yamc.physical_groups": JSON physical group definitions
 //! - "yamc.surface_volumes": JSON surface→volume topology
 //! - "yamc.imprinted" (optional): "false" when every solid was meshed on its
@@ -25,14 +34,18 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow_array::{FixedSizeListArray, Float64Array, Int32Array, UInt32Array};
+use arrow_array::types::{Float64Type, Int32Type, UInt32Type};
+use arrow_array::{
+    Array, ArrayRef, ArrowPrimitiveType, FixedSizeListArray, ListArray, PrimitiveArray, RecordBatch,
+};
+use arrow_buffer::{OffsetBuffer, ScalarBuffer};
 use arrow_ipc::reader::FileReader;
 use arrow_ipc::writer::FileWriter;
-use arrow_schema::{DataType, Field, Schema};
+use arrow_schema::{ArrowError, Field, Schema};
 
 use crate::geometry::MeshError;
 use crate::mesh::physical_groups::{self, PhysicalGroupData};
-use crate::mesh::topology::MeshTopology;
+use crate::mesh::topology::{build_tet_aabbs, build_triangle_aabbs, MeshTopology};
 use crate::types::*;
 
 /// Raw data read from an Arrow IPC mesh file.
@@ -79,8 +92,6 @@ pub struct MeshData {
     pub tet_volume_ids: Vec<u32>,
     pub tet_physical_groups: Vec<i32>,
     pub tet_adjacency: Vec<i32>,
-    pub tri_aabbs: Vec<f64>,
-    pub tet_aabbs: Vec<f64>,
     pub physical_groups_json: String,
     pub surface_volumes_json: String,
     /// Optional JSON array of precomputed volume measures (cm³).
@@ -96,275 +107,278 @@ pub struct MeshData {
     pub separated: Vec<[u32; 2]>,
 }
 
+/// Version of the mesh file layout, written as `yamc.version`. Version 1 kept
+/// every table in batches of one shared schema, padded with null columns.
+const FORMAT_VERSION: &str = "2";
+
+/// The mesh tables, as `(column, element width)`. Each column holds one row:
+/// the whole table as a list of fixed-size lists (or of scalars, width 1).
+const TRIANGLE_COLUMNS: [(&str, i32); 3] = [
+    ("triangles", 3),
+    ("triangle_surface_ids", 1),
+    ("triangle_physical_groups", 1),
+];
+const TET_COLUMNS: [(&str, i32); 4] = [
+    ("tetrahedra", 4),
+    ("tet_volume_ids", 1),
+    ("tet_physical_groups", 1),
+    ("tet_adjacency", 4),
+];
+
+/// One table column: `values` as a single list row of `width`-sized items.
+fn table_column<T: ArrowPrimitiveType>(
+    values: Vec<T::Native>,
+    width: i32,
+) -> Result<ListArray, ArrowError> {
+    let n = values.len() / width as usize;
+    let mut item: ArrayRef = Arc::new(PrimitiveArray::<T>::new(ScalarBuffer::from(values), None));
+    if width > 1 {
+        let field = Arc::new(Field::new("item", T::DATA_TYPE, false));
+        item = Arc::new(FixedSizeListArray::try_new(field, width, item, None)?);
+    }
+    let field = Arc::new(Field::new("item", item.data_type().clone(), false));
+    ListArray::try_new(field, OffsetBuffer::from_lengths([n]), item, None)
+}
+
 /// Write mesh data to an Arrow IPC file.
 ///
-/// The file contains up to 3 record batches sharing one schema:
-/// - Batch 0 "vertices": coordinates as FixedSizeList<3, Float64>
-/// - Batch 1 "triangles": indices + surface_id + physical_group
-/// - Batch 2 "tetrahedra" (optional): indices + volume_id + physical_group + adjacency
-pub fn write_arrow_mesh(data: &MeshData, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let file = File::create(path)?;
-
-    let mut metadata = HashMap::new();
-    metadata.insert("yamc.version".to_string(), "1".to_string());
-    metadata.insert(
-        "yamc.physical_groups".to_string(),
-        data.physical_groups_json.clone(),
-    );
-    metadata.insert(
-        "yamc.surface_volumes".to_string(),
-        data.surface_volumes_json.clone(),
-    );
+/// The file holds one record batch of one row. Each column is a whole table
+/// (vertices, triangles and their ids, tetrahedra and their ids), so no column
+/// carries another table's rows. Bounding boxes are not stored: they follow
+/// from the vertices, and [`read_arrow_mesh`] computes them.
+pub fn write_arrow_mesh(data: MeshData, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let mut metadata = HashMap::from([
+        ("yamc.version".to_string(), FORMAT_VERSION.to_string()),
+        (
+            "yamc.physical_groups".to_string(),
+            data.physical_groups_json,
+        ),
+        (
+            "yamc.surface_volumes".to_string(),
+            data.surface_volumes_json,
+        ),
+    ]);
     if !data.volume_measures_json.is_empty() {
-        metadata.insert(
-            "yamc.volume_measures".to_string(),
-            data.volume_measures_json.clone(),
-        );
+        metadata.insert("yamc.volume_measures".into(), data.volume_measures_json);
     }
     if let Some(imprinted) = data.imprinted {
-        metadata.insert("yamc.imprinted".to_string(), imprinted.to_string());
+        metadata.insert("yamc.imprinted".into(), imprinted.to_string());
     }
     if let Some(tol) = data.contact_tolerance {
-        metadata.insert("yamc.contact_tolerance".to_string(), format!("{tol:e}"));
+        metadata.insert("yamc.contact_tolerance".into(), format!("{tol:e}"));
     }
-    if !data.overlaps.is_empty() {
-        let pairs: Vec<String> = data
-            .overlaps
-            .iter()
-            .map(|[low, high]| format!("[{low}, {high}]"))
-            .collect();
-        metadata.insert(
-            "yamc.overlaps".to_string(),
-            format!("[{}]", pairs.join(", ")),
-        );
-    }
-    if !data.separated.is_empty() {
-        let pairs: Vec<String> = data
-            .separated
-            .iter()
-            .map(|[a, b]| format!("[{a}, {b}]"))
-            .collect();
-        metadata.insert(
-            "yamc.separated".to_string(),
-            format!("[{}]", pairs.join(", ")),
-        );
+    for (key, pairs) in [
+        ("yamc.overlaps", &data.overlaps),
+        ("yamc.separated", &data.separated),
+    ] {
+        if !pairs.is_empty() {
+            let pairs: Vec<String> = pairs.iter().map(|[a, b]| format!("[{a}, {b}]")).collect();
+            metadata.insert(key.into(), format!("[{}]", pairs.join(", ")));
+        }
     }
 
-    let schema = Schema::new_with_metadata(
-        vec![
-            Field::new(
-                "coordinates",
-                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float64, false)), 3),
-                true,
-            ),
-            Field::new(
-                "tri_indices",
-                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::UInt32, false)), 3),
-                true,
-            ),
-            Field::new("tri_surface_id", DataType::UInt32, true),
-            Field::new("tri_physical_group", DataType::Int32, true),
-            Field::new(
-                "tet_indices",
-                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::UInt32, false)), 4),
-                true,
-            ),
-            Field::new("tet_volume_id", DataType::UInt32, true),
-            Field::new("tet_physical_group", DataType::Int32, true),
-            Field::new(
-                "tet_adjacency",
-                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Int32, false)), 4),
-                true,
-            ),
-            Field::new(
-                "tri_aabbs",
-                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float64, false)), 6),
-                true,
-            ),
-            Field::new(
-                "tet_aabbs",
-                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float64, false)), 6),
-                true,
-            ),
-        ],
-        metadata,
-    );
+    let columns: Vec<(&str, ListArray)> = vec![
+        ("vertices", table_column::<Float64Type>(data.vertices, 3)?),
+        (
+            TRIANGLE_COLUMNS[0].0,
+            table_column::<UInt32Type>(data.triangles, 3)?,
+        ),
+        (
+            TRIANGLE_COLUMNS[1].0,
+            table_column::<UInt32Type>(data.triangle_surface_ids, 1)?,
+        ),
+        (
+            TRIANGLE_COLUMNS[2].0,
+            table_column::<Int32Type>(data.triangle_physical_groups, 1)?,
+        ),
+        (
+            TET_COLUMNS[0].0,
+            table_column::<UInt32Type>(data.tetrahedra, 4)?,
+        ),
+        (
+            TET_COLUMNS[1].0,
+            table_column::<UInt32Type>(data.tet_volume_ids, 1)?,
+        ),
+        (
+            TET_COLUMNS[2].0,
+            table_column::<Int32Type>(data.tet_physical_groups, 1)?,
+        ),
+        (
+            TET_COLUMNS[3].0,
+            table_column::<Int32Type>(data.tet_adjacency, 4)?,
+        ),
+    ];
+    let fields: Vec<Field> = columns
+        .iter()
+        .map(|(name, col)| Field::new(*name, col.data_type().clone(), false))
+        .collect();
+    let schema = Arc::new(Schema::new_with_metadata(fields, metadata));
+    let arrays: Vec<ArrayRef> = columns
+        .into_iter()
+        .map(|(_, c)| Arc::new(c) as ArrayRef)
+        .collect();
+    let batch = RecordBatch::try_new(schema.clone(), arrays)?;
 
-    let schema_ref = Arc::new(schema);
-    let mut writer = FileWriter::try_new(file, &schema_ref)?;
-
-    // Batch 0: Vertices
-    let n_verts = data.vertices.len() / 3;
-    let coords_values = Float64Array::from(data.vertices.clone());
-    let coords_list = FixedSizeListArray::try_new(
-        Arc::new(Field::new("item", DataType::Float64, false)),
-        3,
-        Arc::new(coords_values),
-        None,
-    )?;
-    let vertex_batch = arrow_array::RecordBatch::try_new(
-        schema_ref.clone(),
-        vec![
-            Arc::new(coords_list),
-            Arc::new(null_fsl_u32(3, n_verts)),
-            Arc::new(UInt32Array::from(vec![None::<u32>; n_verts])),
-            Arc::new(Int32Array::from(vec![None::<i32>; n_verts])),
-            Arc::new(null_fsl_u32(4, n_verts)),
-            Arc::new(UInt32Array::from(vec![None::<u32>; n_verts])),
-            Arc::new(Int32Array::from(vec![None::<i32>; n_verts])),
-            Arc::new(null_fsl_i32(4, n_verts)),
-            Arc::new(null_fsl_f64(6, n_verts)),
-            Arc::new(null_fsl_f64(6, n_verts)),
-        ],
-    )?;
-    writer.write(&vertex_batch)?;
-
-    // Batch 1: Triangles
-    let n_tris = data.triangles.len() / 3;
-    let tri_values = UInt32Array::from(data.triangles.clone());
-    let tri_list = FixedSizeListArray::try_new(
-        Arc::new(Field::new("item", DataType::UInt32, false)),
-        3,
-        Arc::new(tri_values),
-        None,
-    )?;
-    let tri_aabbs_list = if data.tri_aabbs.is_empty() {
-        null_fsl_f64(6, n_tris)
-    } else {
-        FixedSizeListArray::try_new(
-            Arc::new(Field::new("item", DataType::Float64, false)),
-            6,
-            Arc::new(Float64Array::from(data.tri_aabbs.clone())),
-            None,
-        )?
-    };
-    let tri_batch = arrow_array::RecordBatch::try_new(
-        schema_ref.clone(),
-        vec![
-            Arc::new(null_fsl_f64(3, n_tris)),
-            Arc::new(tri_list),
-            Arc::new(UInt32Array::from(data.triangle_surface_ids.clone())),
-            Arc::new(Int32Array::from(data.triangle_physical_groups.clone())),
-            Arc::new(null_fsl_u32(4, n_tris)),
-            Arc::new(UInt32Array::from(vec![None::<u32>; n_tris])),
-            Arc::new(Int32Array::from(vec![None::<i32>; n_tris])),
-            Arc::new(null_fsl_i32(4, n_tris)),
-            Arc::new(tri_aabbs_list),
-            Arc::new(null_fsl_f64(6, n_tris)),
-        ],
-    )?;
-    writer.write(&tri_batch)?;
-
-    // Batch 2: Tetrahedra (optional)
-    if !data.tetrahedra.is_empty() {
-        let n_tets = data.tetrahedra.len() / 4;
-        let tet_values = UInt32Array::from(data.tetrahedra.clone());
-        let tet_list = FixedSizeListArray::try_new(
-            Arc::new(Field::new("item", DataType::UInt32, false)),
-            4,
-            Arc::new(tet_values),
-            None,
-        )?;
-        let tet_adj_list = if data.tet_adjacency.is_empty() {
-            null_fsl_i32(4, n_tets)
-        } else {
-            FixedSizeListArray::try_new(
-                Arc::new(Field::new("item", DataType::Int32, false)),
-                4,
-                Arc::new(Int32Array::from(data.tet_adjacency.clone())),
-                None,
-            )?
-        };
-        let tet_aabbs_list = if data.tet_aabbs.is_empty() {
-            null_fsl_f64(6, n_tets)
-        } else {
-            FixedSizeListArray::try_new(
-                Arc::new(Field::new("item", DataType::Float64, false)),
-                6,
-                Arc::new(Float64Array::from(data.tet_aabbs.clone())),
-                None,
-            )?
-        };
-        let tet_batch = arrow_array::RecordBatch::try_new(
-            schema_ref.clone(),
-            vec![
-                Arc::new(null_fsl_f64(3, n_tets)),
-                Arc::new(null_fsl_u32(3, n_tets)),
-                Arc::new(UInt32Array::from(vec![None::<u32>; n_tets])),
-                Arc::new(Int32Array::from(vec![None::<i32>; n_tets])),
-                Arc::new(tet_list),
-                Arc::new(UInt32Array::from(data.tet_volume_ids.clone())),
-                Arc::new(Int32Array::from(data.tet_physical_groups.clone())),
-                Arc::new(tet_adj_list),
-                Arc::new(null_fsl_f64(6, n_tets)),
-                Arc::new(tet_aabbs_list),
-            ],
-        )?;
-        writer.write(&tet_batch)?;
-    }
-
+    let mut writer = FileWriter::try_new(File::create(path)?, &schema)?;
+    writer.write(&batch)?;
     writer.finish()?;
     Ok(())
 }
 
-fn make_null_buffer(len: usize) -> arrow_buffer::NullBuffer {
-    arrow_buffer::NullBuffer::new_null(len)
+/// Read back one table column written by [`table_column`], flattened.
+fn read_column<T: ArrowPrimitiveType>(
+    batch: &RecordBatch,
+    name: &str,
+    width: i32,
+) -> Result<Vec<T::Native>, MeshError> {
+    let bad = |what: &str| MeshError::Parse(format!("mesh file column {name:?}: {what}"));
+    let list = batch
+        .column_by_name(name)
+        .ok_or_else(|| bad("missing"))?
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .ok_or_else(|| bad("expected a list"))?;
+    let item = list.value(0);
+    let values = if width == 1 {
+        item
+    } else {
+        let fsl = item
+            .as_any()
+            .downcast_ref::<FixedSizeListArray>()
+            .filter(|f| f.value_length() == width)
+            .ok_or_else(|| bad(&format!("expected lists of {width}")))?;
+        fsl.values().clone()
+    };
+    let values = values
+        .as_any()
+        .downcast_ref::<PrimitiveArray<T>>()
+        .ok_or_else(|| bad(&format!("expected {} values", T::DATA_TYPE)))?;
+    if values.null_count() > 0 {
+        return Err(bad("holds nulls"));
+    }
+    Ok(values.values().to_vec())
 }
 
-fn null_fsl_i32(size: i32, len: usize) -> FixedSizeListArray {
-    let values = Int32Array::from(vec![None::<i32>; len * size as usize]);
-    FixedSizeListArray::try_new(
-        Arc::new(Field::new("item", DataType::Int32, false)),
-        size,
-        Arc::new(values),
-        Some(make_null_buffer(len)),
-    )
-    .unwrap()
+/// Turn `-1`-for-none adjacency into `Option`s.
+fn adjacency(flat: &[i32]) -> Vec<[Option<TetrahedronId>; 4]> {
+    let id = |i: i32| (i >= 0).then_some(i as TetrahedronId);
+    flat.as_chunks::<4>().0.iter().map(|c| c.map(id)).collect()
 }
 
-fn null_fsl_u32(size: i32, len: usize) -> FixedSizeListArray {
-    let values = UInt32Array::from(vec![None::<u32>; len * size as usize]);
-    FixedSizeListArray::try_new(
-        Arc::new(Field::new("item", DataType::UInt32, false)),
-        size,
-        Arc::new(values),
-        Some(make_null_buffer(len)),
-    )
-    .unwrap()
-}
-
-fn null_fsl_f64(size: i32, len: usize) -> FixedSizeListArray {
-    let values = Float64Array::from(vec![None::<f64>; len * size as usize]);
-    FixedSizeListArray::try_new(
-        Arc::new(Field::new("item", DataType::Float64, false)),
-        size,
-        Arc::new(values),
-        Some(make_null_buffer(len)),
-    )
-    .unwrap()
-}
-
-/// Read an Arrow IPC mesh file.
+/// Read an Arrow IPC mesh file written by [`write_arrow_mesh`].
 pub fn read_arrow_mesh(path: &Path) -> Result<ArrowMeshData, MeshError> {
     let file = File::open(path).map_err(MeshError::Io)?;
     let reader = FileReader::try_new(file, None)
         .map_err(|e| MeshError::Parse(format!("Arrow IPC read error: {e}")))?;
-
     let schema = reader.schema();
     let metadata = schema.metadata();
 
-    let physical_groups_json = metadata
-        .get("yamc.physical_groups")
-        .cloned()
-        .unwrap_or_else(|| "{}".to_string());
-    let surface_volumes_json = metadata
-        .get("yamc.surface_volumes")
-        .cloned()
-        .unwrap_or_else(|| "[]".to_string());
-    let volume_measures_json = metadata
-        .get("yamc.volume_measures")
-        .cloned()
-        .unwrap_or_default();
+    match metadata.get("yamc.version").map(|v| v.trim()) {
+        Some(FORMAT_VERSION) => {}
+        found => {
+            return Err(MeshError::Parse(format!(
+                "{} is a version {} yamc mesh file and this yamc reads version {FORMAT_VERSION}. \
+                 Write it again with CadToYamc.to_arrow.",
+                path.display(),
+                found.unwrap_or("unknown")
+            )));
+        }
+    }
+    let (imprinted, contact_tolerance, overlaps, separated) = read_contact_metadata(metadata)?;
+    let get =
+        |key: &str, default: &str| metadata.get(key).cloned().unwrap_or_else(|| default.into());
+    let physical_groups_json = get("yamc.physical_groups", "{}");
+    let surface_volumes_json = get("yamc.surface_volumes", "[]");
+    let volume_measures = parse_volume_measures_json(&get("yamc.volume_measures", ""));
+
+    let mut batches = reader
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| MeshError::Parse(format!("Arrow batch read error: {e}")))?;
+    let batch = match (batches.pop(), batches.is_empty()) {
+        (Some(batch), true) if batch.num_rows() == 1 => batch,
+        _ => {
+            return Err(MeshError::Parse(
+                "a yamc mesh file holds one record batch of one row".into(),
+            ));
+        }
+    };
+
+    let vertices = read_column::<Float64Type>(&batch, "vertices", 3)?;
+    let vertices: Vec<[f64; 3]> = vertices.as_chunks::<3>().0.to_vec();
+    let [tris, tri_sids, tri_pgs] = TRIANGLE_COLUMNS;
+    let triangles: Vec<[VertexId; 3]> = read_column::<UInt32Type>(&batch, tris.0, tris.1)?
+        .as_chunks::<3>()
+        .0
+        .to_vec();
+    let triangle_surface_ids = read_column::<UInt32Type>(&batch, tri_sids.0, tri_sids.1)?;
+    let triangle_physical_groups = read_column::<Int32Type>(&batch, tri_pgs.0, tri_pgs.1)?;
+    let [tets, tet_vids, tet_pgs, tet_adj] = TET_COLUMNS;
+    let tetrahedra: Vec<[VertexId; 4]> = read_column::<UInt32Type>(&batch, tets.0, tets.1)?
+        .as_chunks::<4>()
+        .0
+        .to_vec();
+    let tet_volume_ids = read_column::<UInt32Type>(&batch, tet_vids.0, tet_vids.1)?;
+    let tet_physical_groups = read_column::<Int32Type>(&batch, tet_pgs.0, tet_pgs.1)?;
+    let tet_adjacency = adjacency(&read_column::<Int32Type>(&batch, tet_adj.0, tet_adj.1)?);
+
+    let n_tris = triangles.len();
+    let n_tets = tetrahedra.len();
+    let lengths = [
+        ("triangle_surface_ids", triangle_surface_ids.len(), n_tris),
+        (
+            "triangle_physical_groups",
+            triangle_physical_groups.len(),
+            n_tris,
+        ),
+        ("tet_volume_ids", tet_volume_ids.len(), n_tets),
+        ("tet_physical_groups", tet_physical_groups.len(), n_tets),
+        ("tet_adjacency", tet_adjacency.len(), n_tets),
+    ];
+    for (name, len, want) in lengths {
+        if len != want {
+            return Err(MeshError::Parse(format!(
+                "{name} has {len} rows, expected {want}"
+            )));
+        }
+    }
+    let n_verts = vertices.len();
+    let max_vertex = triangles
+        .iter()
+        .flatten()
+        .chain(tetrahedra.iter().flatten())
+        .max();
+    if let Some(&v) = max_vertex.filter(|&&v| v as usize >= n_verts) {
+        return Err(MeshError::Parse(format!(
+            "an element uses vertex {v}, but the mesh has {n_verts} vertices"
+        )));
+    }
+
+    Ok(ArrowMeshData {
+        triangle_aabbs: build_triangle_aabbs(&triangles, &vertices),
+        tet_aabbs: build_tet_aabbs(&tetrahedra, &vertices),
+        vertices,
+        triangles,
+        triangle_surface_ids,
+        triangle_physical_groups,
+        tetrahedra,
+        tet_volume_ids,
+        tet_physical_groups,
+        tet_adjacency,
+        physical_groups_json,
+        surface_volumes_json,
+        volume_measures,
+        imprinted,
+        contact_tolerance,
+        overlaps,
+        separated,
+    })
+}
+
+type ContactMetadata = (Option<bool>, Option<f64>, Vec<[u32; 2]>, Vec<[u32; 2]>);
+
+/// The non-imprinted mesh entries: `yamc.imprinted`, `yamc.contact_tolerance`,
+/// `yamc.overlaps` and `yamc.separated`.
+fn read_contact_metadata(metadata: &arrow_schema::Metadata) -> Result<ContactMetadata, MeshError> {
     let imprinted = match metadata.get("yamc.imprinted").map(|v| v.trim()) {
         None => None,
         Some("true") => Some(true),
@@ -374,31 +388,6 @@ pub fn read_arrow_mesh(path: &Path) -> Result<ArrowMeshData, MeshError> {
                 "yamc.imprinted must be \"true\" or \"false\", got {other:?}"
             )));
         }
-    };
-    let overlaps = match metadata.get("yamc.overlaps") {
-        None => Vec::new(),
-        Some(json) => parse_surface_volumes_json(json)
-            .into_iter()
-            .map(|pair| match pair {
-                [Some(low), Some(high)] if low != high => Ok([low, high]),
-                _ => Err(MeshError::Parse(format!(
-                    "yamc.overlaps must be [[low, high], ...] pairs of distinct volume ids, \
-                     got {json:?}"
-                ))),
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-    };
-    let separated = match metadata.get("yamc.separated") {
-        None => Vec::new(),
-        Some(json) => parse_surface_volumes_json(json)
-            .into_iter()
-            .map(|pair| match pair {
-                [Some(a), Some(b)] if a != b => Ok([a, b]),
-                _ => Err(MeshError::Parse(format!(
-                    "yamc.separated must be [[a, b], ...] pairs of distinct volume ids, got {json:?}"
-                ))),
-            })
-            .collect::<Result<Vec<_>, _>>()?,
     };
     let contact_tolerance = match metadata.get("yamc.contact_tolerance") {
         None => None,
@@ -411,233 +400,21 @@ pub fn read_arrow_mesh(path: &Path) -> Result<ArrowMeshData, MeshError> {
             }
         },
     };
-
-    let mut flat_vertices = Vec::new();
-    let mut flat_triangles = Vec::new();
-    let mut triangle_surface_ids = Vec::new();
-    let mut triangle_physical_groups = Vec::new();
-    let mut flat_tetrahedra = Vec::new();
-    let mut tet_volume_ids = Vec::new();
-    let mut tet_physical_groups = Vec::new();
-    let mut flat_tet_adjacency = Vec::new();
-    let mut flat_tri_aabbs = Vec::new();
-    let mut flat_tet_aabbs = Vec::new();
-
-    for batch_result in reader {
-        let batch =
-            batch_result.map_err(|e| MeshError::Parse(format!("Arrow batch read error: {e}")))?;
-
-        let coords_col = batch.column(0);
-        let tri_col = batch.column(1);
-        let tet_col = batch.column(4);
-
-        // Vertex batch: coordinates column has non-null data
-        if coords_col.null_count() < coords_col.len() {
-            let coords_list = coords_col
-                .as_any()
-                .downcast_ref::<FixedSizeListArray>()
-                .ok_or_else(|| {
-                    MeshError::Parse("Expected FixedSizeListArray for coordinates".into())
-                })?;
-            let values = coords_list
-                .values()
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .ok_or_else(|| {
-                    MeshError::Parse("Expected Float64Array for coordinate values".into())
-                })?;
-            flat_vertices = values.values().to_vec();
-        }
-
-        // Triangle batch: tri_indices column has non-null data
-        if tri_col.null_count() < tri_col.len() {
-            let tri_list = tri_col
-                .as_any()
-                .downcast_ref::<FixedSizeListArray>()
-                .ok_or_else(|| {
-                    MeshError::Parse("Expected FixedSizeListArray for tri_indices".into())
-                })?;
-            let values = tri_list
-                .values()
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .ok_or_else(|| {
-                    MeshError::Parse("Expected UInt32Array for triangle values".into())
-                })?;
-            flat_triangles = values.values().to_vec();
-
-            let surface_ids = batch
-                .column(2)
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .ok_or_else(|| {
-                    MeshError::Parse("Expected UInt32Array for tri_surface_id".into())
-                })?;
-            triangle_surface_ids = surface_ids.values().to_vec();
-
-            let phys_groups = batch
-                .column(3)
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .ok_or_else(|| {
-                    MeshError::Parse("Expected Int32Array for tri_physical_group".into())
-                })?;
-            triangle_physical_groups = phys_groups.values().to_vec();
-
-            // tri_aabbs (column 8)
-            let tri_aabbs_col = batch.column(8);
-            if tri_aabbs_col.null_count() < tri_aabbs_col.len() {
-                let list = tri_aabbs_col
-                    .as_any()
-                    .downcast_ref::<FixedSizeListArray>()
-                    .ok_or_else(|| {
-                        MeshError::Parse("Expected FixedSizeListArray for tri_aabbs".into())
-                    })?;
-                let values = list
-                    .values()
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .ok_or_else(|| {
-                        MeshError::Parse("Expected Float64Array for tri_aabbs values".into())
-                    })?;
-                flat_tri_aabbs = values.values().to_vec();
-            }
-        }
-
-        // Tet batch: tet_indices column has non-null data
-        if tet_col.null_count() < tet_col.len() {
-            let tet_list = tet_col
-                .as_any()
-                .downcast_ref::<FixedSizeListArray>()
-                .ok_or_else(|| {
-                    MeshError::Parse("Expected FixedSizeListArray for tet_indices".into())
-                })?;
-            let values = tet_list
-                .values()
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .ok_or_else(|| MeshError::Parse("Expected UInt32Array for tet values".into()))?;
-            flat_tetrahedra = values.values().to_vec();
-
-            let vol_ids = batch
-                .column(5)
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .ok_or_else(|| MeshError::Parse("Expected UInt32Array for tet_volume_id".into()))?;
-            tet_volume_ids = vol_ids.values().to_vec();
-
-            let phys_groups = batch
-                .column(6)
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .ok_or_else(|| {
-                    MeshError::Parse("Expected Int32Array for tet_physical_group".into())
-                })?;
-            tet_physical_groups = phys_groups.values().to_vec();
-
-            // tet_adjacency (column 7)
-            let tet_adj_col = batch.column(7);
-            if tet_adj_col.null_count() < tet_adj_col.len() {
-                let list = tet_adj_col
-                    .as_any()
-                    .downcast_ref::<FixedSizeListArray>()
-                    .ok_or_else(|| {
-                        MeshError::Parse("Expected FixedSizeListArray for tet_adjacency".into())
-                    })?;
-                let values = list
-                    .values()
-                    .as_any()
-                    .downcast_ref::<Int32Array>()
-                    .ok_or_else(|| {
-                        MeshError::Parse("Expected Int32Array for tet_adjacency values".into())
-                    })?;
-                flat_tet_adjacency = values.values().to_vec();
-            }
-
-            // tet_aabbs (column 9)
-            let tet_aabbs_col = batch.column(9);
-            if tet_aabbs_col.null_count() < tet_aabbs_col.len() {
-                let list = tet_aabbs_col
-                    .as_any()
-                    .downcast_ref::<FixedSizeListArray>()
-                    .ok_or_else(|| {
-                        MeshError::Parse("Expected FixedSizeListArray for tet_aabbs".into())
-                    })?;
-                let values = list
-                    .values()
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .ok_or_else(|| {
-                        MeshError::Parse("Expected Float64Array for tet_aabbs values".into())
-                    })?;
-                flat_tet_aabbs = values.values().to_vec();
-            }
-        }
-    }
-
-    // Convert flat arrays to structured arrays
-    let vertices: Vec<[f64; 3]> = flat_vertices.as_chunks::<3>().0.to_vec();
-
-    let triangles: Vec<[VertexId; 3]> = flat_triangles.as_chunks::<3>().0.to_vec();
-
-    let tetrahedra: Vec<[VertexId; 4]> = flat_tetrahedra.as_chunks::<4>().0.to_vec();
-
-    let tet_adjacency: Vec<[Option<TetrahedronId>; 4]> = flat_tet_adjacency
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|c| {
-            [
-                if c[0] < 0 {
-                    None
-                } else {
-                    Some(c[0] as TetrahedronId)
-                },
-                if c[1] < 0 {
-                    None
-                } else {
-                    Some(c[1] as TetrahedronId)
-                },
-                if c[2] < 0 {
-                    None
-                } else {
-                    Some(c[2] as TetrahedronId)
-                },
-                if c[3] < 0 {
-                    None
-                } else {
-                    Some(c[3] as TetrahedronId)
-                },
-            ]
-        })
-        .collect();
-
-    let triangle_aabbs: Vec<[f64; 6]> = flat_tri_aabbs.as_chunks::<6>().0.to_vec();
-
-    let tet_aabbs: Vec<[f64; 6]> = flat_tet_aabbs.as_chunks::<6>().0.to_vec();
-
-    // Parse volume measures from metadata
-    let volume_measures = parse_volume_measures_json(&volume_measures_json);
-
-    Ok(ArrowMeshData {
-        vertices,
-        triangles,
-        triangle_surface_ids,
-        triangle_physical_groups,
-        tetrahedra,
-        tet_volume_ids,
-        tet_physical_groups,
-        tet_adjacency,
-        triangle_aabbs,
-        tet_aabbs,
-        physical_groups_json,
-        surface_volumes_json,
-        volume_measures,
-        imprinted,
-        contact_tolerance,
-        overlaps,
-        separated,
-    })
+    let pairs = |key: &str, shape: &str| match metadata.get(key) {
+        None => Ok(Vec::new()),
+        Some(json) => parse_surface_volumes_json(json)
+            .into_iter()
+            .map(|pair| match pair {
+                [Some(a), Some(b)] if a != b => Ok([a, b]),
+                _ => Err(MeshError::Parse(format!(
+                    "{key} must be {shape} pairs of distinct volume ids, got {json:?}"
+                ))),
+            })
+            .collect::<Result<Vec<_>, _>>(),
+    };
+    let overlaps = pairs("yamc.overlaps", "[[low, high], ...]")?;
+    let separated = pairs("yamc.separated", "[[a, b], ...]")?;
+    Ok((imprinted, contact_tolerance, overlaps, separated))
 }
 
 /// Append a vacuum boundary box to Arrow mesh data.
@@ -1871,6 +1648,133 @@ mod tests {
         assert!(
             bc == crate::types::BoundaryCondition::Transmission
                 || bc == crate::types::BoundaryCondition::Vacuum
+        );
+    }
+
+    /// A strip of `n` triangles over `n + 2` vertices, and one tet.
+    fn strip(n: u32) -> MeshData {
+        let vertices = (0..n + 2)
+            .flat_map(|i| [i as f64, (i % 2) as f64, 0.5])
+            .collect();
+        let triangles = (0..n).flat_map(|i| [i, i + 1, i + 2]).collect();
+        MeshData {
+            vertices,
+            triangles,
+            triangle_surface_ids: vec![1; n as usize],
+            triangle_physical_groups: vec![-1; n as usize],
+            tetrahedra: vec![0, 1, 2, 3],
+            tet_volume_ids: vec![1],
+            tet_physical_groups: vec![1],
+            tet_adjacency: vec![-1; 4],
+            physical_groups_json: r#"{"1": [3, "mat:steel", [1]]}"#.into(),
+            surface_volumes_json: "[[1, null]]".into(),
+            volume_measures_json: "[1.5]".into(),
+            imprinted: Some(false),
+            contact_tolerance: Some(1e-3),
+            overlaps: vec![[0, 1]],
+            separated: vec![[1, 2]],
+        }
+    }
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("yamt-{}-{name}.arrow", std::process::id()))
+    }
+
+    #[test]
+    fn test_write_read_round_trip() {
+        let path = temp_path("round-trip");
+        let data = strip(5);
+        write_arrow_mesh(data.clone(), &path).unwrap();
+        let read = read_arrow_mesh(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        let flat = |v: &[[f64; 3]]| v.iter().flatten().copied().collect::<Vec<_>>();
+        assert_eq!(flat(&read.vertices), data.vertices);
+        assert_eq!(read.triangles.concat(), data.triangles);
+        assert_eq!(read.triangle_surface_ids, data.triangle_surface_ids);
+        assert_eq!(read.triangle_physical_groups, data.triangle_physical_groups);
+        assert_eq!(read.tetrahedra.concat(), data.tetrahedra);
+        assert_eq!(read.tet_volume_ids, data.tet_volume_ids);
+        assert_eq!(read.tet_physical_groups, data.tet_physical_groups);
+        assert_eq!(read.tet_adjacency, vec![[None; 4]]);
+        assert_eq!(read.physical_groups_json, data.physical_groups_json);
+        assert_eq!(read.surface_volumes_json, data.surface_volumes_json);
+        assert_eq!(read.volume_measures, vec![1.5]);
+        assert_eq!(
+            (
+                read.imprinted,
+                read.contact_tolerance,
+                read.overlaps,
+                read.separated
+            ),
+            (Some(false), Some(1e-3), vec![[0, 1]], vec![[1, 2]])
+        );
+        assert_eq!(read.triangle_aabbs[0], [0.0, 0.0, 0.5, 2.0, 1.0, 0.5]);
+        assert_eq!(read.tet_aabbs, vec![[0.0, 0.0, 0.5, 3.0, 1.0, 0.5]]);
+    }
+
+    #[test]
+    fn test_surface_only_mesh_round_trips() {
+        let path = temp_path("surface-only");
+        let data = MeshData {
+            tetrahedra: vec![],
+            tet_volume_ids: vec![],
+            tet_physical_groups: vec![],
+            tet_adjacency: vec![],
+            ..strip(3)
+        };
+        write_arrow_mesh(data, &path).unwrap();
+        let read = read_arrow_mesh(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(read.triangles.len(), 3);
+        assert!(read.tetrahedra.is_empty() && read.tet_aabbs.is_empty());
+    }
+
+    /// No column carries another table's rows: the file is the data plus a
+    /// fixed overhead (#504 measured 184 B per row in the old layout).
+    #[test]
+    fn test_file_holds_only_the_data() {
+        let path = temp_path("size");
+        let n = 100_000u32;
+        write_arrow_mesh(strip(n), &path).unwrap();
+        let size = std::fs::metadata(&path).unwrap().len();
+        std::fs::remove_file(&path).unwrap();
+        // 24 B per vertex; 12 B indices, 4 B surface id, 4 B group per triangle.
+        let data = (n as u64 + 2) * 24 + n as u64 * 20;
+        // arrow-rs writes a validity bitmap even for columns with no nulls, one
+        // bit per value: at most 1/32 of 4-byte values.
+        assert!(
+            size < data + data / 32 + 4096,
+            "{size} B for {data} B of mesh data"
+        );
+    }
+
+    #[test]
+    fn test_version_1_file_is_refused() {
+        let path = temp_path("version-1");
+        let metadata = HashMap::from([("yamc.version".to_string(), "1".to_string())]);
+        let schema = Arc::new(Schema::new_with_metadata(Vec::<Field>::new(), metadata));
+        let mut writer = FileWriter::try_new(File::create(&path).unwrap(), &schema).unwrap();
+        writer.finish().unwrap();
+        let err = read_arrow_mesh(&path).err().unwrap().to_string();
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            err.contains("version 1") && err.contains("to_arrow"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_out_of_range_vertex_is_refused() {
+        let path = temp_path("bad-vertex");
+        let mut data = strip(2);
+        data.triangles[5] = 99;
+        write_arrow_mesh(data, &path).unwrap();
+        let err = read_arrow_mesh(&path).err().unwrap().to_string();
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            err.contains("vertex 99") && err.contains("4 vertices"),
+            "{err}"
         );
     }
 }
