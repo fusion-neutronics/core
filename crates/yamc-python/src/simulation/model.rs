@@ -8,8 +8,6 @@ use std::collections::HashMap;
 use yamc::model::Model;
 use yamc::track::HistorySelection;
 use yamc_source::source::ParticleSource;
-use yani_python::PyTransmutationResults;
-use yani_transmute::TransmutationResults;
 
 /// Parse the `capture_tracks=` argument into a [`HistorySelection`].
 ///
@@ -1776,7 +1774,10 @@ impl PyModel {
     ///         combined with ``data_uncertainty``.
     ///
     /// Returns:
-    ///     TransmutationResults object containing material compositions at each timestep.
+    ///     ModelTransmutationResults: a ``TransmutationResults`` with the
+    ///     material compositions at each timestep, plus the model's own tallies
+    ///     from each step's transport (``tally_results(step)``,
+    ///     ``tally_evolution(tally)``).
     ///
     /// Examples:
     ///     >>> schedule = yamc.PulseSchedule([
@@ -1808,7 +1809,7 @@ impl PyModel {
         product_threshold: f64,
         processing: Option<PyRef<'_, yani_python::processing::PyProcessing>>,
         py: Python<'_>,
-    ) -> PyResult<PyTransmutationResults> {
+    ) -> PyResult<Py<crate::simulation::PyModelTransmutationResults>> {
         // Every material it names, copied out while the GIL is held; the
         // driver takes those the geometry does not hold.
         let processing = processing.as_ref().map(|p| p.run(py, &[])).transpose()?;
@@ -1896,9 +1897,9 @@ impl PyModel {
             let parts = loaded.parts;
             // Release GIL during long-running transport computation
             let uncertainty = data_uncertainty.map(|u| u.inner);
-            let result: Result<TransmutationResults, String> = py.detach(|| {
+            let result = py.detach(|| {
                 self.inner
-                    .transmute(
+                    .transmute_with_tallies(
                         &method,
                         &core_schedule,
                         chain,
@@ -1912,7 +1913,9 @@ impl PyModel {
                     .map_err(|e| e.to_string())
             });
             match result {
-                Ok(results) => PyTransmutationResults::from_run(py, results),
+                Ok((results, tallies)) => {
+                    crate::simulation::PyModelTransmutationResults::new(py, results, tallies)
+                }
                 Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
             }
         });

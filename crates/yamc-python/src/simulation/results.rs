@@ -18,7 +18,7 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
 
 use yamc_tallies::result::TallyResult;
-use yamc_tallies::simulation_results::{RunProvenance, SimulationResults};
+use yamc_tallies::simulation_results::SimulationResults;
 use yamc_tallies::{ConvergencePoint, ScorePdf, StatisticalChecks};
 
 use crate::simulation::PyTracks;
@@ -1126,7 +1126,7 @@ impl PyTallyIter {
 /// Falls back to the compile-time version when there is no installed
 /// distribution to ask: running against a source tree, or an embedded
 /// interpreter that never saw a wheel.
-fn provenance_version() -> String {
+pub(crate) fn provenance_version() -> String {
     Python::attach(|py| {
         py.import("importlib.metadata")
             .and_then(|m| m.call_method1("version", ("yamc-core",)))
@@ -1166,41 +1166,32 @@ pub(crate) fn build_results(
     elapsed_secs: f64,
     tracks: Option<PyTracks>,
 ) -> PyResult<PySimulationResults> {
-    let fingerprint = model
-        .fingerprint()
+    let inner = model
+        .tally_results(settings.seed, compute, elapsed_secs, provenance_version())
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
-    // Histories actually run (equals `total_particles` on a normal capped
-    // run; fewer on an early stop; the whole count on an uncapped run). Used
-    // for both the run provenance and the reported particle total, so the
-    // latter is meaningful when `settings.total_particles` is None.
-    let actual_histories = model
-        .tallies
-        .first()
-        .map(|t| t.get_n_histories())
-        .unwrap_or(0);
-    let run = RunProvenance {
-        seed: settings.seed,
-        n_histories: actual_histories,
-        elapsed_secs,
-        fingerprint,
-        data_libraries: model.data_libraries(),
-        data_releases: model.data_releases(),
-        material_slots: model.material_slots(),
-        compute: compute.to_string(),
-        yamc_version: provenance_version(),
-        mpi_size: yamc::mpi_context::mpi_size(),
-        mpi_rank: yamc::mpi_context::mpi_rank(),
-    };
-    match SimulationResults::from_tallies_with_run(&model.tallies, elapsed_secs, run) {
-        Ok(r) => Ok(PySimulationResults {
-            inner: r,
-            tracks,
-            data_load_secs: model.last_data_load_secs,
-            transport_secs: model.last_transport_secs,
-            particles_per_second: model.last_particles_per_second,
-            total_particles: actual_histories as usize,
-        }),
-        Err(msg) => Err(pyo3::exceptions::PyValueError::new_err(msg)),
+    Ok(PySimulationResults {
+        tracks,
+        data_load_secs: model.last_data_load_secs,
+        transport_secs: model.last_transport_secs,
+        particles_per_second: model.last_particles_per_second,
+        ..PySimulationResults::from(inner)
+    })
+}
+
+impl From<SimulationResults> for PySimulationResults {
+    /// Results with no single run's split timing and no tracks. Histories
+    /// actually run (fewer than asked on an early stop) are the reported
+    /// particle total.
+    fn from(inner: SimulationResults) -> Self {
+        let total_particles = total_particles(&inner) as usize;
+        Self {
+            inner,
+            tracks: None,
+            data_load_secs: None,
+            transport_secs: None,
+            particles_per_second: None,
+            total_particles,
+        }
     }
 }
 

@@ -19,6 +19,7 @@ pub mod xs_perturbation;
 // `Model::transmute`: the transport-coupled driver over `yani-transmute`.
 // Nothing but an inherent impl, so the module itself stays private.
 mod transmute;
+pub use transmute::StepTallies;
 
 pub use geo::*;
 pub use geometry::backend::*;

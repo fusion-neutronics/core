@@ -339,7 +339,7 @@ enum Derived {
 /// Contains material compositions at each timestep for all transmuted materials.
 /// Index 0 is the initial composition, index i is after timestep[i-1].
 #[gen_stub_pyclass]
-#[pyclass(name = "TransmutationResults", from_py_object)]
+#[pyclass(name = "TransmutationResults", subclass, from_py_object)]
 #[derive(Clone)]
 pub struct PyTransmutationResults {
     pub inner: TransmutationResults,

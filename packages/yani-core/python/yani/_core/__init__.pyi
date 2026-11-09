@@ -2965,7 +2965,6 @@ class TransmutationChain:
             path (str): Output directory path.
         """
 
-@typing.final
 class TransmutationResults:
     r"""
     Results from a transmutation calculation.
