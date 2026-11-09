@@ -130,6 +130,36 @@ impl Model {
         slots
     }
 
+    /// The model's tallies as the last transport left them, finalized with
+    /// that run's provenance, so they combine like any `simulate_transport`
+    /// result. `n_histories` is what the run actually ran.
+    pub fn tally_results(
+        &self,
+        seed: u64,
+        compute: &str,
+        elapsed_secs: f64,
+        yamc_version: String,
+    ) -> Result<yamc_tallies::simulation_results::SimulationResults, String> {
+        let run = yamc_tallies::simulation_results::RunProvenance {
+            seed,
+            n_histories: self.tallies.first().map_or(0, |t| t.get_n_histories()),
+            elapsed_secs,
+            fingerprint: self.fingerprint()?,
+            data_libraries: self.data_libraries(),
+            data_releases: self.data_releases(),
+            material_slots: self.material_slots(),
+            compute: compute.to_string(),
+            yamc_version,
+            mpi_size: crate::mpi_context::mpi_size(),
+            mpi_rank: crate::mpi_context::mpi_rank(),
+        };
+        yamc_tallies::simulation_results::SimulationResults::from_tallies_with_run(
+            &self.tallies,
+            elapsed_secs,
+            run,
+        )
+    }
+
     /// Stable hash (SHA-256 hex) of the model's physics identity. See
     /// the module docs for what is included and excluded.
     ///

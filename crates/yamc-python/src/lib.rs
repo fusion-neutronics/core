@@ -165,6 +165,7 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<simulation::PyTallyResult>()?;
     m.add_class::<simulation::PySimulationResults>()?;
+    m.add_class::<simulation::PyModelTransmutationResults>()?;
     m.add_class::<simulation::PyTallyIter>()?;
     m.add_class::<simulation::PyStatisticalChecks>()?;
     m.add_class::<simulation::PyConvergencePoint>()?;

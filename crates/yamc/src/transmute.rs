@@ -12,6 +12,8 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use yamc_materials::material::{DensityUnits, Material};
+use yamc_tallies::simulation_results::SimulationResults;
+use yamc_tallies::tally::Tally;
 use yani_transmute::{
     apply_coupled_branching, ChainNuclide, FissionYieldWeights, ForwardEulerStepper, ReactionRates,
     TransmutationResults, TransmutationStepper, TransmutationTallies,
@@ -72,7 +74,84 @@ fn resonance_methods(
         .collect()
 }
 
+/// The model's own tallies from each transport a transmutation ran.
+///
+/// Per source particle, as `simulate_transport` returns them, each step's
+/// reset before its transport, so step `i` reflects the compositions of step
+/// `i` alone. The transmutation's internal tallies and its scouting transport
+/// are not among them.
+#[derive(Debug, Default)]
+pub struct StepTallies {
+    /// One result per transport that ran.
+    pub runs: Vec<SimulationResults>,
+    /// Per schedule step (indexed as `TransmutationResults::timesteps`), the
+    /// run of `runs` it transported with: its own in coupled mode, the single
+    /// one on every irradiation step in independent mode, `None` for a
+    /// decay-only step, and `None` throughout when the model has no tallies.
+    pub steps: Vec<Option<usize>>,
+}
+
+/// Per transport step, a tally's per-bin means and standard deviations.
+pub type Evolution = (Vec<Vec<f64>>, Vec<Vec<f64>>);
+
+impl StepTallies {
+    /// Step `step`'s results, `None` where no transport ran.
+    pub fn get(&self, step: usize) -> Result<Option<&SimulationResults>, String> {
+        let run = self.steps.get(step).ok_or_else(|| {
+            format!(
+                "step {step} out of range: the schedule has {} steps",
+                self.steps.len()
+            )
+        })?;
+        Ok(run.map(|i| &self.runs[i]))
+    }
+
+    /// `tally`'s per-bin means and standard deviations over the steps that
+    /// ran transport, in step order.
+    pub fn evolution(&self, tally: &Arc<Tally>) -> Result<Evolution, String> {
+        self.steps
+            .iter()
+            .flatten()
+            .map(|&i| {
+                self.runs[i]
+                    .get_by_tally(tally)
+                    .map(|r| (r.mean.clone(), r.standard_deviation.clone()))
+                    .ok_or_else(|| "tally is not one of the model's tallies".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|v| v.into_iter().unzip())
+    }
+}
+
 impl Model {
+    /// [`Model::transmute_with_tallies`] without the model's own tallies.
+    #[allow(clippy::too_many_arguments)]
+    pub fn transmute(
+        &mut self,
+        method: &str,
+        schedule: &yani_transmute::Schedule,
+        chain: Arc<HashMap<String, yani_transmute::ChainNuclide>>,
+        branch: Arc<yani::BranchTable>,
+        parts: yani::ChainParts,
+        settings: &crate::model::TransportSettings,
+        uncertainty: Option<&yani_transmute::uncertainty::DataUncertainty>,
+        product_threshold: f64,
+        processing: Option<yani_transmute::ProcessingRun<'_>>,
+    ) -> Result<TransmutationResults, Box<dyn std::error::Error>> {
+        self.transmute_with_tallies(
+            method,
+            schedule,
+            chain,
+            branch,
+            parts,
+            settings,
+            uncertainty,
+            product_threshold,
+            processing,
+        )
+        .map(|(results, _)| results)
+    }
+
     /// Run coupled transport-transmutation calculation (tally-based).
     ///
     /// Transport runs each timestep with updated compositions. Per-material tallies
@@ -133,9 +212,10 @@ impl Model {
     ///   every material independently, as before.
     ///
     /// # Returns
-    /// TransmutationResults containing material compositions at each timestep
+    /// TransmutationResults containing material compositions at each timestep,
+    /// and the model's own tallies from each step's transport ([`StepTallies`]).
     #[allow(clippy::too_many_arguments)]
-    pub fn transmute(
+    pub fn transmute_with_tallies(
         &mut self,
         method: &str,
         schedule: &yani_transmute::Schedule,
@@ -146,7 +226,7 @@ impl Model {
         uncertainty: Option<&yani_transmute::uncertainty::DataUncertainty>,
         product_threshold: f64,
         processing: Option<yani_transmute::ProcessingRun<'_>>,
-    ) -> Result<TransmutationResults, Box<dyn std::error::Error>> {
+    ) -> Result<(TransmutationResults, StepTallies), Box<dyn std::error::Error>> {
         yani_transmute::screening::check_threshold(product_threshold)?;
         if processing.is_some() && uncertainty.is_some() {
             return Err("data_uncertainty is not yet supported together with processing".into());
@@ -573,6 +653,11 @@ impl Model {
             results.add_initial(id, receiver.clone(), vec![0.0; timesteps.len()]);
             results.product_screening.insert(id, Default::default());
         }
+        // The model's own tallies, finalized after each transport. A model
+        // without any finalizes nothing.
+        let mut step_tallies = StepTallies::default();
+        let snapshot_tallies = !self.tallies.is_empty();
+        let version = env!("CARGO_PKG_VERSION");
 
         // Track full compositions (including all chain products) across steps.
         // The cell material only has transport nuclides (with HDF5 data),
@@ -640,12 +725,21 @@ impl Model {
                 data_uncertainty: replica_weights,
                 ..settings.clone()
             };
+            let timer = crate::util::timer::Timer::start();
             self.run_internal::<NoOpTracker>(
                 &transport_settings,
                 None,
                 Some(Arc::clone(&dep_tallies)),
                 false,
             )?;
+            if snapshot_tallies {
+                step_tallies.runs.push(self.tally_results(
+                    settings.seed,
+                    "cpu",
+                    timer.elapsed_secs(),
+                    version.to_string(),
+                )?);
+            }
 
             // Extract rates with source_rate=1.0 to get per-source-particle micro rates
             let mut micro_rates: HashMap<u32, ReactionRates> = HashMap::new();
@@ -770,12 +864,22 @@ impl Model {
                     #[cfg(feature = "debug_timing")]
                     let transport_start = std::time::Instant::now();
 
+                    // The model's tallies are reset by the run itself.
+                    let timer = crate::util::timer::Timer::start();
                     self.run_internal::<NoOpTracker>(
                         settings,
                         None,
                         Some(Arc::clone(&dep_tallies)),
                         false,
                     )?;
+                    if snapshot_tallies {
+                        step_tallies.runs.push(self.tally_results(
+                            settings.seed,
+                            "cpu",
+                            timer.elapsed_secs(),
+                            version.to_string(),
+                        )?);
+                    }
 
                     #[cfg(feature = "debug_timing")]
                     eprintln!(
@@ -796,6 +900,11 @@ impl Model {
                 // Cooling period - no reactions, decay only
                 HashMap::new()
             };
+
+            // In independent mode every irradiation step shares the one run.
+            step_tallies
+                .steps
+                .push((source_rate > 0.0 && snapshot_tallies).then(|| step_tallies.runs.len() - 1));
 
             // Isomeric-branching overlay (see `fold_step_branching`).
             let (folded_chains, step_reports) = if source_rate > 0.0 {
@@ -1042,7 +1151,7 @@ impl Model {
         }
 
         results.data_releases = yamc_nuclide::url_cache::data_releases();
-        Ok(results)
+        Ok((results, step_tallies))
     }
 }
 

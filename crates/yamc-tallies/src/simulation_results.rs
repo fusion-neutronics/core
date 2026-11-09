@@ -74,7 +74,7 @@ pub struct RunProvenance {
 /// Ordered collection of `TallyResult`s plus run-level metadata.
 ///
 /// Returned from `Model::simulate()`. Immutable after construction.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SimulationResults {
     /// Results in the same order the input tallies were supplied.
     results: Vec<Arc<TallyResult>>,
