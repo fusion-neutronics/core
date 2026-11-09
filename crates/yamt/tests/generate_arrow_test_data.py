@@ -30,8 +30,8 @@ in ``crates/yamt/src/io/arrow.rs`` re-checks the committed files on every
 ``cargo test``, so a stale or hand-edited fixture cannot pass CI.
 
 The mesh content is reproducible run to run, but the files are not byte-stable:
-arrow-rs writes schema metadata by iterating a ``HashMap``, so the three
-``yamc.*`` key/value pairs land in a different order each process. Expect a
+arrow-rs writes schema metadata by iterating a ``HashMap``, so the ``yamc.*``
+key/value pairs land in a different order each process. Expect a
 small binary diff from a no-op regeneration; compare the decoded content, not
 the bytes.
 """

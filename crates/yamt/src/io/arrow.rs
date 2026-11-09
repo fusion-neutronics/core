@@ -14,8 +14,6 @@
 //! Bounding boxes are not stored: the reader computes them from the vertices.
 //!
 //! Schema metadata:
-//! - "yamc.version": format version, "2" (version 1 padded every table to a
-//!   shared schema with null columns, and is refused)
 //! - "yamc.physical_groups": JSON physical group definitions
 //! - "yamc.surface_volumes": JSON surface→volume topology
 //! - "yamc.imprinted" (optional): "false" when every solid was meshed on its
@@ -107,10 +105,6 @@ pub struct MeshData {
     pub separated: Vec<[u32; 2]>,
 }
 
-/// Version of the mesh file layout, written as `yamc.version`. Version 1 kept
-/// every table in batches of one shared schema, padded with null columns.
-const FORMAT_VERSION: &str = "2";
-
 /// The mesh tables, as `(column, element width)`. Each column holds one row:
 /// the whole table as a list of fixed-size lists (or of scalars, width 1).
 const TRIANGLE_COLUMNS: [(&str, i32); 3] = [
@@ -148,7 +142,6 @@ fn table_column<T: ArrowPrimitiveType>(
 /// from the vertices, and [`read_arrow_mesh`] computes them.
 pub fn write_arrow_mesh(data: MeshData, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut metadata = HashMap::from([
-        ("yamc.version".to_string(), FORMAT_VERSION.to_string()),
         (
             "yamc.physical_groups".to_string(),
             data.physical_groups_json,
@@ -273,17 +266,6 @@ pub fn read_arrow_mesh(path: &Path) -> Result<ArrowMeshData, MeshError> {
     let schema = reader.schema();
     let metadata = schema.metadata();
 
-    match metadata.get("yamc.version").map(|v| v.trim()) {
-        Some(FORMAT_VERSION) => {}
-        found => {
-            return Err(MeshError::Parse(format!(
-                "{} is a version {} yamc mesh file and this yamc reads version {FORMAT_VERSION}. \
-                 Write it again with CadToYamc.to_arrow.",
-                path.display(),
-                found.unwrap_or("unknown")
-            )));
-        }
-    }
     let (imprinted, contact_tolerance, overlaps, separated) = read_contact_metadata(metadata)?;
     let get =
         |key: &str, default: &str| metadata.get(key).cloned().unwrap_or_else(|| default.into());
@@ -1746,21 +1728,6 @@ mod tests {
         assert!(
             size < data + data / 32 + 4096,
             "{size} B for {data} B of mesh data"
-        );
-    }
-
-    #[test]
-    fn test_version_1_file_is_refused() {
-        let path = temp_path("version-1");
-        let metadata = HashMap::from([("yamc.version".to_string(), "1".to_string())]);
-        let schema = Arc::new(Schema::new_with_metadata(Vec::<Field>::new(), metadata));
-        let mut writer = FileWriter::try_new(File::create(&path).unwrap(), &schema).unwrap();
-        writer.finish().unwrap();
-        let err = read_arrow_mesh(&path).err().unwrap().to_string();
-        std::fs::remove_file(&path).unwrap();
-        assert!(
-            err.contains("version 1") && err.contains("to_arrow"),
-            "{err}"
         );
     }
 
