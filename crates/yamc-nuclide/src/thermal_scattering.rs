@@ -362,15 +362,15 @@ pub fn read_thermal_from_arrow(
 }
 
 /// The table temperatures a material at `kelvin` uses, by label: the one it
-/// sits on, or the two it falls between (the material blends them). Outside
-/// the table's range is an error naming the range: a table is never
-/// extrapolated.
+/// sits on, or the two it falls between (the material blends them).
+///
+/// Outside the table's range is refused, never extrapolated and never snapped
+/// to the end table: the message gives the range the data covers and the
+/// temperature to set instead.
 pub fn labels_for_temperature(
-    table_name: &str,
     available: &[(String, f64)],
     kelvin: f64,
 ) -> Result<Vec<String>, String> {
-    let labels: Vec<String> = available.iter().map(|(l, _)| l.clone()).collect();
     // Bracket on the true temperatures, not the rounded labels: graphite's
     // "296K" is 296 K but water's "294K" is 293.6 K.
     let mut sorted: Vec<&(String, f64)> = available.iter().collect();
@@ -383,9 +383,19 @@ pub fn labels_for_temperature(
         return Ok(vec![l.clone()]);
     }
     if kelvin < lo || kelvin > hi {
+        let labels: Vec<&str> = sorted.iter().map(|(l, _)| l.as_str()).collect();
+        let nearest = if kelvin < lo { lo } else { hi };
+        let default = if kelvin == crate::temperature::DEFAULT_TEMPERATURE_K {
+            " (the temperature a material has when none is set)"
+        } else {
+            ""
+        };
         return Err(format!(
-            "{table_name} covers {lo} K to {hi} K ({}), and the material is at {kelvin} K; \
-             a thermal table is not extrapolated",
+            "the material is at {kelvin} K{default}, but this thermal scattering data only \
+             covers {lo} K to {hi} K (tables at {}). Thermal scattering data is not \
+             extrapolated beyond the temperatures it was evaluated at. Set the material's \
+             temperature within that range, for example to {nearest} K with \
+             Material(..., temperature={nearest}) or material.temperature = {nearest}",
             labels.join(", ")
         ));
     }
@@ -419,7 +429,7 @@ pub fn load_thermal(source: &str, name: &str, kelvin: f64) -> Result<ThermalTabl
     let labels = get_str_list(&header, "temperatures", 0)?;
     let kelvins = get_f64_list(&header, "temperatures_k", 0)?;
     let available: Vec<(String, f64)> = labels.into_iter().zip(kelvins).collect();
-    let wanted = labels_for_temperature(name, &available, kelvin)?;
+    let wanted = labels_for_temperature(&available, kelvin)?;
     read_thermal_from_arrow(dir, Some(&wanted))
 }
 
@@ -437,30 +447,54 @@ mod tests {
 
     #[test]
     fn a_temperature_on_a_table_uses_it_and_between_two_blends_them() {
-        assert_eq!(
-            labels_for_temperature("t", &ladder(), 293.6).unwrap(),
-            ["294K"]
-        );
+        assert_eq!(labels_for_temperature(&ladder(), 293.6).unwrap(), ["294K"]);
         // Within half a kelvin of a table's true temperature is that table:
         // the labels are rounded, and 294 K asks for water's 293.6 K table.
+        assert_eq!(labels_for_temperature(&ladder(), 294.0).unwrap(), ["294K"]);
         assert_eq!(
-            labels_for_temperature("t", &ladder(), 294.0).unwrap(),
-            ["294K"]
-        );
-        assert_eq!(
-            labels_for_temperature("t", &ladder(), 450.0).unwrap(),
+            labels_for_temperature(&ladder(), 450.0).unwrap(),
             ["400K", "600K"]
         );
     }
 
+    /// ENDF/B-VIII.1 crystalline graphite: its first table is at 296 K.
+    fn graphite() -> Vec<(String, f64)> {
+        vec![
+            ("296K".into(), 296.0),
+            ("400K".into(), 400.0),
+            ("2000K".into(), 2000.0),
+        ]
+    }
+
     #[test]
-    fn outside_the_table_is_refused_with_its_range() {
-        let e = labels_for_temperature("c_Graphite", &ladder(), 250.0).unwrap_err();
+    fn below_the_table_is_refused_with_its_range_and_the_fix() {
+        // A material with no temperature is at 294 K, below graphite's 296 K.
+        let e = labels_for_temperature(&graphite(), 294.0).unwrap_err();
+        for part in [
+            "at 294 K (the temperature a material has when none is set)",
+            "only covers 296 K to 2000 K (tables at 296K, 400K, 2000K)",
+            "not extrapolated",
+            "Material(..., temperature=296) or material.temperature = 296",
+        ] {
+            assert!(e.contains(part), "{part:?} not in {e}");
+        }
+        // Just below the first table, and outside the half-kelvin snap, is
+        // refused too: there is no tolerance at the ends.
+        assert!(labels_for_temperature(&graphite(), 295.4).is_err());
+        assert_eq!(
+            labels_for_temperature(&graphite(), 295.6).unwrap(),
+            ["296K"]
+        );
+    }
+
+    #[test]
+    fn above_the_table_suggests_its_highest_temperature() {
+        let e = labels_for_temperature(&ladder(), 601.0).unwrap_err();
         assert!(
-            e.contains("293.6 K to 600 K") && e.contains("c_Graphite"),
+            e.contains("at 601 K, but") && e.contains("293.6 K to 600 K"),
             "{e}"
         );
-        assert!(labels_for_temperature("t", &ladder(), 601.0).is_err());
+        assert!(e.contains("temperature=600)"), "{e}");
     }
 
     #[test]
