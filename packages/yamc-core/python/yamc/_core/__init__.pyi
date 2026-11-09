@@ -8803,9 +8803,9 @@ def mesh_to_arrow(path: builtins.str, vertices: typing.Sequence[builtins.float],
     r"""
     Write mesh data to an Arrow IPC file.
     
-    Tet adjacency and triangle/tet AABBs are computed here from the flat
-    connectivity (previously per-element Python loops), so the caller no longer
-    supplies them.
+    Tet adjacency is computed here from the flat connectivity, so the caller
+    does not supply it. Bounding boxes are not stored; they are computed from
+    the vertices when the file is read.
     
     ``imprinted=False`` records that the solids were meshed one by one, so
     touching solids each have their own surface where they meet;

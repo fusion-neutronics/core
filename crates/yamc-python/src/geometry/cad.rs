@@ -228,7 +228,7 @@ fn write_mesh_file(
     overlaps: Vec<[u32; 2]>,
     separated: Vec<[u32; 2]>,
 ) -> PyResult<()> {
-    use yamt::mesh::cad_build::{tet_aabbs_flat, tet_adjacency_flat, tri_aabbs_flat};
+    use yamt::mesh::cad_build::tet_adjacency_flat;
 
     if !overlaps.is_empty() && imprinted != Some(false) {
         return Err(pyo3::exceptions::PyValueError::new_err(
@@ -257,8 +257,6 @@ fn write_mesh_file(
     }
 
     let tet_adjacency = tet_adjacency_flat(&tetrahedra);
-    let tri_aabbs = tri_aabbs_flat(&vertices, &triangles);
-    let tet_aabbs = tet_aabbs_flat(&vertices, &tetrahedra);
 
     let data = MeshData {
         vertices,
@@ -269,8 +267,6 @@ fn write_mesh_file(
         tet_volume_ids,
         tet_physical_groups,
         tet_adjacency,
-        tri_aabbs,
-        tet_aabbs,
         physical_groups_json,
         surface_volumes_json,
         volume_measures_json,
@@ -280,16 +276,16 @@ fn write_mesh_file(
         separated,
     };
 
-    write_arrow_mesh(&data, &PathBuf::from(path)).map_err(|e| {
+    write_arrow_mesh(data, &PathBuf::from(path)).map_err(|e| {
         pyo3::exceptions::PyIOError::new_err(format!("Failed to write Arrow file: {e}"))
     })
 }
 
 /// Write mesh data to an Arrow IPC file.
 ///
-/// Tet adjacency and triangle/tet AABBs are computed here from the flat
-/// connectivity (previously per-element Python loops), so the caller no longer
-/// supplies them.
+/// Tet adjacency is computed here from the flat connectivity, so the caller
+/// does not supply it. Bounding boxes are not stored; they are computed from
+/// the vertices when the file is read.
 ///
 /// ``imprinted=False`` records that the solids were meshed one by one, so
 /// touching solids each have their own surface where they meet;

@@ -2,13 +2,12 @@
 //!
 //! These were previously per-element Python loops in `yamc.cad`; they are the
 //! compiled core the Python side now calls. `weld_vertices` merges coincident
-//! boundary vertices into a watertight, index-shared mesh; the `*_flat`
-//! wrappers expose the topology builders (adjacency, AABBs) on the flat arrays
-//! the Arrow writer uses.
+//! boundary vertices into a watertight, index-shared mesh; `tet_adjacency_flat`
+//! exposes the adjacency builder on the flat arrays the Arrow writer uses.
 
 use std::collections::{BTreeSet, HashMap};
 
-use crate::mesh::topology::{build_tet_aabbs, build_tet_adjacency, build_triangle_aabbs};
+use crate::mesh::topology::build_tet_adjacency;
 use crate::types::VertexId;
 
 /// Weld coincident vertices of a triangle mesh into a watertight boundary.
@@ -98,28 +97,6 @@ pub fn tet_adjacency_flat(tetrahedra: &[VertexId]) -> Vec<i32> {
         }
     }
     out
-}
-
-/// Per-triangle AABBs from flat vertex/triangle arrays, as
-/// `[min_x,min_y,min_z,max_x,max_y,max_z, ...]`.
-pub fn tri_aabbs_flat(vertices: &[f64], triangles: &[VertexId]) -> Vec<f64> {
-    let verts: Vec<[f64; 3]> = vertices.as_chunks::<3>().0.to_vec();
-    let tris: Vec<[VertexId; 3]> = triangles.as_chunks::<3>().0.to_vec();
-    build_triangle_aabbs(&tris, &verts)
-        .into_iter()
-        .flatten()
-        .collect()
-}
-
-/// Per-tet AABBs from flat vertex/tet arrays, as
-/// `[min_x,min_y,min_z,max_x,max_y,max_z, ...]`.
-pub fn tet_aabbs_flat(vertices: &[f64], tetrahedra: &[VertexId]) -> Vec<f64> {
-    let verts: Vec<[f64; 3]> = vertices.as_chunks::<3>().0.to_vec();
-    let tets: Vec<[VertexId; 4]> = tetrahedra.as_chunks::<4>().0.to_vec();
-    build_tet_aabbs(&tets, &verts)
-        .into_iter()
-        .flatten()
-        .collect()
 }
 
 /// Map each BRep face id to the solids that own it, preserving the order the
