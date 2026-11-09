@@ -292,6 +292,7 @@ fn activate_cells(
             settings,
             None,
             yani_transmute::DEFAULT_PRODUCT_THRESHOLD,
+            None,
         )
         .map_err(|e| e.to_string())?;
     cells
@@ -449,6 +450,7 @@ fn activate_mesh(
         loaded.chain,
         &loaded.branch,
         loaded.parts,
+        None,
         None,
         None,
     )

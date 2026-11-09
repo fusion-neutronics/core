@@ -51,6 +51,7 @@ __all__ = [
     "PhotonContinuum",
     "PhotonSource",
     "Plane",
+    "Processing",
     "Pulse",
     "PulseSchedule",
     "Quadric",
@@ -3378,7 +3379,7 @@ class Model:
         Returns:
             A :class:`GeometrySliceData` -- also supports tuple unpacking.
         """
-    def simulate_transmutation(self, method: builtins.str, schedule: typing.Any, total_particles: typing.Optional[builtins.int] = None, seed: builtins.int = 1, threads: typing.Optional[builtins.int] = None, max_runtime: typing.Optional[typing.Any] = None, compute: builtins.str = 'cpu', data_uncertainty: typing.Optional[DataUncertainty] = None, product_threshold: builtins.float = 1e-12) -> TransmutationResults:
+    def simulate_transmutation(self, method: builtins.str, schedule: typing.Any, total_particles: typing.Optional[builtins.int] = None, seed: builtins.int = 1, threads: typing.Optional[builtins.int] = None, max_runtime: typing.Optional[typing.Any] = None, compute: builtins.str = 'cpu', data_uncertainty: typing.Optional[DataUncertainty] = None, product_threshold: builtins.float = 1e-12, processing: typing.Optional[Processing] = None) -> TransmutationResults:
         r"""
         Run transport-transmutation calculation.
         
@@ -3544,6 +3545,14 @@ class Model:
                 only its neutron reactions are dropped
                 (``get_product_screening_info`` says which). 0 loads every
                 product the solve populates. See ``Material.transmute``.
+        
+            processing (Processing, optional): Removals, transfers between
+                materials and feeds, on the transmutable materials. The
+                materials a transfer links are solved together each step. A
+                material it names that is not in the geometry, a storage tank
+                say, is carried unirradiated and reported under its own id, so
+                its activity and contact dose read like any other's. Not yet
+                combined with ``data_uncertainty``.
         
         Returns:
             TransmutationResults object containing material compositions at each timestep.
@@ -4245,6 +4254,86 @@ class PhotonSource:
     def __repr__(self) -> builtins.str: ...
     def to_vtkhdf(self, filename: builtins.str, **kwargs: typing.Any) -> None:
         r"""Write to a VTK-HDF file for ParaView. Requires h5py (pip install yamc[viz])."""
+
+@typing.final
+class Processing:
+    r"""
+    Removals, transfers between materials and feeds, for a transmutation run.
+    
+    Each term adds to the Bateman equations of the materials it names, and
+    every one is solved exactly: a first-order removal is a loss rate, a
+    transfer is that loss arriving in the destination scaled by the ratio of
+    volumes, and a feed is a source held constant over each interval. Materials
+    a transfer links are solved together each step.
+    
+    A destination need not be irradiated. One that ``transmute`` or
+    ``simulate_transmutation`` is not otherwise given (a storage tank outside
+    the geometry, say) is carried unirradiated and reported in the results
+    under its own id, so its activity and contact dose read like any other
+    material's.
+    
+    A rate is a number, or a table ``(times, rates)``: piecewise constant, each
+    rate holding from its time (seconds from the start of the schedule, or
+    ``(value, unit)``) to the next, and zero before the first. Steps are split
+    where a table changes, so a table is solved exactly. ``steps`` restricts a
+    term to the listed schedule steps (0-based).
+    
+    Examples:
+        >>> loop = yamc.Processing()
+        >>> # tritium out of the breeder with a 2 h half-time, into a tank
+        >>> loop.add_transfer(pbli, "H3", rate=(2, "h"), rate_units="half-time",
+        ...                   destination=tank)
+        >>> loop.add_transfer(pbli, "He", rate=6, rate_units="1/h")  # vented
+        >>> loop.add_feed(pbli, {"Li6": 1.0}, rate=0.05, rate_units="kg/d", steps=[0, 2])
+        >>> # a whole liquid circulating between a core and a pool
+        >>> loop.add_transfer(water, rate=flow / water.volume, destination=pool)
+        >>> loop.add_transfer(pool, rate=flow / pool.volume, destination=water)
+        >>> results = yamc.transmute([pbli, water], schedules, processing=loop)
+    """
+    @property
+    def material_ids(self) -> builtins.list[builtins.int]:
+        r"""
+        The ids of every material a term names.
+        """
+    def __new__(cls) -> Processing: ...
+    def add_transfer(self, material: Material, component: typing.Optional[builtins.str] = None, *, rate: typing.Any, rate_units: builtins.str = '1/s', destination: typing.Optional[Material] = None, steps: typing.Optional[typing.Sequence[builtins.int]] = None) -> None:
+        r"""
+        Remove ``component`` from ``material`` continuously, at a first-order
+        rate, into ``destination`` when given and out of the system otherwise.
+        
+        Args:
+            material (Material): Where it is removed from.
+            component (str, optional): An element (``"H"``, every isotope) or a
+                nuclide (``"H3"``). ``None`` (the default) removes everything,
+                as a flowing liquid does.
+            rate (float | tuple): The rate, or a ``(times, rates)`` table.
+            rate_units (str): ``"1/s"`` (or ``1/min``, ``1/h``, ``1/d``,
+                ``1/a``), or ``"half-time"`` for the time to remove half, in
+                seconds or as ``(value, unit)``.
+            destination (Material, optional): Where it goes. Both materials need
+                a volume: what leaves is diluted by their ratio.
+            steps (list[int], optional): The schedule steps it acts on; every
+                step by default.
+        """
+    def add_feed(self, material: Material, composition: typing.Mapping[builtins.str, builtins.float], *, rate: typing.Any, rate_units: builtins.str = 'g/s', proportional_to: typing.Optional[builtins.str] = None, steps: typing.Optional[typing.Sequence[builtins.int]] = None) -> None:
+        r"""
+        Feed ``composition`` into ``material`` continuously.
+        
+        Args:
+            material (Material): What it is fed into.
+            composition (dict[str, float]): Nuclides or natural elements, by
+                atom fraction (normalized).
+            rate (float | tuple): The rate, or a ``(times, rates)`` table.
+            rate_units (str): An amount per time, ``"g/s"``, ``"kg/d"``,
+                ``"mol/h"`` or ``"atoms/s"``, for which ``material`` needs a
+                volume; or with ``proportional_to`` a rate constant ``"1/s"``.
+            proportional_to (str, optional): A nuclide of ``material``: the feed
+                is then ``rate`` times its inventory, which holds an enrichment
+                (Li6 fed in proportion to Li7, say).
+            steps (list[int], optional): The schedule steps it acts on; every
+                step by default.
+        """
+    def __repr__(self) -> builtins.str: ...
 
 @typing.final
 class Pulse:
@@ -9159,7 +9248,7 @@ def solid_shared_volume(vertices: typing.Sequence[typing.Sequence[builtins.float
         standard error ``std_err``.
     """
 
-def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | typing.Sequence[PulseSchedule], data_uncertainty: typing.Optional[DataUncertainty] = None, self_shielding_chord: typing.Optional[builtins.float] = None, self_shielding_shape: shapes.SphereLump | shapes.CubeLump | shapes.FoilLump | shapes.CylinderLump | shapes.WireLump | None = None, displacement_damage: builtins.bool = False, displacement_energies: typing.Optional[typing.Mapping[builtins.str, builtins.float]] = None, product_threshold: builtins.float = 1e-12) -> TransmutationResults:
+def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | typing.Sequence[PulseSchedule], data_uncertainty: typing.Optional[DataUncertainty] = None, self_shielding_chord: typing.Optional[builtins.float] = None, self_shielding_shape: shapes.SphereLump | shapes.CubeLump | shapes.FoilLump | shapes.CylinderLump | shapes.WireLump | None = None, displacement_damage: builtins.bool = False, displacement_energies: typing.Optional[typing.Mapping[builtins.str, builtins.float]] = None, product_threshold: builtins.float = 1e-12, processing: typing.Optional[Processing] = None) -> TransmutationResults:
     r"""
     Transmute several materials over one timeline in one call.
     
@@ -9213,6 +9302,12 @@ def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | t
             quantity, a product must reach for its cross sections to be loaded
             and its reactions solved, applied to each material's own schedule.
             Default 1e-12. See ``Material.transmute``.
+        processing (Processing, optional): Removals, transfers between
+            materials and feeds. The materials a transfer links are solved
+            together each step. A material it names that is not in
+            ``materials``, a storage tank say, is carried unirradiated and
+            reported under its own id. Not yet combined with
+            ``data_uncertainty``.
     
     Returns:
         TransmutationResults: Keyed by each material's ``id``. Per material,

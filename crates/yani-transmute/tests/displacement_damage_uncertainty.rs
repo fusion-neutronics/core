@@ -78,6 +78,7 @@ fn run(sources: Vec<Source>, flux_error: Option<Vec<f64>>) -> TransmutationResul
             convergence: DEFAULT_CONVERGENCE,
         }),
         Some(&DamageRequest::default()),
+        None,
     )
     .expect("transmute")
 }

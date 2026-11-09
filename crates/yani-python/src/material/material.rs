@@ -1583,6 +1583,7 @@ impl PyMaterial {
                 loaded.parts,
                 uncertainty.as_ref(),
                 damage.as_ref(),
+                None,
             )
             // `Box<dyn Error>` is not `Send`, so it cannot come back out
             // through `detach`; the message is what the caller sees anyway.

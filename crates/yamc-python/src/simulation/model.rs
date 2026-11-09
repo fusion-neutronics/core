@@ -1767,6 +1767,14 @@ impl PyModel {
     ///         (``get_product_screening_info`` says which). 0 loads every
     ///         product the solve populates. See ``Material.transmute``.
     ///
+    ///     processing (Processing, optional): Removals, transfers between
+    ///         materials and feeds, on the transmutable materials. The
+    ///         materials a transfer links are solved together each step. A
+    ///         material it names that is not in the geometry, a storage tank
+    ///         say, is carried unirradiated and reported under its own id, so
+    ///         its activity and contact dose read like any other's. Not yet
+    ///         combined with ``data_uncertainty``.
+    ///
     /// Returns:
     ///     TransmutationResults object containing material compositions at each timestep.
     ///
@@ -1785,7 +1793,7 @@ impl PyModel {
     ///     >>> results.get_nuclide_uncertainty(steel.id, "Co60", 1)
     ///     >>> results.get_data_uncertainty_info(steel.id)["flux_response"]
     ///     'replica_weights'
-    #[pyo3(signature = (method, schedule, total_particles=None, seed=1, threads=None, max_runtime=None, compute="cpu", data_uncertainty=None, product_threshold=1e-12))]
+    #[pyo3(signature = (method, schedule, total_particles=None, seed=1, threads=None, max_runtime=None, compute="cpu", data_uncertainty=None, product_threshold=1e-12, processing=None))]
     #[allow(clippy::too_many_arguments)]
     pub fn simulate_transmutation(
         &mut self,
@@ -1798,8 +1806,12 @@ impl PyModel {
         compute: &str,
         data_uncertainty: Option<yani_python::data_uncertainty::PyDataUncertainty>,
         product_threshold: f64,
+        processing: Option<PyRef<'_, yani_python::processing::PyProcessing>>,
         py: Python<'_>,
     ) -> PyResult<PyTransmutationResults> {
+        // Every material it names, copied out while the GIL is held; the
+        // driver takes those the geometry does not hold.
+        let processing = processing.as_ref().map(|p| p.run(py, &[])).transpose()?;
         yani_transmute::screening::check_threshold(product_threshold)
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
         // As on `generate_weight_windows`: present so the answer is a sentence
@@ -1895,6 +1907,7 @@ impl PyModel {
                         &settings,
                         uncertainty.as_ref(),
                         product_threshold,
+                        processing,
                     )
                     .map_err(|e| e.to_string())
             });

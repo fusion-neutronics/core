@@ -177,7 +177,7 @@ impl TransmutationStepper for ForwardEulerStepper {
 /// is only half of it. An unfed nuclide that still burns (a seed with nothing
 /// producing it, which is most seeds) would otherwise be handed back its
 /// starting density and never deplete.
-fn total_loss_rate(triplets: &[(usize, usize, f64)], n: usize) -> Vec<f64> {
+pub(crate) fn total_loss_rate(triplets: &[(usize, usize, f64)], n: usize) -> Vec<f64> {
     let mut loss = vec![0.0; n];
     for &(row, col, value) in triplets {
         if row == col {
@@ -193,7 +193,7 @@ fn total_loss_rate(triplets: &[(usize, usize, f64)], n: usize) -> Vec<f64> {
 /// during the step feeds its daughter, so the walk follows the off-diagonal
 /// production edges outward from every nuclide that starts with a density.
 /// Whatever it does not reach can only decay, and has an analytic answer.
-fn fed_during_step(triplets: &[(usize, usize, f64)], n0: &[f64]) -> Vec<bool> {
+pub(crate) fn fed_during_step(triplets: &[(usize, usize, f64)], n0: &[f64]) -> Vec<bool> {
     let mut children: HashMap<usize, Vec<usize>> = HashMap::new();
     for &(row, col, value) in triplets {
         if row != col && value > 0.0 {
@@ -229,14 +229,36 @@ fn collect_nuclides_and_densities_from_hashmap(
     chain: &HashMap<String, ChainNuclide>,
     rates: &ReactionRates,
 ) -> (Vec<String>, Vec<f64>) {
-    // BFS from nuclides with non-zero density through chain
+    let names = reachable(
+        nuclides
+            .iter()
+            .filter(|&(_, &density)| density > 0.0)
+            .map(|(name, _)| name.as_str()),
+        chain,
+        rates,
+    );
+    let n0: Vec<f64> = names
+        .iter()
+        .map(|name| *nuclides.get(name).unwrap_or(&0.0))
+        .collect();
+    (names, n0)
+}
+
+/// Every chain nuclide reachable from `seeds` over one step, sorted.
+///
+/// A BFS through the chain following every decay (decays happen regardless
+/// of flux) and only the reactions with a non-zero rate, so unreachable
+/// nuclides do not inflate the matrix. Seeds not in the chain are skipped.
+pub(crate) fn reachable<'a>(
+    seeds: impl IntoIterator<Item = &'a str>,
+    chain: &HashMap<String, ChainNuclide>,
+    rates: &ReactionRates,
+) -> Vec<String> {
     let mut visited: HashSet<String> = HashSet::new();
     let mut queue: VecDeque<String> = VecDeque::new();
-
-    for (name, &density) in nuclides.iter() {
-        if density > 0.0 && chain.contains_key(name) {
-            visited.insert(name.clone());
-            queue.push_back(name.clone());
+    for name in seeds {
+        if chain.contains_key(name) && visited.insert(name.to_string()) {
+            queue.push_back(name.to_string());
         }
     }
 
@@ -315,14 +337,7 @@ fn collect_nuclides_and_densities_from_hashmap(
     // Sort for deterministic ordering
     let mut names: Vec<String> = visited.into_iter().collect();
     names.sort();
-
-    // Build initial density vector
-    let n0: Vec<f64> = names
-        .iter()
-        .map(|name| *nuclides.get(name).unwrap_or(&0.0))
-        .collect();
-
-    (names, n0)
+    names
 }
 
 // ----------------------------- Tests -----------------------------

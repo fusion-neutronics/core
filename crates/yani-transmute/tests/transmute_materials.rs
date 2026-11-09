@@ -177,6 +177,7 @@ fn each_material_matches_its_own_solve() {
         Default::default(),
         None,
         None,
+        None,
     )
     .expect("transmute together");
 
@@ -232,6 +233,7 @@ fn a_different_composition_is_collapsed_again() {
         chain(),
         &Default::default(),
         Default::default(),
+        None,
         None,
         None,
     )
@@ -306,6 +308,7 @@ fn uncertainty_matches_each_materials_own_solve() {
         Default::default(),
         Some(&request),
         None,
+        None,
     )
     .expect("transmute together");
 
@@ -353,6 +356,7 @@ fn a_repeated_id_is_refused() {
         Default::default(),
         None,
         None,
+        None,
     )
     .expect_err("duplicate ids");
     assert!(err.to_string().contains("both have id 4"), "{err}");
@@ -392,6 +396,7 @@ fn a_different_timeline_is_refused() {
             Default::default(),
             None,
             None,
+            None,
         )
         .expect_err("timelines differ")
         .to_string()
@@ -402,4 +407,88 @@ fn a_different_timeline_is_refused() {
     cooled[0].irradiation = None;
     let err = run(cooled);
     assert!(err.contains("step 0 is a cooldown"), "{err}");
+}
+
+/// Processing on a plural solve: manganese extracted from the irradiated iron
+/// into a tank outside the run's cases, which decays there and is reported.
+#[test]
+fn processing_moves_products_into_a_receiver() {
+    use yani_transmute::{Processing, ProcessingRun, Rate};
+    let Some(base) = iron(1, 8.5e-2) else {
+        eprintln!("skipping -- Fe56 fixture absent");
+        return;
+    };
+    let fast = spectrum(&[0.0, 0.1, 0.3, 0.6]);
+    let expected = alone(base.clone(), &fast, 1.0e14);
+    let mut tank = Material::new(HashMap::new(), "atom", "sum", None).expect("empty tank");
+    tank.set_material_id(9);
+    tank.volume = Some(4.0);
+
+    let solve = |processing: &Processing| {
+        let mut a = base.clone();
+        transmute_materials(
+            vec![TransmuteCase {
+                material: &mut a,
+                spectra: vec![fast.clone()],
+                steps: steps(1.0e14),
+                shielding: None,
+                product_threshold: yani_transmute::DEFAULT_PRODUCT_THRESHOLD,
+            }],
+            chain(),
+            &Default::default(),
+            Default::default(),
+            None,
+            None,
+            Some(ProcessingRun {
+                processing,
+                receivers: vec![tank.clone()],
+            }),
+        )
+        .expect("processed solve")
+    };
+
+    // A rate of zero changes nothing but the solve's route.
+    let mut idle = Processing::new();
+    idle.add_transfer(1, Some("Mn"), Rate::Constant(0.0), "1/s", Some(9), None)
+        .unwrap();
+    let off = solve(&idle);
+    for (name, density) in &expected.get_material(1, 2).unwrap().nuclides {
+        let got = off.get_material(1, 2).unwrap().nuclides[name];
+        assert!(
+            (got / density - 1.0).abs() < 1e-9,
+            "{name}: {got} vs {density}"
+        );
+    }
+
+    let mut extract = Processing::new();
+    extract
+        .add_transfer(
+            1,
+            Some("Mn"),
+            Rate::Constant(1.0),
+            "1/h",
+            Some(9),
+            Some(vec![0]),
+        )
+        .unwrap();
+    let on = solve(&extract);
+    let mn56 = |r: &TransmutationResults, id: u32, step: usize| {
+        r.get_material(id, step)
+            .unwrap()
+            .nuclides
+            .get("Mn56")
+            .copied()
+            .unwrap_or(0.0)
+    };
+    assert!(mn56(&on, 1, 1) < 0.5 * mn56(&expected, 1, 1));
+    assert!(mn56(&on, 9, 1) > 0.0, "the tank received no Mn56");
+    // Extraction stops with the irradiation, and the tank is unirradiated, so
+    // in the cooldown its Mn56 only decays.
+    let decayed = mn56(&on, 9, 1) * (-std::f64::consts::LN_2 * DAY / 9284.04).exp();
+    assert!(
+        mn56(&on, 9, 2) <= decayed * 1.001,
+        "tank Mn56 grew during the cooldown: {} > {decayed}",
+        mn56(&on, 9, 2)
+    );
+    assert_eq!(on.get_source_rates(9), Some(&[0.0, 0.0][..]));
 }
