@@ -2,7 +2,9 @@
 
 A thin Li6 sphere under a thermal source: its tritium production per source
 particle is close to proportional to the Li6 density, so it falls visibly as
-the irradiation burns the Li6 away.
+the irradiation burns the Li6 away. The burn is held to about half the Li6:
+further, the bred H3, He3 and He4 rival what Li6 is left, and the comparison
+with a rebuilt model hangs on which of them have data.
 """
 
 import math
@@ -70,7 +72,7 @@ def _run(method="coupled"):
     yamc.transmutation_fission_yields = CHAIN
     yamc.cross_section_data = DATA
     model, source, tallies = _model()
-    pulse = yamc.Pulse(rate=2.0e17, duration=1.0e6, source=source)
+    pulse = yamc.Pulse(rate=4.0e16, duration=1.0e6, source=source)
     schedule = yamc.PulseSchedule([pulse, pulse, pulse, yamc.Cooldown(duration=1.0e5)])
     results = model.simulate_transmutation(
         method=method, schedule=schedule, total_particles=PARTICLES, seed=SEED
