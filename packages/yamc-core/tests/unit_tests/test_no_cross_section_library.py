@@ -4,7 +4,7 @@ a library, and says how to configure one.
 There is no default neutron library (the neutron library is the
 calculation's central choice; nor is there a default transmutation library,
 see test_no_transmutation_data.py), so
-with ``yamc.cross_section_data`` unset these used to either panic with a
+with ``yamc.neutron_cross_section_data`` unset these used to either panic with a
 message about file paths, which Python sees as a ``PanicException`` that
 ``except Exception`` does not catch, or, for ``Material.transmute``, run and
 return zero activity.
@@ -18,9 +18,9 @@ DAY = 86400.0
 
 @pytest.fixture(autouse=True)
 def _no_library():
-    yamc.cross_section_data = None
+    yamc.neutron_cross_section_data = None
     yield
-    yamc.cross_section_data = None
+    yamc.neutron_cross_section_data = None
 
 
 def _iron():
@@ -55,7 +55,7 @@ def _model(material):
 def _assert_names_the_setting(error):
     message = str(error.value)
     assert "no neutron cross-section library is configured" in message
-    assert "cross_section_data" in message
+    assert "neutron_cross_section_data" in message
     assert "Fe56" in message
 
 

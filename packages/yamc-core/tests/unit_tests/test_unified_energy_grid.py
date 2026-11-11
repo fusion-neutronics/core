@@ -3,7 +3,7 @@ from yamc import Material
 
 def test_unified_energy_grid_neutron():
     # Set up global Config
-    yamc.cross_section_data = ({"Li6": "tests/Li6.arrow", "Li7": "tests/Li7.arrow"})
+    yamc.neutron_cross_section_data = ({"Li6": "tests/Li6.arrow", "Li7": "tests/Li7.arrow"})
     
     material = Material.from_atom_densities(
         {"Li6": 1.0, "Li7": 1.0},

@@ -86,7 +86,7 @@ fn an_irradiation_with_no_library_is_refused_and_a_cooldown_is_not() {
         "{err}"
     );
     assert!(
-        err.contains("cross_section_data"),
+        err.contains("neutron_cross_section_data"),
         "must name the setting: {err}"
     );
     assert!(err.contains("'Fe56'"), "must name the nuclide: {err}");

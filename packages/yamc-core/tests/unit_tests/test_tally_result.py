@@ -51,7 +51,7 @@ def _make_model(tally, total_particles=2000):
 @requires_keywords
 def test_single_score_no_filters():
     """1 score, cell tally -> shape (1,), dims ("score",)."""
-    yamc.set_cross_section_data_entry("fendl-3.2d")
+    yamc.set_neutron_cross_section_data_entry("fendl-3.2d")
     tally = yamc.Tally(scores=["flux"])
     model, run_kwargs = _make_model(tally)
     results = model.simulate_transport(**run_kwargs)
@@ -67,7 +67,7 @@ def test_single_score_no_filters():
 @requires_keywords
 def test_with_energy_bins():
     """1 score + 3 energy bins -> shape (1, 3), dims ("score", "energy")."""
-    yamc.set_cross_section_data_entry("fendl-3.2d")
+    yamc.set_neutron_cross_section_data_entry("fendl-3.2d")
     tally = yamc.Tally(
         scores=["flux"],
         energy_bins=[0.0, 1e6, 10e6, 20e6],
@@ -84,7 +84,7 @@ def test_with_energy_bins():
 @requires_keywords
 def test_with_mesh():
     """1 score + mesh 3x4x5 -> shape (1, 5, 4, 3), dims with mesh_z/y/x."""
-    yamc.set_cross_section_data_entry("fendl-3.2d")
+    yamc.set_neutron_cross_section_data_entry("fendl-3.2d")
     mesh = yamc.RegularRectangularMesh(
         lower_left=[-8.0, -8.0, -8.0],
         upper_right=[8.0, 8.0, 8.0],
@@ -103,7 +103,7 @@ def test_with_mesh():
 @requires_keywords
 def test_with_mesh_and_energy():
     """1 score + 2 energy bins + mesh 3x4x5."""
-    yamc.set_cross_section_data_entry("fendl-3.2d")
+    yamc.set_neutron_cross_section_data_entry("fendl-3.2d")
     mesh = yamc.RegularRectangularMesh(
         lower_left=[-8.0, -8.0, -8.0],
         upper_right=[8.0, 8.0, 8.0],
@@ -126,7 +126,7 @@ def test_with_mesh_and_energy():
 @requires_keywords
 def test_multiple_scores():
     """2 scores + mesh -> shape[0] == 2."""
-    yamc.set_cross_section_data_entry("fendl-3.2d")
+    yamc.set_neutron_cross_section_data_entry("fendl-3.2d")
     mesh = yamc.RegularRectangularMesh(
         lower_left=[-8.0, -8.0, -8.0],
         upper_right=[8.0, 8.0, 8.0],
@@ -145,7 +145,7 @@ def test_multiple_scores():
 @requires_keywords
 def test_with_nuclides():
     """1 score + nuclides ["Li6", "total"] -> shape (1, 2), dims with nuclide."""
-    yamc.set_cross_section_data_entry("fendl-3.2d")
+    yamc.set_neutron_cross_section_data_entry("fendl-3.2d")
     tally = yamc.Tally(
         scores=["H3-production"],
         nuclides=["Li6", "total"],
@@ -162,7 +162,7 @@ def test_with_nuclides():
 @requires_keywords
 def test_shape_product_matches_data_length():
     """product(shape) == len(mean) for a multi-dimensional tally."""
-    yamc.set_cross_section_data_entry("fendl-3.2d")
+    yamc.set_neutron_cross_section_data_entry("fendl-3.2d")
     mesh = yamc.RegularRectangularMesh(
         lower_left=[-8.0, -8.0, -8.0],
         upper_right=[8.0, 8.0, 8.0],
@@ -186,7 +186,7 @@ def test_shape_product_matches_data_length():
 @requires_keywords
 def test_dim_labels_are_strings():
     """All dim_labels elements must be str."""
-    yamc.set_cross_section_data_entry("fendl-3.2d")
+    yamc.set_neutron_cross_section_data_entry("fendl-3.2d")
     tally = yamc.Tally(scores=["flux"])
     model, run_kwargs = _make_model(tally)
     results = model.simulate_transport(**run_kwargs)
@@ -199,7 +199,7 @@ def test_dim_labels_are_strings():
 @requires_keywords
 def test_shape_matches_dim_labels():
     """len(shape) == len(dim_labels)."""
-    yamc.set_cross_section_data_entry("fendl-3.2d")
+    yamc.set_neutron_cross_section_data_entry("fendl-3.2d")
     mesh = yamc.RegularRectangularMesh(
         lower_left=[-8.0, -8.0, -8.0],
         upper_right=[8.0, 8.0, 8.0],
@@ -224,7 +224,7 @@ if __name__ == "__main__":
 @requires_keywords
 def test_displays_show_particles_not_batches():
     """Result reprs and HTML show the total particle count, never batches."""
-    yamc.set_cross_section_data_entry("fendl-3.2d")
+    yamc.set_neutron_cross_section_data_entry("fendl-3.2d")
     tally = yamc.Tally(scores=["flux"])
     model, run_kwargs = _make_model(tally, total_particles=2000)
     results = model.simulate_transport(**run_kwargs)

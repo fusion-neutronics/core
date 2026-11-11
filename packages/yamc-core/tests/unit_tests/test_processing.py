@@ -21,7 +21,7 @@ FAST = [1e-5, 0.625, 1e5, 2e7]
 
 @pytest.fixture(autouse=True)
 def _data():
-    yamc.cross_section_data = "tests"
+    yamc.neutron_cross_section_data = "tests"
     yamc.transmutation_decay_data = CHAIN
     yamc.transmutation_reactions = CHAIN
     yamc.transmutation_fission_yields = CHAIN

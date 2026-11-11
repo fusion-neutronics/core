@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 import yamc
 
-yamc.set_cross_section_data_entry('fendl-3.2d')
+yamc.set_neutron_cross_section_data_entry('fendl-3.2d')
 
 # ── Build a simple geometry ──────────────────────────────────────────────
 sphere_inner = yamc.Sphere(radius=20.0)

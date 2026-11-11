@@ -92,6 +92,9 @@ fn keywords_still_bypass_the_backend() {
             "Li6".to_string(),
             "endf-b8.1".to_string(),
         )]));
-        assert_eq!(config.default_cross_section.as_deref(), Some("endf-b8.1"));
+        assert_eq!(
+            config.default_neutron_cross_section.as_deref(),
+            Some("endf-b8.1")
+        );
     });
 }

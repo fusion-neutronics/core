@@ -14,6 +14,7 @@ impl Material {
         // Store photon data paths if provided
         if let Some(paths) = photon_data_paths {
             self.photon_data_paths = paths.clone();
+            self.photon_config_sources.clear();
         }
         // Collect needed nuclide names
         let mut nuclide_names: Vec<String> = self.nuclides.keys().cloned().collect();
@@ -382,10 +383,6 @@ impl Material {
             source_map.insert(nuclide_name.clone(), source.to_string());
         }
 
-        if is_keyword {
-            self.register_photon_data_source(source);
-        }
-
         // Register the keyword / directory as the GLOBAL fallback source when
         // the user has not configured one. Nuclides that enter the problem
         // later by name only -- the transmutation products preloaded in
@@ -400,8 +397,8 @@ impl Material {
             let mut config = yamc_nuclide::config::CONFIG
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if config.default_cross_section.is_none() {
-                config.default_cross_section = Some(source.to_string());
+            if config.default_neutron_cross_section.is_none() {
+                config.default_neutron_cross_section = Some(source.to_string());
             }
         }
 
@@ -409,28 +406,33 @@ impl Material {
         Ok(())
     }
 
-    fn register_photon_data_source(&mut self, source: &str) {
+    fn apply_photon_sources(&mut self, config: &yamc_nuclide::config::Config) {
         use yamc_element::element::element_symbol_from_nuclide;
 
+        for (element, source) in self.photon_config_sources.drain() {
+            if self.photon_data_paths.get(&element) == Some(&source) {
+                self.photon_data_paths.remove(&element);
+            }
+        }
         for nuclide_name in self.nuclides.keys() {
             let element = element_symbol_from_nuclide(nuclide_name);
-            self.photon_data_paths
-                .entry(element)
-                .or_insert_with(|| source.to_string());
+            if let Some(source) = config.get_photon_cross_section(&element)
+                && let std::collections::hash_map::Entry::Vacant(entry) =
+                    self.photon_data_paths.entry(element.clone())
+            {
+                entry.insert(source.clone());
+                self.photon_config_sources.insert(element, source);
+            }
         }
     }
 
-    /// Resolve missing element paths from the global cross-section source.
+    /// Resolve missing element paths from the photon selection only.
     /// Explicit per-element photon paths are preserved.
     pub fn ensure_photon_data_paths(&mut self) {
-        let source = CONFIG
+        let config = CONFIG
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .default_cross_section
-            .clone();
-        if let Some(source) = source {
-            self.register_photon_data_source(&source);
-        }
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.apply_photon_sources(&config);
     }
 
     /// Read nuclear data from a keyword string that will be applied to all nuclides in this material
@@ -454,6 +456,7 @@ impl Material {
             // Store photon data paths if provided
             if let Some(paths) = photon_data {
                 self.photon_data_paths = paths;
+                self.photon_config_sources.clear();
             }
             self.read_nuclear_data_keyword(&keyword)
         } else {
@@ -542,6 +545,7 @@ impl Material {
     /// left for the load to report.
     pub fn prefetch_nuclear_data<'a>(
         materials: impl IntoIterator<Item = &'a Material>,
+        neutrons: bool,
         photons: bool,
     ) {
         use yamc_element::element::element_symbol_from_nuclide;
@@ -551,9 +555,11 @@ impl Material {
         let mut wanted: Vec<(String, String, DataKind, LoadScope)> = Vec::new();
         for material in materials {
             let scope = material.transport_scope();
-            for (name, source) in material.nuclides_to_load() {
-                if let Some(source) = source {
-                    wanted.push((name, source, DataKind::Neutron, scope.clone()));
+            if neutrons {
+                for (name, source) in material.nuclides_to_load() {
+                    if let Some(source) = source {
+                        wanted.push((name, source, DataKind::Neutron, scope.clone()));
+                    }
                 }
             }
             if photons {
@@ -696,14 +702,20 @@ mod tests {
     }
 
     #[test]
-    fn photon_sources_follow_the_selected_keyword() {
-        for keyword in ["endf-b8.1", "fendl-3.2d", "tendl-2025"] {
-            let mut material = material();
-            material.register_photon_data_source(keyword);
-            assert_eq!(material.photon_data_paths.len(), 2);
-            assert_eq!(material.photon_data_paths["Fe"], keyword);
-            assert_eq!(material.photon_data_paths["O"], keyword);
-        }
+    fn photon_sources_do_not_inherit_the_neutron_selection() {
+        let mut config = yamc_nuclide::config::Config::new();
+        config.set_cross_sections("fendl-3.2d");
+        let mut material = material();
+        material.apply_photon_sources(&config);
+        assert!(material.photon_data_paths.is_empty());
+        config.default_photon_cross_section = Some("endf-b8.1".into());
+        config
+            .photon_cross_sections
+            .insert("Fe".into(), "jendl-5.0".into());
+        material.apply_photon_sources(&config);
+        assert_eq!(material.photon_data_paths.len(), 2);
+        assert_eq!(material.photon_data_paths["Fe"], "jendl-5.0");
+        assert_eq!(material.photon_data_paths["O"], "endf-b8.1");
     }
 
     #[test]
@@ -712,8 +724,29 @@ mod tests {
         material
             .photon_data_paths
             .insert("Fe".into(), "local/Fe.arrow".into());
-        material.register_photon_data_source("fendl-3.2d");
+        let mut config = yamc_nuclide::config::Config::new();
+        config.default_photon_cross_section = Some("fendl-3.2d".into());
+        material.apply_photon_sources(&config);
         assert_eq!(material.photon_data_paths["Fe"], "local/Fe.arrow");
         assert_eq!(material.photon_data_paths["O"], "fendl-3.2d");
+    }
+
+    #[test]
+    fn changed_photon_settings_refresh_only_configured_paths() {
+        let mut config = yamc_nuclide::config::Config::new();
+        config.default_photon_cross_section = Some("endf-b8.1".into());
+        let mut material = material();
+        material.apply_photon_sources(&config);
+        assert_eq!(material.photon_data_paths["O"], "endf-b8.1");
+        config.default_photon_cross_section = Some("fendl-3.2d".into());
+        material.apply_photon_sources(&config);
+        assert_eq!(material.photon_data_paths["O"], "fendl-3.2d");
+        material
+            .photon_data_paths
+            .insert("Fe".into(), "explicit/Fe.arrow".into());
+        config.default_photon_cross_section = None;
+        material.apply_photon_sources(&config);
+        assert!(!material.photon_data_paths.contains_key("O"));
+        assert_eq!(material.photon_data_paths["Fe"], "explicit/Fe.arrow");
     }
 }

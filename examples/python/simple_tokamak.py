@@ -23,8 +23,9 @@ parser.add_argument(
 args = parser.parse_args()
 MAKE_PLOTS = not args.no_plots
 
-# yamc.cross_section_data = 'fendl-3.2d'
-yamc.cross_section_data = 'endf-b8.1'
+# yamc.neutron_cross_section_data = 'fendl-3.2d'
+yamc.neutron_cross_section_data = 'endf-b8.1'
+yamc.photon_cross_section_data = 'endf-b8.1'
 
 material1 = yamc.Material(
     composition={"Be9": 1.0},

@@ -112,7 +112,7 @@ def run_case(uncertainty: bool) -> dict:
     """Time one case and dump its inventory. Runs in its own interpreter."""
     import yani
 
-    yani.cross_section_data = LIBRARY
+    yani.neutron_cross_section_data = LIBRARY
     for setting in (
         "transmutation_decay_data",
         "transmutation_reactions",

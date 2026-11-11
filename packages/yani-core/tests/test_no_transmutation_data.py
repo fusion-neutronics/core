@@ -16,7 +16,7 @@ _SOURCES = (
 
 @pytest.fixture(autouse=True)
 def _nothing_configured():
-    yani.cross_section_data = None
+    yani.neutron_cross_section_data = None
     for setting in _SOURCES:
         setattr(yani, setting, None)
 

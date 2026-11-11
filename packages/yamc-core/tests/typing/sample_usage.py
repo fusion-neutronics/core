@@ -33,9 +33,12 @@ nuc = yamc.Nuclide("Fe56")
 assert_type(nuc, yamc.Nuclide)
 
 # --- Module-level data configuration is typed -------------------------------
-yamc.cross_section_data = "endf-b8.1"
-yamc.cross_section_data = {"Li6": "/data/Li6"}
-yamc.cross_section_data = None
+yamc.neutron_cross_section_data = "endf-b8.1"
+yamc.neutron_cross_section_data = {"Li6": "/data/Li6"}
+yamc.neutron_cross_section_data = None
+yamc.photon_cross_section_data = "endf-b8.1"
+yamc.photon_cross_section_data = {"Fe": "/data/photon/Fe.arrow"}
+yamc.photon_cross_section_data = None
 yamc.transmutation_decay_data = None
 
 # `False` turns a subsection off, and only these two accept it. Without the

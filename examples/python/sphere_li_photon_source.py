@@ -26,9 +26,9 @@ Outputs (open either in a browser and click Simulate):
 
 import yamc
 
-# Pull neutron and photon data from the same library automatically.
+# Select the photon library explicitly; no neutron data is needed.
 # The first run caches the downloaded data locally.
-yamc.cross_section_data = "endf-b8.1"
+yamc.photon_cross_section_data = "endf-b8.1"
 
 # --- Material: natural lithium ------------------------------------------
 # `{"Li": 1.0}` expands to natural Li6 + Li7 for neutron data; photon data

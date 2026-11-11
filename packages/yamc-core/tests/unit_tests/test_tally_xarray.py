@@ -71,7 +71,7 @@ def _make_model(tally, total_particles=2000):
 @requires_keywords
 def test_to_xarray_energy_binned():
     xr = pytest.importorskip("xarray")
-    yamc.set_cross_section_data_entry("fendl-3.2d")
+    yamc.set_neutron_cross_section_data_entry("fendl-3.2d")
     tally = yamc.Tally(scores=["flux"], energy_bins=[0.0, 1e3, 1e6, 2e7], name="flux")
     model, run_kwargs = _make_model(tally)
     results = model.simulate_transport(**run_kwargs)
@@ -87,7 +87,7 @@ def test_to_xarray_energy_binned():
 @requires_keywords
 def test_to_dataset_has_mean_std_relerr():
     pytest.importorskip("xarray")
-    yamc.set_cross_section_data_entry("fendl-3.2d")
+    yamc.set_neutron_cross_section_data_entry("fendl-3.2d")
     tally = yamc.Tally(scores=["flux"], energy_bins=[0.0, 1e3, 1e6, 2e7], name="flux")
     model, run_kwargs = _make_model(tally)
     results = model.simulate_transport(**run_kwargs)

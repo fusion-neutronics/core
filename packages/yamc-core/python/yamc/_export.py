@@ -53,11 +53,14 @@ def _require_wasm() -> None:
         "always ships them, so this only happens when working from a checkout."
     )
 
-# The library the exported page fetches from, and whose cached release the
-# embedded data is read from. yamc caches each published release of a library
+# URLs are used only for explicitly selected library keywords. yamc caches
+# each published release of a library
 # under ``<cache_dir()>/<library>/<release>/``, with nuclide sections in
 # ``neutron/<Name>.arrow/`` and element sections in ``photon/<El>.arrow/``.
-_LIBRARY = "endf-b8.1"
+_LIBRARY_URLS = {
+    keyword: f"https://yamc-data.xsplot.com/{keyword}"
+    for keyword in ("endf-b8.1", "jeff-4.0", "jendl-5.0", "fendl-3.2d", "tendl-2025", "tendl-2017")
+}
 _NUCLIDE_SUBDIR = "neutron"
 _ELEMENT_SUBDIR = "photon"
 _DIR_SUFFIX = ".arrow"
@@ -71,7 +74,7 @@ _DIR_SUFFIX = ".arrow"
 _RANGED_DIR = "temperatures"
 
 
-def _default_release_dir() -> Path:
+def _default_release_dir(keyword: str) -> Path:
     """The newest cached release of the page's library.
 
     Releases are named by date (``2026-10-01``), so the lexically last folder
@@ -81,14 +84,31 @@ def _default_release_dir() -> Path:
     """
     from yamc._core import cache_dir
 
-    library = Path(cache_dir()) / _LIBRARY
+    library = Path(cache_dir()) / keyword
     releases = sorted(
         d for d in library.glob("*") if d.is_dir() and (d / "manifest.json").is_file()
     )
     return releases[-1] if releases else library
 
 
-def _expand_nuclide_or_element(item: str, cache_dir: Path) -> list[str]:
+def _source_location(source: str) -> tuple[Path, str | None]:
+    if source in _LIBRARY_URLS:
+        return _default_release_dir(source), _LIBRARY_URLS[source]
+    directory = Path(source)
+    if directory.is_dir():
+        return directory, None
+    raise ValueError(f"cannot export nuclear-data source {source!r}: use a selected library or an existing local directory")
+
+
+def _data_directory(name: str, root: Path, subdir: str) -> Path:
+    if root.name == f"{name}{_DIR_SUFFIX}":
+        return root
+    nested = root / subdir / f"{name}{_DIR_SUFFIX}"
+    direct = root / f"{name}{_DIR_SUFFIX}"
+    return direct if not nested.is_dir() and direct.is_dir() else nested
+
+
+def _expand_nuclide_or_element(item: str, cache_dir: Path | None) -> list[str]:
     """Resolve a single user-supplied entry to a list of nuclide names.
 
     - ``"Li6"`` → ``["Li6"]`` (already a nuclide)
@@ -102,6 +122,8 @@ def _expand_nuclide_or_element(item: str, cache_dir: Path) -> list[str]:
     """
     if re.search(r"\d", item):
         return [item]
+    if cache_dir is None:
+        raise ValueError("expanding an element for export needs an explicit neutron library or cache_dir; otherwise name its nuclides")
     iso_re = re.compile(rf"^{re.escape(item)}(\d+)$")
     expansions: list[str] = []
     nuclides = cache_dir / _NUCLIDE_SUBDIR
@@ -126,7 +148,7 @@ def _expand_nuclide_or_element(item: str, cache_dir: Path) -> list[str]:
 def _resolve_embed_list(
     embed: "bool | Iterable[str]",
     required: list[str],
-    cache_dir: Path,
+    cache_dir: Path | None,
 ) -> list[str]:
     """Translate the ``embed_cross_sections`` arg into a concrete nuclide list."""
     if embed is False or embed is None:
@@ -165,7 +187,7 @@ def _load_nuclide_files(name: str, cache_dir: Path, subdir: str) -> dict[str, by
     so does an activation load's MT subset (``subset/``), which transport
     never reads.
     """
-    nuc_dir = cache_dir / subdir / f"{name}{_DIR_SUFFIX}"
+    nuc_dir = _data_directory(name, cache_dir, subdir)
     if not nuc_dir.is_dir():
         raise FileNotFoundError(
             f"Nuclide '{name}' is not in the local cache at {nuc_dir}. "
@@ -219,21 +241,15 @@ def _check_page_can_load(name: str, cache_dir: Path, temperatures: "list[str] | 
     """
     from yamc._core import Nuclide
 
-    nuc_dir = cache_dir / _NUCLIDE_SUBDIR / f"{name}{_DIR_SUFFIX}"
+    nuc_dir = _data_directory(name, cache_dir, _NUCLIDE_SUBDIR)
     try:
         Nuclide(name).read_nuclear_data(str(nuc_dir), temperatures=temperatures)
     except Exception as err:
         at = "every temperature" if temperatures is None else f"{', '.join(temperatures)} K"
-        fetch = (
-            f"yamc.Nuclide({name!r}).read_nuclear_data({_LIBRARY!r}"
-            + ("" if temperatures is None else f", temperatures={temperatures!r}")
-            + ")"
-        )
         raise FileNotFoundError(
             f"Cannot embed '{name}': the page loads it at {at}, and the cached data at "
-            f"{nuc_dir} cannot serve that load: {err}. Download what the page needs "
-            f"with {fetch}, or by running this model with simulate_transport, then "
-            f"re-export."
+            f"{nuc_dir} cannot serve that load: {err}. Load the required temperatures "
+            f"from the explicitly selected neutron source, then re-export."
         ) from err
 
 
@@ -242,6 +258,7 @@ def _build_embedded_xs_json(
     cache_dir: Path,
     subdir: str,
     temperatures: "dict[str, list[str] | None] | None" = None,
+    locations: "dict[str, Path] | None" = None,
 ) -> str:
     """JSON payload for the `EMBEDDED_XS` global.
 
@@ -251,9 +268,10 @@ def _build_embedded_xs_json(
     """
     payload: dict[str, dict[str, str]] = {}
     for name in nuclides:
-        files = _load_nuclide_files(name, cache_dir, subdir)
+        directory = locations[name] if locations is not None else cache_dir
+        files = _load_nuclide_files(name, directory, subdir)
         if temperatures is not None:
-            _check_page_can_load(name, cache_dir, temperatures[name])
+            _check_page_can_load(name, directory, temperatures[name])
         payload[name] = {
             filename: base64.b64encode(data).decode("ascii")
             for filename, data in files.items()
@@ -326,10 +344,11 @@ def to_html(
             on first load. The Simulate handler overwrites it with the
             recipient's own result after they click.
         cache_dir: The release folder to read embedded data from, laid out
-            as ``neutron/<Name>.arrow/`` and ``photon/<El>.arrow/`` (default:
-            the newest cached endf-b8.1 release,
-            ``<yamc.cache_dir()>/endf-b8.1/<release>/``). Useful for tests or
-            vendored data layouts.
+            as ``neutron/<Name>.arrow/`` and ``photon/<El>.arrow/``. By default
+            each nuclide or element is read from its selected source, so
+            neutron and photon data may come from different libraries.
+            Useful for tests or vendored data layouts. Local-only sources
+            must be embedded: online export never substitutes a library.
 
     Returns:
         The output path (as a :class:`~pathlib.Path`).
@@ -360,15 +379,47 @@ def to_html(
         >>> # but cannot touch the geometry or the tally definitions.
         >>> model.to_html("locked.html", show_surfaces=False, show_tallies=False)
     """
-    out = Path(path)
-    cache = Path(cache_dir) if cache_dir is not None else _default_release_dir()
+    import yamc
 
-    required = self.required_nuclides()
-    embed_list = _resolve_embed_list(embed_cross_sections, required, cache)
+    out = Path(path)
+    selected = self._cross_section_sources()
+    neutron_default = yamc.neutron_cross_section_data
+    cache = Path(cache_dir) if cache_dir is not None else (
+        _source_location(neutron_default)[0] if isinstance(neutron_default, str) else None
+    )
+    required = sorted(selected["neutron"])
+    embed_list = _resolve_embed_list(embed_cross_sections, required, cache) if required else []
+    photon_elements = sorted(selected["photon"]) if embed_cross_sections else []
+    for name in embed_list:
+        if name not in selected["neutron"]:
+            source = neutron_default.get(name) if isinstance(neutron_default, dict) else neutron_default
+            if source is None:
+                raise ValueError(f"no neutron_cross_section_data was selected for exported nuclide {name!r}")
+            selected["neutron"][name] = source
+    locations: dict[str, dict[str, Path]] = {"neutron": {}, "photon": {}}
+    data_sources = {}
+    for particle, entries in selected.items():
+        setting = getattr(yamc, f"{particle}_cross_section_data")
+        data_sources[particle] = {
+            "library_url": _LIBRARY_URLS.get(setting) if isinstance(setting, str) else None,
+            "entries": {},
+        }
+        embedded = embed_list if particle == "neutron" else photon_elements
+        for name, source in entries.items():
+            directory, url = _source_location(source)
+            locations[particle][name] = Path(cache_dir) if cache_dir is not None else directory
+            if url is not None:
+                data_sources[particle]["entries"][name] = url
+            elif name not in embedded:
+                raise ValueError(
+                    f"{particle} data for {name!r} is local-only; embed it explicitly "
+                    "instead of silently fetching another library"
+                )
 
     embedded_xs_json = (
         _build_embedded_xs_json(
-            embed_list, cache, _NUCLIDE_SUBDIR, _page_temperatures(self, embed_list)
+            embed_list, cache, _NUCLIDE_SUBDIR, _page_temperatures(self, embed_list),
+            locations=locations["neutron"],
         )
         if embed_list
         else "{}"
@@ -380,9 +431,9 @@ def to_html(
     # HTML can run photon transport with no network. `_build_embedded_xs_json`
     # reads `photon/<El>.arrow/` dirs (element.arrow, subshells.arrow, ...)
     # the same way it reads `neutron/<Name>.arrow/` dirs.
-    photon_elements = self.required_elements() if embed_list else []
     embedded_photon_json = (
-        _build_embedded_xs_json(photon_elements, cache, _ELEMENT_SUBDIR)
+        _build_embedded_xs_json(photon_elements, cache, _ELEMENT_SUBDIR,
+                                locations=locations["photon"])
         if photon_elements
         else "{}"
     )
@@ -439,6 +490,7 @@ def to_html(
         .replace("__MODEL_JSON__", json.dumps(model_json))
         .replace("__EMBEDDED_XS__", embedded_xs_json)
         .replace("__EMBEDDED_PHOTON_XS__", embedded_photon_json)
+        .replace("__DATA_SOURCES__", json.dumps(data_sources))
         .replace("__SECTION_FLAGS__", section_flags_json)
         .replace("__TALLY_PLOT_SRCDOC__", tally_plot_srcdoc)
         .replace("__INITIAL_RESULT_TEXT__", initial_result_escaped)

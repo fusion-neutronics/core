@@ -104,7 +104,7 @@ def test_mesh_tally_preserves_mesh_properties():
 @requires_keywords
 def test_mesh_tally_bin_count_matches_mesh_dimensions():
     """Test that tally.mean length matches mesh.num_bins"""
-    yamc.set_cross_section_data_entry('fendl-3.2d')
+    yamc.set_neutron_cross_section_data_entry('fendl-3.2d')
 
     # Create simple geometry
     sphere = yamc.Sphere(x0=0.0, y0=0.0, z0=0.0, radius=10.0, boundary='vacuum')
@@ -147,7 +147,7 @@ def test_mesh_tally_bin_count_matches_mesh_dimensions():
 @requires_keywords
 def test_mesh_tally_with_energy_filter_shape():
     """Test that mesh+energy_bins produces correct shape"""
-    yamc.set_cross_section_data_entry('fendl-3.2d')
+    yamc.set_neutron_cross_section_data_entry('fendl-3.2d')
 
     # Create simple geometry
     sphere = yamc.Sphere(x0=0.0, y0=0.0, z0=0.0, radius=10.0, boundary='vacuum')
@@ -193,7 +193,7 @@ def test_mesh_tally_with_energy_filter_shape():
 @requires_keywords
 def test_mesh_tally_multiple_scores_shape():
     """Test that mesh tally with multiple scores produces correct shape"""
-    yamc.set_cross_section_data_entry('fendl-3.2d')
+    yamc.set_neutron_cross_section_data_entry('fendl-3.2d')
 
     # Create simple geometry
     sphere = yamc.Sphere(x0=0.0, y0=0.0, z0=0.0, radius=10.0, boundary='vacuum')
@@ -235,7 +235,7 @@ def test_mesh_tally_multiple_scores_shape():
 @requires_keywords
 def test_mesh_tally_no_garbage_values():
     """Test that mesh tally doesn't produce garbage values"""
-    yamc.set_cross_section_data_entry('fendl-3.2d')
+    yamc.set_neutron_cross_section_data_entry('fendl-3.2d')
 
     # Create simple geometry
     sphere = yamc.Sphere(x0=0.0, y0=0.0, z0=0.0, radius=10.0, boundary='vacuum')
@@ -278,7 +278,7 @@ def test_mesh_tally_no_garbage_values():
 @requires_keywords
 def test_mesh_tally_all_bins_scored():
     """Test that particles score to multiple mesh bins"""
-    yamc.set_cross_section_data_entry('fendl-3.2d')
+    yamc.set_neutron_cross_section_data_entry('fendl-3.2d')
 
     # Create simple geometry
     sphere = yamc.Sphere(x0=0.0, y0=0.0, z0=0.0, radius=10.0, boundary='vacuum')
@@ -320,7 +320,7 @@ def test_mesh_tally_all_bins_scored():
 @requires_keywords
 def test_mesh_tally_center_voxel_highest_flux():
     """Test that center voxel has higher flux than outer voxels for point source"""
-    yamc.set_cross_section_data_entry('fendl-3.2d')
+    yamc.set_neutron_cross_section_data_entry('fendl-3.2d')
 
     # Create simple geometry
     sphere = yamc.Sphere(x0=0.0, y0=0.0, z0=0.0, radius=20.0, boundary='vacuum')

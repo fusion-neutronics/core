@@ -234,7 +234,7 @@ def main(fixtures):
     fetch, requests, batches = origin(publish(fixtures))
     _core._set_data_fetcher(fetch)
 
-    yamc.cross_section_data = "endf-b8.1"
+    yamc.neutron_cross_section_data = "endf-b8.1"
     lithium = yamc.Material(
         composition={"Li6": 1.0}, density=0.46, temperature=294, name="Li6"
     )

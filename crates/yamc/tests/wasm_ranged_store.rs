@@ -114,6 +114,50 @@ fn fill_like_the_browser(sim: &WasmSimulation, dir: &Path, temperature: &str) ->
 }
 
 #[test]
+fn photon_only_transport_needs_no_neutron_files() {
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let photon = PathBuf::from("tests/Li.arrow");
+    assert!(
+        photon.join("element.arrow").is_file(),
+        "fetch the published Li photon fixture"
+    );
+    let mut model = li6_model::li6_sphere_model("294");
+    let source = match model.sources.remove(0) {
+        yamc_source::source::ParticleSource::Neutron(source) => source,
+        _ => panic!("the shared fixture has a neutron source"),
+    };
+    model.sources = vec![yamc_source::source::ParticleSource::Photon(source)];
+    let mut tally = yamc_tallies::tally::Tally::new();
+    tally.filters.push(yamc_tallies::filter::Filter::Cell(
+        yamc_tallies::filter::cell::CellFilter::from_id(1),
+    ));
+    tally.scores = vec![yamc_tallies::score::Score::Flux(
+        yamc_tallies::score::FluxScore,
+    )];
+    model.tallies = vec![std::sync::Arc::new(tally)];
+    let sim = WasmSimulation::new();
+    sim.load_model_json(serde_json::to_string(&model).unwrap())
+        .unwrap();
+    for entry in std::fs::read_dir(photon).unwrap() {
+        let entry = entry.unwrap();
+        if entry.path().is_file() {
+            sim.add_file(
+                format!("/Li.arrow/{}", entry.file_name().to_string_lossy()),
+                std::fs::read(entry.path()).unwrap(),
+            );
+        }
+    }
+    assert_eq!(sim.model_required_nuclides(), "");
+    assert_eq!(sim.model_missing_nuclides(), "");
+    let result = sim.simulate_transport(32, 1, 42);
+    let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(result["status"], "ok", "{result}");
+    assert!(result["tallies"][0]["scores"][0]["mean"].as_f64().unwrap() > 0.0);
+}
+
+#[test]
 fn one_temperature_of_the_store_runs_transport() {
     let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let Some(dir) = fixture_dir() else { return };

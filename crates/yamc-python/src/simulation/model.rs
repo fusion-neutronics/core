@@ -429,6 +429,16 @@ impl PyModel {
         self.inner.required_nuclides()
     }
 
+    /// Particle-specific source information used by the HTML exporter.
+    pub fn _cross_section_sources(
+        &self,
+    ) -> PyResult<std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>>
+    {
+        self.inner
+            .cross_section_sources()
+            .map_err(pyo3::exceptions::PyValueError::new_err)
+    }
+
     /// The temperatures this model's materials load each nuclide at.
     ///
     /// A nuclide two materials hold at two temperatures is loaded at both. A

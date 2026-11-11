@@ -1,6 +1,6 @@
 import yamc
 
-# yamc.cross_section_data = "tendl-21"
+# yamc.neutron_cross_section_data = "tendl-21"
 # Create sphere surface with transmission boundary 
 sphere1 = yamc.Sphere(
     x0=0.0,

@@ -19,7 +19,7 @@ MN56_GAMMA_EV = 846754.0
 
 @pytest.fixture
 def activated_iron():
-    yamc.cross_section_data = "endf-b8.1"
+    yamc.neutron_cross_section_data = "endf-b8.1"
     material = yamc.Material(
         composition={"Fe56": 1.0},
         density=7.874,

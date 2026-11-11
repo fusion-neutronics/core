@@ -12,7 +12,7 @@ matching version of this wheel and is where the documentation lives.
 ```python
 import yani
 
-yani.cross_section_data = "endf-b8.1"
+yani.neutron_cross_section_data = "endf-b8.1"
 yani.transmutation_decay_data = "endf-b8.1"
 yani.transmutation_reactions = "endf-b8.1"
 yani.transmutation_fission_yields = "endf-b8.1"
@@ -40,6 +40,21 @@ a calculation that reads one that is unset is refused before any work, naming
 it. `transmutation_reactions` and `transmutation_fission_yields` also take
 `False`, which leaves that subsection out of a material with no reaction rates,
 or one in which nothing fissions.
+
+## Cross-section selection
+
+`neutron_cross_section_data` supplies the neutron reaction rates for irradiation.
+It accepts a library keyword, an existing local directory, or a nuclide-to-source
+mapping. A new assignment replaces the selection; `None` and an empty mapping
+unset it. No map entry becomes a default for unrelated nuclides.
+
+The independent `photon_cross_section_data` setting is also available for a
+consistent data interface between the wheels, but standalone YANI inventory
+solves do not transport photons and do not read it. Contact-dose estimates use
+the selected decay data and bundled response tables, not photon transport data.
+A decay-only schedule needs neither cross-section setting. The existing
+`transmutation_*` settings remain independent, so selecting FENDL neutron data
+does not silently choose another library for decay or fission yields.
 
 Displacement damage comes from the same call: pass `displacement_damage=True`
 for the damage energy per atom and NRT dpa over the schedule, per element and
@@ -76,7 +91,7 @@ in order, and each reaction takes its split, and the MF=40 covariance of that
 split, from the first source that evaluates it.
 
 ```python
-yani.cross_section_data = "endf-b8.1"
+yani.neutron_cross_section_data = "endf-b8.1"
 yani.transmutation_decay_data = "endf-b8.1"
 yani.transmutation_reactions = "endf-b8.1"
 yani.transmutation_fission_yields = "endf-b8.1"
@@ -94,7 +109,7 @@ report["mixed"]  # True: IRDFF-II splits on ENDF/B-VIII.1 totals
 IRDFF-II, whose isomer production is evaluated for dosimetry: In115 (n,n')
 In115m, In115 (n,2n) In114m, Nb93 (n,n') Nb93m and Nb93 (n,2n) Nb92m are among
 its 14 channels. It publishes isomeric branching and nothing else, so it is only
-ever a branching source (naming it as `cross_section_data` or any other
+ever a branching source (naming it as `neutron_cross_section_data` or any other
 transmutation source is refused), and it is used only where it is named.
 
 The branching report names the source of every channel, and `mixed` says
@@ -139,7 +154,7 @@ explicitly selected ENDF/B-VIII.1 decay data and fission yields:
 ```python
 import yani
 
-yani.cross_section_data = "tendl-2025"
+yani.neutron_cross_section_data = "tendl-2025"
 yani.transmutation_reactions = "tendl-2025"
 yani.transmutation_branch_ratios = "tendl-2025"
 yani.transmutation_decay_data = "endf-b8.1"
@@ -187,7 +202,7 @@ everything here plus neutron and photon transport, geometry, tallies and
 transport-coupled transmutation. The two are **alternatives**. Installing both
 puts two extension modules in one process, so `yamc.Material` and
 `yani.Material` are distinct types and the nuclear-data configuration
-(`cross_section_data`, the four `transmutation_*` sources) exists twice, once
+(`neutron_cross_section_data`, the four `transmutation_*` sources) exists twice, once
 per package.
 
 Pick `yani` when you have a spectrum already and want none of the transport

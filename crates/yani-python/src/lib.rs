@@ -130,10 +130,22 @@ pub fn register_classes(py: Python<'_>, m: &Bound<'_, PyModule>, package: &str) 
     // so the yamc and yani wheels share the one hook.
     #[cfg(target_os = "emscripten")]
     m.add_function(wrap_pyfunction!(config::_set_data_fetcher, m)?)?;
-    m.add_function(wrap_pyfunction!(config::get_cross_section_data, m)?)?;
-    m.add_function(wrap_pyfunction!(config::set_cross_section_data, m)?)?;
-    m.add_function(wrap_pyfunction!(config::lookup_cross_section_data, m)?)?;
-    m.add_function(wrap_pyfunction!(config::set_cross_section_data_entry, m)?)?;
+    m.add_function(wrap_pyfunction!(config::get_neutron_cross_section_data, m)?)?;
+    m.add_function(wrap_pyfunction!(config::set_neutron_cross_section_data, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        config::lookup_neutron_cross_section_data,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        config::set_neutron_cross_section_data_entry,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(config::get_photon_cross_section_data, m)?)?;
+    m.add_function(wrap_pyfunction!(config::set_photon_cross_section_data, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        config::lookup_photon_cross_section_data,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(config::get_transmutation_decay_data, m)?)?;
     m.add_function(wrap_pyfunction!(config::set_transmutation_decay_data, m)?)?;
     m.add_function(wrap_pyfunction!(config::get_transmutation_reactions, m)?)?;

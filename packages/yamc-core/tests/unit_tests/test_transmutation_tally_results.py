@@ -70,7 +70,7 @@ def _run(method="coupled"):
     yamc.transmutation_decay_data = CHAIN
     yamc.transmutation_reactions = CHAIN
     yamc.transmutation_fission_yields = CHAIN
-    yamc.cross_section_data = DATA
+    yamc.neutron_cross_section_data = DATA
     model, source, tallies = _model()
     pulse = yamc.Pulse(rate=4.0e16, duration=1.0e6, source=source)
     schedule = yamc.PulseSchedule([pulse, pulse, pulse, yamc.Cooldown(duration=1.0e5)])

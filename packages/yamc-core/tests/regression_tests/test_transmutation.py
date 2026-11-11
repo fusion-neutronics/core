@@ -52,7 +52,7 @@ def run_yamc_transmute(nuclide, with_anything=True):
     """
     neutron_path = str(TESTS_DATA_DIR / f"{nuclide}.arrow")
 
-    yamc.cross_section_data = NEUTRON_DATA_DIR
+    yamc.neutron_cross_section_data = NEUTRON_DATA_DIR
 
     material = yamc.Material(
         composition={nuclide: 1.0},

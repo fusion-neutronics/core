@@ -34,7 +34,7 @@ def _schedule(pkg, source):
 
 
 def _inventory(pkg, chain_dir, cross_sections):
-    pkg.cross_section_data = cross_sections
+    pkg.neutron_cross_section_data = cross_sections
     pkg.transmutation_decay_data = chain_dir
     pkg.transmutation_reactions = chain_dir
     pkg.transmutation_fission_yields = chain_dir
@@ -101,3 +101,57 @@ def test_material_density_units_keyword_parity(density_units, expected):
         )
         assert material.density == 1.0
         assert material.density_units == expected
+
+
+@pytest.mark.parametrize("package", [yamc, yani], ids=["yamc", "yani"])
+def test_particle_data_selections_are_independent(package):
+    package.neutron_cross_section_data = None
+    package.photon_cross_section_data = None
+    package.neutron_cross_section_data = "fendl-3.2d"
+    assert package.photon_cross_section_data is None
+    package.photon_cross_section_data = "endf-b8.1"
+    assert package.neutron_cross_section_data == "fendl-3.2d"
+    package.neutron_cross_section_data = None
+    assert package.photon_cross_section_data == "endf-b8.1"
+    package.photon_cross_section_data = None
+    assert package.neutron_cross_section_data is None
+
+
+@pytest.mark.parametrize("package", [yamc, yani], ids=["yamc", "yani"])
+@pytest.mark.parametrize("particle, key, absent", [("neutron", "Fe56", "O16"), ("photon", "Fe", "O")])
+def test_particle_data_mapping_replaces_without_a_default(package, particle, key, absent):
+    setting = f"{particle}_cross_section_data"
+    lookup = getattr(package, f"lookup_{particle}_cross_section_data")
+    setattr(package, setting, "fendl-3.2d")
+    setattr(package, setting, {key: "jendl-5.0"})
+    assert getattr(package, setting) == {key: "jendl-5.0"}
+    assert lookup(key) == "jendl-5.0"
+    assert lookup(absent) is None
+    setattr(package, setting, {})
+    assert getattr(package, setting) is None
+
+
+@pytest.mark.parametrize("package", [yamc, yani], ids=["yamc", "yani"])
+@pytest.mark.parametrize("particle, key", [("neutron", "Fe56"), ("photon", "Fe")])
+def test_invalid_particle_data_assignment_is_atomic(package, particle, key):
+    package.neutron_cross_section_data = "fendl-3.2d"
+    package.photon_cross_section_data = "endf-b8.1"
+    setting = f"{particle}_cross_section_data"
+    with pytest.raises(ValueError, match="invalid source"):
+        setattr(package, setting, {key: "jendl-5.0", "missing": "not-a-real-data-source"})
+    with pytest.raises(TypeError, match=setting):
+        setattr(package, setting, True)
+    assert package.neutron_cross_section_data == "fendl-3.2d"
+    assert package.photon_cross_section_data == "endf-b8.1"
+
+
+@pytest.mark.parametrize("package", [yamc, yani], ids=["yamc", "yani"])
+def test_unified_cross_section_api_is_removed(package):
+    for name in (
+        "cross_section_data", "get_cross_section_data", "set_cross_section_data",
+        "lookup_cross_section_data", "set_cross_section_data_entry",
+    ):
+        assert not hasattr(package, name)
+        assert name not in package.__all__
+    with pytest.raises(AttributeError, match="was removed"):
+        setattr(package, "cross_section_data", "fendl-3.2d")

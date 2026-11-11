@@ -34,7 +34,7 @@ def test_temperature_outside_the_ladder_errors_with_the_available_list():
     nearest rung.
     """
     yamc.data.clear_nuclide_cache()
-    yamc.cross_section_data = "fendl-3.2d"
+    yamc.neutron_cross_section_data = "fendl-3.2d"
 
     material = yamc.Material(
         composition={"Li6": 0.5},
@@ -63,7 +63,7 @@ def test_a_temperature_between_two_rungs_is_served_by_blending_them():
     scaled the wrong way, would sit outside the two.
     """
     yamc.data.clear_nuclide_cache()
-    yamc.cross_section_data = "fendl-3.2d"
+    yamc.neutron_cross_section_data = "fendl-3.2d"
 
     def total_at(temperature):
         material = yamc.Material(
@@ -127,7 +127,7 @@ def test_an_intermediate_temperature_loads_from_an_explicit_file():
 def test_correct_temperature_works_with_config():
     """Test that correct temperature works fine with Config"""
     yamc.data.clear_nuclide_cache()
-    yamc.cross_section_data = "fendl-3.2d"
+    yamc.neutron_cross_section_data = "fendl-3.2d"
 
     material = yamc.Material(
         composition={"Li6": 0.5},
@@ -190,7 +190,7 @@ def test_a_material_without_a_temperature_transports_at_the_294_k_default(
     endf-b8.1 carries several temperatures, so the single-temperature
     auto-detect cannot answer and the default has to.
     """
-    yamc.cross_section_data = "endf-b8.1"
+    yamc.neutron_cross_section_data = "endf-b8.1"
 
     model = _sphere_model(make_material())
     results = model.simulate_transport(total_particles=500, seed=1)
@@ -204,7 +204,7 @@ def test_an_unservable_temperature_is_a_value_error_before_transport():
     Relabelled after loading, so the loader never sees 3000 K and the check
     falls to transport setup, which used to panic from inside the grid builder.
     """
-    yamc.cross_section_data = "endf-b8.1"
+    yamc.neutron_cross_section_data = "endf-b8.1"
 
     fe = yamc.Material(composition={"Fe56": 1.0}, density=7.8, temperature=294)
     fe.read_nuclear_data("endf-b8.1")

@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 import yamc
 
-yamc.set_cross_section_data_entry('fendl-3.2d')
+yamc.set_neutron_cross_section_data_entry('fendl-3.2d')
 
 # ── Build geometry ───────────────────────────────────────────────────────
 sphere = yamc.Sphere(radius=50.0, boundary="vacuum")

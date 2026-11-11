@@ -147,7 +147,7 @@ def test_simulate_transport_gpu_seeded_runs_are_deterministic():
 
 def _build_fe56_sphere_with_global_neutron_data(photon_data=None, **model_kwargs):
     """Fe56 sphere at 14.06 MeV whose material is given no neutron data, so it
-    can only come from `yamc.cross_section_data`. `photon_data`, when given, is
+    can only come from `yamc.neutron_cross_section_data`. `photon_data`, when given, is
     passed to `read_nuclear_data` on its own."""
     material = yamc.Material(composition={'Fe56': 1.0}, density=7.8, temperature=294)
     if photon_data is not None:
@@ -166,9 +166,9 @@ def _build_fe56_sphere_with_global_neutron_data(photon_data=None, **model_kwargs
 
 
 def test_simulate_transport_gpu_loads_global_cross_section_data():
-    """With only the global `cross_section_data` set, `compute='gpu'` loads the
+    """With only the global `neutron_cross_section_data` set, `compute='gpu'` loads the
     neutron data itself, as `compute='cpu'` does, and the two agree."""
-    yamc.cross_section_data = {'Fe56': FE56_DATA_PATH}
+    yamc.neutron_cross_section_data = {'Fe56': FE56_DATA_PATH}
     tally, model = _build_fe56_sphere_with_global_neutron_data()
     gpu = model.simulate_transport(total_particles=2000, seed=3, compute='gpu')[tally]
     assert gpu.mean[0] > 0.0
@@ -181,9 +181,9 @@ def test_simulate_transport_gpu_loads_global_cross_section_data():
 
 def test_simulate_transport_gpu_coupled_photons_with_global_neutron_data():
     """Coupled photons on `compute='gpu'` with the neutron data from the global
-    `cross_section_data` and only the photon data given on the material, which
+    `neutron_cross_section_data` and only the photon data given on the material, which
     is the setup `compute='cpu'` accepts."""
-    yamc.cross_section_data = {'Fe56': FE56_DATA_PATH}
+    yamc.neutron_cross_section_data = {'Fe56': FE56_DATA_PATH}
     tally, model = _build_fe56_sphere_with_global_neutron_data(
         photon_data={'Fe': os.path.join(TESTS_DIR, 'Fe.arrow')},
         transport_secondary_photons=True,

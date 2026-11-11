@@ -17,9 +17,9 @@ ENERGY_GROUPS = [1e-5, 0.625, 1e5, 2e7]
 
 @pytest.fixture(autouse=True)
 def _set_cross_sections():
-    yamc.cross_section_data = NUC_DATA
+    yamc.neutron_cross_section_data = NUC_DATA
     yield
-    yamc.cross_section_data = None
+    yamc.neutron_cross_section_data = None
 
 
 def _iron(material_id, density=7.87):

@@ -273,7 +273,7 @@ def test_microscopic_cross_section_lithium():
 def test_auto_loading_from_config():
     """Test that microscopic_cross_section can auto-load data from config when nuclide is empty"""
     # Set up config for auto-loading
-    yamc.cross_section_data = {'Be9': 'tests/Be9.arrow'}
+    yamc.neutron_cross_section_data = {'Be9': 'tests/Be9.arrow'}
     
     # Create empty nuclide with name but no data loaded
     nuc = Nuclide('Be9')
@@ -292,7 +292,7 @@ def test_auto_loading_from_config():
 def test_auto_loading_additional_temperature():
     """Test that microscopic_cross_section can auto-load additional temperatures"""
     # Set up config for auto-loading
-    yamc.cross_section_data = {'Be9': 'tests/Be9.arrow'}
+    yamc.neutron_cross_section_data = {'Be9': 'tests/Be9.arrow'}
     
     # Load Be9 with only 294K initially
     nuc = Nuclide('Be9')
@@ -313,25 +313,25 @@ def test_auto_loading_additional_temperature():
 def test_auto_loading_without_config_fails():
     """Test that auto-loading fails gracefully when no config is available.
 
-    Setting ``cross_section_data = {}`` must clear the configuration entirely --
+    Setting ``neutron_cross_section_data = {}`` must clear the configuration entirely --
     including any previously set global default library -- so that a later
     lookup finds nothing rather than silently falling back to a stale default.
     """
-    original_configs = yamc.cross_section_data
+    original_configs = yamc.neutron_cross_section_data
 
     # Seed a global default first so the clear below has something to remove;
     # this makes the test self-contained instead of relying on whatever a
     # previously run test happened to leave behind.
-    yamc.cross_section_data = "fendl-3.2d"
+    yamc.neutron_cross_section_data = "fendl-3.2d"
 
     # Clearing with an empty dict must wipe that default too (it previously
     # only cleared the per-nuclide map, leaving the default in place).
-    yamc.cross_section_data = {}
+    yamc.neutron_cross_section_data = {}
 
     try:
-        assert yamc.cross_section_data is None, (
-            "cross_section_data = {} should clear the configuration entirely, "
-            f"but it is still {yamc.cross_section_data!r}"
+        assert yamc.neutron_cross_section_data is None, (
+            "neutron_cross_section_data = {} should clear the configuration entirely, "
+            f"but it is still {yamc.neutron_cross_section_data!r}"
         )
 
         # Create empty nuclide with name but no config
@@ -355,15 +355,15 @@ def test_auto_loading_without_config_fails():
     finally:
         # Restore original configuration
         if original_configs:
-            yamc.cross_section_data = original_configs
+            yamc.neutron_cross_section_data = original_configs
         else:
-            yamc.cross_section_data = None
+            yamc.neutron_cross_section_data = None
 
 
 def test_auto_loading_multiple_calls_consistent():
     """Test that multiple auto-loading calls give consistent results"""
     # Set up config for auto-loading
-    yamc.cross_section_data = {'Be9': 'tests/Be9.arrow'}
+    yamc.neutron_cross_section_data = {'Be9': 'tests/Be9.arrow'}
     
     # Create empty nuclide
     nuc = Nuclide('Be9')
@@ -385,7 +385,7 @@ def test_auto_loading_multiple_calls_consistent():
 def test_auto_loading_with_manual_loading_combined():
     """Test combining manual loading with auto-loading for additional data"""
     # Set up config for auto-loading
-    yamc.cross_section_data = {'Be9': 'tests/Be9.arrow'}
+    yamc.neutron_cross_section_data = {'Be9': 'tests/Be9.arrow'}
     
     # Manually load some data first
     nuc = Nuclide('Be9')
@@ -427,10 +427,10 @@ def test_data_source_keyword_recognized(keyword):
     # Test that the keyword is recognized (this tests the Rust backend)
     try:
         # This should not raise an exception if the keyword is recognized
-        yamc.cross_section_data = {'Li6': keyword}
+        yamc.neutron_cross_section_data = {'Li6': keyword}
 
         # Verify we can retrieve it
-        cross_sections = yamc.cross_section_data
+        cross_sections = yamc.neutron_cross_section_data
         assert 'Li6' in cross_sections, "Li6 should be in cross sections config"
         assert cross_sections['Li6'] == keyword, f"Should store {keyword} keyword correctly"
 
@@ -444,11 +444,11 @@ def test_auto_loading_with_global_keyword():
     from yamc import Nuclide
 
     # Clear any per-nuclide entries left by previous tests, then set global
-    yamc.cross_section_data = None
-    yamc.cross_section_data = 'fendl-3.2d'
+    yamc.neutron_cross_section_data = None
+    yamc.neutron_cross_section_data = 'fendl-3.2d'
 
     # Verify config is set correctly
-    assert yamc.lookup_cross_section_data('Li6') == 'fendl-3.2d', "Global config should apply to Li6"
+    assert yamc.lookup_neutron_cross_section_data('Li6') == 'fendl-3.2d', "Global config should apply to Li6"
 
     # Create empty nuclide
     nuc = Nuclide('Li6')
@@ -1137,15 +1137,15 @@ def test_read_nuclear_data_with_file_path():
 def test_read_nuclear_data_no_args_uses_config():
     """Test read_nuclear_data with no args falls back to Config."""
     import yamc
-    yamc.cross_section_data = None
+    yamc.neutron_cross_section_data = None
     yamc.transmutation_decay_data = None
-    yamc.cross_section_data = {"Li6": "tests/Li6.arrow"}
+    yamc.neutron_cross_section_data = {"Li6": "tests/Li6.arrow"}
 
     nuc = Nuclide('Li6')
     nuc.read_nuclear_data()
     assert nuc.name == "Li6"
     assert len(nuc.available_temperatures) > 0
-    yamc.cross_section_data = None
+    yamc.neutron_cross_section_data = None
     yamc.transmutation_decay_data = None
 
 def test_read_nuclear_data_with_directory():

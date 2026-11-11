@@ -35,7 +35,7 @@ DAY = 86400.0
 
 @pytest.fixture(autouse=True)
 def _set_cross_sections():
-    yamc.cross_section_data = NUC_DATA
+    yamc.neutron_cross_section_data = NUC_DATA
 
 
 @pytest.fixture(params=["coupled", "independent"])

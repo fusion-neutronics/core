@@ -2768,7 +2768,7 @@ impl Tally {
                 let message = format!(
                     "overlay tally '{}': {problem}. A response (response=) needs the \
                      overlay nuclides' own data, which is loaded from the global \
-                     configuration (`yamc.cross_section_data`), not from the cell materials. \
+                     configuration (`yamc.neutron_cross_section_data`), not from the cell materials. \
                      Without it the tally would silently score the plain, un-responded \
                      quantity.",
                     self.display_name()

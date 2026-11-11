@@ -10,6 +10,7 @@ const EMBEDDED_XS = __EMBEDDED_XS__;
 // keyed by element; `{}` unless the engineer embedded photon data for a
 // transport_secondary_photons model. Installed under /<El>.arrow/ at init.
 const EMBEDDED_PHOTON_XS = __EMBEDDED_PHOTON_XS__;
+const DATA_SOURCES = __DATA_SOURCES__;
 // SECTION_FLAGS = {geometry, surfaces, materials, tallies} -- each bool.
 // When false, the matching `<fieldset data-section="...">` is removed
 // from the DOM (and its editor code is skipped). Set by the engineer
@@ -45,7 +46,7 @@ const JS_SRC = __JS_SRC_JSON__;
 const jsBlob = new Blob([JS_SRC], { type: "application/javascript" });
 const mod = await import(URL.createObjectURL(jsBlob));
 const init = mod.default;
-const { WasmSimulation, default_library_url } = mod;
+const { WasmSimulation } = mod;
 
 function b64ToBytes(b64) {
   const bin = atob(b64);
@@ -750,7 +751,6 @@ if (applyMatsBtn) applyMatsBtn.onclick = () => {
 // follows per element when the model has photons in flight. Anything the
 // store already holds (embedded at export, or fetched earlier) is skipped,
 // so this re-runs cleanly after the material editor adds a nuclide.
-const LIBRARY_URL = default_library_url();
 const dlBtn = document.getElementById("dl");
 const status = document.getElementById("status");
 dlBtn.onclick = async () => {
@@ -762,7 +762,7 @@ dlBtn.onclick = async () => {
   dlBtn.disabled = true;
   try {
     const summary = JSON.parse(
-      await sim.fetchNuclearData(LIBRARY_URL, (message) => { status.textContent = `${message}…`; })
+      await sim.fetchParticleData(JSON.stringify(DATA_SOURCES), (message) => { status.textContent = `${message}…`; })
     );
     const mb = (summary.bytes / 1e6).toFixed(1);
     const parts = [`${summary.nuclides.length} nuclide(s)`];

@@ -4,7 +4,7 @@ from yamc import Material
 
 def test_macroscopic_xs_neutron():
 
-    yamc.cross_section_data = ({"Li6": "tests/Li6.arrow", "Li7": "tests/Li7.arrow"})
+    yamc.neutron_cross_section_data = ({"Li6": "tests/Li6.arrow", "Li7": "tests/Li7.arrow"})
     # Create a material with Li6 and Li7
     material = Material(
         composition={"Li6": 0.5, "Li7": 0.5},
@@ -31,7 +31,7 @@ def test_macroscopic_xs_neutron():
 
 def test_macroscopic_xs_with_atoms_per_barn_cm():
     # Create a material with Li isotopes that have defined atomic masses
-    yamc.cross_section_data = ({"Li6": "tests/Li6.arrow", "Li7": "tests/Li7.arrow"})
+    yamc.neutron_cross_section_data = ({"Li6": "tests/Li6.arrow", "Li7": "tests/Li7.arrow"})
     material = Material(
         composition={"Li6": 0.5, "Li7": 0.5},
         density=1.0,
@@ -69,7 +69,7 @@ def test_macroscopic_xs_with_atoms_per_barn_cm():
 
 def test_macroscopic_xs_calculation_formula():
     # Create a test material with nuclides that have defined atomic masses
-    yamc.cross_section_data = ({"Li6": "tests/Li6.arrow", "Li7": "tests/Li7.arrow"})
+    yamc.neutron_cross_section_data = ({"Li6": "tests/Li6.arrow", "Li7": "tests/Li7.arrow"})
     material = Material(
         composition={"Li6": 1.0},  # Using a single nuclide for simplicity
         density=1.0,

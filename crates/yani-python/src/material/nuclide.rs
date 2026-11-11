@@ -218,7 +218,7 @@ impl PyNuclide {
     ///   - A file path (e.g. "tests/Li6.arrow")
     ///   - A keyword (e.g. "tendl-2025", "fendl-3.2d", "endf-b8.1")
     ///   - A directory path (e.g. "/path/to/neutron/") -- resolves to `<dir>/<name>.arrow`
-    ///   - None -- looks up the path from yamc.cross_section_data
+    ///   - None -- looks up the path from yamc.neutron_cross_section_data
     ///
     /// When `temperatures` is provided only those temperatures are loaded while
     /// `available_temperatures` always lists every temperature present in the
@@ -227,7 +227,7 @@ impl PyNuclide {
     /// Args:
     ///     path (Optional[str]): Optional path to the nuclide data file, keyword,
     ///         or directory. If omitted, the constructor `name` is used to look up
-    ///         the source from yamc.cross_section_data.
+    ///         the source from yamc.neutron_cross_section_data.
     ///     temperatures (Optional[List[str]]): Temperature strings in Kelvin (e.g. ["293"]).
     ///         If given only these temperatures are loaded.
     ///
@@ -243,7 +243,7 @@ impl PyNuclide {
     ///     Compare the same nuclide from different data sources:
     ///
     ///     >>> # Set global default
-    ///     >>> yamc.cross_section_data = "tendl-2025"
+    ///     >>> yamc.neutron_cross_section_data = "tendl-2025"
     ///     >>>
     ///     >>> # Load from global config (will use TENDL)
     ///     >>> li6_tendl = yamc.Nuclide("Li6")

@@ -369,6 +369,7 @@ impl Progress {
 }
 
 /// What the loaded model needs and does not yet hold.
+#[derive(Default)]
 struct Targets {
     /// Nuclide name and the material temperatures it is wanted at (`None` for
     /// every temperature).
@@ -541,6 +542,95 @@ async fn fetch_all(
 
 #[wasm_bindgen]
 impl WasmSimulation {
+    /// Fetch from an explicit JSON plan with independent neutron and photon sources.
+    #[wasm_bindgen(js_name = fetchParticleData)]
+    pub fn fetch_particle_data(
+        &self,
+        sources_json: String,
+        on_progress: Option<Function>,
+    ) -> Promise {
+        let storage = self.storage().clone();
+        let targets = self.fetch_targets();
+        future_to_promise(async move {
+            let targets = targets.map_err(|error| JsValue::from_str(&error))?;
+            let sources: std::collections::BTreeMap<String, super::fetch_plan::ParticleSources> =
+                serde_json::from_str(&sources_json).map_err(|error| {
+                    JsValue::from_str(&format!("invalid particle data sources: {error}"))
+                })?;
+            let mut groups: std::collections::BTreeMap<String, Targets> =
+                std::collections::BTreeMap::new();
+            for (name, temperatures) in targets.nuclides {
+                let selected = sources.get("neutron").ok_or_else(|| {
+                    JsValue::from_str(&format!(
+                        "no neutron_cross_section_data selected for '{name}'"
+                    ))
+                })?;
+                let source = selected
+                    .source("neutron", &name)
+                    .map_err(|error| JsValue::from_str(&error))?;
+                groups
+                    .entry(source.to_string())
+                    .or_default()
+                    .nuclides
+                    .push((name, temperatures));
+            }
+            for name in targets.elements {
+                let selected = sources.get("photon").ok_or_else(|| {
+                    JsValue::from_str(&format!(
+                        "no photon_cross_section_data selected for '{name}'"
+                    ))
+                })?;
+                let source = selected
+                    .source("photon", &name)
+                    .map_err(|error| JsValue::from_str(&error))?;
+                groups
+                    .entry(source.to_string())
+                    .or_default()
+                    .elements
+                    .push(name);
+            }
+            let mut combined = serde_json::json!({
+                "status": "ok", "libraries": [], "nuclides": [], "ranged": [],
+                "elements": [], "requests": 0, "bytes": 0, "metadata_bytes": 0,
+            });
+            for (source, wanted) in groups {
+                let text = fetch_all(
+                    storage.clone(),
+                    wanted,
+                    source,
+                    Progress(on_progress.clone()),
+                )
+                .await
+                .map_err(|error| JsValue::from_str(&error))?;
+                let report: serde_json::Value = serde_json::from_str(&text)
+                    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+                for field in ["nuclides", "ranged", "elements"] {
+                    combined[field]
+                        .as_array_mut()
+                        .expect("summary array")
+                        .extend(
+                            report[field]
+                                .as_array()
+                                .expect("fetch array")
+                                .iter()
+                                .cloned(),
+                        );
+                }
+                for field in ["requests", "bytes", "metadata_bytes"] {
+                    combined[field] = serde_json::json!(
+                        combined[field].as_u64().expect("summary counter")
+                            + report[field].as_u64().expect("fetch counter")
+                    );
+                }
+                combined["libraries"]
+                    .as_array_mut()
+                    .expect("library reports")
+                    .push(report);
+            }
+            Ok(JsValue::from_str(&combined.to_string()))
+        })
+    }
+
     /// Fetch the nuclear data the loaded model needs and does not yet hold
     /// into the in-memory store, from `library_url` (see
     /// [`default_library_url`](super::simulation_wasm::default_library_url)).
@@ -596,13 +686,17 @@ impl WasmSimulation {
     fn fetch_targets(&self) -> Result<Targets, String> {
         let storage = self.storage();
         self.with_model(|model| {
-            let nuclides = model
-                .required_temperatures()
-                .into_iter()
-                .filter(|(name, _)| {
-                    !storage.exists(Path::new(&format!("{}/nuclide.arrow", store_dir(name))))
-                })
-                .collect();
+            let nuclides = if model.has_neutrons() {
+                model
+                    .required_temperatures()
+                    .into_iter()
+                    .filter(|(name, _)| {
+                        !storage.exists(Path::new(&format!("{}/nuclide.arrow", store_dir(name))))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let elements = model
                 .required_elements()
                 .into_iter()

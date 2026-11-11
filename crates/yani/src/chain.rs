@@ -119,7 +119,7 @@ pub enum BranchQuantity {
 /// # The branching subsection is a second source of cross sections
 ///
 /// Worth stating plainly, because the name says "branch ratios" and the
-/// setting sits beside `cross_section_data` as though the two were disjoint.
+/// setting sits beside `neutron_cross_section_data` as though the two were disjoint.
 /// A [`BranchQuantity::CrossSection`] curve is a partial cross section in
 /// barns, not a dimensionless fraction. For `(n,n')`, and for a list that
 /// gives a reaction's isomers alone, the partial is an absolute production:
@@ -130,7 +130,7 @@ pub enum BranchQuantity {
 ///
 /// Two consequences follow, and neither is obvious from the setting names.
 ///
-/// * A run that names one library for `cross_section_data` and another for
+/// * A run that names one library for `neutron_cross_section_data` and another for
 ///   `transmutation_branch_ratios` is taking cross sections from both. On the
 ///   published 2026-09-08 TENDL-2025 build, 39409 of the 40905 branching rows
 ///   are `CrossSection` rather than `Yield`, so this is the common case and

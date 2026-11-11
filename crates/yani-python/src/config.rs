@@ -2,8 +2,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3_stub_gen::derive::gen_stub_pyfunction;
-use std::collections::HashMap;
-use yamc_nuclide::config::{BranchSources, SubsectionSource, CONFIG};
+use yamc_nuclide::config::{BranchSources, CrossSectionSource, SubsectionSource, CONFIG};
 
 /// Refuse a branching-only library keyword (`irdff-ii`) where `role` names
 /// what it was asked to be, before anything is stored or downloaded.
@@ -23,13 +22,13 @@ fn refuse_branching_only(source: &str, role: &str) -> PyResult<()> {
 /// to paths.
 #[gen_stub_pyfunction]
 #[pyfunction]
-pub fn get_cross_section_data(py: Python<'_>) -> PyResult<Py<PyAny>> {
+pub fn get_neutron_cross_section_data(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let config = CONFIG
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     if config.cross_sections.is_empty() {
-        return match config.default_cross_section.clone() {
+        return match config.default_neutron_cross_section.clone() {
             Some(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
             None => Ok(py.None()),
         };
@@ -40,6 +39,50 @@ pub fn get_cross_section_data(py: Python<'_>) -> PyResult<Py<PyAny>> {
         dict.set_item(nuclide, path)?;
     }
     Ok(dict.into_any().unbind())
+}
+
+/// Get the explicitly selected photon library or element-to-source mapping.
+#[gen_stub_pyfunction]
+#[pyfunction]
+pub fn get_photon_cross_section_data(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let config = CONFIG
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if config.photon_cross_sections.is_empty() {
+        return match config.default_photon_cross_section.clone() {
+            Some(source) => Ok(source.into_pyobject(py)?.into_any().unbind()),
+            None => Ok(py.None()),
+        };
+    }
+    let dict = PyDict::new(py);
+    for (element, source) in &config.photon_cross_sections {
+        dict.set_item(element, source)?;
+    }
+    Ok(dict.into_any().unbind())
+}
+
+fn cross_section_source(
+    value: Option<&Bound<'_, PyAny>>,
+    setting: &str,
+) -> PyResult<CrossSectionSource> {
+    match value {
+        None => Ok(CrossSectionSource::Unset),
+        Some(value) if value.is_none() => Ok(CrossSectionSource::Unset),
+        Some(value) => {
+            if let Ok(mapping) = value.cast::<PyDict>() {
+                Ok(CrossSectionSource::Mapping(mapping.extract()?))
+            } else {
+                value
+                    .extract::<String>()
+                    .map(CrossSectionSource::Library)
+                    .map_err(|_| {
+                        pyo3::exceptions::PyTypeError::new_err(format!(
+                            "{setting} must be None, a string, or a dict"
+                        ))
+                    })
+            }
+        }
+    }
 }
 
 /// The directory downloaded nuclear data is cached in.
@@ -76,65 +119,53 @@ pub fn cache_dir() -> PyResult<String> {
 /// directory, or a dict mapping nuclide names to paths or keywords.
 #[gen_stub_pyfunction]
 #[pyfunction]
-pub fn set_cross_section_data(
+pub fn set_neutron_cross_section_data(
     #[gen_stub(override_type(
         type_repr = "builtins.str | dict[builtins.str, builtins.str] | None"
     ))]
     value: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<()> {
+    let source = cross_section_source(value, "neutron_cross_section_data")?;
     let mut config = CONFIG
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    config
+        .set_neutron_cross_section_data(source)
+        .map_err(PyValueError::new_err)
+}
 
-    match value {
-        None => {
-            config.cross_sections.clear();
-            config.default_cross_section = None;
-        }
-        Some(v) if v.is_none() => {
-            config.cross_sections.clear();
-            config.default_cross_section = None;
-        }
-        Some(v) => {
-            if let Ok(dict) = v.cast::<PyDict>() {
-                if dict.is_empty() {
-                    // An empty dict carries no entries, so treat it like `None`:
-                    // clear both the per-nuclide mappings and the global default.
-                    // (An empty `HashMap` passed to `set_cross_sections` is a
-                    // no-op, which would otherwise leave a previously set global
-                    // default in place -- so `cross_section_data = {}` would not
-                    // actually clear the configuration.)
-                    config.cross_sections.clear();
-                    config.default_cross_section = None;
-                } else {
-                    let mut rust_map = HashMap::new();
-                    for (k, val) in dict.iter() {
-                        let key: String = k.extract()?;
-                        let path: String = val.extract()?;
-                        refuse_branching_only(&path, CROSS_SECTION_ROLE)?;
-                        rust_map.insert(key, path);
-                    }
-                    config.set_cross_sections(rust_map);
-                }
-            } else if let Ok(string_val) = v.extract::<String>() {
-                refuse_branching_only(&string_val, CROSS_SECTION_ROLE)?;
-                config.set_cross_sections(string_val);
-            } else {
-                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "cross_section_data must be None, a string, or a dict",
-                ));
-            }
-        }
-    }
+/// Select photon data explicitly; neutron settings are never used as a fallback.
+#[gen_stub_pyfunction]
+#[pyfunction]
+pub fn set_photon_cross_section_data(
+    #[gen_stub(override_type(
+        type_repr = "builtins.str | dict[builtins.str, builtins.str] | None"
+    ))]
+    value: Option<&Bound<'_, PyAny>>,
+) -> PyResult<()> {
+    let source = cross_section_source(value, "photon_cross_section_data")?;
+    CONFIG
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .set_photon_cross_section_data(source)
+        .map_err(PyValueError::new_err)
+}
 
-    Ok(())
+/// Resolve one photon element from the explicit photon selection only.
+#[gen_stub_pyfunction]
+#[pyfunction]
+pub fn lookup_photon_cross_section_data(element: &str) -> Option<String> {
+    CONFIG
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get_photon_cross_section(element)
 }
 
 /// Look up the cross-section data path for a single nuclide, applying the global
 /// default if no per-nuclide entry is set.
 #[gen_stub_pyfunction]
 #[pyfunction]
-pub fn lookup_cross_section_data(nuclide: &str) -> Option<String> {
+pub fn lookup_neutron_cross_section_data(nuclide: &str) -> Option<String> {
     let config = CONFIG
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -147,7 +178,10 @@ pub fn lookup_cross_section_data(nuclide: &str) -> Option<String> {
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (nuclide_or_keyword, path=None))]
-pub fn set_cross_section_data_entry(nuclide_or_keyword: &str, path: Option<&str>) -> PyResult<()> {
+pub fn set_neutron_cross_section_data_entry(
+    nuclide_or_keyword: &str,
+    path: Option<&str>,
+) -> PyResult<()> {
     refuse_branching_only(path.unwrap_or(nuclide_or_keyword), CROSS_SECTION_ROLE)?;
     let mut config = CONFIG
         .lock()

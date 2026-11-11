@@ -32,11 +32,12 @@ __version__: str
 # `transmutation_reactions` and `transmutation_fission_yields` accept `False` as
 # well as a library keyword or path: False turns the subsection off, `None`
 # unsets it (there is no default library), and each reads back as assigned.
-# The other three take no bool.
+# The other four take no bool.
 #
 # `Literal[False]` and not `bool`, matching the setters: `True` is rejected at
 # runtime, so a plain bool here would advertise a spelling that raises.
-cross_section_data: str | dict[str, str] | None
+neutron_cross_section_data: str | dict[str, str] | None
+photon_cross_section_data: str | dict[str, str] | None
 transmutation_decay_data: str | None
 transmutation_reactions: str | typing.Literal[False] | None
 transmutation_fission_yields: str | typing.Literal[False] | None

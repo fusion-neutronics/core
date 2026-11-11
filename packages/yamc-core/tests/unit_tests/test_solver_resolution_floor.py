@@ -29,7 +29,7 @@ SHORT_LIVED = "B12"
 def _graphite_steps():
     # Module-scoped, so it runs before the conftest's function-scoped fixture
     # that points the chain at the fixture: it has to set the sources itself.
-    yamc.cross_section_data = "endf-b8.1"
+    yamc.neutron_cross_section_data = "endf-b8.1"
     yamc.transmutation_decay_data = _CHAIN
     yamc.transmutation_reactions = _CHAIN
     yamc.transmutation_fission_yields = _CHAIN
