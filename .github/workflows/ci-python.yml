@@ -758,8 +758,8 @@ jobs:
       - name: Install MPI (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libhdf5-dev cmake libopenmpi-dev openmpi-bin
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y libhdf5-dev cmake libopenmpi-dev openmpi-bin
 
       - name: Install MPI (macOS)
         if: matrix.os == 'macos-15'
