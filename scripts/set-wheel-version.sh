@@ -1,32 +1,32 @@
 #!/usr/bin/env bash
-# Set the version a wheel will publish at, in the one place it lives: the crate
-# manifest that its pyproject.toml names as `manifest-path` and reads through
-# `dynamic = ["version"]`.
+# Write the version a wheel will publish at into its package's pyproject.toml.
 #
-#   scripts/set-wheel-version.sh yamc-python 0.8.1
+#   scripts/set-wheel-version.sh yamc-core 0.8.1
 #
-# Locally, prefer `cargo set-version -p yamc-python 0.8.1` (cargo-edit), which
-# does the same thing. This script exists so the release workflow's
-# dispatch-override path does not have to install cargo-edit in every wheel job,
-# on three platforms.
+# The release workflow runs this in every wheel job, with the version the
+# release tag (or a dispatch override) names, so the committed placeholder in
+# `project.version` never reaches PyPI. Nothing is committed back.
 #
-# It patches Cargo.lock as well: the lock records each workspace member's
-# version, and the license-bundle step runs `cargo about --locked`, which
-# refuses a stale lock.
+# Only pyproject.toml changes. The crate manifests and Cargo.lock are left
+# alone: maturin takes a static `project.version` over Cargo.toml's, and
+# leaving the lock untouched keeps `cargo about --locked` and friends happy.
 set -euo pipefail
 
-crate="${1:?usage: set-wheel-version.sh <crate> <version>}"
-version="${2:?usage: set-wheel-version.sh <crate> <version>}"
-manifest="crates/$crate/Cargo.toml"
+package="${1:?usage: set-wheel-version.sh <yamc-core|yani-core> <version>}"
+version="${2:?usage: set-wheel-version.sh <yamc-core|yani-core> <version>}"
+pyproject="packages/$package/pyproject.toml"
 
-# `^version` matches only the [package] version: dependency versions in a Cargo
-# manifest are nested inside their own tables, never at the start of a line.
-sed "s/^version = \".*\"/version = \"$version\"/" "$manifest" > "$manifest.tmp"
-mv "$manifest.tmp" "$manifest"
+[ -f "$pyproject" ] || { echo "no such package: $pyproject" >&2; exit 1; }
 
-# In Cargo.lock the version line directly follows its package's name line.
-sed "/^name = \"$crate\"\$/{n;s/^version = \".*\"/version = \"$version\"/;}" \
-    Cargo.lock > Cargo.lock.tmp
-mv Cargo.lock.tmp Cargo.lock
+# `project.version` is the only line in these files that starts with
+# `version =`: everything else that mentions a version is nested in a value.
+count="$(grep -c '^version = ' "$pyproject" || true)"
+if [ "$count" != 1 ]; then
+  echo "expected exactly one '^version = ' line in $pyproject, found $count" >&2
+  exit 1
+fi
 
-grep -m1 '^version' "$manifest"
+sed "s/^version = \".*\"/version = \"$version\"/" "$pyproject" > "$pyproject.tmp"
+mv "$pyproject.tmp" "$pyproject"
+
+grep '^version = ' "$pyproject"

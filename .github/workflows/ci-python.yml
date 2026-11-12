@@ -31,26 +31,14 @@ on:
   # possible, by writing that number twice, but it is now a thing you say rather
   # than a thing the tag shape imposes.
   #
-  # EACH VERSION LIVES IN ITS OWN CRATE MANIFEST -- crates/yamc-python for
-  # yamc-core, crates/yani-python for yani-core -- and each wheel's
-  # pyproject.toml pulls it from there with `dynamic = ["version"]`. Neither
-  # crate is published to crates.io, so its version field is free to carry the
-  # wheel's number, and one number cannot disagree with itself. (The `^version`
-  # anchor used below therefore matches only the [package] version: dependency
-  # versions in a Cargo manifest are nested inside their own tables.)
+  # THE TAG SETS EACH VERSION. Every wheel job writes the version the tag
+  # names into its package's `project.version` (scripts/set-wheel-version.sh)
+  # before building, so nothing is bumped in a PR and nothing is committed back.
+  # The committed `project.version` is a placeholder, 0.0.0.dev0, which is what
+  # a build from an untagged checkout reports; `verify-versions` refuses to
+  # publish without a tag or override, so the placeholder never reaches PyPI.
   #
-  # The tag repeats that number rather than setting it, and `verify-versions`
-  # below fails the release if the two disagree. So a tag cannot quietly ship a
-  # number nobody bumped, and a bump cannot quietly ship under a number nobody
-  # tagged.
-  #
-  # That inverts the old rule, where the committed version recorded the LAST
-  # release. It now names the NEXT one, which is what makes a bump reviewable:
-  # the number that will reach PyPI appears in the diff.
-  #
-  # The release flow is therefore: bump the version of each project you are
-  # releasing (`cargo set-version -p yamc-python <version>`, which updates
-  # Cargo.lock in the same step), merge, then tag with those exact versions.
+  # The release flow is therefore: merge, then tag with the versions to release.
   #
   # The inputs below publish without a release, for the cases where there should
   # not be one: a first upload that creates a project on PyPI, or a re-publish
@@ -64,11 +52,11 @@ on:
         default: none
         options: [none, yani-core, yamc-core, both]
       yamc_version:
-        description: "Override yamc-core's version (default: crates/yamc-python/Cargo.toml)"
+        description: "yamc-core version to publish at (required to publish yamc-core from a dispatch)"
         type: string
         required: false
       yani_version:
-        description: "Override yani-core's version (default: crates/yani-python/Cargo.toml)"
+        description: "yani-core version to publish at (required to publish yani-core from a dispatch)"
         type: string
         required: false
 
@@ -93,26 +81,6 @@ env:
   CARGO_NET_RETRY: 10
 
 jobs:
-  format-version-bumps:
-    name: Data format changes bump both binding versions
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.13"
-      - name: Install version-comparison tooling
-        run: python -m pip install packaging
-      - name: Test the offline format-version guard
-        run: python -m unittest discover -s scripts/tests -p test_format_version_bumps.py
-      - name: Check this PR against its base
-        env:
-          BASE_COMMIT: ${{ github.event.pull_request.base.sha }}
-        run: python scripts/check_format_version_bumps.py --base "$BASE_COMMIT"
-
   # What this run builds and publishes, decided once, from the event.
   #
   # A release tag names every project it publishes, but only the publish jobs
@@ -130,11 +98,11 @@ jobs:
       build_yani: ${{ steps.plan.outputs.build_yani }}
       publish_yamc: ${{ steps.plan.outputs.publish_yamc }}
       publish_yani: ${{ steps.plan.outputs.publish_yani }}
-      # The version each project's tag component names, empty when the tag does
-      # not name that project or there is no tag at all. verify-versions
-      # compares these against the crate manifests rather than re-parsing.
-      tagged_yamc_version: ${{ steps.plan.outputs.tagged_yamc_version }}
-      tagged_yani_version: ${{ steps.plan.outputs.tagged_yani_version }}
+      # The version each wheel is built at: the dispatch override if one is
+      # given, else the tag's. Empty for push and pull_request, where the
+      # wheels keep the committed placeholder.
+      yamc_version: ${{ steps.plan.outputs.yamc_version }}
+      yani_version: ${{ steps.plan.outputs.yani_version }}
       # The projects whose Pyodide wheel this run publishes, as the JSON list
       # ci-pyodide.yml's `projects` input takes. `[]` when it publishes none.
       pyodide_projects: ${{ steps.plan.outputs.pyodide_projects }}
@@ -182,10 +150,8 @@ jobs:
                 # A `v` is allowed on the version and dropped, since the files
                 # carry the bare number.
                 version="${version#v}"
-                # A component with no version names no release. Refusing it here
-                # is what keeps verify-versions honest: it compares the tagged
-                # version against the file, and an empty one would compare
-                # nothing and wave through whatever the file happens to say.
+                # A component with no version names no release, and would leave
+                # the wheel at the committed placeholder.
                 if [ -z "$version" ]; then
                   echo "::error::tag component '$part' names $project with no version." >&2
                   exit 1
@@ -251,8 +217,8 @@ jobs:
             echo "build_yani=$build_yani"
             echo "publish_yamc=$publish_yamc"
             echo "publish_yani=$publish_yani"
-            echo "tagged_yamc_version=$tagged_yamc"
-            echo "tagged_yani_version=$tagged_yani"
+            echo "yamc_version=${YAMC_OVERRIDE:-$tagged_yamc}"
+            echo "yani_version=${YANI_OVERRIDE:-$tagged_yani}"
             echo "pyodide_projects=[$(IFS=,; echo "${pyodide[*]-}")]"
           } | tee -a "$GITHUB_OUTPUT"
 
@@ -388,14 +354,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Override yamc-core's version
-        # Only a dispatch that names one. A release publishes what the file
-        # says, which verify-versions has already checked against the tag.
-        if: inputs.yamc_version != ''
+      - name: Set yamc-core's version
+        # The version the tag (or a dispatch override) names, written into
+        # project.version. Skipped on push and pull_request, which build the
+        # committed placeholder.
+        if: needs.plan.outputs.yamc_version != ''
         shell: bash
         env:
-          VERSION: ${{ inputs.yamc_version }}
-        run: bash scripts/set-wheel-version.sh yamc-python "$VERSION"
+          VERSION: ${{ needs.plan.outputs.yamc_version }}
+        run: bash scripts/set-wheel-version.sh yamc-core "$VERSION"
 
       - name: Install Rust (third-party license bundle)
         uses: dtolnay/rust-toolchain@stable
@@ -506,14 +473,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Override yani-core's version
-        # Only a dispatch that names one. A release publishes what the file
-        # says, which verify-versions has already checked against the tag.
-        if: inputs.yani_version != ''
+      - name: Set yani-core's version
+        # The version the tag (or a dispatch override) names, written into
+        # project.version. Skipped on push and pull_request, which build the
+        # committed placeholder.
+        if: needs.plan.outputs.yani_version != ''
         shell: bash
         env:
-          VERSION: ${{ inputs.yani_version }}
-        run: bash scripts/set-wheel-version.sh yani-python "$VERSION"
+          VERSION: ${{ needs.plan.outputs.yani_version }}
+        run: bash scripts/set-wheel-version.sh yani-core "$VERSION"
 
       - name: Install Rust (third-party license bundle)
         uses: dtolnay/rust-toolchain@stable
@@ -591,14 +559,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Override yamc-core's version
-        # Only a dispatch that names one. A release publishes what the file
-        # says, which verify-versions has already checked against the tag.
-        if: inputs.yamc_version != ''
+      - name: Set yamc-core's version
+        # The version the tag (or a dispatch override) names, written into
+        # project.version. Skipped on push and pull_request, which build the
+        # committed placeholder.
+        if: needs.plan.outputs.yamc_version != ''
         shell: bash
         env:
-          VERSION: ${{ inputs.yamc_version }}
-        run: bash scripts/set-wheel-version.sh yamc-python "$VERSION"
+          VERSION: ${{ needs.plan.outputs.yamc_version }}
+        run: bash scripts/set-wheel-version.sh yamc-core "$VERSION"
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -656,14 +625,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Override yamc-core's version
-        # Only a dispatch that names one. A release publishes what the file
-        # says, which verify-versions has already checked against the tag.
-        if: inputs.yamc_version != ''
+      - name: Set yamc-core's version
+        # The version the tag (or a dispatch override) names, written into
+        # project.version. Skipped on push and pull_request, which build the
+        # committed placeholder.
+        if: needs.plan.outputs.yamc_version != ''
         shell: bash
         env:
-          VERSION: ${{ inputs.yamc_version }}
-        run: bash scripts/set-wheel-version.sh yamc-python "$VERSION"
+          VERSION: ${{ needs.plan.outputs.yamc_version }}
+        run: bash scripts/set-wheel-version.sh yamc-core "$VERSION"
 
       - name: Install Rust (third-party license bundle)
         uses: dtolnay/rust-toolchain@stable
@@ -725,8 +695,8 @@ jobs:
     uses: ./.github/workflows/ci-pyodide.yml
     with:
       projects: ${{ needs.plan.outputs.pyodide_projects }}
-      yamc_version: ${{ inputs.yamc_version }}
-      yani_version: ${{ inputs.yani_version }}
+      yamc_version: ${{ needs.plan.outputs.yamc_version }}
+      yani_version: ${{ needs.plan.outputs.yani_version }}
     permissions:
       contents: read
 
@@ -1233,7 +1203,7 @@ jobs:
   # outcome than a failed release, since PyPI will not let the number be reused
   # and the tag then names a version that does not exist.
   verify-versions:
-    name: Versions match the tag and are unpublished
+    name: Versions are set and unpublished
     needs: [plan]
     # Only what this run will actually upload, so a single-project release does
     # not echo both projects' versions and read in the log like a double release.
@@ -1250,34 +1220,27 @@ jobs:
           # one thing here and another at the publish gate.
           PUBLISH_YAMC: ${{ needs.plan.outputs.publish_yamc }}
           PUBLISH_YANI: ${{ needs.plan.outputs.publish_yani }}
-          TAGGED_YAMC: ${{ needs.plan.outputs.tagged_yamc_version }}
-          TAGGED_YANI: ${{ needs.plan.outputs.tagged_yani_version }}
-          YAMC_OVERRIDE: ${{ inputs.yamc_version }}
-          YANI_OVERRIDE: ${{ inputs.yani_version }}
+          YAMC_VERSION: ${{ needs.plan.outputs.yamc_version }}
+          YANI_VERSION: ${{ needs.plan.outputs.yani_version }}
         run: |
           set -euo pipefail
-          version_of () { sed -nE 's/^version = "(.*)"/\1/p' "$1" | head -1; }
           fail=0
 
-          # project, publishing?, version the tag names, dispatch override, file
+          # project, publishing?, version the wheels are built at
           check () {
-            local project="$1" publish="$2" tagged="$3" override="$4" file="$5"
+            local project="$1" publish="$2" version="$3"
             if [ "$publish" != true ]; then
               echo "$project: not published by this run"
               return 0
             fi
-            local version="${override:-$(version_of "$file")}"
-            echo "$project $version"
-
-            # A dispatch override has no tag to check against, which is the
-            # case it exists for: a first upload that creates the project on
-            # PyPI, or a re-publish after a fix.
-            if [ -n "$tagged" ] && [ "$tagged" != "$version" ]; then
-              echo "::error::tag says $project $tagged, but $file says $version." >&2
-              echo "::error::Bump the file and re-tag, or tag the version the file already carries." >&2
+            # A release always names a version; a dispatch must give one, or
+            # the committed placeholder would be what went out.
+            if [ -z "$version" ]; then
+              echo "::error::no version for $project: tag it, or set ${project%-core}_version on the dispatch." >&2
               fail=1
               return 0
             fi
+            echo "$project $version"
 
             # Publishing is the last job of a long matrix, and finding out
             # there that the number was taken wastes the whole run for a
@@ -1285,15 +1248,15 @@ jobs:
             local code
             code="$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/$project/$version/json")"
             if [ "$code" = "200" ]; then
-              echo "::error::$project $version is already on PyPI. Bump it." >&2
+              echo "::error::$project $version is already on PyPI. Tag a new version." >&2
               fail=1
             else
               echo "$project $version is free (HTTP $code)"
             fi
           }
 
-          check yamc-core "$PUBLISH_YAMC" "${TAGGED_YAMC:-}" "${YAMC_OVERRIDE:-}" crates/yamc-python/Cargo.toml
-          check yani-core "$PUBLISH_YANI" "${TAGGED_YANI:-}" "${YANI_OVERRIDE:-}" crates/yani-python/Cargo.toml
+          check yamc-core "$PUBLISH_YAMC" "${YAMC_VERSION:-}"
+          check yani-core "$PUBLISH_YANI" "${YANI_VERSION:-}"
           exit $fail
       # Both wheels read any published release whose format_version they
       # support (yamc-nuclide's SUPPORTED_FORMAT_VERSIONS), so the release
@@ -1528,17 +1491,16 @@ jobs:
           PUBLISH_YANI: ${{ needs.plan.outputs.publish_yani }}
           RESULT_YAMC: ${{ needs['publish-yamc-core'].result }}
           RESULT_YANI: ${{ needs['publish-yani-core'].result }}
-          YAMC_OVERRIDE: ${{ inputs.yamc_version }}
-          YANI_OVERRIDE: ${{ inputs.yani_version }}
+          YAMC_VERSION: ${{ needs.plan.outputs.yamc_version }}
+          YANI_VERSION: ${{ needs.plan.outputs.yani_version }}
         run: |
           set -euo pipefail
-          version_of () { sed -nE 's/^version = "(.*)"/\1/p' "$1" | head -1; }
           fail=0
 
-          # project, publishing?, that job's result, dispatch override, file,
+          # project, publishing?, that job's result, version it went out at,
           # directory of the files its publish job uploaded
           confirm () {
-            local project="$1" publish="$2" result="$3" override="$4" file="$5" dir="$6"
+            local project="$1" publish="$2" result="$3" version="$4" dir="$5"
             if [ "$publish" != true ]; then
               echo "$project: not part of this release (job: $result)"
               return 0
@@ -1549,7 +1511,6 @@ jobs:
               return 0
             fi
 
-            local version="${override:-$(version_of "$file")}"
             # PyPI's JSON API trails the upload by seconds rather than by
             # nothing, so a file missing here at first is propagation, not a
             # failed release. Two minutes is well past what it takes; beyond
@@ -1574,6 +1535,6 @@ jobs:
             fi
           }
 
-          confirm yamc-core "$PUBLISH_YAMC" "$RESULT_YAMC" "${YAMC_OVERRIDE:-}" crates/yamc-python/Cargo.toml dist-yamc
-          confirm yani-core "$PUBLISH_YANI" "$RESULT_YANI" "${YANI_OVERRIDE:-}" crates/yani-python/Cargo.toml dist-yani
+          confirm yamc-core "$PUBLISH_YAMC" "$RESULT_YAMC" "${YAMC_VERSION:-}" dist-yamc
+          confirm yani-core "$PUBLISH_YANI" "$RESULT_YANI" "${YANI_VERSION:-}" dist-yani
           exit $fail

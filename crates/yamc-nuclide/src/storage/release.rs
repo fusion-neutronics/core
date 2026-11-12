@@ -51,8 +51,7 @@ use sha2::{Digest, Sha256};
 /// The range ends at [`nuclear_data_schema::FORMAT_VERSION`], the format the
 /// converters write, and the assertion below holds it there: a build reads
 /// what it writes and nothing newer. How far back it reaches is a separate
-/// decision. The bounds stay literals because the data-format check
-/// (`scripts/check_format_version_bumps.py`) reads them from this source.
+/// decision.
 pub const SUPPORTED_FORMAT_VERSIONS: RangeInclusive<u32> = 2..=2;
 
 const _: () = assert!(
