@@ -1,0 +1,100 @@
+name: Coverage
+
+# Code coverage, informational only: it gates nothing and never fails a build.
+# It prints the percentage in the log and uploads the lcov and HTML report as
+# an artifact. No external service.
+#
+# Weekly and on demand, not on every push to main. It is a second, instrumented
+# run of the whole Linux Rust suite that `Rust tests` already runs, and it takes
+# four to five hours (one run hit GitHub's six-hour cap). Run on every merge and
+# release it held a runner for that long each time, which is a large share of
+# what the release jobs were queueing behind.
+#
+# Not watched by main-health.yml, for the same reason: a coverage run that
+# fails says nothing about main that `Rust tests` has not already said.
+
+on:
+  schedule:
+    # Sunday 02:37 UTC, off the hour.
+    - cron: "37 2 * * 0"
+  workflow_dispatch:
+
+concurrency:
+  group: coverage
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+
+jobs:
+  coverage:
+    name: Coverage (Linux, informational)
+    runs-on: ubuntu-latest
+    # Above the four to five hours a run takes, below GitHub's six-hour cap, so
+    # a run that hangs ends with a timeout rather than an unexplained cancel.
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install system dependencies (Linux)
+        run: |
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y libhdf5-dev cmake
+      - name: Set up Rust
+        run: rustup update stable && rustup default stable
+      # Cache the dependency build. Without this every Rust job recompiled the
+      # whole workspace -- arrow, faer, wgpu, cubecl -- from scratch on every
+      # push, which is most of why these jobs ran as long as they did.
+      #
+      # Its OWN key, not the shared one: llvm-cov instrumentation changes
+      # RUSTFLAGS, so every artifact differs and mixing them in would evict the
+      # cache the other jobs rely on without ever hitting.
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage
+          cache-on-failure: true
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      # The cache below is keyed on the release latest.json names, so
+      # a new release starts from a fresh cache rather than restoring
+      # the files of the old one.
+      - name: Resolve nuclear-data release
+        id: fixtures-release
+        shell: bash
+        run: |
+          release=$(python3 scripts/fetch_test_fixtures.py --print-release)
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+      - name: Cache nuclear-data test fixtures
+        uses: actions/cache@v6
+        with:
+          # The platform cache directory yamc resolves (url_cache::cache_root):
+          # one of these exists on any runner, the others are ignored.
+          path: |
+            ~/.cache/yamc
+            ~/Library/Caches/yamc
+            ~/AppData/Local/yamc
+          key: yamc-test-fixtures-endf-b8.1-${{ steps.fixtures-release.outputs.release }}-${{ hashFiles('scripts/fetch_test_fixtures.py') }}
+      - name: Fetch nuclear-data test fixtures
+        run: python3 scripts/fetch_test_fixtures.py
+      # Default features only (arrow). GPU device tests are adapter-gated and
+      # skip without a Vulkan adapter; MPI is a separate feature. The number is
+      # therefore "workspace, default features" -- not "all features".
+      # TODO: optionally add a second run with --features mpi for fuller coverage.
+      # --no-fail-fast: coverage is informational, so report the number even if
+      # a test flakes (e.g. an adapter-dependent GPU test) rather than aborting.
+      - name: Generate coverage (workspace, default features)
+        run: |
+          cargo llvm-cov --workspace --no-fail-fast --lcov --output-path coverage.lcov
+          cargo llvm-cov --workspace --no-fail-fast --summary-only | tee coverage-summary.txt
+      - name: Generate HTML report
+        run: cargo llvm-cov report --html
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: |
+            coverage.lcov
+            coverage-summary.txt
+            target/llvm-cov/html
+          retention-days: 7

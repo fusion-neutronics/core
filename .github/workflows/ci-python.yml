@@ -908,11 +908,18 @@ jobs:
       # A pull request runs both on Linux and one on each other platform (the
       # oldest on Windows, the newest on macOS), so both ends are covered
       # somewhere and the macOS pool, the one PRs queue on, carries one job
-      # instead of two. A push to main and a release run all six, so `collect`
-      # still gates publishing on the full set.
+      # instead of two. A push to main runs all six.
+      #
+      # A release runs the pull-request four. It tags a commit on main whose
+      # push already ran all six against the same source, so the release run
+      # tests what it built on every platform and both Python ends, and `collect`
+      # gates publishing on that. The two it drops are the second macOS and
+      # Windows jobs, and the macOS one is the job most likely to wait on
+      # GitHub's macOS pool: the yamc-core 0.21.0 release first failed to publish
+      # because a macos-15 job was never picked up and was cancelled.
       matrix:
         include: >-
-          ${{ fromJSON(github.event_name == 'pull_request'
+          ${{ fromJSON((github.event_name == 'pull_request' || github.event_name == 'release')
           && '[{"os":"ubuntu-latest","python-version":"3.10"},{"os":"ubuntu-latest","python-version":"3.14"},{"os":"windows-latest","python-version":"3.10"},{"os":"macos-15","python-version":"3.14"}]'
           || '[{"os":"ubuntu-latest","python-version":"3.10"},{"os":"ubuntu-latest","python-version":"3.14"},{"os":"windows-latest","python-version":"3.10"},{"os":"windows-latest","python-version":"3.14"},{"os":"macos-15","python-version":"3.10"},{"os":"macos-15","python-version":"3.14"}]') }}
     steps:

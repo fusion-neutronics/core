@@ -23,6 +23,8 @@ from ._core import sources as sources
 # Package version, read at import time from the installed distribution metadata
 # (importlib.metadata) -- single source of truth, no hardcoded duplicate.
 __version__: str
+__commit__: str | None
+__commit_dirty__: bool | None
 
 # Module-level data configuration, backed by property getters/setters on the
 # module object (see _YaniModule in __init__.py). Modelled as annotated module
