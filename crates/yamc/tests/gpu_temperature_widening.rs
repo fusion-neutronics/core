@@ -19,6 +19,7 @@ use yamc::geometry::cell::Cell;
 use yamc::geometry::Geometry;
 use yamc::model::Model;
 use yamc_materials::Material;
+use yamc_source::source::{ParticleSource, Source};
 use yamc_tallies::tally::Tally;
 
 fn h1_cache() -> Option<String> {
@@ -87,7 +88,13 @@ fn the_gpu_extractor_finds_the_relabelled_temperature() {
     let region = Region::new_from_halfspace(HalfspaceType::Below(Arc::new(sphere)));
     let cell = Cell::new(Some(1), region, Some("h".into()), Some(0));
     let geometry = Geometry::new(vec![cell], vec![Arc::new(material)]).unwrap();
-    let mut model = Model::new(geometry, vec![], Vec::<Arc<Tally>>::new());
+    // A neutron source: the widening only runs for models that transport
+    // neutrons, and a source-less model cannot reach the GPU at all.
+    let mut model = Model::new(
+        geometry,
+        vec![ParticleSource::Neutron(Source::new())],
+        Vec::<Arc<Tally>>::new(),
+    );
 
     // Exactly what the GPU dispatch calls before translating.
     model
