@@ -224,6 +224,15 @@ pub fn register_classes(py: Python<'_>, m: &Bound<'_, PyModule>, package: &str) 
     )?)?;
     add_submodule(py, m, &decay_photons, package, "_decay_photons")?;
 
+    // The git commit this extension was built from, and whether a tracked
+    // file differed from it. Both are None outside a git checkout of this
+    // repository. See build.rs.
+    m.add("__commit__", option_env!("YANI_BUILD_COMMIT"))?;
+    m.add(
+        "__commit_dirty__",
+        option_env!("YANI_BUILD_DIRTY").map(|dirty| dirty == "true"),
+    )?;
+
     rehome(m, package)?;
     Ok(())
 }
