@@ -16,6 +16,8 @@ from ._core import sources as sources
 # Package version, read at import time from the installed distribution metadata
 # (importlib.metadata) -- single source of truth, no hardcoded duplicate.
 __version__: str
+__commit__: str | None
+__commit_dirty__: bool | None
 
 # `Enriched` and `enriched` are not declared here. They stopped being a
 # Python-side dataclass when they became a pyclass and a pyfunction in the

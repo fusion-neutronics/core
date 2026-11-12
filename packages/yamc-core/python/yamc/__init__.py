@@ -20,6 +20,10 @@ except _PackageNotFoundError:  # pragma: no cover - only without an installed di
 
 from yamc._core import *  # noqa: F401,F403
 
+# The git commit the extension was built from, and whether a tracked file
+# differed from it. None when it was not built from a git checkout of core.
+from yamc._core import __commit__, __commit_dirty__  # noqa: F401
+
 # Re-export submodules. sources (distribution zoo), parallel (MPI/GPU
 # helpers), materials (curated material collections) and shapes (the lumps
 # self-shielding takes) are PyO3 submodules of _core, like data.

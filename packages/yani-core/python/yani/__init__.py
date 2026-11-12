@@ -23,6 +23,10 @@ except _PackageNotFoundError:  # pragma: no cover - only without an installed di
 
 from yani._core import *  # noqa: F401,F403
 
+# The git commit the extension was built from, and whether a tracked file
+# differed from it. None when it was not built from a git checkout of core.
+from yani._core import __commit__, __commit_dirty__  # noqa: F401
+
 # PyO3 submodules of _core, same shape as yamc's.
 from yani._core import data, materials, shapes, sources  # noqa: F401
 
