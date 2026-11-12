@@ -14,17 +14,41 @@ use crate::function::{Tabulated1D, Tabulated2D};
 /// routinely missing from the line entirely. Python slicing yields `""` there
 /// and [`int_endf`] reads that as zero; this keeps that behaviour rather than
 /// panicking on the range.
+///
+/// Columns are characters. On an ASCII line, which is every line the format
+/// itself writes, they are bytes too. A line with another character, such as
+/// a Latin-1 byte in a description that `read_text` decoded as one character,
+/// is counted in characters, so the "è" in "Bruyères" (two bytes in a `str`)
+/// does not push MAT, MF and MT one column right of where they are.
 #[inline]
 pub fn field(line: &str, start: usize, end: usize) -> &str {
+    if !line.is_ascii() {
+        return char_field(line, start, end);
+    }
     let len = line.len();
     let start = start.min(len);
     let end = end.min(len);
     if start >= end {
         return "";
     }
-    // `get` returns None rather than panicking if a non-ASCII byte means the
-    // range is not on a char boundary.
-    line.get(start..end).unwrap_or("")
+    &line[start..end]
+}
+
+/// [`field`] on a line that is not ASCII: the same columns, counted in
+/// characters rather than bytes.
+#[cold]
+fn char_field(line: &str, start: usize, end: usize) -> &str {
+    let byte = |column: usize| {
+        line.char_indices()
+            .nth(column)
+            .map_or(line.len(), |(at, _)| at)
+    };
+    let (start, end) = (byte(start), byte(end));
+    if start >= end {
+        ""
+    } else {
+        &line[start..end]
+    }
 }
 
 /// Convert an ENDF floating point field to `f64`.
@@ -546,6 +570,21 @@ mod tests {
     fn field_tolerates_short_lines() {
         assert_eq!(field("abc", 0, 11), "abc");
         assert_eq!(field("abc", 5, 11), "");
+        assert_eq!(field("abè", 0, 11), "abè");
+        assert_eq!(field("abè", 5, 11), "");
+    }
+
+    /// A UKDD-12 description line (Ag119m, Bi198 and Y097 carry it): its
+    /// Latin-1 "è" and "â" are one column each, so MAT, MF and MT stay put.
+    #[test]
+    fn field_counts_a_non_ascii_line_in_characters() {
+        let line =
+            "Converted by 0. BERSILLON and J. BLACHOT (CEA, Bruyères-le-Châtel)4754 1451   11";
+        assert_eq!(line.chars().count(), 80);
+        assert_eq!(field(line, 66, 70), "4754");
+        assert_eq!(field(line, 70, 72), " 1");
+        assert_eq!(field(line, 72, 75), "451");
+        assert!(field(line, 0, 66).ends_with("Châtel)"));
     }
 
     #[test]

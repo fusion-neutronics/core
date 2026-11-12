@@ -1,5 +1,5 @@
 //! Unpacking the source files into one flat folder per sublibrary, in Rust
-//! (zip and gzipped tar), applying each sublibrary's archives in recipe order
+//! (zip, and tar compressed with gzip or bzip2), applying each sublibrary's archives in recipe order
 //! so a later update archive replaces what an earlier one supplied.
 //!
 //! Members are written under their file name alone, never their folder, so a
@@ -90,6 +90,7 @@ fn unpack(source: &Source, path: &Path, dir: &Path) -> Result<usize, String> {
                 .map_err(|e| format!("could not copy {} to {}: {e}", path.display(), to.display()))
         }
         Format::TarGz => unpack_tar_gz(source.keep, path, dir).map_err(what),
+        Format::TarBz2 => unpack_tar_bz2(source.keep, path, dir).map_err(what),
         Format::Zip => unpack_zip(source.keep, path, dir).map_err(what),
     }
 }
@@ -123,13 +124,34 @@ fn write_member(
 fn unpack_tar_gz(keep: fn(&str) -> bool, path: &Path, dir: &Path) -> Result<usize, String> {
     let file = fs::File::open(path).map_err(|e| format!("could not open: {e}"))?;
     let gz = flate2::read::MultiGzDecoder::new(BufReader::with_capacity(1 << 20, file));
-    let mut archive = tar::Archive::new(gz);
+    unpack_tar(keep, gz, "gzipped", dir)
+}
+
+fn unpack_tar_bz2(keep: fn(&str) -> bool, path: &Path, dir: &Path) -> Result<usize, String> {
+    let file = fs::File::open(path).map_err(|e| format!("could not open: {e}"))?;
+    // Multi-stream, as `MultiGzDecoder` is for gzip: parallel compressors
+    // (pbzip2, lbzip2) write one bzip2 stream per block, and a single-stream
+    // decoder would stop silently after the first.
+    let bz = bzip2::read::MultiBzDecoder::new(BufReader::with_capacity(1 << 20, file));
+    unpack_tar(keep, bz, "bzip2", dir)
+}
+
+/// The members of a decompressed tar that `keep` selects, written flat into
+/// `dir`. `compression` names the outer layer in the errors.
+fn unpack_tar(
+    keep: fn(&str) -> bool,
+    decompressed: impl io::Read,
+    compression: &str,
+    dir: &Path,
+) -> Result<usize, String> {
+    let mut archive = tar::Archive::new(decompressed);
     let mut seen = HashSet::new();
     let entries = archive
         .entries()
-        .map_err(|e| format!("not a gzipped tar archive: {e}"))?;
+        .map_err(|e| format!("not a {compression} tar archive: {e}"))?;
     for entry in entries {
-        let mut entry = entry.map_err(|e| format!("not a readable gzipped tar archive: {e}"))?;
+        let mut entry =
+            entry.map_err(|e| format!("not a readable {compression} tar archive: {e}"))?;
         if !entry.header().entry_type().is_file() {
             continue;
         }

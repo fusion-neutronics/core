@@ -24,6 +24,9 @@ etcetera = "0.11"
 # Pure-Rust extraction of the source archives: .tar.gz and .tgz through
 # flate2's default miniz_oxide backend, and .zip through flate2 as well.
 flate2 = "1"
+# .tar.bz2, as the FISPACT-II data repository ships its libraries. bzip2's
+# default backend is libbz2-rs-sys, a Rust port, so no C library is linked.
+bzip2 = "0.6"
 tar = { version = "0.4", default-features = false }
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 sha2 = "0.10"

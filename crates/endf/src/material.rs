@@ -763,6 +763,43 @@ mod tests {
         assert!(description.iter().any(|line| line.contains('\u{96}')));
     }
 
+    /// UKDD-12's Ag119m, Bi198 and Y097 credit "CEA, Bruyères-le-Châtel" in
+    /// Latin-1. Each of those bytes decodes to a character two bytes long, and
+    /// counted in bytes the line's MAT, MF and MT moved right and stopped the
+    /// read. Here the description fills its 66 columns, so any shift lands in
+    /// the control fields.
+    #[test]
+    fn latin1_letters_do_not_move_the_control_fields() {
+        let text = crate::testdata::text(IN116[0]);
+        let mut lines: Vec<Vec<u8>> = text.lines().map(|l| l.as_bytes().to_vec()).collect();
+        let line = &mut lines[12];
+        assert_eq!(&line[70..75], b" 1451");
+        let mut description = b"Converted by 0. BERSILLON and J. BLACHOT (CEA, Bruy".to_vec();
+        description.extend_from_slice(b"\xe8res-le-Ch\xe2tel)");
+        assert_eq!(description.len(), 66);
+        line[..66].copy_from_slice(&description);
+        let mut bytes = lines.join(&b'\n');
+        bytes.push(b'\n');
+        assert!(String::from_utf8(bytes.clone()).is_err());
+
+        let path = std::env::temp_dir().join(format!("endf-bruyeres-{}.endf", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let read = Material::from_file(&path);
+        std::fs::remove_file(&path).unwrap();
+
+        let read = read.unwrap();
+        let clean = Material::from_str(&text).unwrap();
+        assert_eq!(read.mat, clean.mat);
+        assert_eq!(read.sections(), clean.sections());
+        let description = &read.mf1_mt451().unwrap().description;
+        assert!(
+            description
+                .iter()
+                .any(|line| line.contains("Bruyères-le-Châtel)")),
+            "{description:?}"
+        );
+    }
+
     #[test]
     fn interprets_by_sublibrary() {
         let neutron = Material::from_str(&crate::testdata::text(FIXTURE)).unwrap();

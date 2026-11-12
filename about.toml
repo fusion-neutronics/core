@@ -6,8 +6,8 @@
 # licenses (no copyleft). Adding a dependency under a license not listed
 # here breaks the wheel build until the license is reviewed and either
 # accepted (if permissive), admitted for that one crate through a trailing
-# `[crate-name]` section with its justification written beside it (the
-# only such case so far is `buildid` at the bottom of this file), or the
+# `[crate-name]` section with its justification written beside it (see
+# `buildid` and `libbz2-rs-sys` at the bottom of this file), or the
 # dependency is dropped.
 #
 # The generated THIRD-PARTY-LICENSES.html is bundled into each wheel via the
@@ -55,3 +55,13 @@ private = { ignore = true }
 # globally so the "permissive only" gate above stays the default.
 [buildid]
 accepted = ["MPL-2.0"]
+
+# `libbz2-rs-sys` is the pure-Rust bzip2 backend of the `bzip2` crate, which
+# nuclear-data-build uses to unpack `.tar.bz2` nuclear data archives. It
+# keeps the original bzip2 license (SPDX `bzip2-1.0.6`), a BSD-style
+# permissive license: redistribution with or without modification, provided
+# the copyright notice is kept and altered versions are marked as such. It
+# has no copyleft terms. Accepted for this one crate because cargo-about
+# matches license identifiers exactly and this one is unique to bzip2.
+[libbz2-rs-sys]
+accepted = ["bzip2-1.0.6"]
