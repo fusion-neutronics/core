@@ -123,11 +123,10 @@ mod tests {
             config.get_cross_section("Fe56"),
             Some("tendl-2025".to_string())
         );
-        // When a keyword is in the hashmap, it should set the global default too
-        assert_eq!(
-            config.default_neutron_cross_section,
-            Some("tendl-2025".to_string())
-        );
+        // A keyword inside a mapping applies only to its own nuclide. It must
+        // not become a global default for nuclides the mapping does not name.
+        assert_eq!(config.default_neutron_cross_section, None);
+        assert_eq!(config.get_cross_section("Be9"), None);
     }
 
     #[test]
