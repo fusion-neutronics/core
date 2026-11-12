@@ -387,9 +387,9 @@ def package_surface(pkg: Package) -> set[str]:
         names.add(path.stem)
     names.discard("__init__")
 
-    # The five nuclear-data settings are module-level annotated globals in the
+    # Particle and transmutation settings are module-level annotated globals in the
     # hand-maintained package stub, not `__all__` entries in `_core`, and the
-    # doc comments reach for them by name (`yamc.cross_section_data`).
+    # doc comments reach for them by name (`yamc.neutron_cross_section_data`).
     package_stub = pkg.core.parent / "__init__.pyi"
     if package_stub.exists():
         for node in ast.parse(package_stub.read_text()).body:

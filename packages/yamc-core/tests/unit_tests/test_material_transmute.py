@@ -27,9 +27,9 @@ RATE = sum(MULTIGROUP_FLUX)
 
 @pytest.fixture(autouse=True)
 def _set_cross_sections():
-    yamc.cross_section_data = NUC_DATA
+    yamc.neutron_cross_section_data = NUC_DATA
     yield
-    yamc.cross_section_data = None
+    yamc.neutron_cross_section_data = None
 
 
 def _make_iron():

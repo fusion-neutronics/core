@@ -15,7 +15,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def setup_config():
     """Set up global cross-section data with test nuclear data paths."""
-    yamc.cross_section_data = {"Fe56": "tests/Fe56.arrow"}
+    yamc.neutron_cross_section_data = {"Fe56": "tests/Fe56.arrow"}
 
 
 def _make_void_sphere_model(tallies, batches=5, particles=5000):
@@ -298,12 +298,12 @@ def test_overlay_without_resolvable_data_raises():
     cell materials, so a run whose global config cannot resolve them used to
     print a ``[WARNING]`` and then score the un-responded quantity.
     """
-    saved = yamc.cross_section_data
-    yamc.cross_section_data = {}
+    saved = yamc.neutron_cross_section_data
+    yamc.neutron_cross_section_data = {}
     try:
         tally = yamc.Tally(scores=["heating"], response="Fe56")
         model, run_kwargs = _make_fe_sphere_model(tally, batches=1, particles=200)
         with pytest.raises(ValueError, match="response"):
             model.simulate_transport(**run_kwargs)
     finally:
-        yamc.cross_section_data = saved
+        yamc.neutron_cross_section_data = saved

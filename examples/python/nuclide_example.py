@@ -1,7 +1,7 @@
 import yamc
 
 # Configure cross section data paths
-yamc.cross_section_data = {
+yamc.neutron_cross_section_data = {
     "Be9": "tests/Be9.arrow",
     "Fe54": "tests/Fe54.arrow",
     "Fe56": "tests/Fe56.arrow",

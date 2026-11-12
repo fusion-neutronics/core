@@ -19,7 +19,7 @@ import yamc
 # ---------------------------------------------------------------------------
 # Global config: register nuclear data paths so overlay tallies can find them
 # ---------------------------------------------------------------------------
-yamc.cross_section_data = {"Fe56": "tests/Fe56.arrow"}
+yamc.neutron_cross_section_data = {"Fe56": "tests/Fe56.arrow"}
 
 # ---------------------------------------------------------------------------
 # Materials

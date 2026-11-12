@@ -41,20 +41,23 @@ __all__ = [
     "cooldown_steps",
     "enriched",
     "generate_library",
-    "get_cross_section_data",
+    "get_neutron_cross_section_data",
+    "get_photon_cross_section_data",
     "get_transmutation_branch_ratios",
     "get_transmutation_decay_data",
     "get_transmutation_fission_yields",
     "get_transmutation_reactions",
     "group_structure",
     "group_structure_names",
-    "lookup_cross_section_data",
+    "lookup_neutron_cross_section_data",
+    "lookup_photon_cross_section_data",
     "radionuclide_production",
     "read_element_from_arrow",
     "read_nuclide_from_arrow",
     "read_photonuclear_from_arrow",
-    "set_cross_section_data",
-    "set_cross_section_data_entry",
+    "set_neutron_cross_section_data",
+    "set_neutron_cross_section_data_entry",
+    "set_photon_cross_section_data",
     "set_transmutation_branch_ratios",
     "set_transmutation_decay_data",
     "set_transmutation_fission_yields",
@@ -2049,7 +2052,7 @@ class Nuclide:
           - A file path (e.g. "tests/Li6.arrow")
           - A keyword (e.g. "tendl-2025", "fendl-3.2d", "endf-b8.1")
           - A directory path (e.g. "/path/to/neutron/") -- resolves to `<dir>/<name>.arrow`
-          - None -- looks up the path from yani.cross_section_data
+          - None -- looks up the path from yani.neutron_cross_section_data
         
         When `temperatures` is provided only those temperatures are loaded while
         `available_temperatures` always lists every temperature present in the
@@ -2058,7 +2061,7 @@ class Nuclide:
         Args:
             path (Optional[str]): Optional path to the nuclide data file, keyword,
                 or directory. If omitted, the constructor `name` is used to look up
-                the source from yani.cross_section_data.
+                the source from yani.neutron_cross_section_data.
             temperatures (Optional[List[str]]): Temperature strings in Kelvin (e.g. ["293"]).
                 If given only these temperatures are loaded.
         
@@ -2074,7 +2077,7 @@ class Nuclide:
             Compare the same nuclide from different data sources:
         
             >>> # Set global default
-            >>> yani.cross_section_data = "tendl-2025"
+            >>> yani.neutron_cross_section_data = "tendl-2025"
             >>>
             >>> # Load from global config (will use TENDL)
             >>> li6_tendl = yani.Nuclide("Li6")
@@ -4788,7 +4791,7 @@ def generate_library(keyword: builtins.str, path: builtins.str, *, parts: typing
     .. code-block:: python
     
         generate_library("endf-b8.1", "/data/endf-b8.1")
-        cross_section_data = "/data/endf-b8.1"
+        neutron_cross_section_data = "/data/endf-b8.1"
         transmutation_decay_data = "/data/endf-b8.1"
     
     Running it again resumes: finished folders are kept and only the rest are
@@ -4854,13 +4857,18 @@ def generate_library(keyword: builtins.str, path: builtins.str, *, parts: typing
         evaluation's reason is in ``<path>/.build/failed/``.
     """
 
-def get_cross_section_data() -> typing.Any:
+def get_neutron_cross_section_data() -> typing.Any:
     r"""
     Get the current cross-section data mapping.
     
     Returns ``None`` if nothing has been set, a string if a single global
     library keyword or directory is in use, or a dict mapping nuclide names
     to paths.
+    """
+
+def get_photon_cross_section_data() -> typing.Any:
+    r"""
+    Get the explicitly selected photon library or element-to-source mapping.
     """
 
 def get_transmutation_branch_ratios() -> builtins.str | list[builtins.str] | None:
@@ -4939,10 +4947,15 @@ def group_structure_names() -> builtins.list[builtins.str]:
         {'XMAS-172': 172, 'VITAMIN-J-175': 175}
     """
 
-def lookup_cross_section_data(nuclide: builtins.str) -> typing.Optional[builtins.str]:
+def lookup_neutron_cross_section_data(nuclide: builtins.str) -> typing.Optional[builtins.str]:
     r"""
     Look up the cross-section data path for a single nuclide, applying the global
     default if no per-nuclide entry is set.
+    """
+
+def lookup_photon_cross_section_data(element: builtins.str) -> typing.Optional[builtins.str]:
+    r"""
+    Resolve one photon element from the explicit photon selection only.
     """
 
 def radionuclide_production(neutron_files: typing.Sequence[builtins.str]) -> list:
@@ -5126,7 +5139,7 @@ def sample_scatter_cosine() -> builtins.float:
     Sample a scattering cosine (mu in [-1, 1]) for isotropic scattering.
     """
 
-def set_cross_section_data(value: builtins.str | dict[builtins.str, builtins.str] | None) -> None:
+def set_neutron_cross_section_data(value: builtins.str | dict[builtins.str, builtins.str] | None) -> None:
     r"""
     Set the cross-section data mapping.
     
@@ -5134,11 +5147,16 @@ def set_cross_section_data(value: builtins.str | dict[builtins.str, builtins.str
     directory, or a dict mapping nuclide names to paths or keywords.
     """
 
-def set_cross_section_data_entry(nuclide_or_keyword: builtins.str, path: typing.Optional[builtins.str] = None) -> None:
+def set_neutron_cross_section_data_entry(nuclide_or_keyword: builtins.str, path: typing.Optional[builtins.str] = None) -> None:
     r"""
     Set the cross-section data path for a single nuclide, or set the global default
     if ``path`` is omitted and ``nuclide_or_keyword`` is a library keyword /
     directory.
+    """
+
+def set_photon_cross_section_data(value: builtins.str | dict[builtins.str, builtins.str] | None) -> None:
+    r"""
+    Select photon data explicitly; neutron settings are never used as a fallback.
     """
 
 def set_transmutation_branch_ratios(value: typing.Optional[builtins.str | typing.Sequence[builtins.str]]) -> None:

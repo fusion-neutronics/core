@@ -11,7 +11,7 @@ ordinary CSG, with no CAD and no mesh.
 
 import yamc
 
-yamc.cross_section_data = "endf-b8.1"
+yamc.neutron_cross_section_data = "endf-b8.1"
 
 # A sheet gyroid of period 4 cm.
 lattice = yamc.ImplicitSurface(

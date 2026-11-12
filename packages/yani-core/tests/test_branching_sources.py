@@ -51,7 +51,7 @@ def test_a_source_is_a_string():
 @pytest.mark.parametrize(
     "setting",
     [
-        "cross_section_data",
+        "neutron_cross_section_data",
         "transmutation_decay_data",
         "transmutation_reactions",
         "transmutation_fission_yields",
@@ -66,14 +66,14 @@ def test_irdff_ii_is_refused_as_anything_but_a_branching_source(setting):
 
 def test_irdff_ii_is_refused_as_one_nuclide_s_source_too():
     with pytest.raises(ValueError, match="supplies isomeric branching only"):
-        yani.cross_section_data = {"Fe56": "irdff-ii"}
+        yani.neutron_cross_section_data = {"Fe56": "irdff-ii"}
     with pytest.raises(ValueError, match="supplies isomeric branching only"):
-        yani.set_cross_section_data_entry("Fe56", "irdff-ii")
+        yani.set_neutron_cross_section_data_entry("Fe56", "irdff-ii")
 
 
 def _nb93_report(sources):
     """The branching report of a Nb93 foil under a 13.5-14.5 MeV group."""
-    yani.cross_section_data = "endf-b8.1"
+    yani.neutron_cross_section_data = "endf-b8.1"
     yani.transmutation_decay_data = "endf-b8.1"
     yani.transmutation_reactions = "endf-b8.1"
     yani.transmutation_fission_yields = "endf-b8.1"

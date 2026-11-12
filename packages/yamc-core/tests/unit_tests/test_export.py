@@ -30,6 +30,52 @@ FIXTURES = Path("tests")
 # crates/nuclear-data-schema/src/reaction_ranges.rs).
 EOS = b"\xff\xff\xff\xff\x00\x00\x00\x00"
 
+@pytest.fixture(autouse=True)
+def _explicit_export_data_sources():
+    yamc.neutron_cross_section_data = "endf-b8.1"
+    yamc.photon_cross_section_data = "endf-b8.1"
+
+
+def test_export_requires_an_explicit_neutron_source(tmp_path):
+    yamc.neutron_cross_section_data = None
+    with pytest.raises(ValueError, match="neutron_cross_section_data"):
+        _li6_model().to_html(tmp_path / "missing.html")
+    assert not (tmp_path / "missing.html").exists()
+
+
+def test_export_local_only_data_does_not_invent_a_network_library(tmp_path):
+    source = tmp_path / "selected-local-data"
+    source.mkdir()
+    yamc.neutron_cross_section_data = str(source)
+    with pytest.raises(ValueError, match="local-only"):
+        _li6_model().to_html(tmp_path / "local.html")
+    assert not (tmp_path / "local.html").exists()
+
+
+def test_export_preserves_distinct_particle_sources(tmp_path, monkeypatch):
+    from yamc import _export
+
+    wasm = tmp_path / "metadata-only.wasm"
+    glue = tmp_path / "metadata-only.js"
+    wasm.write_bytes(b"\x00asm")
+    glue.write_text("export default function init() {}")
+    monkeypatch.setattr(_export, "_WASM_BIN", wasm)
+    monkeypatch.setattr(_export, "_WASM_JS_GLUE", glue)
+    yamc.neutron_cross_section_data = "fendl-3.2d"
+    yamc.photon_cross_section_data = "endf-b8.1"
+    base = _li6_model()
+    model = yamc.Model(
+        geometry=base.geometry, source=base.source, transport_secondary_photons=True,
+    )
+    html = model.to_html(tmp_path / "sources.html").read_text()
+    match = re.search(r"const DATA_SOURCES\s*=\s*(\{[^;]*\});", html, re.DOTALL)
+    assert match is not None
+    sources = json.loads(match[1])
+    assert sources["neutron"]["entries"]["Li6"] == "https://yamc-data.xsplot.com/fendl-3.2d"
+    assert sources["photon"]["entries"]["Li"] == "https://yamc-data.xsplot.com/endf-b8.1"
+    assert "fetchParticleData(JSON.stringify(DATA_SOURCES)" in html
+    assert "const LIBRARY_URL = default_library_url()" not in html
+
 
 def _make_fake_nuclide(cache_dir: Path, name: str, payload: bytes = b"<arrow-data>") -> None:
     """Create a fake `neutron/<name>.arrow/` directory in the release folder
@@ -350,14 +396,14 @@ def test_exported_html_contains_load_model_json_and_plot(tmp_path: Path) -> None
 
 
 def test_exported_html_fetches_through_the_wasm_fetcher(tmp_path: Path) -> None:
-    """The page's Fetch button goes through `WasmSimulation.fetchNuclearData`,
+    """The page's Fetch button goes through `WasmSimulation.fetchParticleData`,
     which reads the published per-section objects. The page once fetched
     `.arrow.tar` bundles the CDN had stopped serving, and nothing here
     noticed; this pins the wiring, and the browser test in
     crates/yamc/tests/wasm_fetch_browser.rs exercises the fetch itself."""
     html = _li6_model().to_html(tmp_path / "out.html").read_text(encoding="utf-8")
-    assert "sim.fetchNuclearData(" in html
-    assert "default_library_url()" in html
+    assert "sim.fetchParticleData(" in html
+    assert "const LIBRARY_URL = default_library_url()" not in html
     assert "sim.model_missing_nuclides()" in html
     # The greyed-out Simulate button says what to do, before the fetch and
     # again whenever an edit adds a nuclide the store lacks.

@@ -26,11 +26,11 @@ _SOURCES = (
 def _nothing_configured():
     """Unset every source, cross sections included, so a refusal that came
     after any data was read would name the cross sections instead."""
-    yamc.cross_section_data = None
+    yamc.neutron_cross_section_data = None
     for setting in _SOURCES:
         setattr(yamc, setting, None)
     yield
-    yamc.cross_section_data = None
+    yamc.neutron_cross_section_data = None
 
 
 def _assert_names(error, *unset):
@@ -87,7 +87,7 @@ def test_an_irradiation_names_every_unset_source():
 
 
 def test_only_the_unset_source_is_named():
-    yamc.cross_section_data = "tests"
+    yamc.neutron_cross_section_data = "tests"
     yamc.transmutation_decay_data = _CHAIN
     yamc.transmutation_reactions = _CHAIN
     with pytest.raises(ValueError) as error:
@@ -98,7 +98,7 @@ def test_only_the_unset_source_is_named():
 
 def test_false_is_a_choice():
     """Fission yields turned off are not loaded, and iron needs none."""
-    yamc.cross_section_data = "tests"
+    yamc.neutron_cross_section_data = "tests"
     yamc.transmutation_decay_data = _CHAIN
     yamc.transmutation_reactions = _CHAIN
     yamc.transmutation_fission_yields = False

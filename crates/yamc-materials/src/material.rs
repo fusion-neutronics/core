@@ -368,8 +368,9 @@ pub struct Material {
     pub cached_element_atom_densities: Vec<f64>,
     /// Paths to photon interaction Arrow data, keyed by element symbol.
     /// Example: {"Fe" => "path/to/Fe.arrow", "O" => "path/to/O.arrow"}
-    /// Explicit photon sources or paths inherited from the global cross-section source.
+    /// Explicit photon sources or paths resolved from photon configuration.
     pub photon_data_paths: HashMap<String, String>,
+    photon_config_sources: HashMap<String, String>,
     /// Thick-target bremsstrahlung data (electron and positron).
     /// Populated by `init_bremsstrahlung()` when TTB electron treatment is enabled.
     pub ttb: Option<Bremsstrahlung>,
@@ -714,6 +715,7 @@ impl Material {
             cached_elements: Vec::new(),
             cached_element_atom_densities: Vec::new(),
             photon_data_paths: HashMap::new(),
+            photon_config_sources: HashMap::new(),
             ttb: None,
             sorted_nuclide_keys: None,
             sorted_nuclide_ids: None,
@@ -781,6 +783,7 @@ impl Material {
             cached_elements: Vec::new(),
             cached_element_atom_densities: Vec::new(),
             photon_data_paths: template.photon_data_paths.clone(),
+            photon_config_sources: template.photon_config_sources.clone(),
             ttb: None,
             sorted_nuclide_keys: None,
             sorted_nuclide_ids: None,
@@ -2567,7 +2570,7 @@ mod tests {
         // so the assertion is independent of the directory's contents.
         let saved = {
             let mut config = CONFIG.lock().unwrap_or_else(|p| p.into_inner());
-            std::mem::take(&mut config.default_cross_section)
+            std::mem::take(&mut config.default_neutron_cross_section)
         };
 
         let dir = std::env::temp_dir();
@@ -2577,21 +2580,21 @@ mod tests {
         let _ = mat.read_nuclear_data_or_keyword(&dir_str);
         let registered = {
             let config = CONFIG.lock().unwrap_or_else(|p| p.into_inner());
-            config.default_cross_section.clone()
+            config.default_neutron_cross_section.clone()
         };
 
         // An explicit user configuration must WIN over the material source.
         {
             let mut config = CONFIG.lock().unwrap_or_else(|p| p.into_inner());
-            config.default_cross_section = Some("user-configured".into());
+            config.default_neutron_cross_section = Some("user-configured".into());
         }
         let mut mat2 =
             Material::new(HashMap::from([("Li6".into(), 1.0)]), "atom", "sum", None).unwrap();
         let _ = mat2.read_nuclear_data_or_keyword(&dir_str);
         let kept = {
             let mut config = CONFIG.lock().unwrap_or_else(|p| p.into_inner());
-            let kept = config.default_cross_section.clone();
-            config.default_cross_section = saved;
+            let kept = config.default_neutron_cross_section.clone();
+            config.default_neutron_cross_section = saved;
             kept
         };
 

@@ -1,7 +1,7 @@
 //! A bare name that is both a library keyword and a directory is refused.
 //!
 //! With a folder called `endf-b8.1` in the working directory,
-//! `cross_section_data = "endf-b8.1"` could mean either, and reading one of
+//! `neutron_cross_section_data = "endf-b8.1"` could mean either, and reading one of
 //! them would be a guess. The test changes the working directory, which is
 //! process-global, so it is the only test in this binary.
 

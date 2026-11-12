@@ -25,7 +25,7 @@
 //! the bytes fetched are exactly the bytes the loader will read, by
 //! construction rather than by keeping two implementations in step.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nuclear_data_schema::energy_ranges::EnergyRanges;
 use nuclear_data_schema::reaction_ranges::{Range, ReactionRanges};
@@ -37,6 +37,29 @@ use yamc_nuclide::url_cache::{NEUTRON_SECTIONS, PHOTON_SECTIONS};
 /// folder, per-nuclide neutron data lives under `neutron/` and per-element
 /// photon data under `photon/`.
 pub const DEFAULT_LIBRARY_URL: &str = "https://yamc-data.xsplot.com/endf-b8.1";
+
+/// A browser host's explicit source plan for one particle type.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ParticleSources {
+    pub library_url: Option<String>,
+    pub entries: BTreeMap<String, String>,
+}
+
+impl ParticleSources {
+    pub fn source(&self, particle: &str, name: &str) -> Result<&str, String> {
+        self.entries
+            .get(name)
+            .map(String::as_str)
+            .or(self.library_url.as_deref())
+            .filter(|source| !source.trim().is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "no {particle}_cross_section_data selected for '{name}'; \
+                 the browser will not substitute another particle's library"
+                )
+            })
+    }
+}
 
 /// The two sections a temperature-aware fetch can range into.
 const REACTIONS: &str = "reactions.arrow";
@@ -220,6 +243,50 @@ fn energy_spans(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn particle_sources_are_independent() {
+        let neutron = ParticleSources {
+            library_url: Some("https://example.test/fendl-3.2d".into()),
+            entries: BTreeMap::new(),
+        };
+        let photon = ParticleSources::default();
+        assert_eq!(
+            neutron.source("neutron", "Fe56").unwrap(),
+            "https://example.test/fendl-3.2d"
+        );
+        assert!(photon
+            .source("photon", "Fe")
+            .unwrap_err()
+            .contains("photon_cross_section_data"));
+    }
+
+    #[test]
+    fn particle_sources_keep_explicit_overrides() {
+        let photon = ParticleSources {
+            library_url: Some("https://example.test/endf-b8.1".into()),
+            entries: BTreeMap::from([("Fe".into(), "https://example.test/jendl-5.0".into())]),
+        };
+        assert_eq!(
+            photon.source("photon", "Fe").unwrap(),
+            "https://example.test/jendl-5.0"
+        );
+        assert_eq!(
+            photon.source("photon", "O").unwrap(),
+            "https://example.test/endf-b8.1"
+        );
+    }
+
+    #[test]
+    fn particle_sources_deserialize_the_exported_plan() {
+        let sources: BTreeMap<String, ParticleSources> = serde_json::from_str(
+            r#"{"neutron":{"library_url":"https://example.test/fendl-3.2d","entries":{}},"photon":{"library_url":"https://example.test/endf-b8.1","entries":{}}}"#,
+        ).unwrap();
+        assert_ne!(
+            sources["neutron"].source("neutron", "Fe56").unwrap(),
+            sources["photon"].source("photon", "Fe").unwrap()
+        );
+    }
 
     fn ladder() -> Vec<String> {
         ["250K", "294K", "600K", "900K", "1200K", "2500K"]

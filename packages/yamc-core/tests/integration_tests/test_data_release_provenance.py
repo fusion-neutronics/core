@@ -44,7 +44,7 @@ def _run(run):
 
 
 def test_a_transport_run_records_the_converters_of_its_release():
-    yamc.cross_section_data = "endf-b8.1"
+    yamc.neutron_cross_section_data = "endf-b8.1"
     lithium = yamc.Material(composition={"Li6": 1.0}, density=0.46, temperature=294)
     sphere = yamc.Sphere(radius=10.0, boundary="vacuum")
     cell = yamc.Cell(region=sphere.below, material=lithium)
@@ -57,7 +57,7 @@ def test_a_transport_run_records_the_converters_of_its_release():
 
 
 def test_a_transmutation_records_the_converters_of_its_releases():
-    yamc.cross_section_data = "endf-b8.1"
+    yamc.neutron_cross_section_data = "endf-b8.1"
     yamc.transmutation_decay_data = "endf-b8.1"
     yamc.transmutation_reactions = "endf-b8.1"
     yamc.transmutation_fission_yields = "endf-b8.1"

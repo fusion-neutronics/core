@@ -54,7 +54,7 @@ def main(fixtures):
     fetch, requests, batches = origin(publish(fixtures, NUCLIDES, CHAIN))
     _core._set_data_fetcher(fetch)
 
-    yani.cross_section_data = KEYWORD
+    yani.neutron_cross_section_data = KEYWORD
     yani.transmutation_decay_data = KEYWORD
     yani.transmutation_reactions = KEYWORD
     yani.transmutation_fission_yields = KEYWORD

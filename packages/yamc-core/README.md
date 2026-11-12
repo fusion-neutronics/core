@@ -43,6 +43,43 @@ results = model.simulate_transport(total_particles=250_000, seed=1)
 print(results[tally].mean)
 ```
 
+## Selecting nuclear data
+
+Select neutron and photon data independently. Both settings start unset, and
+choosing one never sets the other:
+
+```python
+yamc.neutron_cross_section_data = "fendl-3.2d"
+yamc.photon_cross_section_data = "endf-b8.1"
+```
+
+Each accepts a library keyword, an existing local data directory, or a mapping:
+neutron mappings use nuclide names such as `Fe56`, and photon mappings use
+element symbols such as `Fe`. Assigning a mapping replaces that particle's
+selection; it does not turn one entry into a default for other species.
+`None` or an empty mapping unsets only that particle's selection. Explicit
+material data overrides remain supported.
+
+| Calculation | Cross-section selection |
+| --- | --- |
+| Neutron transport | `neutron_cross_section_data` |
+| Primary-photon transport | `photon_cross_section_data` |
+| Coupled neutron-photon transport | Both |
+| D1S shutdown dose | Both, plus explicit decay and activation sources |
+| Standalone irradiation/transmutation | Neutron data, plus explicit transmutation sources |
+| Decay-only, activity, decay heat or contact-dose estimate | Neither; decay data remains required |
+
+Neutron-induced photon production comes from the neutron evaluation; the photon
+selection controls the emitted photons' interactions, including the selected
+dataset's atomic relaxation. D1S emission instead uses the decay and activation
+settings. Thermal S(alpha,beta) tables follow the material's neutron library.
+The photon setting does not enable photonuclear transport.
+
+Missing required data raises before transport instead of selecting another
+library. Selecting FENDL photons still selects FENDL photons: missing atomic
+relaxation is reported, not silently replaced by ENDF/B-VIII.1. Exported HTML
+also preserves particle-specific sources; local-only data must be embedded.
+
 ## CAD imprint threads
 
 The CAD extra uses stable CadQuery from PyPI. Limit imprinting to fewer
@@ -74,7 +111,7 @@ irradiation schedules, inventories) plus neutron and photon transport,
 geometry, tallies and transport-coupled transmutation. The two are
 **alternatives**. Installing both puts two extension modules in one process, so
 `yamc.Material` and `yani.Material` are distinct types and the nuclear-data
-configuration (`cross_section_data`, the four `transmutation_*` sources) exists
+configuration (both particle settings and the four `transmutation_*` sources) exists
 twice, once per package.
 
 Pick `yamc` when the neutron spectrum should come from a transport solve; pick

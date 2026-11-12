@@ -133,7 +133,11 @@ impl WasmSimulation {
         let Some(model) = model.as_ref() else {
             return String::new();
         };
-        model.required_nuclides().join(",")
+        if model.has_neutrons() {
+            model.required_nuclides().join(",")
+        } else {
+            String::new()
+        }
     }
 
     /// Element symbols the loaded model needs *photon* data for, comma-
@@ -162,6 +166,9 @@ impl WasmSimulation {
         let Some(model) = model.as_ref() else {
             return String::new();
         };
+        if !model.has_neutrons() {
+            return String::new();
+        }
         model
             .required_nuclides()
             .into_iter()
@@ -793,6 +800,7 @@ impl WasmSimulation {
         // is needed whenever photons will be in flight -- a photon source
         // counts even with transport_secondary_photons off.
         let photon_on = model.has_photons();
+        let neutron_on = model.has_neutrons();
 
         // For each material in the geometry, re-load nuclide data from
         // the in-memory storage. The path convention is `/<Name>.arrow`
@@ -802,11 +810,6 @@ impl WasmSimulation {
                 let mut new_materials = Vec::with_capacity(geom.materials.len());
                 for mat_arc in &geom.materials {
                     let mut mat = (**mat_arc).clone();
-                    let nuclide_map: HashMap<String, String> = mat
-                        .nuclides
-                        .keys()
-                        .map(|name| (name.clone(), format!("/{name}.arrow")))
-                        .collect();
                     // Photon transport needs per-element photon data. Mirror
                     // the neutron convention: files live at /<El>.arrow/<file>,
                     // so point each element at that virtual directory.
@@ -822,8 +825,17 @@ impl WasmSimulation {
                     } else {
                         None
                     };
-                    mat.read_nuclear_data(&nuclide_map, photon_map.as_ref())
-                        .map_err(|e| format!("read_nuclear_data: {e}"))?;
+                    if neutron_on {
+                        let nuclide_map: HashMap<String, String> = mat
+                            .nuclides
+                            .keys()
+                            .map(|name| (name.clone(), format!("/{name}.arrow")))
+                            .collect();
+                        mat.read_nuclear_data(&nuclide_map, photon_map.as_ref())
+                            .map_err(|e| format!("read_nuclear_data: {e}"))?;
+                    } else if let Some(paths) = photon_map {
+                        mat.photon_data_paths = paths;
+                    }
                     new_materials.push(Arc::new(mat));
                 }
                 geom.materials = new_materials;

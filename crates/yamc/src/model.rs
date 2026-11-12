@@ -492,6 +492,13 @@ fn material_label(material: &yamc_materials::material::Material, slot: usize) ->
 }
 
 impl Model {
+    /// Whether a configured source emits neutrons.
+    pub fn has_neutrons(&self) -> bool {
+        self.sources
+            .iter()
+            .any(|source| source.particle_type() == yamc_particle::particle::ParticleType::Neutron)
+    }
+
     /// True when photons will be in flight during the run -- either a
     /// source emits photons, or secondary-photon production is enabled.
     /// This (not the `transport_secondary_photons` flag alone) is what
@@ -504,6 +511,115 @@ impl Model {
                 .sources
                 .iter()
                 .any(|s| s.particle_type() == yamc_particle::particle::ParticleType::Photon)
+    }
+
+    fn validate_particle_sources(
+        &self,
+        photons: bool,
+        config: &yamc_nuclide::config::Config,
+    ) -> Result<(), String> {
+        let neutrons = self.has_neutrons();
+        for (slot, material) in self.geometry.materials().iter().enumerate() {
+            if neutrons && material.fast_xs.is_none() {
+                let mut missing: Vec<&str> = material
+                    .nuclides
+                    .keys()
+                    .filter(|name| {
+                        !material.has_transport_data(name)
+                            && material
+                                .nuclide_data
+                                .get(*name)
+                                .and_then(|nuclide| nuclide.reload_source())
+                                .is_none()
+                            && config.get_cross_section(name).is_none()
+                    })
+                    .map(String::as_str)
+                    .collect();
+                missing.sort_unstable();
+                if !missing.is_empty() {
+                    return Err(format!(
+                        "{}: {}",
+                        material_label(material, slot),
+                        config.missing_cross_sections(&missing)
+                    ));
+                }
+            }
+            if photons {
+                let elements: std::collections::BTreeSet<String> = material
+                    .nuclides
+                    .keys()
+                    .map(|name| yamc_element::element::element_symbol_from_nuclide(name))
+                    .filter(|element| {
+                        !material.photon_data_paths.contains_key(element)
+                            && config.get_photon_cross_section(element).is_none()
+                    })
+                    .collect();
+                if !elements.is_empty() {
+                    let missing: Vec<&str> = elements.iter().map(String::as_str).collect();
+                    return Err(format!(
+                        "photon transport requested for {}: {}",
+                        material_label(material, slot),
+                        config.missing_photon_cross_sections(&missing)
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve the model's actual sources for export without loading data.
+    pub fn cross_section_sources(
+        &self,
+    ) -> Result<
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+        String,
+    > {
+        let config = yamc_nuclide::config::Config::global().clone();
+        let neutrons = self.has_neutrons();
+        let mut sources = std::collections::BTreeMap::from([
+            ("neutron".to_string(), std::collections::BTreeMap::new()),
+            ("photon".to_string(), std::collections::BTreeMap::new()),
+        ]);
+        let mut insert = |particle: &str, name: String, source: String| -> Result<(), String> {
+            let selected = sources.get_mut(particle).expect("particle source group");
+            if let Some(previous) = selected.get(&name)
+                && previous != &source
+            {
+                return Err(format!(
+                    "cannot export {particle} data for '{name}' from both '{previous}' and \
+                     '{source}': one browser model needs one source per nuclide or element"
+                ));
+            }
+            selected.insert(name, source);
+            Ok(())
+        };
+        for material in self.geometry.materials() {
+            if neutrons {
+                for name in material.nuclides.keys() {
+                    let source = material
+                        .nuclide_data
+                        .get(name)
+                        .and_then(|nuclide| nuclide.reload_source())
+                        .or_else(|| config.get_cross_section(name))
+                        .ok_or_else(|| config.missing_cross_sections(&[name]))?;
+                    insert("neutron", name.clone(), source)?;
+                }
+            }
+            if self.has_photons() {
+                let mut selected = (**material).clone();
+                selected.ensure_photon_data_paths();
+                for name in material.nuclides.keys() {
+                    let element = yamc_element::element::element_symbol_from_nuclide(name);
+                    let source = selected
+                        .photon_data_paths
+                        .get(&element)
+                        .cloned()
+                        .ok_or_else(|| config.missing_photon_cross_sections(&[&element]))?;
+                    insert("photon", element, source)?;
+                }
+            }
+        }
+        Ok(sources)
     }
 
     /// Every nuclide name referenced by the model's materials, sorted and
@@ -1318,27 +1434,22 @@ impl Model {
     /// When `populate_atoms_cache` is set (the GPU path, which skips the CPU
     /// `calculate_macroscopic_xs` that would otherwise fill it), the
     /// `cached_atoms_per_barn_cm` cache that `init_bremsstrahlung` needs is
-    /// populated from the composition between `init_photon_data` and
-    /// `init_bremsstrahlung`.
+    /// populated from the composition before photon initialization.
     fn prepare_material_photon_data(
         material: &mut yamc_materials::material::Material,
         slot: usize,
         ttb: bool,
         populate_atoms_cache: bool,
     ) -> Result<(), String> {
+        if populate_atoms_cache && material.cached_atoms_per_barn_cm.is_none() {
+            material.cached_atoms_per_barn_cm = Some(material.get_atoms_per_barn_cm()?);
+        }
         if let Err(e) = material.init_photon_data(&material.photon_data_paths.clone()) {
             return Err(format!(
                 "Failed to initialize photon data for material slot {slot}: {e}"
             ));
         }
         if ttb {
-            if populate_atoms_cache && material.cached_atoms_per_barn_cm.is_none() {
-                // `init_bremsstrahlung` needs `cached_atoms_per_barn_cm`
-                // (CPU prep populates it via `calculate_macroscopic_xs`).
-                // GPU path skips that, so populate the cache manually
-                // from the composition.
-                material.cached_atoms_per_barn_cm = Some(material.get_atoms_per_barn_cm()?);
-            }
             material.init_bremsstrahlung();
         }
         Ok(())
@@ -1379,17 +1490,7 @@ impl Model {
         // top of `run_internal`. Surfacing the missing-data error here
         // means the user sees a clean message instead of a panic
         // inside `extract_photon_material_xs`.
-        for (i, material_arc) in self.geometry.materials().iter().enumerate() {
-            if !material_arc.nuclides.is_empty() && material_arc.photon_data_paths.is_empty() {
-                return Err(format!(
-                    "photon transport requested but material slot {i} has no photon data. \
-                     Set `cross_section_data` to a library with photoatomic data \
-                     (e.g. `yamc.cross_section_data = 'endf-b8.1'`), \
-                     or supply a per-element map: \
-                     `read_nuclear_data(..., photon_data={{'Fe': '/path/to/Fe.arrow'}})`."
-                ));
-            }
-        }
+        self.validate_particle_sources(true, &yamc_nuclide::config::Config::global())?;
 
         // Serialise photon-init with any concurrent simulate_transport
         // calls -- they both touch the global TTB grids.
@@ -1398,6 +1499,7 @@ impl Model {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let ttb_enabled = self.electron_treatment.ttb();
+        let neutrons = self.has_neutrons();
 
         // Ensure the global TTB grids are populated from element 0's raw
         // (LINEAR-space) data if some earlier load hasn't already set
@@ -1411,9 +1513,11 @@ impl Model {
 
         for (i, material_arc) in self.geometry.materials_mut().iter_mut().enumerate() {
             let mut material = (**material_arc).clone();
-            material
-                .ensure_nuclides_loaded()
-                .map_err(|e| format!("{}: {e}", material_label(&material, i)))?;
+            if neutrons {
+                material
+                    .ensure_nuclides_loaded()
+                    .map_err(|e| format!("{}: {e}", material_label(&material, i)))?;
+            }
             Self::prepare_material_photon_data(&mut material, i, ttb_enabled, true)?;
             *material_arc = Arc::new(material);
         }
@@ -1447,6 +1551,9 @@ impl Model {
     /// Runs before the photon prep, matching the CPU's order, and returns
     /// without cloning when nothing needs widening.
     pub fn ensure_neutron_temperatures_for_gpu(&mut self) -> Result<(), String> {
+        if !self.has_neutrons() {
+            return Ok(());
+        }
         for (slot, material_arc) in self.geometry.materials_mut().iter_mut().enumerate() {
             if material_arc.nuclide_data.is_empty() {
                 continue;
@@ -1497,7 +1604,7 @@ impl Model {
 
     /// Load every material's missing nuclide data, from the source each
     /// nuclide was read from or, failing that, the global configuration
-    /// (`yamc.cross_section_data`). This is the data-loading step both the CPU
+    /// (`yamc.neutron_cross_section_data`). This is the data-loading step both the CPU
     /// (`run_internal`) and the GPU dispatch run before transport, so a model
     /// whose materials never had `read_nuclear_data` called works on either.
     ///
@@ -1506,21 +1613,24 @@ impl Model {
     /// that already carry transport cross sections (`fast_xs`, e.g. from a
     /// transmutation step) keep them; missing photon paths are still resolved.
     pub fn ensure_nuclear_data_loaded(&mut self, photons: bool) -> Result<(), String> {
+        let neutrons = self.has_neutrons();
         if photons {
             for material in self.geometry.materials_mut() {
                 Arc::make_mut(material).ensure_photon_data_paths();
             }
         }
+        self.validate_particle_sources(photons, &yamc_nuclide::config::Config::global())?;
         yamc_materials::Material::prefetch_nuclear_data(
             self.geometry
                 .materials()
                 .iter()
                 .filter(|m| m.fast_xs.is_none())
                 .map(|m| m.as_ref()),
+            neutrons,
             photons,
         );
         for (i, material_arc) in self.geometry.materials_mut().iter_mut().enumerate() {
-            if material_arc.fast_xs.is_some() {
+            if !neutrons || material_arc.fast_xs.is_some() {
                 continue;
             }
             let mut material = (**material_arc).clone();
@@ -1573,20 +1683,6 @@ impl Model {
         // so that an explicit user error (forgot photon_data) doesn't poison
         // the global mutex and contaminate subsequent simulations in the same
         // process. See `init_photon_data` for the per-element check.
-        if self.transport_secondary_photons {
-            for (i, material_arc) in self.geometry.materials().iter().enumerate() {
-                if !material_arc.nuclides.is_empty() && material_arc.photon_data_paths.is_empty() {
-                    return Err(format!(
-                        "transport_secondary_photons=True but material slot {i} has no photon data. \
-                         Set `cross_section_data` to a library with photoatomic data \
-                         (e.g. `yamc.cross_section_data = 'endf-b8.1'`), \
-                         or supply a per-element map: \
-                         `read_nuclear_data(..., photon_data={{'Fe': '/path/to/Fe.arrow'}})`."
-                    ));
-                }
-            }
-        }
-
         // Acquire the photon-init lock when photon transport is enabled.
         // The global TTB grids go through a LINEAR → LOG conversion and
         // concurrent tests would race on that shared state without this.
@@ -1610,13 +1706,15 @@ impl Model {
         }
 
         let transport_secondary_photons = self.transport_secondary_photons;
+        let neutrons = self.has_neutrons();
         let ttb = self.electron_treatment.ttb();
         // `calculate_macroscopic_xs` borrows a `&Vec<i32>`; own the slice
         // once here so the per-material loop borrows it without reallocating.
         let mt_filter = mt_filter.to_vec();
         for (i, material_arc) in self.geometry.materials_mut().iter_mut().enumerate() {
             // Skip materials that already have transport XS computed (e.g., from transmutation step)
-            if material_arc.fast_xs.is_some() {
+            let prepared_neutrons = material_arc.fast_xs.is_some();
+            if prepared_neutrons && !transport_secondary_photons {
                 if debug {
                     eprintln!("[DEBUG] Material slot {i} already has fast_xs, skipping...");
                 }
@@ -1631,21 +1729,22 @@ impl Model {
             // only panic. This is also where an unset temperature becomes the
             // 294 K default. Photon-only materials carry no nuclide data and
             // have no neutron temperature to resolve.
-            if !material.nuclide_data.is_empty() {
+            if neutrons && !prepared_neutrons && !material.nuclide_data.is_empty() {
                 material
                     .try_resolve_temperature(None)
                     .map_err(|e| format!("{}: {e}", material_label(&material, i)))?;
             }
-            material.calculate_macroscopic_xs(&mt_filter, true);
-            if has_nuclide_tallies {
-                material.populate_per_nuclide_xs();
+            if neutrons && !prepared_neutrons {
+                material.calculate_macroscopic_xs(&mt_filter, true);
+                if has_nuclide_tallies {
+                    material.populate_per_nuclide_xs();
+                }
+                material.release_microscopic_xs();
             }
-            // Both consumers of the per-nuclide microscopic tables have run.
-            material.release_microscopic_xs();
             if transport_secondary_photons {
                 // The presence check is performed upfront before any locks
                 // are taken; init_photon_data will surface per-element issues.
-                Self::prepare_material_photon_data(&mut material, i, ttb, false)?;
+                Self::prepare_material_photon_data(&mut material, i, ttb, !neutrons)?;
             }
             *material_arc = Arc::new(material);
         }
@@ -3862,6 +3961,99 @@ mod tests {
     use yamc_source::source::{
         ParticleSource, Source, SourceEnergyDistribution, SourceSpatialDistribution,
     };
+
+    fn particle_source_preflight_model(photon: bool) -> Model {
+        let boundary = Arc::new(Surface::sphere(
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            Some(1),
+            Some(BoundaryType::Vacuum),
+        ));
+        let material = Material::new(
+            HashMap::from([("Fe56".into(), 1.0)]),
+            "atom",
+            "g/cm3",
+            Some(7.87),
+        )
+        .unwrap();
+        let cell = Cell::new(
+            Some(1),
+            Region::new_from_halfspace(HalfspaceType::Below(boundary)),
+            None,
+            Some(0),
+        );
+        let source = Source {
+            space: SourceSpatialDistribution::Point(Point::new([0.0, 0.0, 0.0])),
+            angle: AngularDistribution::Isotropic,
+            energy: SourceEnergyDistribution::Discrete(
+                Discrete::new(vec![1e6], vec![1.0]).unwrap(),
+            ),
+            strength: 1.0,
+        };
+        let source = if photon {
+            ParticleSource::Photon(source)
+        } else {
+            ParticleSource::Neutron(source)
+        };
+        Model::new(
+            Geometry::new(vec![cell], vec![Arc::new(material)]).unwrap(),
+            vec![source],
+            vec![],
+        )
+    }
+
+    #[test]
+    fn particle_source_preflight_requires_only_the_particles_in_flight() {
+        let mut config = yamc_nuclide::config::Config::new();
+        config.set_cross_sections("fendl-3.2d");
+        let mut neutron_model = particle_source_preflight_model(false);
+        assert!(neutron_model
+            .validate_particle_sources(false, &config)
+            .is_ok());
+        neutron_model.transport_secondary_photons = true;
+        let missing = neutron_model
+            .validate_particle_sources(true, &config)
+            .unwrap_err();
+        assert!(missing.contains("photon_cross_section_data"), "{missing}");
+        config.default_photon_cross_section = Some("endf-b8.1".into());
+        assert!(neutron_model
+            .validate_particle_sources(true, &config)
+            .is_ok());
+        config.default_neutron_cross_section = None;
+        let missing = neutron_model
+            .validate_particle_sources(true, &config)
+            .unwrap_err();
+        assert!(missing.contains("neutron_cross_section_data"), "{missing}");
+        let photon_model = particle_source_preflight_model(true);
+        assert!(photon_model
+            .validate_particle_sources(true, &config)
+            .is_ok());
+    }
+
+    #[test]
+    fn particle_source_preflight_checks_d1s_and_each_element() {
+        let mut config = yamc_nuclide::config::Config::new();
+        config.set_cross_sections("fendl-3.2d");
+        let mut model = particle_source_preflight_model(false);
+        model.use_decay_photons = true;
+        assert!(model
+            .validate_particle_sources(model.has_photons(), &config)
+            .is_err());
+        Arc::make_mut(&mut model.geometry.materials_mut()[0])
+            .nuclides
+            .insert("O16".into(), 1.0);
+        config
+            .photon_cross_sections
+            .insert("Fe".into(), "endf-b8.1".into());
+        let missing = model.validate_particle_sources(true, &config).unwrap_err();
+        assert!(missing.contains("'O'"), "{missing}");
+        Arc::make_mut(&mut model.geometry.materials_mut()[0])
+            .photon_data_paths
+            .insert("O".into(), "explicit/O.arrow".into());
+        assert!(model.validate_particle_sources(true, &config).is_ok());
+    }
 
     /// `use_decay_photons` puts photons in flight, so the predicate that gates
     /// photon data has to count it. It did not.

@@ -940,7 +940,7 @@ fn not_published_error(keyword: &str, url: &str) -> String {
          build of yamc reads only versioned releases (<keyword>/<release>/ with a manifest), and \
          the origin still serves only the older unversioned layout for this library. Use a yamc \
          release that reads that layout, or point the data source at a local directory holding \
-         the library (e.g. yamc.cross_section_data = \"/path/to/library\")."
+         the library (e.g. yamc.neutron_cross_section_data = \"/path/to/library\")."
     )
 }
 

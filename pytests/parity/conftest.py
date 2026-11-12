@@ -4,7 +4,7 @@ This directory belongs to neither package, so it inherits no conftest. The
 autouse restore fixture in packages/yamc-core/tests/conftest.py covered these
 files while they lived under pytests/ next to it, and after the split it does
 not reach them: `_inventory` in test_yani_package_parity.py sets
-`cross_section_data` and three `transmutation_*` sources on yamc AND on yani and
+`neutron_cross_section_data` and three `transmutation_*` sources on yamc AND on yani and
 puts neither back, so without this nothing cleans up after it. One `pytest` run
 walks all three suites in a single process and whichever suite runs next
 inherits whatever was left set, which is a failure that shows up nowhere near
@@ -39,7 +39,7 @@ _TRANSMUTATION_SETTINGS = (
     "transmutation_branch_ratios",
 )
 
-# Reading `cross_section_data` cannot tell "per-nuclide map set" from "global
+# Reading `neutron_cross_section_data` cannot tell "per-nuclide map set" from "global
 # keyword set": the property returns the map whenever it is non-empty and the
 # keyword only when it is not. Looking up a nuclide that will never have an
 # explicit entry applies the global default and nothing else, so it reports the
@@ -100,19 +100,20 @@ def pytest_configure(config):
 
 
 def _cross_section_data_state(pkg):
-    """Both halves of `cross_section_data`: (per-nuclide view, global keyword)."""
-    return pkg.cross_section_data, pkg.lookup_cross_section_data(_ABSENT_NUCLIDE)
+    """Both halves of `neutron_cross_section_data`: (per-nuclide view, global keyword)."""
+    return pkg.neutron_cross_section_data, pkg.lookup_neutron_cross_section_data(_ABSENT_NUCLIDE)
 
 
 def _snapshot(pkg):
     return (
         _cross_section_data_state(pkg),
+        pkg.photon_cross_section_data,
         {name: getattr(pkg, name) for name in _TRANSMUTATION_SETTINGS},
     )
 
 
 def _restore(pkg, saved):
-    saved_transport, saved_transmutation = saved
+    saved_transport, saved_photon, saved_transmutation = saved
 
     # Restore each setting only if that setting actually moved. Reading is free,
     # writing is not, because a nuclide is cached under a key derived from the
@@ -123,15 +124,11 @@ def _restore(pkg, saved):
 
     saved_property, saved_keyword = saved_transport
     if _cross_section_data_state(pkg) != saved_transport:
-        # `None` is the only input that clears both halves; setting a dict
-        # merges into the existing map and setting a keyword leaves the map
-        # alone. So clear first, then put back whichever halves were set,
-        # keyword first so the map is not overwritten by it.
-        pkg.cross_section_data = None
-        if saved_keyword is not None:
-            pkg.cross_section_data = saved_keyword
-        if saved_property is not None:
-            pkg.cross_section_data = saved_property
+        pkg.neutron_cross_section_data = saved_property
+        if isinstance(saved_property, dict) and saved_keyword is not None:
+            pkg.set_neutron_cross_section_data_entry(saved_keyword)
+    if pkg.photon_cross_section_data != saved_photon:
+        pkg.photon_cross_section_data = saved_photon
 
 
 @pytest.fixture(autouse=True)

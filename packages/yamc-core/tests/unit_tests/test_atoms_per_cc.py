@@ -5,7 +5,7 @@ from yamc import Material
 
 def test_get_atoms_per_barn_cm():
     # Configure cross-sections to load nuclide data
-    yamc.cross_section_data = ({"Li6": "tests/Li6.arrow", "Li7": "tests/Li7.arrow"})
+    yamc.neutron_cross_section_data = ({"Li6": "tests/Li6.arrow", "Li7": "tests/Li7.arrow"})
 
     # Test with Li isotopes - proper atomic mass calculation
     material = Material(

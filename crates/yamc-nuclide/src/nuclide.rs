@@ -1607,7 +1607,7 @@ impl Nuclide {
             *self = loaded_nuclide;
             Ok(())
         } else {
-            Err(format!("No configuration found for nuclide '{nuclide_name}'. Set yamc.cross_section_data to configure data sources.").into())
+            Err(format!("No configuration found for nuclide '{nuclide_name}'. Set yamc.neutron_cross_section_data to configure data sources.").into())
         }
     }
 
@@ -1921,7 +1921,7 @@ pub fn load_nuclide_for_python(
             config.get_cross_section(name).ok_or_else(|| {
                 format!(
                     "No path provided and nuclide '{}' not found in Config. \
-                     Set yamc.cross_section_data first or provide a path.",
+                     Set yamc.neutron_cross_section_data first or provide a path.",
                     name
                 )
             })?

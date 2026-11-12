@@ -19,7 +19,7 @@ VOLUME_CM3 = 1000.0
 
 
 def _irradiated(volume):
-    yamc.cross_section_data = "endf-b8.1"
+    yamc.neutron_cross_section_data = "endf-b8.1"
     material = yamc.Material(
         composition={"Fe56": 1.0},
         density=DENSITY_G_CM3,

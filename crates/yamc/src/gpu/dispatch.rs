@@ -749,7 +749,7 @@ fn run_on_gpu_dispatch(
     warn_if_tracking_mode_ignored(model.tracking_mode);
     warn_if_ranks_share_one_device(device, model.verbose.summary);
     // Load any nuclide data the materials do not hold yet, from the global
-    // `cross_section_data` setting when `read_nuclear_data` was never called:
+    // `neutron_cross_section_data` setting when `read_nuclear_data` was never called:
     // the same step `run_internal` runs before CPU transport. Logged like the
     // CPU's data-load phase when verbose "nuclear_data" is set.
     if model.verbose.nuclear_data {

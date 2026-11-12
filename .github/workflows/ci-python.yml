@@ -1208,7 +1208,9 @@ jobs:
           fi
           echo "$out" | grep -q 'Argument "density".*\[arg-type\]' || { echo "::error::missing expected density [arg-type] error" >&2; exit 1; }
           echo "$out" | grep -q 'Argument "scores".*\[arg-type\]'  || { echo "::error::missing expected scores [arg-type] error" >&2; exit 1; }
-          echo "$out" | grep -q '\[assignment\]'                    || { echo "::error::missing expected cross_section_data [assignment] error" >&2; exit 1; }
+          particle_errors="$(echo "$out" | grep -cE 'expression has type "int".*variable has type "str \| dict\[str, str\] \| None"' || true)"
+          [ "$particle_errors" = "2" ] || { echo "::error::both particle settings must reject integer assignments" >&2; exit 1; }
+          echo "$out" | grep -q 'Module has no attribute "cross_section_data"' || { echo "::error::the removed source setting must be absent from the stubs" >&2; exit 1; }
           # The two subsections that take a bool take only False. Grepping the
           # rendered union is what proves it is Literal[False] and not bool:
           # with bool, `= True` type-checks and this line goes quiet.

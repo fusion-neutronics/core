@@ -22,9 +22,9 @@ Outputs (open either in a browser and click Simulate):
 
 import yamc
 
-# R2 mirror; first run caches under ~/.cache/yamc/. Loads both neutron
-# (per-nuclide) and photon (per-element) data for the material.
-yamc.cross_section_data = "endf-b8.1"
+# Select each particle's library explicitly; first use caches the data.
+yamc.neutron_cross_section_data = "endf-b8.1"
+yamc.photon_cross_section_data = "endf-b8.1"
 
 # --- Material: natural lithium ------------------------------------------
 lithium = yamc.Material(

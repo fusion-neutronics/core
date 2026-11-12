@@ -7,7 +7,10 @@ mod tests {
         for keyword in ["tendl-2025", "fendl-3.2d", "endf-b8.1"] {
             let mut config = Config::new();
             config.set_cross_section(keyword, None);
-            assert_eq!(config.default_cross_section, Some(keyword.to_string()));
+            assert_eq!(
+                config.default_neutron_cross_section,
+                Some(keyword.to_string())
+            );
         }
     }
 
@@ -90,7 +93,10 @@ mod tests {
     fn test_set_cross_sections_with_string_keyword() {
         let mut config = Config::new();
         config.set_cross_sections("tendl-2025");
-        assert_eq!(config.default_cross_section, Some("tendl-2025".to_string()));
+        assert_eq!(
+            config.default_neutron_cross_section,
+            Some("tendl-2025".to_string())
+        );
         assert_eq!(
             config.get_cross_section("Li6"),
             Some("tendl-2025".to_string())
@@ -117,8 +123,10 @@ mod tests {
             config.get_cross_section("Fe56"),
             Some("tendl-2025".to_string())
         );
-        // When a keyword is in the hashmap, it should set the global default too
-        assert_eq!(config.default_cross_section, Some("tendl-2025".to_string()));
+        // A keyword inside a mapping applies only to its own nuclide. It must
+        // not become a global default for nuclides the mapping does not name.
+        assert_eq!(config.default_neutron_cross_section, None);
+        assert_eq!(config.get_cross_section("Be9"), None);
     }
 
     #[test]

@@ -40,14 +40,17 @@ from yani._core import (  # noqa: F811
     PulseSchedule as PulseSchedule,
     TransmutationResults as TransmutationResults,
     transmute as transmute,
-    get_cross_section_data as _get_cross_section_data,
+    get_neutron_cross_section_data as _get_neutron_cross_section_data,
+    get_photon_cross_section_data as _get_photon_cross_section_data,
+    lookup_photon_cross_section_data as lookup_photon_cross_section_data,  # noqa: F401
     get_transmutation_branch_ratios as _get_transmutation_branch_ratios,
     get_transmutation_decay_data as _get_transmutation_decay_data,
     get_transmutation_fission_yields as _get_transmutation_fission_yields,
     get_transmutation_reactions as _get_transmutation_reactions,
-    lookup_cross_section_data as lookup_cross_section_data,  # noqa: F401
-    set_cross_section_data as _set_cross_section_data,
-    set_cross_section_data_entry as set_cross_section_data_entry,  # noqa: F401
+    lookup_neutron_cross_section_data as lookup_neutron_cross_section_data,  # noqa: F401
+    set_neutron_cross_section_data as _set_neutron_cross_section_data,
+    set_photon_cross_section_data as _set_photon_cross_section_data,
+    set_neutron_cross_section_data_entry as set_neutron_cross_section_data_entry,  # noqa: F401
     set_transmutation_branch_ratios as _set_transmutation_branch_ratios,
     set_transmutation_decay_data as _set_transmutation_decay_data,
     set_transmutation_fission_yields as _set_transmutation_fission_yields,
@@ -61,17 +64,33 @@ from yani._core import (  # noqa: F811
 
 class _YaniModule(types.ModuleType):
     """Module subclass exposing the nuclear-data sources as properties, so
-    ``yani.cross_section_data = "endf-b8.1"`` reads like a setting rather than
-    a function call. Same five settings, and the same global state, as yamc.
+    ``yani.neutron_cross_section_data = "endf-b8.1"`` reads like a setting rather than
+    a function call. Same six settings, and the same global state, as yamc.
     """
 
-    @property
-    def cross_section_data(self):
-        return _get_cross_section_data()
+    def __setattr__(self, name, value):
+        if name == "cross_section_data":
+            raise AttributeError(
+                "cross_section_data was removed; set neutron_cross_section_data "
+                "and photon_cross_section_data independently"
+            )
+        super().__setattr__(name, value)
 
-    @cross_section_data.setter
-    def cross_section_data(self, value):
-        _set_cross_section_data(value)
+    @property
+    def neutron_cross_section_data(self):
+        return _get_neutron_cross_section_data()
+
+    @neutron_cross_section_data.setter
+    def neutron_cross_section_data(self, value):
+        _set_neutron_cross_section_data(value)
+
+    @property
+    def photon_cross_section_data(self):
+        return _get_photon_cross_section_data()
+
+    @photon_cross_section_data.setter
+    def photon_cross_section_data(self, value):
+        _set_photon_cross_section_data(value)
 
     @property
     def transmutation_decay_data(self):

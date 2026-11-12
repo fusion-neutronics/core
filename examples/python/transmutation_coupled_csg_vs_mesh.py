@@ -31,7 +31,7 @@ HALF = SIDE / 2.0  # half-width
 NUC_DATA = "tests"  # directory containing Fe56.arrow
 CHAIN_FILE = "tests/transmutation-endf-b8.1-sfr.arrow"
 
-yamc.cross_section_data = NUC_DATA
+yamc.neutron_cross_section_data = NUC_DATA
 yamc.transmutation_decay_data = CHAIN_FILE
 yamc.transmutation_reactions = CHAIN_FILE
 yamc.transmutation_fission_yields = CHAIN_FILE

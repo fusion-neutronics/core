@@ -141,6 +141,49 @@ pub enum BranchSources {
     List(Vec<String>),
 }
 
+/// One particle's explicitly assigned cross-section sources.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum CrossSectionSource {
+    #[default]
+    Unset,
+    Library(String),
+    Mapping(HashMap<String, String>),
+}
+
+impl CrossSectionSource {
+    fn validate(&self, role: &str) -> Result<(), String> {
+        let validate = |source: &str| {
+            if crate::url_cache::is_branching_only(source) {
+                return Err(crate::url_cache::branching_only_error(source, role));
+            }
+            if !source.trim().is_empty()
+                && (crate::url_cache::is_keyword(source)
+                    || crate::storage::exists(std::path::Path::new(source)))
+            {
+                Ok(())
+            } else {
+                Err(format!(
+                    "invalid source '{source}' for {role}: expected a library keyword ({}) or an existing data path",
+                    crate::url_cache::cross_section_keywords().join(", ")
+                ))
+            }
+        };
+        match self {
+            Self::Unset => Ok(()),
+            Self::Library(source) => validate(source),
+            Self::Mapping(sources) => sources.values().try_for_each(|source| validate(source)),
+        }
+    }
+
+    fn into_parts(self) -> (HashMap<String, String>, Option<String>) {
+        match self {
+            Self::Unset => (HashMap::new(), None),
+            Self::Library(source) => (HashMap::new(), Some(source)),
+            Self::Mapping(sources) => (sources, None),
+        }
+    }
+}
+
 impl BranchSources {
     /// The sources in order, whatever shape they were given in.
     pub fn sources(&self) -> Vec<String> {
@@ -168,7 +211,11 @@ pub struct Config {
     /// Map of nuclide name -> absolute or relative path to its Arrow data directory.
     pub cross_sections: HashMap<String, String>,
     /// Optional global default cross section source keyword
-    pub default_cross_section: Option<String>,
+    pub default_neutron_cross_section: Option<String>,
+    /// Map of element symbol to its explicitly selected photon data source.
+    pub photon_cross_sections: HashMap<String, String>,
+    /// Optional photon source, independent of the neutron source.
+    pub default_photon_cross_section: Option<String>,
     /// Source (library keyword or path to a `decay/` subsection) for the decay
     /// part of the transmutation network. `None` is unset: there is no
     /// default library.
@@ -198,7 +245,9 @@ impl Config {
     pub fn new() -> Self {
         Config {
             cross_sections: HashMap::new(),
-            default_cross_section: None,
+            default_neutron_cross_section: None,
+            photon_cross_sections: HashMap::new(),
+            default_photon_cross_section: None,
             transmutation_decay_data: None,
             transmutation_reactions: SubsectionSource::Unset,
             transmutation_fission_yields: SubsectionSource::Unset,
@@ -229,7 +278,7 @@ impl Config {
                         crate::url_cache::cross_section_keywords().join(", ")
                     );
                 }
-                self.default_cross_section = Some(nuclide_or_keyword.to_string());
+                self.default_neutron_cross_section = Some(nuclide_or_keyword.to_string());
             }
         }
     }
@@ -239,7 +288,53 @@ impl Config {
         self.cross_sections
             .get(nuclide)
             .cloned()
-            .or_else(|| self.default_cross_section.clone())
+            .or_else(|| self.default_neutron_cross_section.clone())
+    }
+
+    /// Resolve an element from photon settings only.
+    pub fn get_photon_cross_section(&self, element: &str) -> Option<String> {
+        self.photon_cross_sections
+            .get(element)
+            .cloned()
+            .or_else(|| self.default_photon_cross_section.clone())
+    }
+
+    /// Replace the neutron selection after validating every supplied source.
+    pub fn set_neutron_cross_section_data(
+        &mut self,
+        source: CrossSectionSource,
+    ) -> Result<(), String> {
+        source.validate("neutron_cross_section_data")?;
+        (self.cross_sections, self.default_neutron_cross_section) = source.into_parts();
+        Ok(())
+    }
+
+    /// Replace the photon selection without consulting or modifying neutron data.
+    pub fn set_photon_cross_section_data(
+        &mut self,
+        source: CrossSectionSource,
+    ) -> Result<(), String> {
+        source.validate("photon_cross_section_data")?;
+        (
+            self.photon_cross_sections,
+            self.default_photon_cross_section,
+        ) = source.into_parts();
+        Ok(())
+    }
+
+    /// Explain an unresolved photon selection without suggesting another library.
+    pub fn missing_photon_cross_sections(&self, elements: &[&str]) -> String {
+        let named = elements
+            .iter()
+            .map(|element| format!("'{element}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "no photon cross-section source for {named}: set `photon_cross_section_data` \
+             to a library keyword, a local release directory, or an {{element: path}} dict, \
+             or supply explicit `photon_data` to `Material.read_nuclear_data`. \
+             `neutron_cross_section_data` does not select photon data."
+        )
     }
 
     /// Why `nuclides` have no neutron cross-section source, saying how to give
@@ -255,18 +350,18 @@ impl Config {
             .map(|n| format!("'{n}'"))
             .collect::<Vec<_>>()
             .join(", ");
-        if self.default_cross_section.is_none() && self.cross_sections.is_empty() {
+        if self.default_neutron_cross_section.is_none() && self.cross_sections.is_empty() {
             format!(
                 "no neutron cross-section library is configured, so there is no data for \
-                 {named}. Set one with `cross_section_data`, e.g. \
-                 `yamc.cross_section_data = \"endf-b8.1\"` (or `yani.`): a library keyword \
+                 {named}. Set one with `neutron_cross_section_data`, e.g. \
+                 `yamc.neutron_cross_section_data = \"endf-b8.1\"` (or `yani.`): a library keyword \
                  ({}), a local release directory, or a {{nuclide: path}} dict. Or load \
                  the material's data yourself with `Material.read_nuclear_data`.",
                 crate::url_cache::cross_section_keywords().join(", "),
             )
         } else {
             format!(
-                "no neutron cross sections for {named}: `cross_section_data` maps {} \
+                "no neutron cross sections for {named}: `neutron_cross_section_data` maps {} \
                  nuclide(s) and names no library for the rest. Add them to the mapping, or \
                  set a library keyword or local release directory as the default.",
                 self.cross_sections.len(),
@@ -373,7 +468,9 @@ impl Config {
     /// Clear all cross section mappings, default, and transmutation settings.
     pub fn clear(&mut self) {
         self.cross_sections.clear();
-        self.default_cross_section = None;
+        self.default_neutron_cross_section = None;
+        self.photon_cross_sections.clear();
+        self.default_photon_cross_section = None;
         self.transmutation_decay_data = None;
         self.transmutation_reactions = SubsectionSource::Unset;
         self.transmutation_fission_yields = SubsectionSource::Unset;
@@ -433,7 +530,7 @@ pub fn missing_cross_section_message(nuclide: &str) -> String {
         }
         Err(std::sync::TryLockError::WouldBlock) => format!(
             "no neutron cross-section source for '{nuclide}'. Set one with \
-             `cross_section_data`, or load the material's data with \
+             `neutron_cross_section_data`, or load the material's data with \
              `Material.read_nuclear_data`."
         ),
     }
@@ -448,10 +545,9 @@ impl IntoCrossSectionsInput for HashMap<String, String> {
     fn apply(self, config: &mut Config) {
         for (nuclide, path) in self {
             refuse_branching_only(&path);
-            if crate::url_cache::is_keyword(&path) {
-                // If value is a keyword, set as global default
-                config.default_cross_section = Some(path.clone());
-            } else if !crate::storage::exists(std::path::Path::new(&path)) {
+            if !crate::url_cache::is_keyword(&path)
+                && !crate::storage::exists(std::path::Path::new(&path))
+            {
                 // Validate the path through the active storage backend, not
                 // `std::fs`: a browser host's in-memory files (`InMemoryStorage`)
                 // have no filesystem behind them, and `std::path::Path::exists`
@@ -475,7 +571,7 @@ impl IntoCrossSectionsInput for &str {
                 crate::url_cache::cross_section_keywords().join(", ")
             );
         }
-        config.default_cross_section = Some(self.to_string());
+        config.default_neutron_cross_section = Some(self.to_string());
     }
 }
 
@@ -491,6 +587,107 @@ impl Config {
         CONFIG
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+#[cfg(test)]
+mod particle_source_tests {
+    use super::*;
+
+    #[test]
+    fn neutron_and_photon_sources_are_independent() {
+        let mut config = Config::new();
+        config.set_cross_sections("fendl-3.2d");
+        assert_eq!(config.get_photon_cross_section("Fe"), None);
+        config.default_photon_cross_section = Some("endf-b8.1".into());
+        config
+            .photon_cross_sections
+            .insert("Fe".into(), "jendl-5.0".into());
+        assert_eq!(
+            config.get_cross_section("Fe56").as_deref(),
+            Some("fendl-3.2d")
+        );
+        assert_eq!(
+            config.get_photon_cross_section("Fe").as_deref(),
+            Some("jendl-5.0")
+        );
+        assert_eq!(
+            config.get_photon_cross_section("O").as_deref(),
+            Some("endf-b8.1")
+        );
+        config.clear();
+        assert_eq!(config.get_cross_section("Fe56"), None);
+        assert_eq!(config.get_photon_cross_section("Fe"), None);
+    }
+
+    #[test]
+    fn a_keyword_mapping_does_not_select_an_unrelated_source() {
+        let mut config = Config::new();
+        config.set_cross_sections(HashMap::from([("Fe56".into(), "fendl-3.2d".into())]));
+        assert_eq!(
+            config.get_cross_section("Fe56").as_deref(),
+            Some("fendl-3.2d")
+        );
+        assert_eq!(config.get_cross_section("O16"), None);
+        assert_eq!(config.get_photon_cross_section("Fe"), None);
+    }
+
+    #[test]
+    fn assignments_replace_only_the_selected_particle() {
+        let mut config = Config::new();
+        config
+            .set_neutron_cross_section_data(CrossSectionSource::Library("fendl-3.2d".into()))
+            .unwrap();
+        config
+            .set_photon_cross_section_data(CrossSectionSource::Library("endf-b8.1".into()))
+            .unwrap();
+        config
+            .set_neutron_cross_section_data(CrossSectionSource::Mapping(HashMap::from([(
+                "Fe56".into(),
+                "jendl-5.0".into(),
+            )])))
+            .unwrap();
+        assert_eq!(config.get_cross_section("O16"), None);
+        assert_eq!(
+            config.get_photon_cross_section("Fe").as_deref(),
+            Some("endf-b8.1")
+        );
+        config
+            .set_photon_cross_section_data(CrossSectionSource::Unset)
+            .unwrap();
+        assert_eq!(config.get_photon_cross_section("Fe"), None);
+        assert_eq!(
+            config.get_cross_section("Fe56").as_deref(),
+            Some("jendl-5.0")
+        );
+    }
+
+    #[test]
+    fn invalid_assignments_leave_both_selections_unchanged() {
+        let mut config = Config::new();
+        config
+            .set_neutron_cross_section_data(CrossSectionSource::Library("fendl-3.2d".into()))
+            .unwrap();
+        config
+            .set_photon_cross_section_data(CrossSectionSource::Library("endf-b8.1".into()))
+            .unwrap();
+        let invalid = CrossSectionSource::Mapping(HashMap::from([
+            ("Fe".into(), "jendl-5.0".into()),
+            ("Pb".into(), "not-a-real-data-source".into()),
+        ]));
+        assert!(config.set_photon_cross_section_data(invalid).is_err());
+        assert_eq!(
+            config.get_photon_cross_section("Fe").as_deref(),
+            Some("endf-b8.1")
+        );
+        assert_eq!(
+            config.get_cross_section("Fe56").as_deref(),
+            Some("fendl-3.2d")
+        );
+        let missing = config.missing_photon_cross_sections(&["Fe", "Pb"]);
+        assert!(missing.contains("photon_cross_section_data"));
+        assert!(missing.contains("'Fe'"));
+        assert!(missing.contains("'Pb'"));
     }
 }
 
@@ -781,7 +978,7 @@ mod missing_cross_section_tests {
             empty.contains("no neutron cross-section library is configured"),
             "{empty}"
         );
-        assert!(empty.contains("cross_section_data"), "{empty}");
+        assert!(empty.contains("neutron_cross_section_data"), "{empty}");
         assert!(empty.contains("'Fe56', 'Fe57'"), "{empty}");
         assert!(empty.contains("endf-b8.1"), "{empty}");
 

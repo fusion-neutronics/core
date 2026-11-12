@@ -27,7 +27,7 @@ _TRANSMUTATION_SETTINGS = (
     "transmutation_branch_ratios",
 )
 
-# Reading `cross_section_data` cannot tell "per-nuclide map set" from "global
+# Reading `neutron_cross_section_data` cannot tell "per-nuclide map set" from "global
 # keyword set": the property returns the map whenever it is non-empty and the
 # keyword only when it is not. Looking up a nuclide that will never have an
 # explicit entry applies the global default and nothing else, so it reports the
@@ -36,8 +36,8 @@ _ABSENT_NUCLIDE = "__yani_conftest_probe__"
 
 
 def _cross_section_data_state(yani):
-    """Both halves of `cross_section_data`: (per-nuclide view, global keyword)."""
-    return yani.cross_section_data, yani.lookup_cross_section_data(_ABSENT_NUCLIDE)
+    """Both halves of `neutron_cross_section_data`: (per-nuclide view, global keyword)."""
+    return yani.neutron_cross_section_data, yani.lookup_neutron_cross_section_data(_ABSENT_NUCLIDE)
 
 
 @pytest.fixture(autouse=True)
@@ -52,6 +52,7 @@ def _restore_data_settings():
         return
 
     saved_transport = _cross_section_data_state(yani)
+    saved_photon = yani.photon_cross_section_data
     saved_transmutation = {n: getattr(yani, n) for n in _TRANSMUTATION_SETTINGS}
 
     yield
@@ -65,12 +66,8 @@ def _restore_data_settings():
 
     saved_property, saved_keyword = saved_transport
     if _cross_section_data_state(yani) != saved_transport:
-        # `None` is the only input that clears both halves; setting a dict
-        # merges into the existing map and setting a keyword leaves the map
-        # alone. So clear first, then put back whichever halves were set,
-        # keyword first so the map is not overwritten by it.
-        yani.cross_section_data = None
-        if saved_keyword is not None:
-            yani.cross_section_data = saved_keyword
-        if saved_property is not None:
-            yani.cross_section_data = saved_property
+        yani.neutron_cross_section_data = saved_property
+        if isinstance(saved_property, dict) and saved_keyword is not None:
+            yani.set_neutron_cross_section_data_entry(saved_keyword)
+    if yani.photon_cross_section_data != saved_photon:
+        yani.photon_cross_section_data = saved_photon

@@ -8,7 +8,7 @@ distance outside it. The result is ordinary CSG: surfaces, half-spaces
 
 import yamc
 
-yamc.cross_section_data = "endf-b8.1"
+yamc.neutron_cross_section_data = "endf-b8.1"
 
 # A EU-DEMO-like plasma (as in tokamak_plasma_source.py). Lengths in cm.
 shape = yamc.sources.TokamakShape(

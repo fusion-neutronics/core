@@ -38,7 +38,8 @@ __version__: str
 #
 # `Literal[False]` and not `bool`, matching the setters: `True` is rejected at
 # runtime, so a plain bool here would advertise a spelling that raises.
-cross_section_data: str | dict[str, str] | None
+neutron_cross_section_data: str | dict[str, str] | None
+photon_cross_section_data: str | dict[str, str] | None
 transmutation_decay_data: str | None
 transmutation_reactions: str | typing.Literal[False] | None
 transmutation_fission_yields: str | typing.Literal[False] | None

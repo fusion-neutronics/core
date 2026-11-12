@@ -16,7 +16,7 @@ use yani::LoadedChain;
 ///
 /// There is no default library: a source `chain_use` reads that is unset
 /// raises `ValueError` before anything is resolved or downloaded, naming each
-/// such setting, as an unset `cross_section_data` does. Each source (a library
+/// such setting, as an unset `neutron_cross_section_data` does. Each source (a library
 /// keyword or a local path) is resolved independently (a keyword downloads its
 /// subsection on first use and caches it), then the parts are merged.
 /// When `yamc.transmutation_branch_ratios` names branching sources, the

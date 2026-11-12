@@ -93,7 +93,7 @@ def test_cylindrical_tally_creation():
 
 @requires_keywords
 def test_cylindrical_tally_bin_count_matches_mesh():
-    yamc.set_cross_section_data_entry("fendl-3.2d")
+    yamc.set_neutron_cross_section_data_entry("fendl-3.2d")
 
     sphere = yamc.Sphere(x0=0.0, y0=0.0, z0=0.0, radius=12.0, boundary="vacuum")
     region = sphere.below

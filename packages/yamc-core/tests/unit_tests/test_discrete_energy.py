@@ -38,18 +38,20 @@ def test_discrete_sampling():
     """Test that Discrete samples from correct distribution."""
     dist = yamc.sources.Discrete([1e6, 2e6, 3e6], [0.5, 0.3, 0.2])
 
-    # Sample many times
-    samples = [dist.sample() for _ in range(10000)]
+    # Sample many times. The RNG is unseeded, so the tolerance is set at
+    # six or more standard deviations to keep the test from failing by chance.
+    n = 100_000
+    samples = [dist.sample() for _ in range(n)]
 
     # Count occurrences
     counts = {1e6: 0, 2e6: 0, 3e6: 0}
     for s in samples:
         counts[s] += 1
 
-    # Check distribution (within 2% tolerance)
-    assert abs(counts[1e6] / 10000 - 0.5) < 0.02
-    assert abs(counts[2e6] / 10000 - 0.3) < 0.02
-    assert abs(counts[3e6] / 10000 - 0.2) < 0.02
+    # Check distribution (within 1% absolute)
+    assert abs(counts[1e6] / n - 0.5) < 0.01
+    assert abs(counts[2e6] / n - 0.3) < 0.01
+    assert abs(counts[3e6] / n - 0.2) < 0.01
 
 
 def test_source_with_discrete_energy():

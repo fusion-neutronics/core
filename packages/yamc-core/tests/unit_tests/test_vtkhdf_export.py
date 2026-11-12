@@ -217,7 +217,7 @@ def test_tally_to_vtkhdf_unrun_tally(tmp_path, mesh_2x3x4):
 @requires_keywords
 def test_tally_to_vtkhdf_simulated(tmp_path):
     """tally.to_vtkhdf exports simulated results matching results[tally]."""
-    yamc.set_cross_section_data_entry('fendl-3.2d')
+    yamc.set_neutron_cross_section_data_entry('fendl-3.2d')
 
     sphere = yamc.Sphere(x0=0.0, y0=0.0, z0=0.0, radius=10.0, boundary='vacuum')
     material = yamc.Material(

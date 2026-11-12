@@ -23,7 +23,7 @@ import yamc
 
 # Pull cross-section data from the R2 mirror.
 # First run downloads + caches per-nuclide tarballs under ~/.cache/yamc/.
-yamc.cross_section_data = "endf-b8.1"
+yamc.neutron_cross_section_data = "endf-b8.1"
 
 # --- Material -------------------------------------------------------------
 # Pure Li-6 at natural-lithium-ish density. The composition is intentionally

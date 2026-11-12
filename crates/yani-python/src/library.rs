@@ -85,7 +85,7 @@ pub fn verify_library(py: Python<'_>, path: &str) -> PyResult<Py<PyDict>> {
 /// .. code-block:: python
 ///
 ///     generate_library("endf-b8.1", "/data/endf-b8.1")
-///     cross_section_data = "/data/endf-b8.1"
+///     neutron_cross_section_data = "/data/endf-b8.1"
 ///     transmutation_decay_data = "/data/endf-b8.1"
 ///
 /// Running it again resumes: finished folders are kept and only the rest are

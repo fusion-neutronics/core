@@ -642,7 +642,7 @@ def test_invalid_element():
 # ---------------------------------------------------------------------------
 
 def test_global_default_cross_section_keyword():
-    yamc.set_cross_section_data_entry("Li6", "tests/Li6.arrow")
+    yamc.set_neutron_cross_section_data_entry("Li6", "tests/Li6.arrow")
     mat = Material(
         composition={"Li6": 1.0}, density=1.0, temperature=294
     )
@@ -652,7 +652,7 @@ def test_global_default_cross_section_keyword():
 
 def test_mean_free_path_lithium_14mev():
     import math
-    yamc.cross_section_data = ({"Li6": "tests/Li6.arrow", "Li7": "tests/Li7.arrow"})
+    yamc.neutron_cross_section_data = ({"Li6": "tests/Li6.arrow", "Li7": "tests/Li7.arrow"})
     mat = Material(
         composition={"Li": 1.0}, density=0.534, temperature=294
     )
@@ -664,7 +664,7 @@ def test_mean_free_path_lithium_14mev():
 
 
 def test_material_reaction_mts_lithium():
-    yamc.cross_section_data = ({"Li6": "tests/Li6.arrow", "Li7": "tests/Li7.arrow"})
+    yamc.neutron_cross_section_data = ({"Li6": "tests/Li6.arrow", "Li7": "tests/Li7.arrow"})
     mat = Material(
         composition={"Li": 1.0}, density=0.534, temperature=294
     )
@@ -675,7 +675,7 @@ def test_material_reaction_mts_lithium():
 
 
 def test_calculate_microscopic_xs_neutron_lithium():
-    yamc.cross_section_data = ({"Li6": "tests/Li6.arrow", "Li7": "tests/Li7.arrow"})
+    yamc.neutron_cross_section_data = ({"Li6": "tests/Li6.arrow", "Li7": "tests/Li7.arrow"})
     mat = Material(
         composition={"Li": 1.0}, density=0.534, temperature=294
     )
@@ -692,7 +692,7 @@ def test_calculate_microscopic_xs_neutron_lithium():
 def test_material_vs_nuclide_microscopic_xs_li6():
     from yamc import Nuclide
     import numpy as np
-    yamc.cross_section_data = ({"Li6": "tests/Li6.arrow"})
+    yamc.neutron_cross_section_data = ({"Li6": "tests/Li6.arrow"})
     mat = Material(
         composition={"Li6": 1.0}, density=0.534, temperature=294
     )
@@ -821,7 +821,7 @@ def test_material_be9_selective_temperature_load():
     mat = Material(
         composition={"Be9": 1.0}, density=1.85, temperature=294
     )
-    yamc.cross_section_data = ({"Be9": "tests/Be9.arrow"})
+    yamc.neutron_cross_section_data = ({"Be9": "tests/Be9.arrow"})
     mat.read_nuclear_data({"Be9": "tests/Be9.arrow"})
 
 

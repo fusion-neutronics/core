@@ -14,8 +14,10 @@ yamc.Material(composition={"Fe": 1.0}, density="dense")  # ERROR
 # scores expects a sequence, not a bare int.
 yamc.Tally(scores=5)  # ERROR
 
-# the cross_section_data setter rejects an int (module-level union attribute).
-yamc.cross_section_data = 123  # ERROR
+# Both particle setters reject an int (module-level union attributes).
+yamc.neutron_cross_section_data = 123  # ERROR
+yamc.photon_cross_section_data = 123  # ERROR
+yamc.cross_section_data = "endf-b8.1"  # ERROR
 
 # a group structure is named with a str, not with its group count.
 yamc.group_structure(1102)  # ERROR

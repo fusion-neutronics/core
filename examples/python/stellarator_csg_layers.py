@@ -8,7 +8,7 @@ half-spaces (``.below`` / ``.above``) and Boolean regions, no CAD and no mesh.
 
 import yamc
 
-yamc.cross_section_data = "endf-b8.1"
+yamc.neutron_cross_section_data = "endf-b8.1"
 
 # A rotating ellipse with five field periods, R0 = 600 cm (as in
 # stellarator_plasma_source.py).
