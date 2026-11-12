@@ -42,6 +42,29 @@ fn tar_gz(path: &Path, members: &[(&str, &[u8])]) {
     tar.into_inner().unwrap().finish().unwrap();
 }
 
+/// A bzip2 tar written as two bzip2 streams, one after the other, as parallel
+/// compressors write them: a decoder that stops after the first stream would
+/// lose the members in the second.
+fn tar_bz2(path: &Path, members: &[(&str, &[u8])]) {
+    let mut tar = tar::Builder::new(Vec::new());
+    for (name, body) in members {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_path(name).unwrap();
+        header.set_cksum();
+        tar.append(&header, *body).unwrap();
+    }
+    let tarball = tar.into_inner().unwrap();
+    let (first, second) = tarball.split_at(tarball.len() / 2);
+    let mut file = std::fs::File::create(path).unwrap();
+    for half in [first, second] {
+        let mut bz = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
+        bz.write_all(half).unwrap();
+        file.write_all(&bz.finish().unwrap()).unwrap();
+    }
+}
+
 fn zip_file(path: &Path, members: &[(&str, &[u8])]) {
     let file = std::fs::File::create(path).unwrap();
     let mut zip = zip::ZipWriter::new(file);
@@ -183,6 +206,61 @@ fn a_file_that_is_not_the_archive_it_is_named_as_is_refused() {
     let r = recipe("fendl-3.2d", vec![f.source]);
     let err = extract(&r, &[f], &scratch.dir("lib")).unwrap_err();
     assert!(err.contains("not a zip archive"), "{err}");
+}
+
+/// The FISPACT-II data repository's layout (`decay2020.tar.bz2`): one folder
+/// of nuclide files, plus an index and the macOS `._*` and `.DS_Store` files
+/// its archive carries, which the recipe's `keep` leaves out.
+#[test]
+fn a_bzip2_tar_of_two_streams_unpacks_whole() {
+    let scratch = Scratch::new("bzip2");
+    let archive = scratch.0.join("decay2020.tar.bz2");
+    let cs137 = unxz(CS137);
+    let u235 = unxz(U235);
+    tar_bz2(
+        &archive,
+        &[
+            ("decay_2020/Cs137", &cs137),
+            ("decay_2020/U235", &u235),
+            ("decay_2020/.DS_Store", b"finder"),
+            ("./._decay_2020_index.txt", b"resource fork"),
+            ("decay_2020_index.txt", b"Cs137 1 551370"),
+        ],
+    );
+    fn nuclides(n: &str) -> bool {
+        !n.starts_with('.') && !n.ends_with(".txt")
+    }
+    let got = vec![fetched(
+        &archive,
+        "decay2020.tar.bz2",
+        Sublibrary::Decay,
+        nuclides,
+    )];
+    let r = recipe("ukdd-2020", got.iter().map(|f| f.source).collect());
+    let root = scratch.dir("lib");
+    let folders = extract(&r, &got, &root).unwrap();
+    let dir = sources_dir(&root).join("decay");
+    assert_eq!(folders, vec![(Sublibrary::Decay, dir.clone())]);
+    assert_eq!(read(&dir.join("Cs137")), cs137);
+    assert_eq!(read(&dir.join("U235")), u235);
+    let mut names: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n != MARKER)
+        .collect();
+    names.sort();
+    assert_eq!(names, ["Cs137", "U235"]);
+}
+
+#[test]
+fn a_file_that_is_not_a_bzip2_tar_is_refused() {
+    let scratch = Scratch::new("not-bzip2");
+    let a = scratch.0.join("decay2020.tar.bz2");
+    std::fs::write(&a, b"<html>a login page</html>").unwrap();
+    let f = fetched(&a, "decay2020.tar.bz2", Sublibrary::Decay, |_| true);
+    let r = recipe("ukdd-2020", vec![f.source]);
+    let err = extract(&r, &[f], &scratch.dir("lib")).unwrap_err();
+    assert!(err.contains("bzip2 tar archive"), "{err}");
 }
 
 /// Builds a decay tape of two materials and a neutron archive from the

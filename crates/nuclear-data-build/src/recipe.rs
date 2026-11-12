@@ -157,6 +157,8 @@ impl Source {
             Format::Zip
         } else if self.name.ends_with(".tar.gz") || self.name.ends_with(".tgz") {
             Format::TarGz
+        } else if self.name.ends_with(".tar.bz2") || self.name.ends_with(".tbz2") {
+            Format::TarBz2
         } else {
             Format::Plain
         }
@@ -168,6 +170,9 @@ impl Source {
 pub enum Format {
     Zip,
     TarGz,
+    /// A bzip2-compressed tar, as the FISPACT-II nuclear data repository
+    /// ships its libraries (`decay2020.tar.bz2`, `UKFY42data.tar.bz2`).
+    TarBz2,
     /// Used as it is.
     Plain,
 }
