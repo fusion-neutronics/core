@@ -272,9 +272,9 @@ fn run_case_with(
     };
     let inputs = translate_for_gpu(&model, n, settings.seed)
         .expect("translate single-nuclide model for GPU twin");
-    for i in 0..n {
+    for (i, &seed) in inputs.seeds[..n].iter().enumerate() {
         assert_eq!(
-            inputs.seeds[i],
+            seed,
             yamc_rng::history_seed(SEED, i as u64),
             "GPU per-particle seed must equal history_seed(base_seed, i) for batch 0"
         );

@@ -547,9 +547,9 @@ fn run_case(label: &str, case: &SphereCase, energy_ev: f64, n: usize) -> CaseRep
     // holds exactly the shared per-history seed the CPU transport loop derives
     // for the same global index, so both backends start history `i` on the same
     // 64-bit PCG state.
-    for i in 0..n {
+    for (i, &seed) in inputs.seeds[..n].iter().enumerate() {
         assert_eq!(
-            inputs.seeds[i],
+            seed,
             history_seed(SEED, i as u64),
             "GPU per-particle seed must equal history_seed(base_seed, i) for batch 0"
         );
