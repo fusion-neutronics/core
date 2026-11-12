@@ -123,8 +123,8 @@ fn every_tabulated_energy_conserves_products_per_fission() {
     let chain = chain();
     for parent in ["U235", "Pu239"] {
         let fy = chain[parent].fission_yields.as_ref().unwrap();
-        for k in 0..fy.yields.len() {
-            let total: f64 = fy.yields[k].products.iter().map(|(_, y)| y).sum();
+        for (k, point) in fy.yields.iter().enumerate() {
+            let total: f64 = point.products.iter().map(|(_, y)| y).sum();
             assert!(
                 (total - 2.0).abs() < 0.05,
                 "{parent} point {k} sums to {total}, not ~2 products per fission"

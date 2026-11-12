@@ -635,9 +635,10 @@ fn read_range(range: &Range, parameters: &ResonanceParameters, b: &mut Builder) 
                     })?;
                 next = group + 1;
                 let mf2_group = &rml.spin_groups[group];
-                for index in 0..sg.nrsa as usize {
+                // Slicing to NRSA keeps the panic on a group shorter than the
+                // covariance says, rather than silently stopping early.
+                for (index, &e) in mf2_group.er[..sg.nrsa as usize].iter().enumerate() {
                     let (p, d) = (sg.parameters(index), sg.uncertainties(index));
-                    let e = mf2_group.er[index];
                     let location = if (p[0] - e).abs() <= ENERGY_TOLERANCE * e.abs().max(1e-30) {
                         if !close(p[0], e) {
                             b.approximate += 1;
@@ -2127,11 +2128,11 @@ mod rebuild_tests {
             };
             let mut parameters = Vec::new();
             for (group, sg) in rml.spin_groups.iter().enumerate().take(3) {
-                for channel in 0..sg.nch as usize {
+                for (channel, &apt) in sg.channels.apt[..sg.nch as usize].iter().enumerate() {
                     parameters.push(parameter(
                         Location::Channel { group, channel },
                         Quantity::ScatteringRadius,
-                        sg.channels.apt[channel],
+                        apt,
                     ));
                 }
                 for index in (0..sg.er.len()).step_by(5) {

@@ -1381,9 +1381,9 @@ mod tests {
         let t = &global.per_tally[0];
         assert_eq!(t.n_histories, 3);
         // Mean per bin = average of (1*(j+1), 2*(j+1), 3*(j+1)) = 2*(j+1)
-        for j in 0..3 {
+        for (j, &mean) in t.mean[..3].iter().enumerate() {
             let expected = 2.0 * (j + 1) as f64;
-            assert!((t.mean[j] - expected).abs() < 1e-12);
+            assert!((mean - expected).abs() < 1e-12);
         }
     }
 
