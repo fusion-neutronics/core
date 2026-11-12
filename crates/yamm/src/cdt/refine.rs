@@ -312,9 +312,8 @@ pub fn enforce_periodic_seams(output: &mut CDTOutput, sf: &SizeField) {
 
     // Identify Steiner vertices to remove: those within `margin` of any seam
     let mut remove_verts: HashSet<usize> = HashSet::new();
-    for i in num_orig..output.vertices.len() {
-        let u = output.vertices[i][0];
-        let v = output.vertices[i][1];
+    for (i, vertex) in output.vertices.iter().enumerate().skip(num_orig) {
+        let [u, v] = [vertex[0], vertex[1]];
         let near_u_min = (u - sf.u_min).abs() < margin;
         let near_u_max = (u - sf.u_max).abs() < margin;
         let near_v_min = (v - sf.v_min).abs() < margin;

@@ -323,12 +323,9 @@ impl AdvancingFront {
         }
 
         // Quality check
+        // Not `q >= min`: a NaN quality passed this check before, and still does.
         let q = optimize::tet_quality(pa, pb, pc, pp);
-        if q < min_quality(qc) {
-            return false;
-        }
-
-        true
+        q.partial_cmp(&min_quality(qc)) != Some(std::cmp::Ordering::Less)
     }
 
     /// Find the best existing nearby point to connect to a front face.

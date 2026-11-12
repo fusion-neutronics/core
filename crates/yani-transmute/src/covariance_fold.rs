@@ -933,13 +933,12 @@ fn partial_rates_within(
 /// Contract `rᵢᵀ C rⱼ`.
 fn contract(block: &ExpandedBlock, row: &Partials, col: &Partials) -> f64 {
     let mut total = 0.0;
-    for i in 0..block.n_rows().min(row.per_interval.len()) {
-        let ri = row.per_interval[i];
+    for (i, &ri) in row.per_interval.iter().take(block.n_rows()).enumerate() {
         if ri == 0.0 {
             continue;
         }
-        for j in 0..block.n_cols().min(col.per_interval.len()) {
-            total += block.get(i, j) * ri * col.per_interval[j];
+        for (j, &cj) in col.per_interval.iter().take(block.n_cols()).enumerate() {
+            total += block.get(i, j) * ri * cj;
         }
     }
     total

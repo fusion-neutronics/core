@@ -397,19 +397,15 @@ fn attribution_is_each_source_alone() {
             BASE_SEED,
             Some(&request(vec![source], 3)),
         );
-        for step in 0..steps {
+        let by_step = &attribution.by_source[source.name()][..steps];
+        for (step, attributed) in by_step.iter().enumerate() {
             let variances: HashMap<String, f64> = alone.uncertainty[&1]
                 .std_dev_at(step)
                 .into_iter()
                 .filter(|(_, s)| *s > 0.0)
                 .map(|(n, s)| (n, s * s))
                 .collect();
-            assert_eq!(
-                attribution.by_source[source.name()][step],
-                variances,
-                "{} at step {step}",
-                source.name()
-            );
+            assert_eq!(attributed, &variances, "{} at step {step}", source.name());
         }
     }
     let h3 = |name: &str| attribution.by_source[name][3].get("H3").copied();

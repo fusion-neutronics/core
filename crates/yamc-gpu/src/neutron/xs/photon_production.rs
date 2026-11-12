@@ -836,8 +836,9 @@ mod tests {
         // photon-product) pairs. ~532 for Fe56.
         let cpu_n_products: usize = {
             let mut n = 0;
-            for j in 0..grid.photon_rxn_mt_numbers.len() {
-                for product in grid.photon_rxn_reactions[j].products.iter() {
+            let n_rxn = grid.photon_rxn_mt_numbers.len();
+            for reaction in &grid.photon_rxn_reactions[..n_rxn] {
+                for product in reaction.products.iter() {
                     if product.is_particle_type(&ParticleType::Photon) {
                         n += 1;
                     }

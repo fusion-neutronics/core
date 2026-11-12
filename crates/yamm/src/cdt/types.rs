@@ -50,9 +50,11 @@ impl CDTOutput {
         let eps_u = (sf.u_max - sf.u_min) * 1e-6;
         let eps_v = (sf.v_max - sf.v_min) * 1e-6;
         let mut seam = HashSet::new();
-        for i in 0..self.num_original_vertices {
-            let u = self.vertices[i][0];
-            let v = self.vertices[i][1];
+        for (i, vertex) in self.vertices[..self.num_original_vertices]
+            .iter()
+            .enumerate()
+        {
+            let [u, v] = [vertex[0], vertex[1]];
             if (u - sf.u_min).abs() < eps_u
                 || (u - sf.u_max).abs() < eps_u
                 || (v - sf.v_min).abs() < eps_v
