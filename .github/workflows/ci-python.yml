@@ -108,7 +108,13 @@ jobs:
       pyodide_projects: ${{ steps.plan.outputs.pyodide_projects }}
     steps:
       # No checkout: this reads the event, not the tree, which is what keeps it
-      # a sub-minute job in front of everything else.
+      # a sub-minute job in front of everything else. Python only to put each
+      # version into its canonical PEP 440 form, below.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install version parsing
+        run: python -m pip install --quiet packaging
       - id: plan
         shell: bash
         env:
@@ -211,14 +217,36 @@ jobs:
           if [ "$publish_yamc" = true ]; then pyodide+=('"yamc-core"'); fi
           if [ "$publish_yani" = true ]; then pyodide+=('"yani-core"'); fi
 
+          # Each version in its canonical PEP 440 form, checked here rather than
+          # by maturin in every wheel job. Canonical, because PyPI treats
+          # 0.22.0-rc1 and 0.22.0rc1 as one version: verify-versions asks PyPI
+          # about this exact string, and the wheels are built at it.
+          canonical () {
+            python - "$1" <<'PY'
+          import sys
+          from packaging.version import InvalidVersion, Version
+          try:
+              version = Version(sys.argv[1])
+          except InvalidVersion:
+              sys.exit(f"::error::'{sys.argv[1]}' is not a valid PEP 440 version.")
+          if version.local:
+              sys.exit(f"::error::'{sys.argv[1]}' has a local label (+{version.local}), which PyPI refuses.")
+          print(version)
+          PY
+          }
+          yamc_version="${YAMC_OVERRIDE:-$tagged_yamc}"
+          yani_version="${YANI_OVERRIDE:-$tagged_yani}"
+          if [ -n "$yamc_version" ]; then yamc_version="$(canonical "$yamc_version")"; fi
+          if [ -n "$yani_version" ]; then yani_version="$(canonical "$yani_version")"; fi
+
           # tee, so the plan is readable in the log of the job that made it.
           {
             echo "build_yamc=$build_yamc"
             echo "build_yani=$build_yani"
             echo "publish_yamc=$publish_yamc"
             echo "publish_yani=$publish_yani"
-            echo "yamc_version=${YAMC_OVERRIDE:-$tagged_yamc}"
-            echo "yani_version=${YANI_OVERRIDE:-$tagged_yani}"
+            echo "yamc_version=$yamc_version"
+            echo "yani_version=$yani_version"
             echo "pyodide_projects=[$(IFS=,; echo "${pyodide[*]-}")]"
           } | tee -a "$GITHUB_OUTPUT"
 

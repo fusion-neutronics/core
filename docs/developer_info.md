@@ -599,6 +599,10 @@ A leading `v` on each version is allowed (`yamc-core-v0.8.1`), and whitespace
 around a comma is ignored. There is no bare `0.8.1` tag: one tag carries one
 number, and the two distributions are versioned apart.
 
+Each version must be a valid PEP 440 version without a local `+label`, and is
+published in its canonical form: `yamc-core-0.9.0-rc1` goes out as `0.9.0rc1`.
+An invalid version fails the release before any wheel is built.
+
 The flow is therefore:
 
 1. Merge to `main`. No version bump is needed in the PR.
