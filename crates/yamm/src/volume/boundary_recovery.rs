@@ -174,10 +174,7 @@ fn segments_cross_interior(verts: &[[f64; 3]], s1: [usize; 2], s2: [usize; 2]) -
     }
     let s_a = orient_3d(c, d, a, apex);
     let s_b = orient_3d(c, d, b, apex);
-    if s_a == 0.0 || s_b == 0.0 || (s_a > 0.0) == (s_b > 0.0) {
-        return false;
-    }
-    true
+    !(s_a == 0.0 || s_b == 0.0 || (s_a > 0.0) == (s_b > 0.0))
 }
 
 /// Does the edge (eu, ev) cross the active `constraint` in its interior?

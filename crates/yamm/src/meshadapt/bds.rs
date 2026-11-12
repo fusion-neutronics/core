@@ -636,12 +636,8 @@ mod tests {
         let mesh = BDSMesh::from_triangles(&v, &t);
 
         // In a 2-triangle quad, all 4 vertices are on the boundary.
-        for vi in 0..4 {
-            assert!(
-                mesh.vertices[vi].on_boundary,
-                "vertex {} should be on boundary",
-                vi
-            );
+        for (vi, vertex) in mesh.vertices[..4].iter().enumerate() {
+            assert!(vertex.on_boundary, "vertex {} should be on boundary", vi);
         }
     }
 
@@ -724,9 +720,9 @@ mod tests {
         );
 
         // Outer vertices are on boundary.
-        for vi in 0..4 {
+        for (vi, vertex) in mesh.vertices[..4].iter().enumerate() {
             assert!(
-                mesh.vertices[vi].on_boundary,
+                vertex.on_boundary,
                 "outer vertex {} should be on boundary",
                 vi
             );

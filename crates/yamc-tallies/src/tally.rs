@@ -2160,8 +2160,8 @@ impl Tally {
     pub fn reset_accumulation_shared(&self) {
         self.update_cache();
         let num_bins = self.num_bins();
-        for i in 0..num_bins.min(self.accumulator.values.len()) {
-            self.accumulator.values[i].store(0, Ordering::Relaxed);
+        for value in self.accumulator.values.iter().take(num_bins) {
+            value.store(0, Ordering::Relaxed);
         }
         self.accumulator.n_realizations.store(0, Ordering::Relaxed);
     }
