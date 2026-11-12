@@ -93,8 +93,10 @@ fn keywords_still_bypass_the_backend() {
             "endf-b8.1".to_string(),
         )]));
         assert_eq!(
-            config.default_neutron_cross_section.as_deref(),
+            config.get_cross_section("Li6").as_deref(),
             Some("endf-b8.1")
         );
+        // A per-nuclide entry no longer sets a library for every nuclide.
+        assert_eq!(config.default_neutron_cross_section, None);
     });
 }
