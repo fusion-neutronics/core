@@ -333,8 +333,10 @@ impl PyMeshGeometry {
 
     /// Triangle indices belonging to a specific volume.
     ///
-    /// Returns the global triangle indices for every surface that bounds
-    /// the given volume.  These can be used to index into :attr:`triangles`.
+    /// Returns the global triangle indices for every surface of the given
+    /// volume: those bounding it, and any internal face (a surface with the
+    /// volume on both sides, which bounds nothing).  These can be used to
+    /// index into :attr:`triangles`.
     ///
     /// Args:
     ///     volume_id (int): Volume index (0-based).

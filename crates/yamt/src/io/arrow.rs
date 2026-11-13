@@ -15,7 +15,9 @@
 //!
 //! Schema metadata:
 //! - "yamc.physical_groups": JSON physical group definitions
-//! - "yamc.surface_volumes": JSON surface→volume topology
+//! - "yamc.surface_volumes": JSON surface→volume topology, `[forward, reverse]`
+//!   per surface; a surface with the same volume in both is an internal face
+//!   of that volume, which bounds nothing
 //! - "yamc.imprinted" (optional): "false" when every solid was meshed on its
 //!   own, without imprinting, so touching solids do not share surfaces
 //! - "yamc.contact_tolerance" (optional): for such a mesh, the distance (cm)
