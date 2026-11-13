@@ -1,0 +1,13 @@
+[package]
+name = "geomderiv-proto"
+version = "0.0.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+yamc-geo = { path = "../../crates/yamc-geo" }
+yamc-source = { path = "../../crates/yamc-source" }
+
+[profile.release]
+opt-level = 3
