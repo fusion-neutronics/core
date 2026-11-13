@@ -126,6 +126,7 @@ __all__ = [
     "set_transmutation_reactions",
     "simulate_shutdown_dose",
     "solid_contact_samples",
+    "solid_open_edges",
     "solid_overlaps",
     "solid_self_intersections",
     "solid_shared_volume",
@@ -9251,6 +9252,40 @@ def solid_contact_samples(vertices: typing.Sequence[typing.Sequence[builtins.flo
         ``solid_a``'s surface. A pair whose meshes come close only between
         vertices returns no points, and so does a pair whose meshes share a
         vertex (which lies on both CAD surfaces, so the two touch).
+    """
+
+def solid_open_edges(vertices: typing.Sequence[typing.Sequence[builtins.float]], triangles: typing.Sequence[typing.Sequence[builtins.int]], triangle_surface_ids: typing.Sequence[builtins.int], solid_faces: typing.Sequence[tuple[builtins.int, typing.Sequence[builtins.int]]], face_to_surface_id: typing.Sequence[tuple[builtins.int, builtins.int]], face_solid_reversed: typing.Mapping[tuple[builtins.int, builtins.int], builtins.bool], reach: typing.Mapping[builtins.int, builtins.float], samples: builtins.int = 4) -> builtins.list[tuple[builtins.int, builtins.int, builtins.list[builtins.list[builtins.float]]]]:
+    r"""
+    Solids whose surface mesh is open.
+    
+    Each solid is bounded by the surfaces :func:`cad_mesh_to_arrow` writes it
+    with, their triangles wound outward from it. A closed surface runs along
+    each edge of its triangles as often one way as the other; an edge a
+    solid's triangles run along more often one way is open: the rim of a hole
+    or of a face left one-sided, a face wound the wrong way round, or one side
+    of a crack between two facetings of a CAD edge. A surface with the solid
+    on both sides closes on itself. Cracks are not counted: an open edge with
+    an open edge running back alongside it, within the solid's ``reach``.
+    
+    Args:
+        vertices: Global ``[x, y, z]`` vertex array.
+        triangles: Per-triangle global vertex indices.
+        triangle_surface_ids: 1-based surface id per triangle.
+        solid_faces: ``(solid_id, face_ids)`` pairs in ascending solid order.
+        face_to_surface_id: ``(face_id, surface_id)`` pairs (surface ids 1-based).
+        face_solid_reversed: ``(solid_id, face_id) -> reversed`` orientation map.
+        reach: ``{solid_id: distance}`` within which an open edge running back
+            closes a crack; a solid it does not name has none.
+        samples: Open edges to give the midpoint of per solid at most.
+    
+    Returns:
+        ``[(solid_id, edges, [[x, y, z], ...]), ...]`` for every solid with an
+        open edge outside a crack: how many it has, and the midpoints of the
+        first.
+    
+    Raises:
+        ValueError: If ``triangles`` and ``triangle_surface_ids`` differ in
+            length, or a triangle indexes past ``vertices``.
     """
 
 def solid_overlaps(vertices: typing.Sequence[typing.Sequence[builtins.float]], solids: typing.Sequence[tuple[builtins.int, typing.Sequence[typing.Sequence[builtins.int]]]], depth_tolerance: builtins.float, threads: typing.Optional[builtins.int] = None) -> builtins.list[tuple[builtins.int, builtins.int, builtins.float, builtins.float]]:
