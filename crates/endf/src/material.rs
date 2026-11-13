@@ -150,7 +150,7 @@ fn first_material_line(lines: &[&str]) -> usize {
 /// rather than refused over a comment. That is how the generation scripts
 /// read such a tape to split it into one file per material, so the tape
 /// reads as its split files do.
-fn read_text(path: &Path) -> Result<String> {
+pub fn read_text(path: &Path) -> Result<String> {
     let bytes = std::fs::read(path)?;
     Ok(match String::from_utf8(bytes) {
         Ok(text) => text,
