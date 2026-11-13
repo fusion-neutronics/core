@@ -1,13 +1,10 @@
 [package]
 name = "yani-python"
-# The version the next yani-core release publishes, and not published to
-# crates.io, so it is free to carry the wheel's number; packages/yani-core's
-# pyproject.toml names this manifest and declares `dynamic = ["version"]`.
-# It moves independently of yamc-core's: the two are built and released
-# together and that is no reason to share a number, since a change to the
-# transport converter says nothing about the inventory package. Bump it with
-# `cargo set-version -p yani-python <version>`.
-# See .github/workflows/ci-python.yml and docs/developer_info.md.
+# Not the yani-core wheel's version, and not bumped. The wheel's version is
+# `project.version` in packages/yani-core/pyproject.toml, which the release
+# workflow sets from the release tag. This crate is never published to
+# crates.io, so its own number is unused; read the wheel's at runtime with
+# `importlib.metadata.version("yani-core")`, not `CARGO_PKG_VERSION`.
 version = "0.25.0"
 edition = "2024"
 rust-version.workspace = true

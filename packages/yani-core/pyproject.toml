@@ -4,10 +4,11 @@ build-backend = "maturin"
 
 [project]
 name = "yani-core"
-# The version lives in `crates/yani-python/Cargo.toml`, the manifest named by
-# `manifest-path` below, and `dynamic` is what lets maturin read it from there.
-# See that manifest for the bump procedure, and docs/developer_info.md.
-dynamic = ["version"]
+# Not bumped by hand. The release workflow writes the version the release tag
+# names into this field before it builds (scripts/set-wheel-version.sh), so a
+# wheel's version comes from the tag alone. The placeholder below is what a
+# build from an untagged checkout reports. See docs/developer_info.md.
+version = "0.0.0.dev0"
 description = "Transmutation and activation without transport: a material, an irradiation schedule and a neutron spectrum in, inventories out"
 readme = "README.md"
 requires-python = ">=3.10"

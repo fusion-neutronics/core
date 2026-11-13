@@ -4,13 +4,11 @@ build-backend = "maturin"
 
 [project]
 name = "yamc-core"
-# The version lives in `crates/yamc-python/Cargo.toml`, the manifest named by
-# `manifest-path` below, and `dynamic` is what lets maturin read it from there.
-# A static number here would be a second copy to keep in sync for no gain: that
-# crate is never published to crates.io, so its version field is free to carry
-# this wheel's number, and one number cannot disagree with itself.
-# See that manifest for the bump procedure, and docs/developer_info.md.
-dynamic = ["version"]
+# Not bumped by hand. The release workflow writes the version the release tag
+# names into this field before it builds (scripts/set-wheel-version.sh), so a
+# wheel's version comes from the tag alone. The placeholder below is what a
+# build from an untagged checkout reports. See docs/developer_info.md.
+version = "0.0.0.dev0"
 description = "Yet Another Monte Carlo -- neutron transport with mesh geometry support"
 readme = "README.md"
 requires-python = ">=3.10"

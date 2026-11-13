@@ -185,7 +185,7 @@ pub fn generate_library(
         Some(n) => n,
         None => default_njoy(py)?,
     };
-    let builder = format!("yani-python {}", env!("CARGO_PKG_VERSION"));
+    let builder = format!("yani-python {}", wheel_version(py));
     let stop = AtomicBool::new(false);
     let path_buf = std::path::PathBuf::from(path);
     let downloads = downloads.map(std::path::PathBuf::from);
@@ -251,6 +251,17 @@ pub fn generate_library(
     dict.set_item("file_count", report.file_count)?;
     dict.set_item("total_bytes", report.total_bytes)?;
     Ok(dict.unbind())
+}
+
+/// The installed yani-core wheel's version, which the release tag sets. The
+/// crate's own `CARGO_PKG_VERSION` is not bumped, so it is only the fallback
+/// for an interpreter that never saw a wheel.
+#[cfg(not(target_os = "emscripten"))]
+fn wheel_version(py: Python<'_>) -> String {
+    py.import("importlib.metadata")
+        .and_then(|m| m.call_method1("version", ("yani-core",)))
+        .and_then(|v| v.extract::<String>())
+        .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string())
 }
 
 /// The `njoy` the njoy2016 wheel installs beside this interpreter, or `njoy`

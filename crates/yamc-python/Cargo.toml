@@ -1,17 +1,10 @@
 [package]
 name = "yamc-python"
-# The version the next yamc-core release publishes. This crate is never
-# published to crates.io, so its version field is free to carry the wheel's
-# number: packages/yamc-core/pyproject.toml names this manifest as its
-# `manifest-path` and declares `dynamic = ["version"]`, so maturin reads the
-# number from here.
-#
-# CI reads it from here rather than from the release tag, which is what lets
-# yamc-core and yani-core be released together and versioned apart: one tag
-# cannot carry two numbers. Bump it in the PR that earns the bump -- with
-# `cargo set-version -p yamc-python <version>`, which updates Cargo.lock in the
-# same step -- and `verify-versions` refuses a number already on PyPI.
-# See .github/workflows/ci-python.yml and docs/developer_info.md.
+# Not the yamc-core wheel's version, and not bumped. The wheel's version is
+# `project.version` in packages/yamc-core/pyproject.toml, which the release
+# workflow sets from the release tag. This crate is never published to
+# crates.io, so its own number is unused; read the wheel's at runtime with
+# `importlib.metadata.version("yamc-core")`, not `CARGO_PKG_VERSION`.
 version = "0.21.0"
 edition = "2024"
 rust-version.workspace = true

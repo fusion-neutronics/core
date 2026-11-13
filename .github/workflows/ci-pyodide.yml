@@ -39,12 +39,12 @@ on:
         type: string
         required: true
       yamc_version:
-        description: "Override yamc-core's version, as ci-python.yml's dispatch input of that name"
+        description: "yamc-core version to build at: the release tag's, or ci-python.yml's dispatch override"
         type: string
         required: false
         default: ""
       yani_version:
-        description: "Override yani-core's version, as ci-python.yml's dispatch input of that name"
+        description: "yani-core version to build at: the release tag's, or ci-python.yml's dispatch override"
         type: string
         required: false
         default: ""
@@ -96,18 +96,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Only a ci-python.yml dispatch that names one, so the Pyodide wheel goes
-      # out at the same number as the native wheels of that run.
-      - name: Override yamc-core's version
+      # The version ci-python.yml's plan resolved (tag or dispatch override), so
+      # the Pyodide wheel goes out at the same number as the native wheels.
+      - name: Set yamc-core's version
         if: matrix.project == 'yamc-core' && inputs.yamc_version != ''
         env:
           VERSION: ${{ inputs.yamc_version }}
-        run: bash scripts/set-wheel-version.sh yamc-python "$VERSION"
-      - name: Override yani-core's version
+        run: bash scripts/set-wheel-version.sh yamc-core "$VERSION"
+      - name: Set yani-core's version
         if: matrix.project == 'yani-core' && inputs.yani_version != ''
         env:
           VERSION: ${{ inputs.yani_version }}
-        run: bash scripts/set-wheel-version.sh yani-python "$VERSION"
+        run: bash scripts/set-wheel-version.sh yani-core "$VERSION"
 
       - name: Set up Python
         uses: actions/setup-python@v7

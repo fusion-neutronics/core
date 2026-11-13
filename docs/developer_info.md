@@ -561,45 +561,28 @@ Two distributions are published from this repository, and they carry
 independent version numbers: `yamc-core` (the transport wheel) and `yani-core`
 (the standalone transmutation wheel).
 
-### Where the version lives
+### Where the version comes from
 
-Each wheel's version lives in the crate manifest that its `pyproject.toml`
-names as `manifest-path`:
+The release tag. Each wheel's version is `project.version` in its package's
+`pyproject.toml`:
 
-| Distribution | Version lives in | Declared in |
-| --- | --- | --- |
-| `yamc-core` | `crates/yamc-python/Cargo.toml` | `packages/yamc-core/pyproject.toml` |
-| `yani-core` | `crates/yani-python/Cargo.toml` | `packages/yani-core/pyproject.toml` |
+| Distribution | Version field |
+| --- | --- |
+| `yamc-core` | `packages/yamc-core/pyproject.toml` |
+| `yani-core` | `packages/yani-core/pyproject.toml` |
 
-Both `pyproject.toml` files declare `dynamic = ["version"]`, which is what tells
-maturin to read the number from the manifest. Neither crate is published to
-crates.io, so its version field is free to carry the wheel's number — one number
-in one place, rather than two that have to be kept in step.
+The committed value is a placeholder, `0.0.0.dev0`, and is never bumped by hand.
+When a release is published, every wheel job runs
+`scripts/set-wheel-version.sh <package> <version>` with the version the tag
+names, before building. Nothing is committed back. A build from an untagged
+checkout (`pip install .`, `maturin develop`, a `git+` URL) reports the
+placeholder.
 
-The committed version names the **next** release, not the last one. That is what
-makes a bump reviewable: the number that will reach PyPI appears in the diff.
-
-### Bumping a version
-
-```bash
-cargo install cargo-edit                      # once
-cargo set-version -p yamc-python 0.8.1        # yamc-core
-cargo set-version -p yani-python 0.10.1       # yani-core
-```
-
-`cargo set-version` updates `Cargo.lock` in the same step, so both files land in
-the same commit. Without cargo-edit, `bash scripts/set-wheel-version.sh
-yamc-python 0.8.1` does the same two edits (it is what CI uses, so that the wheel
-jobs do not have to install cargo-edit on three platforms).
-
-Bump in the PR that earns the bump.
-
-Pull requests that change `SUPPORTED_FORMAT_VERSIONS` or Rust source in
-`crates/nuclear-data-schema/src/` must change both binding versions in the
-same PR. The offline `Data format changes bump both binding versions` check
-compares the PR base and head; ordinary release-reader comments do not require
-a bump. Update `Cargo.lock` alongside the manifests. This guard does not
-decide whether old and new data formats may replace one another on the server.
+The crates' own versions in `crates/yamc-python/Cargo.toml` and
+`crates/yani-python/Cargo.toml` are not the wheel's and are not bumped. At
+runtime, read the wheel's version with `importlib.metadata.version("yamc-core")`
+(this is what `yamc.__version__` and `yani.__version__` do), not
+`CARGO_PKG_VERSION`.
 
 ### Tagging a release
 
@@ -616,16 +599,24 @@ A leading `v` on each version is allowed (`yamc-core-v0.8.1`), and whitespace
 around a comma is ignored. There is no bare `0.8.1` tag: one tag carries one
 number, and the two distributions are versioned apart.
 
+Each version must be a valid PEP 440 version without a local `+label`, and is
+published in its canonical form: `yamc-core-0.9.0-rc1` goes out as `0.9.0rc1`.
+An invalid version fails the release before any wheel is built.
+
 The flow is therefore:
 
-1. Bump the version of each project you are releasing, and merge that PR.
-2. Tag with those exact versions and publish the GitHub release.
-3. `.github/workflows/ci-python.yml` builds the wheels and publishes to PyPI.
+1. Merge to `main`. No version bump is needed in the PR.
+2. Tag with the versions to release and publish the GitHub release.
+3. `.github/workflows/ci-python.yml` writes those versions into the
+   `pyproject.toml` files, builds the wheels and publishes to PyPI.
 
-Before anything is uploaded, the `verify-versions` job fails the release if a
-tag component names a version that disagrees with its manifest, if the tag names
-no project at all, or if the version is already on PyPI. So a tag cannot ship a
-number nobody bumped, and a bump cannot ship under a number nobody tagged.
+Before anything is uploaded, the `verify-versions` job fails the release if the
+tag names no project, or if a version is already on PyPI. A manual
+`workflow_dispatch` publish must give the version in its `yamc_version` /
+`yani_version` input, so the placeholder cannot be published.
+
+If a release changes the published data format (`SUPPORTED_FORMAT_VERSIONS`, or
+`crates/nuclear-data-schema/src/`), release both `yamc-core` and `yani-core`.
 
 ### The Pyodide wheels
 
