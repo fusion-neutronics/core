@@ -511,20 +511,22 @@ fn thermal_jobs(
 }
 
 /// The element symbols MF=7 MT=451 names, or `None` when the evaluation has
-/// no such section.
+/// no such section. Read from MT=451 alone, so a file whose law the reader
+/// refuses (or that the converter cuts to its first temperature) still names
+/// its atoms.
 fn mt451_elements(path: &Path) -> Result<Option<BTreeSet<String>>, String> {
     let material =
         endf::Material::from_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let Some(zas) = endf::ThermalScattering::from_endf(&material)
-        .map_err(|e| format!("{}: {e}", path.display()))?
-        .atom_zas()
-    else {
+    let Some(mt451) = material.mf7_mt451() else {
         return Ok(None);
     };
     Ok(Some(
-        zas.iter()
-            .filter_map(|za| {
-                usize::try_from(za / 1000)
+        mt451
+            .elements
+            .iter()
+            .flat_map(|e| e.zai.iter())
+            .filter_map(|&za| {
+                usize::try_from(za as i64 / 1000)
                     .ok()
                     .and_then(|z| endf::data::ATOMIC_SYMBOL.get(z))
                     .map(|s| s.to_string())
