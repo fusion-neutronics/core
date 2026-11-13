@@ -417,6 +417,13 @@ impl MeshGeometry {
         }
     }
 
+    /// The contact tolerance (cm) a mesh is tracked discontinuously at when
+    /// its file records none: a ten-thousandth of the diagonal of the box
+    /// around its solids.
+    pub fn default_contact_tolerance(&self) -> f64 {
+        default_contact_tolerance(&self.topology)
+    }
+
     /// The contact tolerance (cm) when tracking is discontinuous, `None` for
     /// imprinted (conformal) tracking.
     pub fn contact_tolerance(&self) -> Option<f64> {
@@ -431,8 +438,9 @@ impl MeshGeometry {
     /// True when some solids touch without sharing a surface, while the mesh
     /// is tracked conformally: some solid's surface, facing the implicit
     /// complement, has another solid right behind it. Conformal tracking
-    /// reads the far side of such a surface as the implicit complement and
-    /// skips the other solid, without losing particles. A mesh made without
+    /// reads the far side of such a surface as the implicit complement, so a
+    /// particle crossing it skips the other solid or, where the two facetings
+    /// cross, is lost. A mesh made without
     /// imprinting is like that throughout; an imprinted one where the imprint
     /// failed to share some faces is like that in places.
     ///
