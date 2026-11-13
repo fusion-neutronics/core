@@ -290,7 +290,8 @@ fn rotation_matrix(degrees: [f64; 3]) -> Option<[[f64; 3]; 3]> {
 /// True when every edge of the volume's bounding surfaces is shared by
 /// exactly two triangles (a closed 2-manifold), i.e. the volume is
 /// watertight. Vertices are welded by exact coordinate bits first so
-/// meshes with duplicated-but-coincident vertices still pass.
+/// meshes with duplicated-but-coincident vertices still pass. Internal
+/// faces bound nothing, so they are left out.
 fn volume_is_closed(topo: &yamt::MeshTopology, volume: u32) -> bool {
     // Weld vertices with bit-identical coordinates to one canonical id.
     let mut canonical: HashMap<[u64; 3], u32> = HashMap::new();
@@ -301,7 +302,7 @@ fn volume_is_closed(topo: &yamt::MeshTopology, volume: u32) -> bool {
     };
 
     let mut edge_counts: HashMap<(u32, u32), u32> = HashMap::new();
-    for &(surf, _sense) in &topo.volume_surfaces[volume as usize] {
+    for (surf, _sense) in topo.boundary_surfaces(volume) {
         for i in topo.surface_tri_ranges[surf as usize].clone() {
             let tri = topo.triangles[topo.surface_tri_indices[i as usize] as usize];
             let w = [

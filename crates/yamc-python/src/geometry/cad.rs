@@ -287,6 +287,12 @@ fn write_mesh_file(
 /// does not supply it. Bounding boxes are not stored; they are computed from
 /// the vertices when the file is read.
 ///
+/// ``surface_volumes_json`` gives, for each surface, the 0-based ids of the
+/// volume its triangles' normals point out of and of the one they point into,
+/// ``null`` for the implicit complement. A surface with the same volume in
+/// both is an internal face of that volume: it bounds nothing, and particles
+/// pass it as if it were not there.
+///
 /// ``imprinted=False`` records that the solids were meshed one by one, so
 /// touching solids each have their own surface where they meet;
 /// :class:`MeshGeometry` then tracks the mesh discontinuously, with

@@ -57,9 +57,10 @@ pub fn mesh_geometry_to_geo_mesh(mesh: &crate::geometry::mesh::MeshGeometry) -> 
             .unwrap_or(-1);
         let material_name = mat.and_then(|m| m.get_name().map(|n| n.to_string()));
 
-        // Collect all triangle indices for this volume
+        // The triangles bounding this volume: the viewer places points by
+        // parity over them, which an internal face would only slow down.
         let mut tri_indices = Vec::new();
-        for &(surf_id, _sense) in &topo.volume_surfaces[vol_id] {
+        for (surf_id, _sense) in topo.boundary_surfaces(vol_id as u32) {
             let range = &topo.surface_tri_ranges[surf_id as usize];
             for idx in range.clone() {
                 tri_indices.push(topo.surface_tri_indices[idx as usize]);

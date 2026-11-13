@@ -80,7 +80,9 @@ pub struct MeshTopology {
     pub surface_tri_indices: Vec<TriangleId>,
 
     // -- Volume ↔ Surface relationships --
-    /// Surfaces bounding each volume, with sense.
+    /// Surfaces of each volume, with sense: those bounding it, and its
+    /// internal faces once each way (see [`MeshTopology::is_internal_face`]
+    /// and [`MeshTopology::boundary_surfaces`]).
     pub volume_surfaces: Vec<Vec<(SurfaceId, Sense)>>,
     /// For each surface: `(forward_volume, reverse_volume)`.
     /// Forward = surface normal points outward from this volume.
@@ -131,6 +133,28 @@ pub struct MeshTopology {
     /// in the mesh although the CAD solids do not touch: a real gap, which
     /// relocation must not fill.
     pub separated: Vec<(VolumeId, VolumeId)>,
+}
+
+impl MeshTopology {
+    /// True for an internal face: a surface with the same volume on both
+    /// sides, as a file from another writer can have. It lies inside that
+    /// volume and bounds nothing, so it changes neither which volume a point
+    /// is in, nor where a ray leaves the volume, nor the volume's measure.
+    pub fn is_internal_face(&self, surface: SurfaceId) -> bool {
+        matches!(self.surface_volumes.get(surface as usize), Some((Some(a), Some(b))) if a == b)
+    }
+
+    /// The surfaces bounding `volume`, with sense: its `volume_surfaces` less
+    /// its internal faces.
+    pub fn boundary_surfaces(
+        &self,
+        volume: VolumeId,
+    ) -> impl Iterator<Item = (SurfaceId, Sense)> + '_ {
+        self.volume_surfaces[volume as usize]
+            .iter()
+            .copied()
+            .filter(|&(surface, _)| !self.is_internal_face(surface))
+    }
 }
 
 /// Rank every volume so that, for each `(low, high)` overlap pair, `high`
