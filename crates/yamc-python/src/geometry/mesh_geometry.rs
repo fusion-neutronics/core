@@ -117,7 +117,8 @@ pub struct PyMeshGeometry {
     pub(crate) py_materials: Arc<Vec<Py<PyMaterial>>>,
     /// Current graveyard offset.
     graveyard_offset: Option<f64>,
-    /// Contact tolerance passed by the caller, re-applied on rebuild.
+    /// Contact tolerance passed by the caller, or chosen on load for solids
+    /// touching without a shared surface; re-applied on rebuild.
     contact_tolerance: Option<f64>,
 }
 
@@ -187,27 +188,44 @@ impl PyMeshGeometry {
             pyo3::exceptions::PyValueError::new_err(format!("Invalid mesh '{filename}': {e}"))
         })?;
         let mut mesh = yamt::MeshGeometry::from_topology(topo);
+        let mut contact_tolerance = contact_tolerance;
         if contact_tolerance.is_some() {
             mesh.set_contact_tolerance(contact_tolerance);
         }
+        // Solids that touch or overlap without sharing a surface, in a mesh
+        // tracked conformally. Their facetings can cross where the CAD gap
+        // is thinner than the facets' sag, and conformal tracking hands a
+        // particle leaving one of them into such a crossing to the implicit
+        // complement, where it skips the other solid or is lost. A file that
+        // says it was imprinted (CadToYamc refuses overlaps deeper than its
+        // facetings before writing one) is then tracked discontinuously,
+        // which places the particle in the solid it is in; shared surfaces
+        // still hand over by topology. A file that does not say how it was
+        // made could hold a real overlap, which tracking would then hide, so
+        // it is only warned about.
         if mesh.touches_without_shared_surface(4096) {
             let message = if mesh.topology.imprinted == Some(true) {
+                let tol = mesh
+                    .topology
+                    .contact_tolerance
+                    .unwrap_or_else(|| mesh.default_contact_tolerance());
+                mesh.set_contact_tolerance(Some(tol));
+                contact_tolerance = Some(tol);
                 format!(
                     "'{filename}': the file says its solids were imprinted, but some of them \
-                     touch without sharing a surface, so the imprint did not join them. A \
-                     particle leaving one of these solids is not placed in the solid it \
-                     enters, so tallies come out wrong. Mesh the CAD with imprint=False \
-                     instead, or pass contact_tolerance=<distance in cm> to track this file \
-                     discontinuously, which crosses these contacts but cannot repair anything \
-                     else the imprint got wrong."
+                     touch without sharing a surface, so the imprint did not join them. \
+                     Tracked conformally, a particle leaving one of these solids is not \
+                     placed in the solid it enters, so the file is tracked discontinuously, \
+                     with a contact tolerance of {tol:.3e} cm: shared surfaces still hand \
+                     over by topology. Pass contact_tolerance=<distance in cm> to choose it."
                 )
             } else {
                 format!(
                     "'{filename}': some solids touch without sharing a surface, as in a mesh \
                      made without imprinting, but the file does not say it was made that way. \
                      Tracked as an imprinted mesh, a particle leaving one of these solids is \
-                     not placed in the solid it enters, so tallies come out wrong without any \
-                     lost particles. Pass contact_tolerance=<distance in cm> to track it \
+                     not placed in the solid it enters, so tallies come out wrong or particles \
+                     are lost. Pass contact_tolerance=<distance in cm> to track it \
                      discontinuously."
                 )
             };
@@ -231,17 +249,19 @@ impl PyMeshGeometry {
         })
     }
 
-    /// True when the mesh is tracked discontinuously: its solids were meshed
-    /// one by one without imprinting, so a particle leaving one is placed in
-    /// whichever touching solid contains it rather than read off a shared
-    /// surface.
+    /// True when the mesh is tracked discontinuously: a particle leaving a
+    /// solid through a surface it does not share is placed in whichever
+    /// touching solid contains it, rather than read off the surface. So is a
+    /// mesh whose solids were meshed one by one without imprinting, and an
+    /// imprinted one in which some solids touch without sharing a surface;
+    /// shared surfaces still hand over by topology.
     #[getter]
     pub fn discontinuous(&self) -> bool {
         self.inner.mesh.is_discontinuous()
     }
 
     /// Distance (cm) within which two solids' surfaces count as touching, for
-    /// a discontinuously tracked mesh; ``None`` for an imprinted one.
+    /// a discontinuously tracked mesh; ``None`` for one tracked conformally.
     #[getter]
     pub fn contact_tolerance(&self) -> Option<f64> {
         self.inner.mesh.contact_tolerance()

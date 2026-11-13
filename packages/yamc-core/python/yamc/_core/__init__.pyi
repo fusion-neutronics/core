@@ -2604,16 +2604,18 @@ class MeshGeometry:
     @property
     def discontinuous(self) -> builtins.bool:
         r"""
-        True when the mesh is tracked discontinuously: its solids were meshed
-        one by one without imprinting, so a particle leaving one is placed in
-        whichever touching solid contains it rather than read off a shared
-        surface.
+        True when the mesh is tracked discontinuously: a particle leaving a
+        solid through a surface it does not share is placed in whichever
+        touching solid contains it, rather than read off the surface. So is a
+        mesh whose solids were meshed one by one without imprinting, and an
+        imprinted one in which some solids touch without sharing a surface;
+        shared surfaces still hand over by topology.
         """
     @property
     def contact_tolerance(self) -> typing.Optional[builtins.float]:
         r"""
         Distance (cm) within which two solids' surfaces count as touching, for
-        a discontinuously tracked mesh; ``None`` for an imprinted one.
+        a discontinuously tracked mesh; ``None`` for one tracked conformally.
         """
     @property
     def num_volumes(self) -> builtins.int:
