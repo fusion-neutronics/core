@@ -449,10 +449,10 @@ class CadToYamc:
                 meshing (radians), a number or a per-solid dict as for
                 *tolerance*.  Default 0.2 (~11.5 degrees).
             fidelity_check: Refuse, raising ``MeshFidelityError``, a mesh
-                whose face areas or solid volumes are far from the CAD's, or
-                in which a solid's surface crosses itself (a wall thinner than
-                its facets' sag, meshed at too loose an angular tolerance).
-                Default True.
+                whose face areas or solid volumes are far from the CAD's, in
+                which a solid's surface is open, or in which it crosses itself
+                (a wall thinner than its facets' sag, meshed at too loose an
+                angular tolerance). Default True.
             imprint: Imprint the assembly first, so solids that touch share
                 one surface where they meet (a conformal mesh). ``False``
                 skips the imprint and meshes every solid on its own: much
@@ -759,10 +759,12 @@ class CadToYamc:
 
         if fidelity_check:
             from ._fidelity import (
-                MeshFidelityError, check_mesh_fidelity, check_self_crossing,
+                MeshFidelityError, check_closed, check_mesh_fidelity,
+                check_self_crossing,
             )
 
             problems = check_mesh_fidelity(self._surface_mesh, pa, solid_tolerance)
+            problems += check_closed(self._surface_mesh, solid_tolerance)
             problems += check_self_crossing(
                 self._surface_mesh, solid_angular_tolerance, rayon_threads
             )
@@ -771,7 +773,7 @@ class CadToYamc:
                 raise MeshFidelityError(
                     "Surface mesh deviates grossly from the CAD. "
                     "Transport on such a mesh produces wrong physics, often "
-                    "without losing a particle to show it. Problems:\n  " + detail + "\n"
+                    "without losing a particle. Problems:\n  " + detail + "\n"
                     "Pass fidelity_check=False to bypass this gate."
                 )
 

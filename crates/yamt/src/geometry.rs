@@ -325,31 +325,9 @@ impl MeshGeometry {
 
         // Precompute analytical volumes if not already set (e.g. from Arrow metadata)
         if topo.volume_measures.is_empty() && topo.num_volumes > 0 {
-            // We need the MeshGeometry built first to call measure_volume,
-            // but measure_volume only uses topology data, so we can compute
-            // directly here using the same divergence-theorem logic.
-            let mut measures = Vec::with_capacity(topo.num_volumes as usize);
-            for vol_id in 0..topo.num_volumes {
-                let mut total = 0.0;
-                for &(surf_id, sense) in &topo.volume_surfaces[vol_id as usize] {
-                    let range = &topo.surface_tri_ranges[surf_id as usize];
-                    for i in range.start..range.end {
-                        let tri_id = topo.surface_tri_indices[i as usize];
-                        let tri = &topo.triangles[tri_id as usize];
-                        let v0 = topo.vertices[tri[0] as usize];
-                        let v1 = topo.vertices[tri[1] as usize];
-                        let v2 = topo.vertices[tri[2] as usize];
-                        let contrib =
-                            crate::query::intersect::triangle_volume_contribution(v0, v1, v2);
-                        match sense {
-                            Sense::Forward => total += contrib,
-                            Sense::Reverse => total -= contrib,
-                        }
-                    }
-                }
-                measures.push((total / 6.0).abs());
-            }
-            topo.volume_measures = measures;
+            topo.volume_measures = (0..topo.num_volumes)
+                .map(|vol_id| enclosed_volume(&topo, vol_id))
+                .collect();
         }
 
         let mut geometry = Self {
@@ -417,6 +395,13 @@ impl MeshGeometry {
         }
     }
 
+    /// The contact tolerance (cm) a mesh is tracked discontinuously at when
+    /// its file records none: a ten-thousandth of the diagonal of the box
+    /// around its solids.
+    pub fn default_contact_tolerance(&self) -> f64 {
+        default_contact_tolerance(&self.topology)
+    }
+
     /// The contact tolerance (cm) when tracking is discontinuous, `None` for
     /// imprinted (conformal) tracking.
     pub fn contact_tolerance(&self) -> Option<f64> {
@@ -431,8 +416,9 @@ impl MeshGeometry {
     /// True when some solids touch without sharing a surface, while the mesh
     /// is tracked conformally: some solid's surface, facing the implicit
     /// complement, has another solid right behind it. Conformal tracking
-    /// reads the far side of such a surface as the implicit complement and
-    /// skips the other solid, without losing particles. A mesh made without
+    /// reads the far side of such a surface as the implicit complement, so a
+    /// particle crossing it skips the other solid or, where the two facetings
+    /// cross, is lost. A mesh made without
     /// imprinting is like that throughout; an imprinted one where the imprint
     /// failed to share some faces is like that in places.
     ///
@@ -562,13 +548,7 @@ impl MeshGeometry {
             // Inside the solid, the nearest of its facets is an exit: one query.
             None => match first_facet(false) {
                 Some((prim, t)) if sd.leaves(prim as usize, direction) => Some((prim, t)),
-                // A face with this solid on both sides (an internal face, as a
-                // file from another writer can have) is no way in.
-                Some((prim, t))
-                    if t > self.contact_tolerance
-                        && self.topology.surface_volumes[sd.surf_ids[prim as usize] as usize]
-                            != (Some(volume), Some(volume)) =>
-                {
+                Some((_, t)) if t > self.contact_tolerance => {
                     let here = self.find_volume(origin);
                     if here != volume {
                         return Some((0.0, SurfaceId::MAX, Beyond::Volume(Some(here))));
@@ -1215,23 +1195,7 @@ impl MeshGeometry {
         if (volume as usize) >= self.topology.volume_surfaces.len() {
             return 0.0;
         }
-        let mut total = 0.0;
-        for &(surf_id, sense) in &self.topology.volume_surfaces[volume as usize] {
-            let range = &self.topology.surface_tri_ranges[surf_id as usize];
-            for i in range.start..range.end {
-                let tri_id = self.topology.surface_tri_indices[i as usize];
-                let tri = &self.topology.triangles[tri_id as usize];
-                let v0 = self.topology.vertices[tri[0] as usize];
-                let v1 = self.topology.vertices[tri[1] as usize];
-                let v2 = self.topology.vertices[tri[2] as usize];
-                let contrib = intersect::triangle_volume_contribution(v0, v1, v2);
-                match sense {
-                    Sense::Forward => total += contrib,
-                    Sense::Reverse => total -= contrib,
-                }
-            }
-        }
-        (total / 6.0).abs()
+        enclosed_volume(&self.topology, volume)
     }
 
     /// Compute the area of a mesh surface.
@@ -1285,10 +1249,32 @@ impl MeshGeometry {
 // BVH building helpers
 // ---------------------------------------------------------------------------
 
+/// Volume (cm³) enclosed by the surfaces bounding `volume`, by the
+/// divergence theorem.
+fn enclosed_volume(topo: &MeshTopology, volume: VolumeId) -> f64 {
+    let mut total = 0.0;
+    for (surf_id, sense) in topo.boundary_surfaces(volume) {
+        let range = &topo.surface_tri_ranges[surf_id as usize];
+        for i in range.start..range.end {
+            let tri = &topo.triangles[topo.surface_tri_indices[i as usize] as usize];
+            let v0 = topo.vertices[tri[0] as usize];
+            let v1 = topo.vertices[tri[1] as usize];
+            let v2 = topo.vertices[tri[2] as usize];
+            let contrib = intersect::triangle_volume_contribution(v0, v1, v2);
+            match sense {
+                Sense::Forward => total += contrib,
+                Sense::Reverse => total -= contrib,
+            }
+        }
+    }
+    (total / 6.0).abs()
+}
+
 /// Build per-volume surface BVHs with precomputed triangle data.
 ///
-/// For each volume, collect all triangles on all its surfaces, build
-/// one BVH for ray firing, and precompute edge vectors for each triangle.
+/// For each volume, collect the triangles of the surfaces bounding it (not
+/// its internal faces), build one BVH for ray firing and point location, and
+/// precompute edge vectors for each triangle.
 fn build_surface_bvhs(topo: &MeshTopology) -> Vec<SurfaceBvhData> {
     // Build BVH for each real volume plus the implicit complement.
     // The complement entry (at index num_volumes) was appended to
@@ -1302,7 +1288,7 @@ fn build_surface_bvhs(topo: &MeshTopology) -> Vec<SurfaceBvhData> {
         let ic = topo.implicit_complement;
         let real = |v: Option<VolumeId>| matches!(v, Some(v) if v != ic);
 
-        for &(surf_id, sense) in &topo.volume_surfaces[vol_id as usize] {
+        for (surf_id, sense) in topo.boundary_surfaces(vol_id) {
             let (fwd, rev) = topo.surface_volumes[surf_id as usize];
             let sign: i8 = if !real(fwd) && !real(rev) {
                 0
@@ -1383,7 +1369,7 @@ fn build_overlap_bvhs(topo: &MeshTopology) -> Vec<Option<OverlapBvh>> {
         let mut exit_sign = Vec::new();
         let mut enters = Vec::new();
         for &j in &higher[vol] {
-            for &(surf_id, sense) in &topo.volume_surfaces[j as usize] {
+            for (surf_id, sense) in topo.boundary_surfaces(j) {
                 // Inverted: `leaves` then means the ray enters `j`.
                 let sign: i8 = match sense {
                     Sense::Forward => -1,
@@ -1425,13 +1411,16 @@ fn build_overlap_bvhs(topo: &MeshTopology) -> Vec<Option<OverlapBvh>> {
 }
 
 /// BVH over the triangles of every vacuum-boundary surface, `None` when the
-/// mesh has none.
+/// mesh has none. An internal face bounds nothing, so whatever its tag it is
+/// no way out of the geometry: surface tracking does not meet it either.
 fn build_vacuum_bvh(topo: &MeshTopology) -> Option<VacuumBvh> {
     let mut surfaces: Vec<SurfaceId> = topo
         .physical_data
         .surface_bcs
         .iter()
-        .filter(|&(_, &bc)| bc == BoundaryCondition::Vacuum)
+        .filter(|&(&surf_id, &bc)| {
+            bc == BoundaryCondition::Vacuum && !topo.is_internal_face(surf_id)
+        })
         .map(|(&surf_id, _)| surf_id)
         .collect();
     if surfaces.is_empty() {

@@ -126,6 +126,7 @@ __all__ = [
     "set_transmutation_reactions",
     "simulate_shutdown_dose",
     "solid_contact_samples",
+    "solid_open_edges",
     "solid_overlaps",
     "solid_self_intersections",
     "solid_shared_volume",
@@ -2602,16 +2603,18 @@ class MeshGeometry:
     @property
     def discontinuous(self) -> builtins.bool:
         r"""
-        True when the mesh is tracked discontinuously: its solids were meshed
-        one by one without imprinting, so a particle leaving one is placed in
-        whichever touching solid contains it rather than read off a shared
-        surface.
+        True when the mesh is tracked discontinuously: a particle leaving a
+        solid through a surface it does not share is placed in whichever
+        touching solid contains it, rather than read off the surface. So is a
+        mesh whose solids were meshed one by one without imprinting, and an
+        imprinted one in which some solids touch without sharing a surface;
+        shared surfaces still hand over by topology.
         """
     @property
     def contact_tolerance(self) -> typing.Optional[builtins.float]:
         r"""
         Distance (cm) within which two solids' surfaces count as touching, for
-        a discontinuously tracked mesh; ``None`` for an imprinted one.
+        a discontinuously tracked mesh; ``None`` for one tracked conformally.
         """
     @property
     def num_volumes(self) -> builtins.int:
@@ -2685,8 +2688,10 @@ class MeshGeometry:
         r"""
         Triangle indices belonging to a specific volume.
         
-        Returns the global triangle indices for every surface that bounds
-        the given volume.  These can be used to index into :attr:`triangles`.
+        Returns the global triangle indices for every surface of the given
+        volume: those bounding it, and any internal face (a surface with the
+        volume on both sides, which bounds nothing).  These can be used to
+        index into :attr:`triangles`.
         
         Args:
             volume_id (int): Volume index (0-based).
@@ -5037,12 +5042,12 @@ class SimulationResults:
         ``manifest_sha256`` (the hash of that release's manifest, which pins
         every file in it), ``format_version``, ``offline`` (True when the
         data origin was unreachable and the newest complete cached release was
-        used; always False for a local folder) and ``converter_versions``
-        (every converter that wrote the release's files, with its version, as
-        its manifest lists them, e.g.
-        ``["yamc-convert 0.1.0", "yani-convert 0.1.0"]``; empty in results
-        saved before releases recorded them). Empty when all data came from
-        local directories that are not release folders.
+        used; always False for a local folder) and ``converters``
+        (every build that wrote the release's files, as its manifest lists
+        them: the package, its version and the core commit it was compiled
+        from, e.g. ``["yani-python 0.22.1 (core 250c439e...)"]``; empty for a
+        release published before releases recorded them). Empty when all data
+        came from local directories that are not release folders.
         """
     def __len__(self) -> builtins.int:
         r"""
@@ -6353,11 +6358,11 @@ class TransmutationResults:
         hash of that release's manifest, which pins every file in it),
         ``format_version``, ``offline`` (True when the data origin was
         unreachable and the newest complete cached release was used, always
-        False for a local folder) and ``converter_versions`` (every converter
-        that wrote the release's files, with its version, as its manifest lists
-        them; empty in results recorded before releases listed them). Empty
-        when every data source was a local directory that is not a release
-        folder.
+        False for a local folder) and ``converters`` (every build that
+        wrote the release's files, as its manifest lists them, such as
+        ``"yani-python 0.22.1 (core 250c439e...)"``; empty for a release
+        published before releases listed them). Empty when every data source
+        was a local directory that is not a release folder.
         """
     @property
     def num_steps(self) -> builtins.int:
@@ -8645,7 +8650,24 @@ def generate_library(keyword: builtins.str, path: builtins.str, *, parts: typing
         transmutation_decay_data = "/data/endf-b8.1"
     
     Running it again resumes: finished folders are kept and only the rest are
-    converted. A folder holds one library built by one version of this package.
+    converted. A folder holds one library built by one build of this package:
+    the same version compiled from the same core commit.
+    
+    The build is recorded in the release. ``manifest.json`` carries
+    ``provenance.builder`` (``"yani-python <version>"``),
+    ``provenance.builder_commit`` (the core commit this extension was compiled
+    from, :data:`__commit__`) and ``provenance.builder_dirty``
+    (:data:`__commit_dirty__`), both ``null`` when it was built outside a git
+    checkout, beside ``provenance.njoy``. Every ``version.json`` and
+    ``provenance.json`` carries the same as one ``converter`` stamp, such as
+    ``"yani-python 0.22.1 (core 250c439e...)"``, and the manifest lists each
+    distinct stamp as ``converters``.
+    
+    An extension compiled from a tree with uncommitted changes
+    (``__commit_dirty__`` is ``True``) writes data no commit describes, so it
+    builds only a partial library (``parts``, ``nuclides`` or ``temperatures``
+    given), which is never published. Commit the changes and rebuild to build
+    a whole library.
     
     Some hosts serve their archives only to a web browser (the IAEA's FENDL and
     IRDFF-II files, JAEA's JENDL-5 files). The error then lists each file with
@@ -8700,11 +8722,13 @@ def generate_library(keyword: builtins.str, path: builtins.str, *, parts: typing
     ValueError
         An unknown keyword or part, or bad temperatures.
     RuntimeError
-        The build cannot start (the folder, the NJOY, the disk space, or source
-        files that need a browser), or did not finish: evaluations that failed
-        and are not declared, a gate that failed, or Ctrl-C. Nothing finished is
-        lost, and running again retries only what is left. Each failed
-        evaluation's reason is in ``<path>/.build/failed/``.
+        The build cannot start (an extension compiled from uncommitted changes
+        asked for a whole library, the folder or another build in it, the NJOY,
+        the disk space, or source files that need a browser), or did not
+        finish: evaluations that failed and are not declared, a gate that
+        failed, or Ctrl-C. Nothing finished is lost, and running again retries
+        only what is left. Each failed evaluation's reason is in
+        ``<path>/.build/failed/``.
     """
 
 def get_neutron_cross_section_data() -> typing.Any:
@@ -8833,6 +8857,12 @@ def mesh_to_arrow(path: builtins.str, vertices: typing.Sequence[builtins.float],
     Tet adjacency is computed here from the flat connectivity, so the caller
     does not supply it. Bounding boxes are not stored; they are computed from
     the vertices when the file is read.
+    
+    ``surface_volumes_json`` gives, for each surface, the 0-based ids of the
+    volume its triangles' normals point out of and of the one they point into,
+    ``null`` for the implicit complement. A surface with the same volume in
+    both is an internal face of that volume: it bounds nothing, and particles
+    pass it as if it were not there.
     
     ``imprinted=False`` records that the solids were meshed one by one, so
     touching solids each have their own surface where they meet;
@@ -9261,6 +9291,40 @@ def solid_contact_samples(vertices: typing.Sequence[typing.Sequence[builtins.flo
         ``solid_a``'s surface. A pair whose meshes come close only between
         vertices returns no points, and so does a pair whose meshes share a
         vertex (which lies on both CAD surfaces, so the two touch).
+    """
+
+def solid_open_edges(vertices: typing.Sequence[typing.Sequence[builtins.float]], triangles: typing.Sequence[typing.Sequence[builtins.int]], triangle_surface_ids: typing.Sequence[builtins.int], solid_faces: typing.Sequence[tuple[builtins.int, typing.Sequence[builtins.int]]], face_to_surface_id: typing.Sequence[tuple[builtins.int, builtins.int]], face_solid_reversed: typing.Mapping[tuple[builtins.int, builtins.int], builtins.bool], reach: typing.Mapping[builtins.int, builtins.float], samples: builtins.int = 4) -> builtins.list[tuple[builtins.int, builtins.int, builtins.list[builtins.list[builtins.float]]]]:
+    r"""
+    Solids whose surface mesh is open.
+    
+    Each solid is bounded by the surfaces :func:`cad_mesh_to_arrow` writes it
+    with, their triangles wound outward from it. A closed surface runs along
+    each edge of its triangles as often one way as the other; an edge a
+    solid's triangles run along more often one way is open: the rim of a hole
+    or of a face left one-sided, a face wound the wrong way round, or one side
+    of a crack between two facetings of a CAD edge. A surface with the solid
+    on both sides closes on itself. Cracks are not counted: an open edge with
+    an open edge running back alongside it, within the solid's ``reach``.
+    
+    Args:
+        vertices: Global ``[x, y, z]`` vertex array.
+        triangles: Per-triangle global vertex indices.
+        triangle_surface_ids: 1-based surface id per triangle.
+        solid_faces: ``(solid_id, face_ids)`` pairs in ascending solid order.
+        face_to_surface_id: ``(face_id, surface_id)`` pairs (surface ids 1-based).
+        face_solid_reversed: ``(solid_id, face_id) -> reversed`` orientation map.
+        reach: ``{solid_id: distance}`` within which an open edge running back
+            closes a crack; a solid it does not name has none.
+        samples: Open edges to give the midpoint of per solid at most.
+    
+    Returns:
+        ``[(solid_id, edges, [[x, y, z], ...]), ...]`` for every solid with an
+        open edge outside a crack: how many it has, and the midpoints of the
+        first.
+    
+    Raises:
+        ValueError: If ``triangles`` and ``triangle_surface_ids`` differ in
+            length, or a triangle indexes past ``vertices``.
     """
 
 def solid_overlaps(vertices: typing.Sequence[typing.Sequence[builtins.float]], solids: typing.Sequence[tuple[builtins.int, typing.Sequence[typing.Sequence[builtins.int]]]], depth_tolerance: builtins.float, threads: typing.Optional[builtins.int] = None) -> builtins.list[tuple[builtins.int, builtins.int, builtins.float, builtins.float]]:

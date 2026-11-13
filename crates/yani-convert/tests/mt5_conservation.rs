@@ -98,6 +98,7 @@ fn every_mt5_list_of_every_library_is_checked() {
                 decay_library: String::new(),
                 data_version: "test".to_string(),
                 created_utc: String::new(),
+                converter: String::new(),
             },
         )
         .expect("converts");

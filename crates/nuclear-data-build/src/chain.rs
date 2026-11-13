@@ -71,7 +71,8 @@ fn release_dir() -> &'static str {
 /// Build the chain subsections among `parts` from `materials`, the whole of
 /// the library's identified sources, into the release folder `root`.
 ///
-/// `release` and `created_utc` are the stamps the subsections record.
+/// `release`, `created_utc` and `converter` are the stamps the subsections
+/// record.
 pub fn build(
     materials: &[Material],
     root: &Path,
@@ -79,6 +80,7 @@ pub fn build(
     parts: &[Part],
     release: &str,
     created_utc: &str,
+    converter: &str,
 ) -> Result<Chain, String> {
     let wanted: Vec<Part> = parts.iter().copied().filter(|p| p.is_chain()).collect();
     if wanted.is_empty() {
@@ -97,6 +99,7 @@ pub fn build(
         decay_library: recipe.keyword.to_string(),
         data_version: release.to_string(),
         created_utc: created_utc.to_string(),
+        converter: converter.to_string(),
     };
     let neutron = files_of(materials, Sublibrary::Neutron);
     let decay = files_of(materials, Sublibrary::Decay);

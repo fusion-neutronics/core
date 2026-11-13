@@ -287,6 +287,12 @@ fn write_mesh_file(
 /// does not supply it. Bounding boxes are not stored; they are computed from
 /// the vertices when the file is read.
 ///
+/// ``surface_volumes_json`` gives, for each surface, the 0-based ids of the
+/// volume its triangles' normals point out of and of the one they point into,
+/// ``null`` for the implicit complement. A surface with the same volume in
+/// both is an internal face of that volume: it bounds nothing, and particles
+/// pass it as if it were not there.
+///
 /// ``imprinted=False`` records that the solids were meshed one by one, so
 /// touching solids each have their own surface where they meet;
 /// :class:`MeshGeometry` then tracks the mesh discontinuously, with
@@ -729,6 +735,107 @@ pub fn solid_self_intersections(
             (s.solid, s.pairs, s.max_depth, points)
         })
         .collect())
+}
+
+/// Solids whose surface mesh is open.
+///
+/// Each solid is bounded by the surfaces :func:`cad_mesh_to_arrow` writes it
+/// with, their triangles wound outward from it. A closed surface runs along
+/// each edge of its triangles as often one way as the other; an edge a
+/// solid's triangles run along more often one way is open: the rim of a hole
+/// or of a face left one-sided, a face wound the wrong way round, or one side
+/// of a crack between two facetings of a CAD edge. A surface with the solid
+/// on both sides closes on itself. Cracks are not counted: an open edge with
+/// an open edge running back alongside it, within the solid's ``reach``.
+///
+/// Args:
+///     vertices: Global ``[x, y, z]`` vertex array.
+///     triangles: Per-triangle global vertex indices.
+///     triangle_surface_ids: 1-based surface id per triangle.
+///     solid_faces: ``(solid_id, face_ids)`` pairs in ascending solid order.
+///     face_to_surface_id: ``(face_id, surface_id)`` pairs (surface ids 1-based).
+///     face_solid_reversed: ``(solid_id, face_id) -> reversed`` orientation map.
+///     reach: ``{solid_id: distance}`` within which an open edge running back
+///         closes a crack; a solid it does not name has none.
+///     samples: Open edges to give the midpoint of per solid at most.
+///
+/// Returns:
+///     ``[(solid_id, edges, [[x, y, z], ...]), ...]`` for every solid with an
+///     open edge outside a crack: how many it has, and the midpoints of the
+///     first.
+///
+/// Raises:
+///     ValueError: If ``triangles`` and ``triangle_surface_ids`` differ in
+///         length, or a triangle indexes past ``vertices``.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (
+    vertices,
+    triangles,
+    triangle_surface_ids,
+    solid_faces,
+    face_to_surface_id,
+    face_solid_reversed,
+    reach,
+    samples=4,
+))]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn solid_open_edges(
+    vertices: Vec<[f64; 3]>,
+    triangles: Vec<[u32; 3]>,
+    triangle_surface_ids: Vec<u32>,
+    solid_faces: Vec<(u32, Vec<i64>)>,
+    face_to_surface_id: Vec<(i64, u32)>,
+    face_solid_reversed: HashMap<(u32, i64), bool>,
+    reach: HashMap<u32, f64>,
+    samples: usize,
+) -> PyResult<Vec<(u32, usize, Vec<[f64; 3]>)>> {
+    use yamt::mesh::cad_build::{
+        face_owners, open_volume_edges, surface_volume_pairs, unmatched_edges,
+    };
+
+    if triangles.len() != triangle_surface_ids.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{} triangles but {} triangle surface ids",
+            triangles.len(),
+            triangle_surface_ids.len()
+        )));
+    }
+    if let Some(&v) = triangles
+        .iter()
+        .flatten()
+        .find(|&&v| v as usize >= vertices.len())
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "a triangle indexes vertex {v} of {}",
+            vertices.len()
+        )));
+    }
+    let owners = face_owners(&solid_faces);
+    let surface_volumes = surface_volume_pairs(&face_to_surface_id, &owners, &face_solid_reversed);
+    Ok(
+        open_volume_edges(&triangles, &triangle_surface_ids, &surface_volumes)
+            .into_iter()
+            .filter_map(|(volume, edges)| {
+                let solid_id = volume + 1;
+                let reach = reach.get(&solid_id).copied().unwrap_or(0.0);
+                let edges = unmatched_edges(&vertices, &edges, reach);
+                let points: Vec<[f64; 3]> = edges
+                    .iter()
+                    .take(samples)
+                    .map(|&[a, b]| {
+                        let (p, q) = (vertices[a as usize], vertices[b as usize]);
+                        [
+                            0.5 * (p[0] + q[0]),
+                            0.5 * (p[1] + q[1]),
+                            0.5 * (p[2] + q[2]),
+                        ]
+                    })
+                    .collect();
+                (!edges.is_empty()).then_some((solid_id, edges.len(), points))
+            })
+            .collect(),
+    )
 }
 
 /// Combine per-face triangulations into one welded surface mesh (the compiled

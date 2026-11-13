@@ -49,6 +49,8 @@ yamc-particle = { path = "../yamc-particle" }
 yani = { path = "../yani" }
 # Data generation: the whole reason a yani user never types `import endf`.
 yani-convert = { path = "../yani-convert" }
+# The `converter` stamp every converted folder records (`BuildIdentity`).
+nuclear-data-schema = { path = "../nuclear-data-schema" }
 # Cross sections for the reaction-rate collapse. The transport sections are
 # deliberately not built here: an activation run never reads them.
 yamc-convert = { path = "../yamc-convert" }

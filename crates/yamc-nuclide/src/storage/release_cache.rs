@@ -168,7 +168,7 @@ impl CachedRelease {
             manifest_sha256: self.release.manifest_sha256.clone(),
             format_version: self.release.manifest.format_version,
             offline,
-            converter_versions: self.release.manifest.converter_versions.clone(),
+            converters: self.release.manifest.converters.clone(),
         }
     }
 }

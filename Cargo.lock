@@ -7563,6 +7563,7 @@ version = "0.25.0"
 dependencies = [
  "endf",
  "nuclear-data-build",
+ "nuclear-data-schema",
  "pyo3",
  "pyo3-stub-gen",
  "radiological-material-clearance-finder",

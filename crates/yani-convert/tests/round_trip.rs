@@ -50,6 +50,7 @@ fn provenance() -> yani_convert::Provenance {
         decay_library: String::new(),
         data_version: "2026-08-09.1".to_string(),
         created_utc: "2026-08-09T00:00:00+00:00".to_string(),
+        converter: "yani-python 0.22.1 (core 0123abc)".to_string(),
     }
 }
 
@@ -599,6 +600,8 @@ fn convert_transmutation_writes_a_complete_directory() {
         assert_eq!(v["subsection"], subsection);
         assert_eq!(v["library"], "endf-b8.1");
         assert_eq!(v["data_version"], "2026-08-09.1");
+        assert_eq!(v["converter"], "yani-python 0.22.1 (core 0123abc)");
+        assert!(v.get("converter_version").is_none());
     }
 
     let manifest: serde_json::Value = serde_json::from_str(
@@ -610,6 +613,7 @@ fn convert_transmutation_writes_a_complete_directory() {
         nuclear_data_schema::FORMAT_VERSION
     );
     assert_eq!(manifest["data_version"], "2026-08-09.1");
+    assert_eq!(manifest["converter"], "yani-python 0.22.1 (core 0123abc)");
     for subsection in ["decay", "reactions", "fission_yields"] {
         assert_eq!(
             manifest["subsections"][subsection]["path"], subsection,

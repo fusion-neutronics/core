@@ -1,11 +1,12 @@
 """A run on a library keyword records, for each library it read, the
-published release and the converters that wrote it: ``converter_versions``,
-as the release's manifest lists them.
+published release and the builds that wrote it: ``converters``, as the
+release's manifest lists them.
 
 End-to-end network tests against the published data. They skip when it is
 unavailable (offline with an empty cache), and compare each record with the
-manifest the run cached, so they hold for whichever release is current; the
-2026-10-12.1 values are pinned as well.
+manifest the run cached, so they hold for whichever release is current. A
+release published before the build stamps lists no ``converters`` and
+records an empty list.
 """
 
 import json
@@ -15,19 +16,15 @@ import pytest
 
 import yamc
 
-# What the 2026-10-12.1 manifest of every keyword yamc resolves lists.
-CONVERTERS_2026_10_12_1 = ["yamc-convert 0.1.0", "yani-convert 0.1.0"]
-KEYS = {"release", "manifest_sha256", "format_version", "offline", "converter_versions"}
+KEYS = {"release", "manifest_sha256", "format_version", "offline", "converters"}
 
 
 def _check(keyword, record):
-    """`record` names the release the run read and the converters its manifest lists."""
+    """`record` names the release the run read and the builds its manifest lists."""
     assert set(record) == KEYS
     manifest = Path(yamc.cache_dir()) / keyword / record["release"] / "manifest.json"
-    listed = json.loads(manifest.read_text()).get("converter_versions", [])
-    assert record["converter_versions"] == listed
-    if record["release"] == "2026-10-12.1":
-        assert record["converter_versions"] == CONVERTERS_2026_10_12_1
+    listed = json.loads(manifest.read_text()).get("converters", [])
+    assert record["converters"] == listed
 
 
 def _run(run):

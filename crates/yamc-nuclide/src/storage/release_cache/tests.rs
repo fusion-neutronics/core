@@ -114,14 +114,14 @@ impl Origin {
         self.publish_listing(keyword, release, files, Some(&["test"]));
     }
 
-    /// [`Origin::publish`], with the manifest's `converter_versions` given,
+    /// [`Origin::publish`], with the manifest's `converters` given,
     /// or left out for `None`.
     fn publish_listing(
         &self,
         keyword: &str,
         release: &str,
         files: &[(&str, &[u8])],
-        converter_versions: Option<&[&str]>,
+        converters: Option<&[&str]>,
     ) {
         let entries: Vec<serde_json::Value> = files
             .iter()
@@ -138,8 +138,8 @@ impl Origin {
             "created": "2026-10-01T00:00:00Z",
             "files": entries,
         });
-        if let Some(converters) = converter_versions {
-            manifest["converter_versions"] = serde_json::json!(converters);
+        if let Some(converters) = converters {
+            manifest["converters"] = serde_json::json!(converters);
         }
         let manifest = serde_json::to_vec(&manifest).unwrap();
         self.put(&format!("{keyword}/{release}/manifest.json"), &manifest);
@@ -727,10 +727,13 @@ fn a_stale_pointer_at_the_edge_does_not_decide_the_release() {
     );
 }
 
-/// The converters that wrote the 2026-10-12.1 releases, as their manifests
-/// list them: every keyword core resolves, and the chain-only irdff-ii.
-const CONVERTERS_2026_10_12_1: [&str; 2] = ["yamc-convert 0.1.0", "yani-convert 0.1.0"];
-const IRDFF_II_CONVERTERS_2026_10_12_1: [&str; 1] = ["yani-convert 0.1.0"];
+/// The builds that wrote a release, as its manifest lists them: a full
+/// library, and the chain-only irdff-ii.
+const CONVERTERS: [&str; 2] = [
+    "yani-python 0.22.1 (core 1111111)",
+    "yani-python 0.22.1 (core 2222222)",
+];
+const IRDFF_II_CONVERTERS: [&str; 1] = ["yani-python 0.22.1 (core 1111111)"];
 
 /// A run records the converters its release's manifest lists, online and
 /// from the cache when the origin is out of reach.
@@ -742,12 +745,7 @@ fn a_run_records_the_converters_that_wrote_its_release() {
         .iter()
         .map(|(p, b)| (p.as_str(), b.as_slice()))
         .collect();
-    origin.publish_listing(
-        "endf-b8.1",
-        "2026-10-12.1",
-        &files,
-        Some(&CONVERTERS_2026_10_12_1),
-    );
+    origin.publish_listing("endf-b8.1", "2026-10-12.1", &files, Some(&CONVERTERS));
     let root = Scratch::new("converters");
 
     let online = registry(&origin.url, &root);
@@ -757,13 +755,13 @@ fn a_run_records_the_converters_that_wrote_its_release() {
         (record.release.as_str(), record.offline),
         ("2026-10-12.1", false)
     );
-    assert_eq!(record.converter_versions, CONVERTERS_2026_10_12_1);
+    assert_eq!(record.converters, CONVERTERS);
 
     let offline = registry(&dead_origin(), &root);
     fetch(&offline, "Fe56").expect("from the cache");
     let record = &offline.data_releases()["endf-b8.1"];
     assert!(record.offline);
-    assert_eq!(record.converter_versions, CONVERTERS_2026_10_12_1);
+    assert_eq!(record.converters, CONVERTERS);
 }
 
 /// A library that publishes only a transmutation subsection, as irdff-ii
@@ -775,14 +773,14 @@ fn a_chain_only_library_records_its_converter() {
         "irdff-ii",
         "2026-10-12.1",
         &[("transmutation/branching.arrow/branching.arrow", b"b")],
-        Some(&IRDFF_II_CONVERTERS_2026_10_12_1),
+        Some(&IRDFF_II_CONVERTERS),
     );
     let root = Scratch::new("converters-irdff");
     let reg = registry(&origin.url, &root);
     fetch_subsection(&reg, "irdff-ii", "branching").expect("published");
     assert_eq!(
-        reg.data_releases()["irdff-ii"].converter_versions,
-        IRDFF_II_CONVERTERS_2026_10_12_1
+        reg.data_releases()["irdff-ii"].converters,
+        IRDFF_II_CONVERTERS
     );
 }
 
@@ -802,14 +800,12 @@ fn a_release_whose_manifest_lists_no_converters_records_an_empty_list() {
 
     let online = registry(&origin.url, &root);
     fetch(&online, "Fe56").expect("download");
-    assert!(online.data_releases()["endf-b8.1"]
-        .converter_versions
-        .is_empty());
+    assert!(online.data_releases()["endf-b8.1"].converters.is_empty());
 
     let offline = registry(&dead_origin(), &root);
     fetch(&offline, "Fe56").expect("from the cache");
     let record = &offline.data_releases()["endf-b8.1"];
-    assert!(record.offline && record.converter_versions.is_empty());
+    assert!(record.offline && record.converters.is_empty());
 }
 
 /// The offline choice is the newest cached release holding every file the
@@ -989,7 +985,8 @@ fn origin_serves_a_readable_release_for_every_keyword() {
 /// A run against the live origin records the converters its release's
 /// manifest lists, for a full library (endf-b8.1) and for the chain-only
 /// irdff-ii, each read through a transmutation subsection into an empty cache.
-/// For the 2026-10-12.1 releases they are the values published then.
+/// A release published before the build stamps lists none under
+/// `converters`, and records an empty list.
 ///
 /// Ignored by default because it needs the network and downloads about 7 MB:
 ///   cargo test -p yamc-nuclide --features download-tls --lib -- \
@@ -1003,10 +1000,7 @@ fn a_run_on_the_live_origin_records_its_converters() {
         Some(root.0.clone()),
         Timeouts::DEFAULT,
     );
-    for (keyword, expected_2026_10_12_1) in [
-        ("endf-b8.1", &CONVERTERS_2026_10_12_1[..]),
-        ("irdff-ii", &IRDFF_II_CONVERTERS_2026_10_12_1[..]),
-    ] {
+    for keyword in ["endf-b8.1", "irdff-ii"] {
         fetch_subsection(&reg, keyword, "branching").expect("download");
         let record = &reg.data_releases()[keyword];
         assert!(!record.offline, "{keyword}: the origin was not reached");
@@ -1014,17 +1008,15 @@ fn a_run_on_the_live_origin_records_its_converters() {
             &fs::read(root.0.join(keyword).join(&record.release).join(MANIFEST)).unwrap(),
         )
         .unwrap();
+        let listed = manifest.get("converters").cloned();
         assert_eq!(
-            serde_json::json!(record.converter_versions),
-            manifest["converter_versions"],
+            serde_json::json!(record.converters),
+            listed.unwrap_or(serde_json::json!([])),
             "{keyword}: the record is the manifest's list"
         );
-        if record.release == "2026-10-12.1" {
-            assert_eq!(record.converter_versions, expected_2026_10_12_1);
-        }
         println!(
-            "{keyword}: release {} converter_versions {:?}",
-            record.release, record.converter_versions
+            "{keyword}: release {} converters {:?}",
+            record.release, record.converters
         );
     }
 }

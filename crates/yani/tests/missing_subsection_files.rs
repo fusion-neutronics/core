@@ -43,7 +43,7 @@ fn exported(tag: &str) -> PathBuf {
             .collect();
     let dir = std::env::temp_dir().join(format!("yani-missing-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    export_chain_parts(&chain, &dir, Some("test")).expect("export");
+    export_chain_parts(&chain, &dir, Some("test"), "test").expect("export");
     dir
 }
 

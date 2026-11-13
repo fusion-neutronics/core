@@ -3,8 +3,10 @@
 Tracking on a mesh crosses from one solid into the next only through a
 surface the two share. Two touching cubes that each carry their own closed
 surface meet along two surfaces, so a particle leaving one is read into the
-implicit complement and never enters the other: wrong tallies, no lost
-particles. Loading such a mesh warns.
+implicit complement and never enters the other; where the two facetings
+cross, the particle can be lost. Loading such a mesh warns. One whose file
+says it was imprinted is tracked discontinuously, which places the particle
+in the solid it enters.
 
 ``solid_overlaps`` is the mesh-level overlap check ``CadToYamc.mesh`` runs
 before export; it is tested here directly, without cadquery.
@@ -32,9 +34,9 @@ def _box(x0, x1, y0, y1, z0, z1):
 GROUPS = '{"1": {"name": "mat:a", "dim": 3}, "2": {"name": "mat:b", "dim": 3}}'
 
 
-def _write_two_cubes(path, x_b):
+def _write_two_cubes(path, x_b, imprinted=None):
     """Two 10 cm cubes, the second starting at x = *x_b*, each with its own
-    closed surface."""
+    closed surface; *imprinted* is what the file says of them."""
     va, ta = _box(0, 10, 0, 10, 0, 10)
     vb, tb = _box(x_b, x_b + 10, 0, 10, 0, 10)
     vertices = [c for v in va + vb for c in v]
@@ -48,6 +50,7 @@ def _write_two_cubes(path, x_b):
         [1] * n + [2] * n,
         physical_groups_json=GROUPS,
         surface_volumes_json="[[0, null], [1, null]]",
+        imprinted=imprinted,
     )
 
 
@@ -92,6 +95,64 @@ def test_slightly_overlapping_solids_without_a_shared_surface_warn(tmp_path):
     _write_two_cubes(path, 9.99)
     with pytest.warns(UserWarning, match="touch without sharing a surface"):
         yamc.MeshGeometry(path, {}, graveyard_offset=1.0)
+
+
+def _track_length_in_b(path, contact_tolerance=None):
+    """Lost histories and the track length in cube b per history, for a
+    beam along +x from the middle of cube a, through near-void Li6."""
+    a, b = (
+        yamc.Material(composition={"Li6": 1.0}, density=1e-9, name=n, temperature=294)
+        for n in "ab"
+    )
+    for m in (a, b):
+        m.read_nuclear_data({"Li6": "tests/Li6.arrow"})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        geometry = yamc.MeshGeometry(
+            path, {"a": a, "b": b}, graveyard_offset=1.0, contact_tolerance=contact_tolerance
+        )
+    tally = yamc.Tally(scores=["flux"], materials=b, name="b")
+    source = yamc.NeutronSource(
+        position=(5.0, 5.0, 5.0),
+        energy=14.06e6,
+        direction=yamc.sources.Monodirectional([1.0, 0.0, 0.0]),
+    )
+    model = yamc.Model(geometry=geometry, tallies=[tally], source=source,
+                       max_lost_particles=1000)
+    results = model.simulate_transport(total_particles=100, seed=1)
+    return len(model.lost_particles), results[tally].mean[0]
+
+
+@pytest.mark.parametrize("x_b", [10.0, 9.99])
+def test_a_particle_enters_a_solid_the_imprint_did_not_join(tmp_path, x_b):
+    """Touching, or overlapping by a sliver as two facetings of one CAD
+    surface can: the beam runs on through cube b from where it leaves a."""
+    path = str(tmp_path / "cubes.arrow")
+    _write_two_cubes(path, x_b, imprinted=True)
+    with pytest.warns(UserWarning, match="tracked discontinuously"):
+        geometry = yamc.MeshGeometry(path, {}, graveyard_offset=1.0)
+    assert geometry.discontinuous
+    lost, in_b = _track_length_in_b(path)
+    assert lost == 0
+    assert in_b == pytest.approx(x_b, abs=1e-6)
+
+
+def test_a_file_that_does_not_say_how_it_was_made_is_only_warned_about(tmp_path):
+    """It could hold a real overlap, which discontinuous tracking would hide."""
+    path = str(tmp_path / "cubes.arrow")
+    _write_two_cubes(path, 9.99)
+    with pytest.warns(UserWarning, match="does not say it was made that way"):
+        geometry = yamc.MeshGeometry(path, {}, graveyard_offset=1.0)
+    assert not geometry.discontinuous
+    assert geometry.contact_tolerance is None
+
+
+def test_a_contact_tolerance_given_is_kept(tmp_path):
+    path = str(tmp_path / "cubes.arrow")
+    _write_two_cubes(path, 9.99, imprinted=True)
+    geometry = yamc.MeshGeometry(path, {}, graveyard_offset=1.0, contact_tolerance=0.5)
+    assert geometry.contact_tolerance == 0.5
+    assert _track_length_in_b(path, contact_tolerance=0.5) == (0, pytest.approx(9.99, abs=1e-6))
 
 
 @pytest.mark.parametrize("writer", ["apart", "shared"])

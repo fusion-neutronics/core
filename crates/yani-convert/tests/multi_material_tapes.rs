@@ -52,6 +52,7 @@ fn provenance() -> yani_convert::Provenance {
         decay_library: String::new(),
         data_version: "2026-10-23".to_string(),
         created_utc: "2026-10-23T00:00:00+00:00".to_string(),
+        converter: String::new(),
     }
 }
 

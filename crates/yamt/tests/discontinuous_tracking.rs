@@ -669,11 +669,11 @@ fn a_particle_outside_its_solid_is_not_carried_to_a_far_overlap() {
 }
 
 #[test]
-fn an_internal_face_does_not_move_a_particle_out_of_its_solid() {
+fn a_particle_passes_an_internal_face_and_leaves_its_solid_beyond_it() {
     // One solid, the unit box, with an internal face at z = 0.5 that has the
-    // box on both sides, as a file from another writer can have; the face is
-    // in the solid's surface list twice, once each way. Crossing it, whichever
-    // copy the ray meets first, the particle stays in the box.
+    // box on both sides, as a file from another writer can have. The face
+    // bounds nothing, so however it is wound, a particle below it passes it
+    // and leaves the box through its top, into the implicit complement.
     for flip in [false, true] {
         let mut vertices = Vec::new();
         let mut triangles = Vec::new();
@@ -730,7 +730,7 @@ fn an_internal_face_does_not_move_a_particle_out_of_its_solid() {
                 ];
                 let (t, cell) = next(&geom, 0, p, dir);
                 assert!(
-                    t > 0.0 && cell == Some(0),
+                    (t - 0.75 * n).abs() < 1e-12 && cell == Some(geom.implicit_complement()),
                     "flip {flip}, from {p:?}: {t} into {cell:?}"
                 );
             }

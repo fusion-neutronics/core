@@ -113,7 +113,7 @@ pub fn convert_photonuclear(
         "format_version": FORMAT_VERSION,
         "particle": "photonuclear",
         "scope": "evaluated",
-        "converter_version": concat!("yamc-convert ", env!("CARGO_PKG_VERSION")),
+        "converter": provenance.converter,
         "library": provenance.library,
         "data_version": provenance.data_version,
         "created_utc": provenance.created_utc,

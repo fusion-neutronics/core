@@ -48,3 +48,14 @@ def test_the_download_cache_is_refused():
     with pytest.raises(RuntimeError, match="inside the nuclear data cache"):
         yani.generate_library("fendl-3.2d", str(inside))
     assert not inside.exists()
+
+
+def test_a_whole_library_from_uncommitted_changes_is_refused(tmp_path):
+    # Only a build compiled from a tree with changes can show the refusal; a
+    # clean build or one outside git (the CI wheels) builds as usual.
+    if not yani.__commit_dirty__:
+        pytest.skip("this extension was not compiled from uncommitted changes")
+    root = tmp_path / "irdff-ii"
+    with pytest.raises(RuntimeError, match="uncommitted changes"):
+        yani.generate_library("irdff-ii", str(root))
+    assert not root.exists()

@@ -124,10 +124,11 @@ impl PyChain {
     ///
     /// Args:
     ///     path (str): Output directory path.
-    pub fn export_to_arrow(&self, path: &str) -> PyResult<()> {
-        yani::export_chain_parts(&self.inner, path, self.library.as_deref()).map_err(|e| {
-            pyo3::exceptions::PyIOError::new_err(format!("Failed to export chain: {e}"))
-        })
+    pub fn export_to_arrow(&self, py: Python<'_>, path: &str) -> PyResult<()> {
+        let converter = crate::build_identity::converter(py);
+        yani::export_chain_parts(&self.inner, path, self.library.as_deref(), &converter).map_err(
+            |e| pyo3::exceptions::PyIOError::new_err(format!("Failed to export chain: {e}")),
+        )
     }
 
     /// Half-lives of the unstable nuclides in the chain.

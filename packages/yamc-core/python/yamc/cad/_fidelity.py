@@ -26,7 +26,13 @@ Tolerances scale with the requested deflection so legitimately coarse
 meshes of small parts do not trip the gate; a collapsed solid is refused
 whatever the deflection.
 
-A third check needs no CAD: every solid's closed boundary must not cross
+Two more checks need no CAD. Every solid's boundary must be closed, short of
+the cracks two facetings of an edge can leave (see check_closed): the volume
+check cannot be relied on to see an opening, since the divergence-theorem
+volume of an open surface depends on the point it is taken from. A face
+inside a box, meshed as a boundary with the implicit complement, left the box
+6% large, inside the allowance, while transport lost the particles crossing
+the face. And every solid's closed boundary must not cross
 itself (see check_self_crossing). A wall thinner than the faceting, meshed at
 a loose angular tolerance, can have its two faces cut through each other over
 a strip, which barely moves the volume but puts the solid's boundary in the
@@ -52,7 +58,7 @@ from OCP.TopExp import TopExp_Explorer
 from OCP.TopoDS import TopoDS
 from OCP.gp import gp_Pnt
 
-from yamc._core import solid_self_intersections
+from yamc._core import solid_open_edges, solid_self_intersections
 
 from ._overlap import _name, _solid_triangles
 from ._scene_extract import _SEAM_WELD_REL_TOL
@@ -311,6 +317,40 @@ def _lying_facets(triangles):
 def _extent(vertices):
     """The longest side of the box around *vertices*."""
     return max(max(v[i] for v in vertices) - min(v[i] for v in vertices) for i in range(3))
+
+
+def check_closed(mesh, tolerance):
+    """Solids of *mesh* (SurfaceMesh) whose surface is open, each bounded by
+    the surfaces it is written with.
+
+    The two faces on a CAD edge can leave a crack along it rather than share
+    their vertices, no wider than the two facetings of the edge are apart:
+    twice the deflection. Such a crack is not reported.
+
+    Args:
+        mesh: SurfaceMesh from the assembler.
+        tolerance: ``{solid_id: deflection}``, the chordal deflection each
+            solid was meshed at.
+
+    Returns:
+        List of human-readable problem strings (empty when every solid's
+        surface is closed).
+    """
+    return [
+        f"{_name(mesh, sid)}: its surface is open ({edges} edges of its facets "
+        f"with no facet running back along them, one near ({x:.4g}, {y:.4g}, "
+        f"{z:.4g})): transport loses particles that cross there"
+        for sid, edges, [(x, y, z)] in solid_open_edges(
+            mesh.vertices,
+            mesh.triangles,
+            mesh.triangle_surface_ids,
+            list(mesh.solid_faces.items()),
+            list(mesh.face_to_surface_id.items()),
+            mesh.face_solid_reversed,
+            {sid: 2.0 * deflection for sid, deflection in tolerance.items()},
+            samples=1,
+        )
+    ]
 
 
 def check_self_crossing(mesh, angular_tolerance, threads=None):

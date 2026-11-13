@@ -155,6 +155,7 @@ pub fn convert_transmutation(
         decay_library: decay_library.to_string(),
         data_version: data_version.to_string(),
         created_utc: created_utc.map(str::to_string).unwrap_or_default(),
+        converter: crate::build_identity::converter(py),
     };
 
     detached(py, || {
@@ -298,6 +299,7 @@ pub fn convert_branching(
         decay_library: decay_library.to_string(),
         data_version: data_version.to_string(),
         created_utc: created_utc.map(str::to_string).unwrap_or_default(),
+        converter: crate::build_identity::converter(py),
     };
 
     let stats = detached(py, || {
@@ -440,6 +442,7 @@ pub fn convert_neutron_xs(
         library: library.to_string(),
         data_version: data_version.to_string(),
         created_utc: created_utc.map(str::to_string).unwrap_or_default(),
+        converter: crate::build_identity::converter(py),
     };
 
     detached(py, || {
@@ -527,6 +530,7 @@ pub fn convert_neutron_transport(
         library: library.to_string(),
         data_version: data_version.to_string(),
         created_utc: created_utc.map(str::to_string).unwrap_or_default(),
+        converter: crate::build_identity::converter(py),
     };
 
     detached(py, || {
@@ -561,6 +565,7 @@ pub fn convert_photonuclear(
         library: library.to_string(),
         data_version: data_version.to_string(),
         created_utc: created_utc.map(str::to_string).unwrap_or_default(),
+        converter: crate::build_identity::converter(py),
     };
     detached(py, || {
         yamc_convert::photonuclear::convert_photonuclear(
@@ -655,6 +660,7 @@ pub fn convert_photon(
         library: library.to_string(),
         data_version: data_version.to_string(),
         created_utc: created_utc.map(str::to_string).unwrap_or_default(),
+        converter: crate::build_identity::converter(py),
     };
 
     detached(py, || {

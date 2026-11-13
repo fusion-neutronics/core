@@ -92,6 +92,9 @@ pub struct Options<'a> {
     pub library: &'a str,
     /// The release stamp every folder records.
     pub release: &'a str,
+    /// The `converter` stamp every folder records: what built it, from
+    /// [`nuclear_data_schema::BuildIdentity::stamp`].
+    pub converter: &'a str,
     /// The NJOY to run for neutron evaluations.
     pub njoy_exec: &'a str,
     /// Temperatures in Kelvin for the neutron data.
@@ -511,20 +514,22 @@ fn thermal_jobs(
 }
 
 /// The element symbols MF=7 MT=451 names, or `None` when the evaluation has
-/// no such section.
+/// no such section. Read from MT=451 alone, so a file whose law the reader
+/// refuses (or that the converter cuts to its first temperature) still names
+/// its atoms.
 fn mt451_elements(path: &Path) -> Result<Option<BTreeSet<String>>, String> {
     let material =
         endf::Material::from_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let Some(zas) = endf::ThermalScattering::from_endf(&material)
-        .map_err(|e| format!("{}: {e}", path.display()))?
-        .atom_zas()
-    else {
+    let Some(mt451) = material.mf7_mt451() else {
         return Ok(None);
     };
     Ok(Some(
-        zas.iter()
-            .filter_map(|za| {
-                usize::try_from(za / 1000)
+        mt451
+            .elements
+            .iter()
+            .flat_map(|e| e.zai.iter())
+            .filter_map(|&za| {
+                usize::try_from(za as i64 / 1000)
                     .ok()
                     .and_then(|z| endf::data::ATOMIC_SYMBOL.get(z))
                     .map(|s| s.to_string())
@@ -583,6 +588,7 @@ fn convert_one(job: &Job, path: &Path, options: &Options) -> Result<(), String> 
         library: options.library.to_string(),
         data_version: options.release.to_string(),
         created_utc: release::utc_timestamp(std::time::SystemTime::now())?,
+        converter: options.converter.to_string(),
     };
     let written: Vec<PathBuf> = match job.particle {
         Particle::Neutron => {

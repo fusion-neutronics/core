@@ -345,16 +345,18 @@ impl MeshGeometry {
 
     /// True when the mesh has a surface with a vacuum boundary condition
     /// (a `graveyard_offset` box or a `boundary:vacuum` group) or a vacuum
-    /// box added by [`Self::add_graveyard`].
+    /// box added by [`Self::add_graveyard`]. An internal face bounds nothing,
+    /// so its tag does not count.
     pub fn has_vacuum_boundary(&self) -> bool {
+        let topo = &self.mesh.topology;
         self.graveyard.is_some()
-            || self
-                .mesh
-                .topology
+            || topo
                 .physical_data
                 .surface_bcs
-                .values()
-                .any(|&bc| bc == yamt::BoundaryCondition::Vacuum)
+                .iter()
+                .any(|(&surface, &bc)| {
+                    bc == yamt::BoundaryCondition::Vacuum && !topo.is_internal_face(surface)
+                })
     }
 
     /// True when the implicit complement carries a material.

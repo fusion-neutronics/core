@@ -89,7 +89,7 @@ fn continuum_chain() -> std::path::PathBuf {
     });
     let dir = std::env::temp_dir().join(format!("yamc-d1s-continuum-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    yani::export_chain_parts(&chain, &dir, Some("endf-b8.1")).expect("export the chain");
+    yani::export_chain_parts(&chain, &dir, Some("endf-b8.1"), "test").expect("export the chain");
     dir
 }
 

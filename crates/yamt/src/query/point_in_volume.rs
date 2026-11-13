@@ -212,9 +212,7 @@ const MAX_INLINE_HITS: usize = 64;
 /// Every crossing counts, however close to the next. A ray through an edge
 /// that both facets would report is not counted at all, so two crossings a
 /// hair apart are two: a ray clipping a corner of the surface, entering and
-/// leaving, or a face with the volume on both sides, whose facets come twice
-/// in the volume's surface, once each way. Taken as one, either flips the
-/// parity.
+/// leaving. Taken as one, they flip the parity.
 fn count_crossings_bvh(
     surface_bvh: &Bvh,
     tri_v0: &[[f64; 3]],

@@ -63,19 +63,16 @@ fn arrow_writer_roundtrip() {
     if tmp.exists() {
         std::fs::remove_dir_all(&tmp).unwrap();
     }
-    export_chain_arrow(&original, &tmp, Some("endf-b8.1")).expect("export");
+    let converter = "yani-python 0.22.1 (core 0123abc)";
+    export_chain_arrow(&original, &tmp, Some("endf-b8.1"), converter).expect("export");
 
-    // version.json should record the real library + the yani version (not "unknown").
+    // version.json records the real library (not "unknown") and the build
+    // that wrote it.
     let version_json =
         std::fs::read_to_string(tmp.join("version.json")).expect("read version.json");
-    assert!(
-        version_json.contains("\"library\": \"endf-b8.1\""),
-        "version.json should carry the library: {version_json}"
-    );
-    assert!(
-        version_json.contains(env!("CARGO_PKG_VERSION")),
-        "version.json should carry the yani version: {version_json}"
-    );
+    let version: serde_json::Value = serde_json::from_str(&version_json).expect("JSON");
+    assert_eq!(version["library"], "endf-b8.1", "{version_json}");
+    assert_eq!(version["converter"], converter, "{version_json}");
 
     let mut reparsed = parse_chain_arrow(&tmp).expect("reparse");
     std::fs::remove_dir_all(&tmp).ok();
