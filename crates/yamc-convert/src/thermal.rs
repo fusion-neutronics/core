@@ -89,11 +89,6 @@ type ElasticRow = (
     Option<(f64, f64)>,
 );
 
-/// How far the elastic part may stray from what NJOY wrote, relative: far
-/// above the rounding of a PENDF tape, far below any convention mix-up (a
-/// factor of `nmix` or of M0).
-const NJOY_TOLERANCE: f64 = 1e-4;
-
 fn same(a: f64, b: f64) -> bool {
     (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0)
 }
@@ -348,10 +343,16 @@ impl Prepared {
     /// factor at every edge ACER kept, and the incoherent cross section at
     /// every energy of its grid. The closed forms are kept rather than ACER's
     /// equiprobable cosines, so this is what holds them to NJOY's conventions.
-    pub fn check_against_njoy(&self) -> Result<(), Box<dyn Error>> {
+    ///
+    /// `tolerance` is the relative difference allowed, and is the fractional
+    /// tolerance the deck gave THERMR (`error`): NJOY builds the elastic part
+    /// it writes only to that accuracy, so the closed form, which is exact,
+    /// cannot be held closer to it. That is still far below any convention
+    /// mix-up (a factor of `nmix` or of M0).
+    pub fn check_against_njoy(&self, tolerance: f64) -> Result<(), Box<dyn Error>> {
         use endf::thermal_ace::AceElastic;
         let off = |what: &str, e: f64, ours: f64, njoy: f64| -> Result<(), String> {
-            if (ours - njoy).abs() > NJOY_TOLERANCE * njoy.abs().max(ours.abs()) {
+            if (ours - njoy).abs() > tolerance * njoy.abs().max(ours.abs()) {
                 return Err(format!(
                     "{}: {what} at {e} eV is {ours}, NJOY wrote {njoy}",
                     self.name
@@ -515,6 +516,7 @@ pub fn convert_thermal(
     std::fs::create_dir_all(output_dir)?;
     let mut laws = Vec::new();
     let mut aces = Vec::new();
+    let error = endf::njoy::ThermalAceOptions::default().error;
     for file in source.thermal {
         let material = Material::from_file(file).map_err(|e| format!("{}: {e}", file.display()))?;
         let law = ThermalScattering::from_endf(&material)?;
@@ -527,6 +529,7 @@ pub fn convert_thermal(
             nmix: source.nmix,
             output_dir: work.path().to_path_buf(),
             njoy_exec: source.njoy_exec.to_string(),
+            error,
             ..Default::default()
         };
         let ace = endf::njoy::make_ace_thermal(source.neutron, &neutron, file, &material, &options)
@@ -552,7 +555,7 @@ pub fn convert_thermal(
         laws,
         aces,
     )?;
-    prepared.check_against_njoy()?;
+    prepared.check_against_njoy(error)?;
     let dir = output_dir.join(format!("{}.arrow", source.name));
     if dir.exists() {
         std::fs::remove_dir_all(&dir)?;
@@ -926,26 +929,47 @@ mod tests {
     fn the_elastic_part_agrees_with_what_njoy_writes() {
         // SiO2: coherent, three atom types (nmix = 3).
         prepared_against_njoy(SIO2, 3.0, 3)
-            .check_against_njoy()
+            .check_against_njoy(1e-3)
             .unwrap();
         // Solid CH4: incoherent with four principal atoms (M0 = 4).
         assert_eq!(law(S_CH4).principal_count, 4.0);
         prepared_against_njoy(S_CH4, 1.0, 1)
-            .check_against_njoy()
+            .check_against_njoy(1e-3)
             .unwrap();
         prepared_against_njoy(ZR_ZRH, 1.0, 1)
-            .check_against_njoy()
+            .check_against_njoy(1e-3)
             .unwrap();
+    }
+
+    #[test]
+    fn the_check_allows_what_the_deck_allows_thermr_and_no_more() {
+        use endf::thermal_ace::AceElastic;
+        // NJOY's Bragg factors off by `d`, relative, as a THERMR built to a
+        // tolerance of 0.1% may write them.
+        let off_by = |d: f64| {
+            let mut p = prepared_against_njoy(SIO2, 3.0, 3);
+            for t in &mut p.temperatures {
+                if let Some(AceElastic::Coherent { factors, .. }) = &mut t.ace.elastic {
+                    factors.iter_mut().for_each(|f| *f *= 1.0 + d);
+                }
+            }
+            p
+        };
+        off_by(2.5e-4).check_against_njoy(1e-3).unwrap();
+        off_by(9e-4).check_against_njoy(1e-3).unwrap();
+        let err = off_by(2e-3).check_against_njoy(1e-3).unwrap_err();
+        assert!(err.to_string().contains("Bragg"), "{err}");
+        assert_eq!(endf::njoy::ThermalAceOptions::default().error, 1e-3);
     }
 
     #[test]
     fn an_elastic_part_off_from_njoy_by_nmix_is_refused() {
         let err = prepared_against_njoy(SIO2, 3.0, 1)
-            .check_against_njoy()
+            .check_against_njoy(1e-3)
             .unwrap_err();
         assert!(err.to_string().contains("Bragg"), "{err}");
         let err = prepared_against_njoy(S_CH4, 2.0, 1)
-            .check_against_njoy()
+            .check_against_njoy(1e-3)
             .unwrap_err();
         assert!(err.to_string().contains("incoherent"), "{err}");
     }
