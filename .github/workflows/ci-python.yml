@@ -1050,6 +1050,16 @@ jobs:
           python -m pip install dist-yamc/*.whl dist-yani/*.whl
           # The two extension modules must coexist rather than merely install.
           python -c "import yamc, yani; assert yamc.Material is not yani.Material; print(yamc.__version__, yani.__version__)"
+          # Each wheel names the commit it was built from and says it was clean.
+          # A release writes the tag's version into pyproject.toml first, so
+          # this is what notices set-wheel-version.sh making a release "dirty".
+          python - <<'PY'
+          import os, yamc, yani
+          for m in (yamc, yani):
+              print(m.__name__, m.__commit__, "dirty" if m.__commit_dirty__ else "clean")
+              assert m.__commit__ == os.environ["GITHUB_SHA"], (m.__name__, m.__commit__)
+              assert m.__commit_dirty__ is False, m.__name__
+          PY
 
       # The cache below is keyed on the release latest.json names, so
       # a new release starts from a fresh cache rather than restoring
