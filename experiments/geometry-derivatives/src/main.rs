@@ -132,10 +132,11 @@ impl Model {
                 };
                 let mut best: Option<(f64, usize)> = None;
                 for s in &c.surfs {
-                    if let Some(t) = s.distance_to_surface(p.pos, p.dir) {
-                        if t > 1e-10 && best.is_none_or(|b| t < b.0) {
-                            best = Some((t, s.surface_id.unwrap()));
-                        }
+                    if let Some(t) = s.distance_to_surface(p.pos, p.dir)
+                        && t > 1e-10
+                        && best.is_none_or(|b| t < b.0)
+                    {
+                        best = Some((t, s.surface_id.unwrap()));
                     }
                 }
                 let track = |len: f64, p: &P, score: &mut f64, ds: &mut [f64]| {
