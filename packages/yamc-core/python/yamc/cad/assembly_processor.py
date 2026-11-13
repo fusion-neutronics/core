@@ -307,6 +307,30 @@ def _strip_free_internal_edges(compound, solids_with_ids):
     }
 
 
+def _bounding_faces(shape):
+    """The faces that bound the solid *shape*, each once, as the solid holds it.
+
+    A face the solid lies on both sides of bounds nothing: one OCC keeps in
+    the solid as INTERNAL (``Shape.split`` with a face that stops short of the
+    solid's boundary leaves one, and so does a general fuse with a face), or
+    one the solid holds both FORWARD and REVERSED. Nor does an EXTERNAL face,
+    with the solid on neither side. Meshed as a boundary, such a face opened
+    the solid onto the implicit complement, and transport lost the particles
+    that crossed it. OCC leaves these faces out of the solid's volume, and
+    cad-to-dagmc leaves an INTERNAL face out of its mesh.
+    """
+    held = {}  # hash -> (face, the orientations the solid holds it in)
+    explorer = TopExp_Explorer(shape, TopAbs_FACE)
+    while explorer.More():
+        face = TopoDS.Face(explorer.Current())
+        held.setdefault(hash(face), (face, set()))[1].add(face.Orientation())
+        explorer.Next()
+    return [
+        face for face, orientations in held.values()
+        if orientations in ({TopAbs_FORWARD}, {TopAbs_REVERSED})
+    ]
+
+
 def _refuse_lost_or_shared_inputs(assembly, imprinted_solids_with_ids):
     """Raise unless every input solid comes out of the imprint as its own.
 
@@ -466,7 +490,8 @@ def process_assembly(
         else:
             ordered_tags.append(f"material_{len(ordered_tags)}")
 
-    # Step 3: Extract faces from each solid -- track ownership and orientation
+    # Step 3: Extract the faces bounding each solid -- track ownership and
+    # orientation
     faces = {}
     face_to_occ = {}
     solid_faces = {}
@@ -486,9 +511,7 @@ def process_assembly(
         else:
             shape = solid
 
-        face_explorer = TopExp_Explorer(shape, TopAbs_FACE)
-        while face_explorer.More():
-            occ_face = TopoDS.Face(face_explorer.Current())
+        for occ_face in _bounding_faces(shape):
             face_hash = hash(occ_face)
 
             # Check if we've seen this face before (shared face)
@@ -499,7 +522,6 @@ def process_assembly(
                     occ_face.Orientation() == TopAbs_REVERSED
                 )
                 solid_face_ids.append(fid)
-                face_explorer.Next()
                 continue
 
             fid = face_id_counter
@@ -529,8 +551,6 @@ def process_assembly(
             faces[fid] = face_info
             face_to_occ[fid] = occ_face
             solid_face_ids.append(fid)
-
-            face_explorer.Next()
 
         solid_faces[solid_id] = solid_face_ids
         solid_shapes[solid_id] = solid
