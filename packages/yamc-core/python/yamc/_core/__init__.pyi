@@ -2686,8 +2686,10 @@ class MeshGeometry:
         r"""
         Triangle indices belonging to a specific volume.
         
-        Returns the global triangle indices for every surface that bounds
-        the given volume.  These can be used to index into :attr:`triangles`.
+        Returns the global triangle indices for every surface of the given
+        volume: those bounding it, and any internal face (a surface with the
+        volume on both sides, which bounds nothing).  These can be used to
+        index into :attr:`triangles`.
         
         Args:
             volume_id (int): Volume index (0-based).
@@ -8823,6 +8825,12 @@ def mesh_to_arrow(path: builtins.str, vertices: typing.Sequence[builtins.float],
     Tet adjacency is computed here from the flat connectivity, so the caller
     does not supply it. Bounding boxes are not stored; they are computed from
     the vertices when the file is read.
+    
+    ``surface_volumes_json`` gives, for each surface, the 0-based ids of the
+    volume its triangles' normals point out of and of the one they point into,
+    ``null`` for the implicit complement. A surface with the same volume in
+    both is an internal face of that volume: it bounds nothing, and particles
+    pass it as if it were not there.
     
     ``imprinted=False`` records that the solids were meshed one by one, so
     touching solids each have their own surface where they meet;
