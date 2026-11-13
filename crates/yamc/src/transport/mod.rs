@@ -619,14 +619,24 @@ pub(crate) fn transport_particle<T: Tracker>(
 
         // Neutron-specific: debug collision logging and URR handling
         if particle.particle_type == ParticleType::Neutron {
+            // Log the total each flight was sampled against. The smooth path
+            // carries it; the fused sampler returns only the distance, so its
+            // total is looked up again, as the band's total when it drew one.
             #[cfg(feature = "debug_collision")]
-            if let Some((dist, _, _, urr_rand, _)) = &collision_data {
-                let sigma_t = if *dist > 0.0 {
-                    -1.0_f64.ln() / *dist
-                } else {
-                    0.0
+            {
+                let sampled = match (&smooth_flight, &collision_data, cell_material) {
+                    (Some(sf), _, _) => Some((sf.sigma_t, sf.distance, sf.urr_random)),
+                    (None, Some((dist, _, _, urr_rand, _)), Some(m)) => {
+                        let sigma_t = urr_rand
+                            .and_then(|band| m.compute_urr_macro_xs(particle.energy, band))
+                            .map_or_else(|| m.lookup_xs_by_mt(1, particle.energy), |xs| xs.total);
+                        Some((sigma_t, *dist, *urr_rand))
+                    }
+                    _ => None,
                 };
-                log_collision_distance(particle_idx, particle.energy, sigma_t, *dist, *urr_rand);
+                if let Some((sigma_t, dist, urr_rand)) = sampled {
+                    log_collision_distance(particle_idx, particle.energy, sigma_t, dist, urr_rand);
+                }
             }
 
             // Store URR random on particle for correlated reaction sampling.
