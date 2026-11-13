@@ -248,6 +248,18 @@ pub fn get_table(path: impl AsRef<Path>, name: &str) -> Result<Table> {
         })
 }
 
+/// Whether the first word of a header is a 2.0-style version such as
+/// `2.0.1`, rather than the table name a 1.0-style header opens with.
+///
+/// A version is only digits and dots. Testing for a dot as the second
+/// character, as this used to, also matched a one-letter thermal table name
+/// such as `k.01t`, `v.01t` or `w.01t` (JEFF-4.0 potassium, vanadium and
+/// tungsten), and the comment line was then read as
+/// numbers.
+fn is_ace_version(word: &str) -> bool {
+    word.as_bytes().get(1) == Some(&b'.') && word.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+}
+
 /// Read tables from the text of an ASCII ACE file.
 ///
 /// `wanted` restricts which tables are read; `None` reads all of them.
@@ -260,9 +272,7 @@ pub fn tables_from_str(text: &str, wanted: Option<&[String]>) -> Result<Vec<Tabl
         let header = lines[at];
         let first_word = header.split_whitespace().next().unwrap_or("");
 
-        // A 2.0-style header opens with a version like "2.0.1", so its second
-        // character is a dot. A 1.0-style one opens with the table name.
-        let two_point_zero = first_word.as_bytes().get(1) == Some(&b'.');
+        let two_point_zero = is_ace_version(first_word);
 
         let (name, atomic_weight_ratio, kt, body) = if two_point_zero {
             let words: Vec<&str> = header.split_whitespace().collect();
@@ -388,6 +398,35 @@ mod tests {
         // And the newer SZA form, where the ground state is spelled out.
         let m = get_metadata(1_095_242, MetastableScheme::Mcnp).unwrap();
         assert_eq!((m.name.as_str(), m.metastable), ("Am242", 0));
+    }
+
+    #[test]
+    fn a_one_letter_table_name_is_not_a_version() {
+        assert!(is_ace_version("2.0.1"));
+        assert!(is_ace_version("2.0.0"));
+        for name in [
+            "K.00t",
+            "V.00t",
+            "W.00t",
+            "cont.10t",
+            "92235.80c",
+            "1001.00c",
+        ] {
+            assert!(!is_ace_version(name), "{name}");
+        }
+
+        // A whole table named k.01t, with the comment NJOY's deck gives a
+        // JEFF-4.0 table, reads as the same table under its own name.
+        let text = crate::testdata::text(include_bytes!("../fixtures/synthetic-thermal.ace.xz"));
+        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+        assert!(lines[0].starts_with("  cont.10t"));
+        lines[0] = lines[0].replacen("  cont.10t", "     k.01t", 1);
+        lines[1] = format!("{:<70}{}", "JEFF-4.0: K processed by NJOY", &lines[1][70..]);
+        let renamed = tables_from_str(&(lines.join("\n") + "\n"), None).unwrap();
+        let original = tables_from_str(&text, None).unwrap();
+        assert_eq!(renamed[0].name, "k.01t");
+        assert_eq!(renamed[0].xss, original[0].xss);
+        assert_eq!(renamed.len(), original.len());
     }
 
     #[test]
