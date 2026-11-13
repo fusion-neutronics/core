@@ -7,7 +7,7 @@
 # release tag (or a dispatch override) names, so the committed placeholder in
 # `project.version` never reaches PyPI. Nothing is committed back.
 #
-# Only pyproject.toml changes. The crate manifests and Cargo.lock are left
+# Only pyproject.toml changes (and git is told to ignore that, see below). The crate manifests and Cargo.lock are left
 # alone: maturin takes a static `project.version` over Cargo.toml's, and
 # leaving the lock untouched keeps `cargo about --locked` and friends happy.
 set -euo pipefail
@@ -28,5 +28,12 @@ fi
 
 sed "s/^version = \".*\"/version = \"$version\"/" "$pyproject" > "$pyproject.tmp"
 mv "$pyproject.tmp" "$pyproject"
+
+# The wheel records whether tracked files differed from the commit it was built
+# from (`__commit_dirty__`). This edit is the release's own, not a change to
+# the source, so tell git to leave the file out of that check.
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  git update-index --skip-worktree "$pyproject"
+fi
 
 grep '^version = ' "$pyproject"
