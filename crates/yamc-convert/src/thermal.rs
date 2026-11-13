@@ -291,12 +291,14 @@ impl Prepared {
     /// The elastic part at temperature `t`, per bound atom as ACER writes it:
     /// SB taken per principal atom (THERMR's `natom`, which the deck sets to
     /// M0) and everything divided by `nmix`.
+    ///
+    /// Only for a table with an elastic part: `new` checks every law has one
+    /// or none, and the callers skip a table with none.
     fn elastic_row(&self, t: &Temperature) -> Result<ElasticRow, String> {
         let law = &self.laws[t.law];
-        let elastic = law
-            .elastic
-            .as_ref()
-            .expect("the first law has elastic, so all do");
+        let Some(elastic) = law.elastic.as_ref() else {
+            return Err(format!("{}: the evaluation has no elastic part", self.name));
+        };
         let coherent = |c: &endf::thermal_scattering::CoherentElastic| {
             c.temperatures
                 .iter()
@@ -361,7 +363,20 @@ impl Prepared {
             Ok(())
         };
         for t in &self.temperatures {
-            let emax = self.laws[t.law].energy_max;
+            let law = &self.laws[t.law];
+            // Many evaluations have no MF=7 MT=2 (D in D2O, H in HF, Al in
+            // Al2O3): nothing to compare, as long as NJOY made none up either.
+            if law.elastic.is_none() {
+                if t.ace.elastic.is_some() {
+                    return Err(format!(
+                        "{}: the evaluation has no elastic part, but NJOY wrote one at {} K",
+                        self.name, t.kelvin
+                    )
+                    .into());
+                }
+                continue;
+            }
+            let emax = law.energy_max;
             let (_, bragg, inc) = self.elastic_row(t)?;
             let (ace_bragg, ace_inc) = match &t.ace.elastic {
                 None if bragg.is_none() && inc.is_none() => continue,
@@ -960,6 +975,41 @@ mod tests {
         let err = off_by(2e-3).check_against_njoy(1e-3).unwrap_err();
         assert!(err.to_string().contains("Bragg"), "{err}");
         assert_eq!(endf::njoy::ThermalAceOptions::default().error, 1e-3);
+    }
+
+    #[test]
+    fn a_table_without_an_elastic_part_is_checked_without_one() {
+        // As D in D2O or H in HF: MF=7 MT=4 only.
+        let mut l = law(S_CH4);
+        l.elastic = None;
+        let mut aces = aces_for(&l);
+        for a in &mut aces {
+            a.elastic = None;
+        }
+        let p = Prepared::new("c_Test", &[], "t.endf", 1, vec![l.clone()], vec![aces]).unwrap();
+        p.check_against_njoy(1e-3).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("c_Test.arrow");
+        p.write(&dir).unwrap();
+        assert!(!dir.join("elastic.arrow").exists());
+
+        // An elastic part NJOY wrote that the evaluation does not have.
+        let mut aces: Vec<ThermalAce> = aces_for(&l)
+            .into_iter()
+            .map(|mut a| {
+                a.elastic = None;
+                a
+            })
+            .collect();
+        aces[0].elastic = prepared_against_njoy(S_CH4, 1.0, 1).temperatures[0]
+            .ace
+            .elastic
+            .clone();
+        let err = Prepared::new("c_Test", &[], "t.endf", 1, vec![l], vec![aces])
+            .unwrap()
+            .check_against_njoy(1e-3)
+            .unwrap_err();
+        assert!(err.to_string().contains("no elastic part"), "{err}");
     }
 
     #[test]
