@@ -591,11 +591,11 @@ impl PyTransmutationResults {
     /// hash of that release's manifest, which pins every file in it),
     /// ``format_version``, ``offline`` (True when the data origin was
     /// unreachable and the newest complete cached release was used, always
-    /// False for a local folder) and ``converter_versions`` (every converter
-    /// that wrote the release's files, with its version, as its manifest lists
-    /// them; empty in results recorded before releases listed them). Empty
-    /// when every data source was a local directory that is not a release
-    /// folder.
+    /// False for a local folder) and ``converters`` (every build that
+    /// wrote the release's files, as its manifest lists them, such as
+    /// ``"yani-python 0.22.1 (core 250c439e...)"``; empty for a release
+    /// published before releases listed them). Empty when every data source
+    /// was a local directory that is not a release folder.
     #[getter]
     fn data_releases<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let out = PyDict::new(py);
@@ -605,7 +605,7 @@ impl PyTransmutationResults {
             d.set_item("manifest_sha256", &release.manifest_sha256)?;
             d.set_item("format_version", release.format_version)?;
             d.set_item("offline", release.offline)?;
-            d.set_item("converter_versions", &release.converter_versions)?;
+            d.set_item("converters", &release.converters)?;
             out.set_item(keyword, d)?;
         }
         Ok(out)

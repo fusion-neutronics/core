@@ -211,7 +211,7 @@ fn a_later_source_reaches_only_the_channels_no_earlier_one_evaluates() {
     .into_iter()
     .map(|n| (n.name.clone(), n))
     .collect();
-    yani::export_chain_parts(&chain, tmp.path(), Some("test")).expect("chain exports");
+    yani::export_chain_parts(&chain, tmp.path(), Some("test"), "test").expect("chain exports");
     let (first, second, empty) = (
         tmp.path().join("first"),
         tmp.path().join("second"),
@@ -598,7 +598,7 @@ fn nb93_takes_each_split_and_its_covariance_from_the_first_source_that_evaluates
     .into_iter()
     .map(|n| (n.name.clone(), n))
     .collect();
-    yani::export_chain_parts(&chain, tmp.path(), Some("test")).expect("chain exports");
+    yani::export_chain_parts(&chain, tmp.path(), Some("test"), "test").expect("chain exports");
     let dir = |sub: &str| tmp.path().join(sub).to_string_lossy().into_owned();
     let (irdff_dir, endf_dir) = (
         fixture(IRDFF).to_string_lossy().into_owned(),
@@ -812,7 +812,7 @@ fn no_source_and_one_source_give_what_they_gave_before_to_the_bit() {
     .into_iter()
     .map(|n| (n.name.clone(), n))
     .collect();
-    yani::export_chain_parts(&chain, tmp.path(), Some("test")).expect("chain exports");
+    yani::export_chain_parts(&chain, tmp.path(), Some("test"), "test").expect("chain exports");
     let dir = |sub: &str| tmp.path().join(sub).to_string_lossy().into_owned();
     let irdff = fixture(IRDFF).to_string_lossy().into_owned();
     let spectra = [

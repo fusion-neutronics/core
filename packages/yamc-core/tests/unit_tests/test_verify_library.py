@@ -38,7 +38,7 @@ def _library(root, format_version=2):
         "keyword": "endf-b8.1",
         "release": "2026-10-01",
         "format_version": format_version,
-        "converter_versions": ["yamc-convert 0.1.0"],
+        "converters": ["yamc-convert 0.1.0"],
         "created": "2026-10-01T00:00:00Z",
         "provenance": {},
         "particles": ["neutron"],

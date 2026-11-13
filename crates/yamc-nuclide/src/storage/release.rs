@@ -148,18 +148,21 @@ pub struct Manifest {
     pub keyword: String,
     pub release: String,
     pub format_version: u32,
-    /// Every converter that wrote the release's files, with its version
-    /// (`yamc-convert 0.1.0`, `yani-convert 0.1.0`): the publishing scripts
-    /// list each distinct `converter_version` stamp in the tree, and the cross
-    /// sections and the transmutation chain are written by different
-    /// converters. Empty when the manifest lists none.
+    /// Every build that wrote the release's files: each distinct `converter`
+    /// stamp of its `version.json` and `provenance.json` files, such as
+    /// `"yani-python 0.22.1 (core <commit>)"` (the package, its version and
+    /// the core commit it was compiled from). One entry for a release built
+    /// by one build. Empty when the manifest lists none.
     #[serde(default)]
-    pub converter_versions: Vec<String>,
+    pub converters: Vec<String>,
     /// When the release was built.
     #[serde(default)]
     pub created: Option<String>,
-    /// What built the release, free-form: the publishing scripts record their
-    /// commit as `scripts_commit`.
+    /// What built the release, free-form. The library builder records
+    /// `builder` (`"yani-python 0.22.1"`), `builder_commit` and
+    /// `builder_dirty` (the core commit it was compiled from and whether the
+    /// tree had uncommitted changes, both null when unknown), `njoy` and the
+    /// `sources` with their sha256s.
     #[serde(default)]
     pub provenance: serde_json::Map<String, serde_json::Value>,
     /// The particle folders the release carries, in [`PARTICLES`] order.
@@ -187,12 +190,12 @@ pub struct DataRelease {
     /// Whether the origin was unreachable, so the release is the newest
     /// complete one in the cache rather than the one the origin names now.
     pub offline: bool,
-    /// Every converter that wrote the release's files, with its version, as
-    /// the release's manifest lists them (`yamc-convert 0.1.0`,
-    /// `yani-convert 0.1.0`). Empty when the manifest lists none, and when
-    /// reading results written before releases recorded them.
+    /// Every build that wrote the release's files, as the release's manifest
+    /// lists them (`"yani-python 0.22.1 (core <commit>)"`). Empty when the
+    /// manifest lists none, and when reading results written before releases
+    /// recorded them.
     #[serde(default)]
-    pub converter_versions: Vec<String>,
+    pub converters: Vec<String>,
 }
 
 /// A parsed manifest with its files indexed by path.
@@ -542,7 +545,7 @@ fn index(manifest: Manifest, manifest_sha256: String) -> Result<Release, String>
 /// scripts' `release_manifest.py` write for the same files at the same
 /// `created` with the same `provenance`: files sorted by path, keys sorted, no
 /// whitespace, one trailing newline. `particles` names the particle folders
-/// listed, and `converter_versions` every distinct `converter_version` the
+/// listed, and `converters` every distinct `converter` the
 /// `version.json` and `provenance.json` files carry. `format_version` is the
 /// caller's to state, since a chain subsection carries no stamp of its own
 /// (the chain records its format in its own manifest, which is not part of
@@ -592,7 +595,7 @@ pub fn write_manifest(
             dir.join(path).display()
         ));
     }
-    let converter_versions = converter_versions(&files, format_version)?;
+    let converters = converters(&files, format_version)?;
     let locals: Vec<&PathBuf> = files.values().collect();
     let mut entries = Vec::with_capacity(files.len());
     for ((path, local), hashed) in files.iter().zip(hash_files(&locals)) {
@@ -614,7 +617,7 @@ pub fn write_manifest(
         keyword: keyword.to_string(),
         release: release.to_string(),
         format_version,
-        converter_versions,
+        converters,
         created: Some(created),
         provenance,
         particles: PARTICLES
@@ -801,10 +804,10 @@ fn entries(dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
         .collect()
 }
 
-/// The distinct `converter_version`s of the `version.json` and
+/// The distinct `converter`s of the `version.json` and
 /// `provenance.json` among `files`, sorted, refusing a `format_version` stamp
 /// other than `format_version`.
-fn converter_versions(
+fn converters(
     files: &BTreeMap<String, PathBuf>,
     format_version: u32,
 ) -> Result<Vec<String>, String> {
@@ -826,7 +829,7 @@ fn converter_versions(
                 local.display()
             ));
         }
-        if let Some(converter) = stamp.get("converter_version").and_then(|v| v.as_str())
+        if let Some(converter) = stamp.get("converter").and_then(|v| v.as_str())
             && !converter.is_empty()
         {
             converters.insert(converter.to_string());
@@ -1070,7 +1073,7 @@ mod tests {
             "keyword": keyword,
             "release": release,
             "format_version": format_version,
-            "converter_versions": ["yamc-convert 0.15.0", "yani-convert 0.15.0"],
+            "converters": ["yamc-convert 0.15.0", "yani-convert 0.15.0"],
             "created": "2026-10-01T00:00:00Z",
             "files": [
                 {"path": "neutron/Fe56.arrow/version.json", "bytes": 3, "sha256": sha256_hex(b"abc")},
@@ -1131,6 +1134,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(release.manifest_sha256, sha256_hex(&bytes));
+        assert_eq!(
+            release.manifest.converters,
+            ["yamc-convert 0.15.0", "yani-convert 0.15.0"]
+        );
         assert!(release.file("neutron/Fe56.arrow/version.json").is_some());
         assert!(release.file("neutron/Fe57.arrow/version.json").is_none());
         assert_eq!(release.names_under("neutron"), ["Fe56", "Li6"]);
@@ -1143,8 +1150,10 @@ mod tests {
     /// The shape the publishing scripts write (nuclear_data_generation_scripts
     /// `release_manifest.py`), with the values of the published endf-b8.1
     /// release 2026-10-12.1 and two of its 5008 files: compact, sorted keys.
+    /// The release listed its converters as `converter_versions`, renamed
+    /// here to the `converters` a build now writes.
     const PUBLISHED_MANIFEST: &str = concat!(
-        r#"{"converter_versions":["yamc-convert 0.1.0","yani-convert 0.1.0"],"#,
+        r#"{"converters":["yamc-convert 0.1.0","yani-convert 0.1.0"],"#,
         r#""created":"2026-10-12T23:24:22Z","file_count":5008,"files":["#,
         r#"{"bytes":17932,"path":"neutron/Li6.arrow/version.json","#,
         r#""sha256":"1245da86f7b99438ba860630a210b18277f3e0c6a81d96fc9457f12caa1711a9"},"#,
@@ -1166,7 +1175,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            release.manifest.converter_versions,
+            release.manifest.converters,
             ["yamc-convert 0.1.0", "yani-convert 0.1.0"]
         );
         assert_eq!(release.manifest.release, "2026-10-12.1");
@@ -1176,32 +1185,35 @@ mod tests {
     /// Results saved before releases recorded their converters read back
     /// with an empty list.
     #[test]
-    fn a_data_release_recorded_before_converter_versions_still_loads() {
+    fn a_data_release_recorded_before_converters_still_loads() {
         let saved =
             r#"{"release":"2026-10-01","manifest_sha256":"ab","format_version":2,"offline":false}"#;
         let record: DataRelease = serde_json::from_str(saved).unwrap();
         assert_eq!(record.release, "2026-10-01");
-        assert!(record.converter_versions.is_empty());
+        assert!(record.converters.is_empty());
 
         let record = DataRelease {
-            converter_versions: vec!["yamc-convert 0.1.0".into(), "yani-convert 0.1.0".into()],
+            converters: vec!["yamc-convert 0.1.0".into(), "yani-convert 0.1.0".into()],
             ..record
         };
         let json = serde_json::to_string(&record).unwrap();
         assert_eq!(serde_json::from_str::<DataRelease>(&json).unwrap(), record);
     }
 
+    /// Including one that lists them under the `converter_versions` of the
+    /// releases published before the build stamps, which is not read.
     #[test]
     fn a_manifest_that_lists_no_converters_still_parses() {
         let bytes = serde_json::to_vec(&serde_json::json!({
             "keyword": "endf-b8.1",
             "release": "2026-10-01",
             "format_version": 2,
+            "converter_versions": ["yamc-convert 0.1.0"],
             "files": [],
         }))
         .unwrap();
         let release = parse_manifest("endf-b8.1", &bytes, None).unwrap();
-        assert!(release.manifest.converter_versions.is_empty());
+        assert!(release.manifest.converters.is_empty());
     }
 
     #[test]
@@ -1356,9 +1368,9 @@ mod tests {
         assert!(bad.contains(&expected.sha256) && bad.contains(&sha256_hex(b"abd")));
     }
 
-    const VERSION: &[u8] = br#"{"format_version": 2, "data_version": "2026-10-01", "converter_version": "yamc-convert 0.1.0", "library": "endf-b8.1"}"#;
+    const VERSION: &[u8] = br#"{"format_version": 2, "data_version": "2026-10-01", "converter": "yamc-convert 0.1.0", "library": "endf-b8.1"}"#;
     const PROVENANCE: &[u8] =
-        br#"{"converter_version": "yani-convert 0.1.0", "data_version": "2026-10-01"}"#;
+        br#"{"converter": "yani-convert 0.1.0", "data_version": "2026-10-01"}"#;
 
     /// A release folder in the shape of the tree `release_manifest.py`'s own
     /// tests publish (`make_tree` in its `tests/test_release_publishing.py`):
@@ -1397,7 +1409,7 @@ mod tests {
         ("index.txt", b"Am242\nAm242_m1\nFe56\n"),
         (
             ".build/chain/manifest.json",
-            br#"{"format_version": 2, "library": "endf-b8.1", "converter_version": "yani-convert 0.1.0", "subsections": {}}"#,
+            br#"{"format_version": 2, "library": "endf-b8.1", "converter": "yani-convert 0.1.0", "subsections": {}}"#,
         ),
         (".build/state.json", b"{}"),
     ];
@@ -1419,48 +1431,51 @@ mod tests {
     /// `transmutation-endf-b8.1.arrow/<subsection>/` with its manifest beside
     /// the subsections), run from nuclear_data_generation_scripts b813787 with
     /// `SOURCE_DATE_EPOCH=1790000000`, outside a git checkout so that
-    /// `scripts_commit` is empty.
+    /// `scripts_commit` is empty. Since then the stamps were renamed
+    /// (`converter_version` to `converter` in the files, `converter_versions`
+    /// to `converters` in the manifest), which changed those keys and the
+    /// sizes and hashes of the stamped files, and nothing else.
     const RELEASE_MANIFEST_PY: &str = concat!(
-        r#"{"converter_versions":["yamc-convert 0.1.0","yani-convert 0.1.0"],"#,
+        r#"{"converters":["yamc-convert 0.1.0","yani-convert 0.1.0"],"#,
         r#""created":"2026-09-21T14:13:20Z","file_count":17,"files":["#,
         r#"{"bytes":15,"path":"neutron/Am242.arrow/reactions.arrow","#,
         r#""sha256":"498dbbbb6a01f00bda9b016664aeaaa630dcafebf6f261811c596d0fd4fd3150"},"#,
-        r#"{"bytes":118,"path":"neutron/Am242.arrow/version.json","#,
-        r#""sha256":"cbd21517fd692fb1eda29939cd99d3e7dd433c2303671ff627bff5ffd1445eec"},"#,
+        r#"{"bytes":110,"path":"neutron/Am242.arrow/version.json","#,
+        r#""sha256":"5e0bf0ddd43296f68efbdaf3e257951794932b20915a353d494f02eac890faab"},"#,
         r#"{"bytes":18,"path":"neutron/Am242_m1.arrow/reactions.arrow","#,
         r#""sha256":"3c1103f0d6ce0a5ebc677384a6367de35c491470f47cdec4eada8ac50392cfab"},"#,
-        r#"{"bytes":118,"path":"neutron/Am242_m1.arrow/version.json","#,
-        r#""sha256":"cbd21517fd692fb1eda29939cd99d3e7dd433c2303671ff627bff5ffd1445eec"},"#,
+        r#"{"bytes":110,"path":"neutron/Am242_m1.arrow/version.json","#,
+        r#""sha256":"5e0bf0ddd43296f68efbdaf3e257951794932b20915a353d494f02eac890faab"},"#,
         r#"{"bytes":12,"path":"neutron/Fe56.arrow/energy.arrow","#,
         r#""sha256":"4ead9a897a3066f53bcecc233c79d964f4734ccaa6e13f015761aa22c913a4d2"},"#,
         r#"{"bytes":0,"path":"neutron/Fe56.arrow/urr.arrow","#,
         r#""sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"#,
-        r#"{"bytes":118,"path":"neutron/Fe56.arrow/version.json","#,
-        r#""sha256":"cbd21517fd692fb1eda29939cd99d3e7dd433c2303671ff627bff5ffd1445eec"},"#,
+        r#"{"bytes":110,"path":"neutron/Fe56.arrow/version.json","#,
+        r#""sha256":"5e0bf0ddd43296f68efbdaf3e257951794932b20915a353d494f02eac890faab"},"#,
         r#"{"bytes":13,"path":"neutron/index.json","#,
         r#""sha256":"2f0fd78a91263ee7352df687964d366f9e7323d54cb0412cb1c1d73afeb5bcf1"},"#,
         r#"{"bytes":10,"path":"photon/Fe.arrow/element.arrow","#,
         r#""sha256":"c3c5c3b22b99b16f258814f977bc9aa985dc26770fa73ae2ff520ba240b908bf"},"#,
-        r#"{"bytes":118,"path":"photon/Fe.arrow/version.json","#,
-        r#""sha256":"cbd21517fd692fb1eda29939cd99d3e7dd433c2303671ff627bff5ffd1445eec"},"#,
+        r#"{"bytes":110,"path":"photon/Fe.arrow/version.json","#,
+        r#""sha256":"5e0bf0ddd43296f68efbdaf3e257951794932b20915a353d494f02eac890faab"},"#,
         r#"{"bytes":33,"path":"photon/index.json","#,
         r#""sha256":"7d2e7c53f5f2e7d2c17e0285b8423bbb8b41ab7e6b0c98c3423a9f44088418f5"},"#,
         r#"{"bytes":16,"path":"photonuclear/Be9.arrow/reactions.arrow","#,
         r#""sha256":"35802f6feab4bdd7d73224fea1b0f6e8bb8fec66b50f3ee5a0fa0e4523a3e1ce"},"#,
-        r#"{"bytes":118,"path":"photonuclear/Be9.arrow/version.json","#,
-        r#""sha256":"cbd21517fd692fb1eda29939cd99d3e7dd433c2303671ff627bff5ffd1445eec"},"#,
+        r#"{"bytes":110,"path":"photonuclear/Be9.arrow/version.json","#,
+        r#""sha256":"5e0bf0ddd43296f68efbdaf3e257951794932b20915a353d494f02eac890faab"},"#,
         r#"{"bytes":15,"path":"transmutation/branching.arrow/branching.arrow","#,
         r#""sha256":"3244041a18ca4dc04452ec06d60231ca305dbc62c5ca629f119af811e751085c"},"#,
-        r#"{"bytes":73,"path":"transmutation/branching.arrow/provenance.json","#,
-        r#""sha256":"e946d95abf6bd6280a465a84bfeff700bcaa57204c97f1b3821e8c22c92e930b"},"#,
+        r#"{"bytes":65,"path":"transmutation/branching.arrow/provenance.json","#,
+        r#""sha256":"4cdcdb174399e4f183680b288c1eb49c99b95546d9e6954653477281f0a0eb05"},"#,
         r#"{"bytes":11,"path":"transmutation/decay.arrow/nuclides.arrow","#,
         r#""sha256":"eba3b096d5a1eb49549f9e6d217754eb5d3347e03beb4437dc2c179e5c04428f"},"#,
-        r#"{"bytes":73,"path":"transmutation/decay.arrow/provenance.json","#,
-        r#""sha256":"e946d95abf6bd6280a465a84bfeff700bcaa57204c97f1b3821e8c22c92e930b"}],"#,
+        r#"{"bytes":65,"path":"transmutation/decay.arrow/provenance.json","#,
+        r#""sha256":"4cdcdb174399e4f183680b288c1eb49c99b95546d9e6954653477281f0a0eb05"}],"#,
         r#""format_version":2,"keyword":"endf-b8.1","#,
         r#""particles":["neutron","photon","photonuclear"],"#,
         r#""provenance":{"scripts_commit":""},"release":"2026-10-01","#,
-        r#""schema":"yamc-data-manifest","schema_version":1,"total_bytes":879}"#,
+        r#""schema":"yamc-data-manifest","schema_version":1,"total_bytes":823}"#,
         "\n",
     );
 
@@ -1535,7 +1550,7 @@ mod tests {
         assert_eq!(manifest.created.as_deref(), Some("2026-09-21T14:13:20Z"));
         assert_eq!(manifest.particles, ["neutron", "photon", "photonuclear"]);
         assert_eq!(
-            manifest.converter_versions,
+            manifest.converters,
             ["yamc-convert 0.1.0", "yani-convert 0.1.0"]
         );
         assert_eq!(manifest.file_count, Some(17));
@@ -1617,7 +1632,7 @@ mod tests {
         assert_eq!(manifest.format_version, 2);
         assert!(manifest.particles.is_empty());
         assert!(manifest.provenance.is_empty());
-        assert_eq!(manifest.converter_versions, ["yani-convert 0.1.0"]);
+        assert_eq!(manifest.converters, ["yani-convert 0.1.0"]);
         assert_eq!(release.names_under("transmutation"), ["branching"]);
         let _ = std::fs::remove_dir_all(&dir);
     }

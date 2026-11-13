@@ -64,6 +64,12 @@ pub struct Provenance {
     /// the code.
     pub data_version: String,
     pub created_utc: String,
+    /// What wrote the folder, recorded in its `version.json` as `converter`:
+    /// the package and version that ran the conversion and the core commit it
+    /// was built from, such as `"yani-python 0.22.1 (core 250c439e...)"`.
+    /// Supplied by the caller, since only the binding knows the commit it was
+    /// compiled from.
+    pub converter: String,
 }
 
 /// What a source yields: the nuclide, and the fission energy release where
@@ -371,7 +377,7 @@ fn write_version(
         "format_version": nuclear_data_schema::FORMAT_VERSION,
         "library": provenance.library,
         "data_version": provenance.data_version,
-        "converter_version": concat!("yamc-convert ", env!("CARGO_PKG_VERSION")),
+        "converter": provenance.converter,
         "created_utc": provenance.created_utc,
     });
     if !unconverted.is_empty() {
@@ -643,5 +649,26 @@ mod tests {
         )
         .expect("JSON");
         assert!(version.get("unconverted_covariance").is_none());
+    }
+
+    /// The stamp is what the caller says wrote the folder, verbatim, and the
+    /// crate's own version (never bumped, so it identified nothing) is gone.
+    #[test]
+    fn version_json_records_the_converter_the_caller_names() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let provenance = Provenance {
+            converter: "yani-python 0.0.0.dev0 (core 0123abc, dirty)".into(),
+            ..Provenance::default()
+        };
+        write_version(tmp.path(), &provenance, &[]).expect("writes");
+        let version: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("version.json")).expect("reads"),
+        )
+        .expect("JSON");
+        assert_eq!(
+            version["converter"],
+            "yani-python 0.0.0.dev0 (core 0123abc, dirty)"
+        );
+        assert!(version.get("converter_version").is_none());
     }
 }

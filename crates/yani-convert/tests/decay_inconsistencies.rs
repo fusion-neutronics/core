@@ -50,6 +50,7 @@ fn inconsistent_records_are_listed_by_kind() {
             decay_library: String::new(),
             data_version: "test".to_string(),
             created_utc: "2026-09-07T00:00:00+00:00".to_string(),
+            converter: String::new(),
         },
     )
     .expect("conversion runs");

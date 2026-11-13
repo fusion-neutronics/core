@@ -22,6 +22,8 @@
 //! - thermal scattering -- `thermal/{name}.arrow/`: [`thermal`],
 //!   [`thermal_inelastic`], [`thermal_elastic`] and [`thermal_sab`]
 
+pub use build_identity::BuildIdentity;
+
 use arrow_schema::{DataType, Field, Metadata, Schema};
 use std::sync::Arc;
 
@@ -29,6 +31,7 @@ use std::sync::Arc;
 /// a reader can fetch only the cross sections it needs. Part of the published
 /// format, and shared by the converter that writes the index and the loader
 /// that reads it.
+pub mod build_identity;
 pub mod energy_ranges;
 pub mod reaction_ranges;
 

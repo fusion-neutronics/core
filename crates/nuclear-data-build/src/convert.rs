@@ -92,6 +92,9 @@ pub struct Options<'a> {
     pub library: &'a str,
     /// The release stamp every folder records.
     pub release: &'a str,
+    /// The `converter` stamp every folder records: what built it, from
+    /// [`nuclear_data_schema::BuildIdentity::stamp`].
+    pub converter: &'a str,
     /// The NJOY to run for neutron evaluations.
     pub njoy_exec: &'a str,
     /// Temperatures in Kelvin for the neutron data.
@@ -585,6 +588,7 @@ fn convert_one(job: &Job, path: &Path, options: &Options) -> Result<(), String> 
         library: options.library.to_string(),
         data_version: options.release.to_string(),
         created_utc: release::utc_timestamp(std::time::SystemTime::now())?,
+        converter: options.converter.to_string(),
     };
     let written: Vec<PathBuf> = match job.particle {
         Particle::Neutron => {

@@ -150,7 +150,7 @@ fn a_chain_without_such_a_mode_builds_the_same_matrix_after_a_round_trip() {
 
     let dir = std::env::temp_dir().join(format!("yani-sf-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    export_chain_parts(&written, &dir, Some("test")).expect("export");
+    export_chain_parts(&written, &dir, Some("test"), "test").expect("export");
     let (read, _branch) = parse_chain_parts(&dir.join("decay"), None, None, &[]).expect("read");
     let _ = std::fs::remove_dir_all(&dir);
 

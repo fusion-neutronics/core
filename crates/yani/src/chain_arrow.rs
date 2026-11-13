@@ -2086,10 +2086,16 @@ impl SourceColumns {
 /// target where the source file names the parent, a ground state or a
 /// `replace_missing` stand-in. Their branching ratios, the sigmas on them and
 /// the evaluated ratios beside them are written unchanged.
+///
+/// `library` is written into `manifest.json` (`"unknown"` when `None`), and
+/// `converter`, what is writing the chain (such as
+/// `"yani-python 0.22.1 (core 250c439e...)"`), is written there as
+/// `converter`.
 pub fn export_chain_parts<P: AsRef<Path>>(
     chain: &HashMap<String, ChainNuclide>,
     dir: P,
     library: Option<&str>,
+    converter: &str,
 ) -> Result<(), Box<dyn Error>> {
     let dir = dir.as_ref();
     let decay_dir = dir.join("decay");
@@ -2377,14 +2383,19 @@ pub fn export_chain_parts<P: AsRef<Path>>(
     std::fs::write(
         dir.join("manifest.json"),
         format!(
-            r#"{{"format_version": {}, "library": "{}", "converter_version": "yani {}", "subsections": {{"decay": {{"path": "decay"}}, "reactions": {{"path": "reactions"}}, "fission_yields": {{"path": "fission_yields"}}}}}}"#,
+            r#"{{"format_version": {}, "library": {}, "converter": {}, "subsections": {{"decay": {{"path": "decay"}}, "reactions": {{"path": "reactions"}}, "fission_yields": {{"path": "fission_yields"}}}}}}"#,
             nuclear_data_schema::FORMAT_VERSION,
-            library.unwrap_or("unknown"),
-            env!("CARGO_PKG_VERSION"),
+            json_string(library.unwrap_or("unknown")),
+            json_string(converter),
         ),
     )?;
 
     Ok(())
+}
+
+/// `text` as a JSON string literal, quoted and escaped.
+fn json_string(text: &str) -> String {
+    serde_json::Value::from(text).to_string()
 }
 
 /// Remove an optional file an export has nothing to write into, if an earlier
@@ -2420,6 +2431,7 @@ fn write_arrow_file(
 ///
 /// `library` is the source data library identifier (e.g. `"endf-b8.1"`) written
 /// into `version.json`; pass `None` if unknown (recorded as `"unknown"`).
+/// `converter`, what is writing the chain, is written there as `converter`.
 ///
 /// The flat layout has no place for evaluated yields: the `independent` and
 /// `cumulative` fields of each [`FissionYield`] are not written, and a round
@@ -2429,6 +2441,7 @@ pub fn export_chain_arrow<P: AsRef<Path>>(
     chain: &HashMap<String, ChainNuclide>,
     dir: P,
     library: Option<&str>,
+    converter: &str,
 ) -> Result<(), Box<dyn Error>> {
     let dir = dir.as_ref();
     std::fs::create_dir_all(dir)?;
@@ -2609,14 +2622,12 @@ pub fn export_chain_arrow<P: AsRef<Path>>(
         write_arrow_file(&dir.join("fission_yields.arrow"), schema, batch)?;
     }
 
-    // Library names are simple keywords (e.g. "endf-b8.1") with no JSON-special
-    // characters, so a direct format is safe and avoids a serde_json dependency.
     std::fs::write(
         dir.join("version.json"),
         format!(
-            r#"{{"format_version": 1, "library": "{}", "converter_version": "yani {}"}}"#,
-            library.unwrap_or("unknown"),
-            env!("CARGO_PKG_VERSION"),
+            r#"{{"format_version": 1, "library": {}, "converter": {}}}"#,
+            json_string(library.unwrap_or("unknown")),
+            json_string(converter),
         ),
     )?;
 
@@ -2818,7 +2829,7 @@ mod tests {
             },
         );
 
-        super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+        super::export_chain_parts(&chain, &dir, Some("test"), "test").expect("export succeeds");
         let (back, _branch) =
             super::parse_chain_parts(&dir.join("decay"), None, None, &[]).expect("load succeeds");
         let _ = std::fs::remove_dir_all(&dir);
@@ -2860,7 +2871,9 @@ mod tests {
             },
         )]);
 
-        super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+        // A quote in the stamp is escaped, not written raw into the JSON.
+        let converter = "yani-python 0.22.1 (core 0123abc) \"quoted\"";
+        super::export_chain_parts(&chain, &dir, Some("test"), converter).expect("export succeeds");
         let text = std::fs::read_to_string(dir.join("manifest.json")).expect("manifest");
         let _ = std::fs::remove_dir_all(&dir);
         let manifest: serde_json::Value = serde_json::from_str(&text).expect("manifest is JSON");
@@ -2869,6 +2882,8 @@ mod tests {
             nuclear_data_schema::FORMAT_VERSION
         );
         assert_eq!(manifest["library"], "test");
+        assert_eq!(manifest["converter"], converter);
+        assert!(manifest.get("converter_version").is_none());
     }
 
     /// A chain of decay modes: a sigma, a stored 0.0 and none at all, and an
@@ -2950,7 +2965,7 @@ mod tests {
         let chain = chain_with_branching_sigmas();
         let dir = std::env::temp_dir().join(format!("yani-sigmas-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+        super::export_chain_parts(&chain, &dir, Some("test"), "test").expect("export succeeds");
         let (back, _branch) =
             super::parse_chain_parts(&dir.join("decay"), None, None, &[]).expect("load succeeds");
         let _ = std::fs::remove_dir_all(&dir);
@@ -2998,7 +3013,7 @@ mod tests {
         let chain = chain_with_branching_sigmas();
         let dir = std::env::temp_dir().join(format!("yani-old-modes-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+        super::export_chain_parts(&chain, &dir, Some("test"), "test").expect("export succeeds");
 
         let mut names: Vec<&String> = chain.keys().collect();
         names.sort();
@@ -3185,7 +3200,7 @@ mod tests {
 
         let dir = std::env::temp_dir().join(format!("yani-parts-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+        super::export_chain_parts(&chain, &dir, Some("test"), "test").expect("export succeeds");
 
         // Every section export_chain_parts writes, not a subset. The two it
         // used to skip are where the bug was: reactions/reactions.arrow was
@@ -3282,7 +3297,7 @@ mod tests {
                     sources: Default::default(),
                 },
             );
-            super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+            super::export_chain_parts(&chain, &dir, Some("test"), "test").expect("export succeeds");
 
             let mut nuclide = StringBuilder::new();
             let mut particle = StringBuilder::new();
@@ -3360,8 +3375,9 @@ mod tests {
                 sources: Default::default(),
             },
         );
-        super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
-        super::export_chain_arrow(&chain, dir.join("flat"), Some("test")).expect("export succeeds");
+        super::export_chain_parts(&chain, &dir, Some("test"), "test").expect("export succeeds");
+        super::export_chain_arrow(&chain, dir.join("flat"), Some("test"), "test")
+            .expect("export succeeds");
 
         let mut nuclide = StringBuilder::new();
         let mut particle = StringBuilder::new();
@@ -3459,7 +3475,7 @@ mod tests {
                 std::thread::current().id()
             ));
             let _ = std::fs::remove_dir_all(&dir);
-            super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+            super::export_chain_parts(&chain, &dir, Some("test"), "test").expect("export succeeds");
             let result = parse_chain_parts(&dir.join("decay"), None, None, &[]);
             let _ = std::fs::remove_dir_all(&dir);
             match result {
@@ -3531,7 +3547,7 @@ mod tests {
                 std::thread::current().id()
             ));
             let _ = std::fs::remove_dir_all(&dir);
-            super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+            super::export_chain_parts(&chain, &dir, Some("test"), "test").expect("export succeeds");
             let result = parse_chain_parts(&dir.join("decay"), None, None, &[]);
             let _ = std::fs::remove_dir_all(&dir);
             result.map_err(|e| e.to_string())
@@ -3604,7 +3620,7 @@ mod tests {
                 std::thread::current().id()
             ));
             let _ = std::fs::remove_dir_all(&dir);
-            super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+            super::export_chain_parts(&chain, &dir, Some("test"), "test").expect("export succeeds");
             let result = parse_chain_parts(&dir.join("decay"), None, None, &[]);
             let _ = std::fs::remove_dir_all(&dir);
             result.map(|_| ()).map_err(|e| e.to_string())
@@ -3644,7 +3660,7 @@ mod tests {
                 sources: Default::default(),
             },
         );
-        super::export_chain_arrow(&chain, &dir, Some("test")).expect("export succeeds");
+        super::export_chain_arrow(&chain, &dir, Some("test"), "test").expect("export succeeds");
 
         let mut nuclide = StringBuilder::new();
         let mut particle = StringBuilder::new();
@@ -3767,7 +3783,7 @@ mod tests {
             fissioning("U235", &[0.0253, 5.0e5], true),
         );
         chain.insert("Pu239".to_string(), fissioning("Pu239", &[0.0253], false));
-        super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+        super::export_chain_parts(&chain, &dir, Some("test"), "test").expect("export succeeds");
 
         let path = dir.join("fission_yields/evaluated_yields.arrow");
         let batches = super::read_arrow_file(&path).expect("evaluated yields written");
@@ -3843,7 +3859,7 @@ mod tests {
         });
         u235.fission_yields = Some(Arc::new(FissionYieldSet::new(yields)));
         let chain = std::collections::HashMap::from([("U235".to_string(), u235)]);
-        super::export_chain_parts(&chain, dir, None).unwrap();
+        super::export_chain_parts(&chain, dir, None, "test").unwrap();
 
         let path = dir.join("fission_yields/fission_yields.arrow");
         let batch = super::read_arrow_file(&path).unwrap().remove(0);
@@ -3936,14 +3952,14 @@ mod tests {
                 fissioning("U235", &[0.0253], evaluated),
             )])
         };
-        super::export_chain_parts(&chain(true), &dir, None).unwrap();
+        super::export_chain_parts(&chain(true), &dir, None, "test").unwrap();
         let path = dir.join("fission_yields/evaluated_yields.arrow");
         assert!(path.exists());
         // A converter's aliases.arrow has no place beside an export either,
         // which writes every nuclide's yields in full.
         std::fs::write(dir.join("fission_yields/aliases.arrow"), b"stale").unwrap();
 
-        super::export_chain_parts(&chain(false), &dir, None).unwrap();
+        super::export_chain_parts(&chain(false), &dir, None, "test").unwrap();
         assert!(!path.exists(), "a stale evaluated_yields.arrow was left");
         assert!(!dir.join("fission_yields/aliases.arrow").exists());
         let (back, _) = parse_chain_parts(
@@ -3973,8 +3989,8 @@ mod tests {
             "U235".to_string(),
             fissioning("U235", &[5.0e5], false),
         )]);
-        super::export_chain_parts(&with, root.join("a"), None).unwrap();
-        super::export_chain_parts(&without, root.join("b"), None).unwrap();
+        super::export_chain_parts(&with, root.join("a"), None, "test").unwrap();
+        super::export_chain_parts(&without, root.join("b"), None, "test").unwrap();
         std::fs::copy(
             root.join("a/fission_yields/evaluated_yields.arrow"),
             root.join("b/fission_yields/evaluated_yields.arrow"),
@@ -4010,7 +4026,7 @@ mod tests {
             "U235".to_string(),
             fissioning("U235", &[0.0253, 5.0e5], true),
         )]);
-        super::export_chain_parts(&chain, &dir, None).unwrap();
+        super::export_chain_parts(&chain, &dir, None, "test").unwrap();
         let mut parts = super::ChainSections::default();
         for (subsection, file) in [
             ("decay", "nuclides.arrow"),
@@ -4218,7 +4234,7 @@ mod tests {
                 sources: Default::default(),
             },
         );
-        super::export_chain_parts(&chain, &root, Some("test")).expect("export succeeds");
+        super::export_chain_parts(&chain, &root, Some("test"), "test").expect("export succeeds");
         // A real file of the declared schema, with no rows: what is in a row
         // is the converter's round trip to test, not this loader's.
         let schema = std::sync::Arc::new(nuclear_data_schema::branching_branching_covariance());
@@ -4415,7 +4431,8 @@ mod tests {
         let base = std::env::temp_dir().join(format!("yani-nx-reduce-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let (full_dir, reduced_dir) = (base.join("full"), base.join("reduced"));
-        super::export_chain_parts(&chain, &full_dir, Some("test")).expect("export succeeds");
+        super::export_chain_parts(&chain, &full_dir, Some("test"), "test")
+            .expect("export succeeds");
         let mut columns: Vec<(&'static str, ArrayRef)> = Vec::new();
         {
             let path = full_dir.join("reactions").join("reactions.arrow");
@@ -4477,7 +4494,8 @@ mod tests {
         let mut names: Vec<&String> = reduced.keys().collect();
         names.sort();
         assert_eq!(names, ["Pp1", "Qq2"]);
-        super::export_chain_parts(&reduced, &reduced_dir, Some("test")).expect("export succeeds");
+        super::export_chain_parts(&reduced, &reduced_dir, Some("test"), "test")
+            .expect("export succeeds");
         let back = load(&reduced_dir);
         let _ = std::fs::remove_dir_all(&base);
         let (back, branch) = back.expect("the reduced chain's export loads");

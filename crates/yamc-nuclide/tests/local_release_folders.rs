@@ -80,7 +80,7 @@ fn write_release(
         "keyword": keyword,
         "release": release,
         "format_version": format_version,
-        "converter_versions": ["yamc-convert 0.1.0", "yani-convert 0.1.0"],
+        "converters": ["yamc-convert 0.1.0", "yani-convert 0.1.0"],
         "files": entries,
     }))
     .unwrap();
@@ -212,7 +212,7 @@ fn a_folder_read_is_recorded_by_its_path() {
     assert_eq!(record.format_version, 2);
     assert!(!record.offline);
     assert_eq!(
-        record.converter_versions,
+        record.converters,
         ["yamc-convert 0.1.0", "yani-convert 0.1.0"]
     );
 

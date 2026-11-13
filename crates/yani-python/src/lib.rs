@@ -25,6 +25,7 @@
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
+pub mod build_identity;
 pub mod config;
 pub mod convert;
 pub mod data_uncertainty;
@@ -227,11 +228,8 @@ pub fn register_classes(py: Python<'_>, m: &Bound<'_, PyModule>, package: &str) 
     // The git commit this extension was built from, and whether a tracked
     // file differed from it. Both are None outside a git checkout of this
     // repository. See build.rs.
-    m.add("__commit__", option_env!("YANI_BUILD_COMMIT"))?;
-    m.add(
-        "__commit_dirty__",
-        option_env!("YANI_BUILD_DIRTY").map(|dirty| dirty == "true"),
-    )?;
+    m.add("__commit__", build_identity::COMMIT)?;
+    m.add("__commit_dirty__", build_identity::dirty())?;
 
     rehome(m, package)?;
     Ok(())

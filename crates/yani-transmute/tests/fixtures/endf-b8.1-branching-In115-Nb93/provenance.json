@@ -1,5 +1,5 @@
 {
-  "converter_version": "yani-convert 0.1.0",
+  "converter": "yani-convert 0.1.0",
   "created_utc": "",
   "data_version": "2026-10-12.1",
   "decay_library": "endf-b8.1",

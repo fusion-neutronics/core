@@ -329,6 +329,39 @@ release's `manifest.json` written last. The logic is the native-only
 The publishing repository, `nuclear_data_generation_scripts`, builds every
 release with this call and then uploads it.
 
+### Build provenance
+
+Every release records which build of core produced it, the way simulation
+results record `__commit__`. The identity is `nuclear_data_schema::BuildIdentity`:
+the package and version (`yani-python 0.22.1`), the core commit the extension
+was compiled from and whether the tree had uncommitted changes, both from the
+`YANI_BUILD_COMMIT` and `YANI_BUILD_DIRTY` that `crates/yani-python/build.rs`
+embeds (`yani.__commit__`, `yani.__commit_dirty__`). Both are null for an
+extension built outside a git checkout. It is written to:
+
+* `manifest.json`, in `provenance`: `builder` (the package and version),
+  `builder_commit`, `builder_dirty`, `njoy` (the NJOY version, such as
+  `2016.80`) and `sources` (each archive with its size and sha256).
+* every `version.json` and `provenance.json` (and the chain's own
+  `manifest.json`), as one `converter` stamp:
+  `"yani-python 0.22.1 (core <commit>)"`, with `", dirty"` after the commit
+  for a tree with changes, or the package alone when the commit is unknown.
+  The Python converters (`convert_neutron_transport`, `convert_photon`,
+  `convert_photonuclear`, `convert_transmutation`, `convert_branching`) and
+  `TransmutationChain.export_to_arrow` write the same stamp.
+* `manifest.json`'s `converters`: each distinct `converter` stamp in the
+  release, sorted. A release built by one build lists one.
+* `.build/state.json`: `builder`, `builder_commit` and `builder_dirty`. A
+  resume compares all three, so a folder started by one commit is not
+  finished by another, even at the same `0.0.0.dev0` version.
+
+`generate_library` refuses a whole library from an extension compiled from
+uncommitted changes (commit known, dirty), since no commit describes what it
+would write. A partial build (`parts`, `nuclides` or `temperatures` given),
+whose manifest records those keys and which the publishing scripts refuse to
+publish, is allowed. NJOY2016 prints its version and source date but no
+commit, so NJOY is recorded by version alone.
+
 ## Workspace Layout
 
 ```
@@ -751,11 +784,12 @@ when per-file load logging is on.
 
 Results record the release of each library a run used: `SimulationResults.runs`
 entries carry `data_releases` (`release`, `manifest_sha256`, `format_version`,
-`offline`, `converter_versions`), and `TransmutationResults.data_releases`
-carries the same. `converter_versions` is the release manifest's list of the
-converters that wrote its files, with their versions (`["yamc-convert 0.1.0",
-"yani-convert 0.1.0"]` for the 2026-10-12.1 releases); results saved before it
-was recorded read back with an empty list. `combine_results` refuses to pool
+`offline`, `converters`), and `TransmutationResults.data_releases`
+carries the same. `converters` is the release manifest's list of the builds
+that wrote its files (see "Build provenance" below), such as
+`["yani-python 0.22.1 (core 250c439e...)"]`; a release published before the
+build stamps lists none, and results saved before it was recorded read back
+with an empty list. `combine_results` refuses to pool
 runs that read different releases of one library.
 
 A local directory passed as a data source is read with no download. One that

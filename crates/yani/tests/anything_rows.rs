@@ -118,7 +118,7 @@ fn chain() -> HashMap<String, ChainNuclide> {
 fn round_trip(written: &HashMap<String, ChainNuclide>, tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("yani-anything-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    export_chain_parts(written, &dir, Some("test")).expect("export");
+    export_chain_parts(written, &dir, Some("test"), "test").expect("export");
     dir
 }
 

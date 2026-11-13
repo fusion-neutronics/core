@@ -29,7 +29,7 @@ def test_verify_library_rehashes_a_chain_only_library(tmp_path):
         "keyword": "irdff-ii",
         "release": "2026-10-01",
         "format_version": 2,
-        "converter_versions": ["yani-convert 0.1.0"],
+        "converters": ["yani-convert 0.1.0"],
         "created": "2026-10-01T00:00:00Z",
         "provenance": {},
         "particles": [],
