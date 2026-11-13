@@ -131,7 +131,6 @@ __all__ = [
     "solid_shared_volume",
     "transmute",
     "verify_library",
-    "weld_mesh",
 ]
 
 @typing.final
@@ -8142,7 +8141,7 @@ def Torus(axis: typing.Any, x0: builtins.float = 0.0, y0: builtins.float = 0.0, 
         A Surface object representing the torus
     """
 
-def assemble_face_meshes(faces: typing.Sequence[tuple[builtins.int, typing.Sequence[typing.Sequence[builtins.float]], typing.Sequence[typing.Sequence[builtins.int]]]], rel_tol: builtins.float = 1e-06, min_cross_sq: builtins.float = 1e-24) -> tuple[builtins.list[builtins.list[builtins.float]], builtins.list[builtins.list[builtins.int]], builtins.list[builtins.int], builtins.list[builtins.int], builtins.list[tuple[builtins.int, builtins.int]]]:
+def assemble_face_meshes(faces: typing.Sequence[tuple[builtins.int, typing.Sequence[typing.Sequence[builtins.float]], typing.Sequence[typing.Sequence[builtins.int]]]], rel_tol: builtins.float = 1e-06, min_cross_sq: builtins.float = 1e-24, seam_rel_tol: builtins.float = 1e-09) -> tuple[builtins.list[builtins.list[builtins.float]], builtins.list[builtins.list[builtins.int]], builtins.list[builtins.int], builtins.list[builtins.int], builtins.list[tuple[builtins.int, builtins.int]]]:
     r"""
     Combine per-face triangulations into one welded surface mesh (the compiled
     core of the CAD pipeline's mesh assembly).
@@ -8150,22 +8149,33 @@ def assemble_face_meshes(faces: typing.Sequence[tuple[builtins.int, typing.Seque
     Faces are taken in the order given. A face's degenerate triangles (two
     equal corners, or ``|(b - a) x (c - a)|^2`` below ``min_cross_sq``) are
     dropped, and a face left with none gets no surface id; the others get
-    1-based surface ids in order. Their vertices are concatenated and welded as
-    by :func:`weld_mesh`, which also drops the triangles that collapse.
+    1-based surface ids in order. Their vertices are concatenated and welded.
+    Vertices at one position become one. The copies that faces hold of a
+    point on their common edge, the vertices on the open boundary of each
+    face's triangles, are merged within ``rel_tol`` times the mesh extent of
+    each other, but two vertices of one face only within ``seam_rel_tol``
+    times it, as the copies of a point on its seam or at a pole are. So a
+    solid thinner than ``rel_tol`` keeps its sides apart, and one thinner than
+    ``seam_rel_tol`` collapses. Triangles the weld collapses are dropped.
     
     Args:
         faces: ``(face_id, vertices, triangles)`` per face, the triangles as
             0-based indices into that face's vertices.
-        rel_tol: Weld tolerance as a fraction of the mesh extent.
+        rel_tol: Weld tolerance between faces, as a fraction of the mesh
+            extent.
         min_cross_sq: Squared cross-product magnitude below which a triangle is
             degenerate.
+        seam_rel_tol: Weld tolerance within one face, as a fraction of the
+            mesh extent.
     
     Returns:
         ``(vertices, triangles, triangle_face_ids, triangle_surface_ids,
         face_surface_ids)``, the last as ``[(face_id, surface_id), ...]``.
     
     Raises:
-        ValueError: If a triangle indexes past its face's vertices.
+        ValueError: If a triangle indexes past its face's vertices or uses a
+            vertex that is not finite, ``rel_tol`` is not positive, or
+            ``seam_rel_tol`` is negative.
     """
 
 def cache_dir() -> builtins.str:
@@ -9463,21 +9473,5 @@ def verify_library(path: builtins.str) -> dict:
         manifest is not a version 1 release manifest or is in a
         ``format_version`` this build does not read, or if a listed file
         cannot be read.
-    """
-
-def weld_mesh(vertices: typing.Sequence[typing.Sequence[builtins.float]], triangles: typing.Sequence[typing.Sequence[builtins.int]], rel_tol: builtins.float = 1e-06) -> tuple[builtins.list[builtins.list[builtins.float]], builtins.list[builtins.list[builtins.int]], builtins.list[builtins.int]]:
-    r"""
-    Weld coincident vertices of a triangle mesh into a watertight, index-shared
-    boundary (the compiled core of the CAD pipeline's vertex welding).
-    
-    Args:
-        vertices: List of ``[x, y, z]`` coordinates.
-        triangles: List of ``[i, j, k]`` vertex indices.
-        rel_tol: Merge tolerance as a fraction of the mesh extent.
-    
-    Returns:
-        ``(welded_vertices, welded_triangles, kept)``: the merged vertices, the
-        triangles reindexed into them (degenerate ones dropped), and the
-        original indices of the surviving triangles (to filter parallel arrays).
     """
 

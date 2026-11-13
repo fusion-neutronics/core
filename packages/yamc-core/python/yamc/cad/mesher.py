@@ -19,7 +19,6 @@ import warnings
 from .assembly_processor import process_assembly, release_freed_memory, resolve_threads
 from . import cad_mesh_labels as _cad_mesh_labels
 from . import cad_mesh_to_arrow as _cad_mesh_to_arrow
-from . import weld_mesh as _weld_mesh
 
 if TYPE_CHECKING:
     import cadquery
@@ -228,18 +227,19 @@ def _cap_thin_solids(pa, solid_tolerance, solid_angular_tolerance):
     return lin, ang
 
 
-def _weld_solid_boundary(vertices, triangles, rel_tol=1e-6):
-    """Weld a solid's surface triangles into a watertight boundary.
+def _solid_boundary(vertices, triangles):
+    """A solid's surface triangles over just the vertices they use, as
+    ``(boundary_vertices, boundary_triangles)``.
 
-    The scene surface mesh stores per-face-duplicated boundary vertices
-    (coincident at shared edges but with distinct indices). The yamm tet
-    mesher needs a closed, index-shared boundary, so coincident vertices are
-    merged by coordinate in the Rust core. Returns ``(boundary_vertices,
-    boundary_triangles)`` with triangles reindexed into the local welded vertex
-    list (seams that collapse to degenerate triangles are dropped).
+    The yamm tet mesher needs a closed, index-shared boundary, which the
+    surface mesh already is: the assembler welded it (see
+    :func:`~yamc.cad._scene_extract.assemble_surface_mesh`). Welding it again
+    by position would merge the two sides of a solid thinner than the weld's
+    tolerance, which the assembler keeps apart.
     """
-    local_verts, boundary_triangles, _kept = _weld_mesh(vertices, triangles, rel_tol)
-    return local_verts, boundary_triangles
+    used = sorted({i for tri in triangles for i in tri})
+    local = {i: k for k, i in enumerate(used)}
+    return [vertices[i] for i in used], [[local[i] for i in tri] for tri in triangles]
 
 
 def _default_tet_edge_length(vertices):
@@ -770,8 +770,8 @@ class CadToYamc:
                 detail = "\n  ".join(problems)
                 raise MeshFidelityError(
                     "Surface mesh deviates grossly from the CAD. "
-                    "Transport on such a mesh runs without lost particles but "
-                    "produces wrong physics. Problems:\n  " + detail + "\n"
+                    "Transport on such a mesh produces wrong physics, often "
+                    "without losing a particle to show it. Problems:\n  " + detail + "\n"
                     "Pass fidelity_check=False to bypass this gate."
                 )
 
@@ -851,8 +851,8 @@ class CadToYamc:
     def _mesh_volumes(self, solids_to_tet, tet_target_edge_length=None, threads=None):
         """Tetrahedralize each solid with the yamm tet mesher (mesh_volume).
 
-        Each solid's surface triangles (from the scene surface mesh) are welded
-        into a watertight boundary and passed to ``mesh_volume_rs``, which
+        Each solid's surface triangles (from the welded surface mesh, a
+        watertight boundary already) are passed to ``mesh_volume_rs``, which
         preserves the boundary exactly and fills the interior. The tet vertex
         block (boundary + new interior) is appended to the global vertex array
         and the connectivity reindexed into it. The surface mesh is already
@@ -876,7 +876,7 @@ class CadToYamc:
         rather than a hole.
 
         The merge keys on the exact coordinate rather than a tolerance. Both
-        blocks weld their boundary from the same surface triangles, so a shared
+        blocks take their boundary from the same surface triangles, so a shared
         interface arrives bit-identical on both sides and an exact key merges
         all of it; anything a tolerance would additionally catch is two
         genuinely distinct points, which is what a narrow gap between solids is
@@ -900,9 +900,7 @@ class CadToYamc:
             if not solid_tris:
                 continue
 
-            boundary_verts, boundary_tris = _weld_solid_boundary(
-                mesh.vertices, solid_tris
-            )
+            boundary_verts, boundary_tris = _solid_boundary(mesh.vertices, solid_tris)
 
             tel = tet_target_edge_length
             if tel is None:
