@@ -24,7 +24,7 @@ use arrow_array::builder::{Float32Builder, ListBuilder};
 use arrow_array::ArrayRef;
 use endf::data::temperature_str;
 use endf::thermal_ace::InelasticDistribution;
-use endf::thermal_scattering::SecondaryModel;
+use endf::thermal_scattering::{first_temperature_only, FirstTemperatureCut, SecondaryModel};
 use endf::{Material, ThermalAce, ThermalElastic, ThermalScattering};
 
 use crate::entry::Provenance;
@@ -44,6 +44,9 @@ pub struct ThermalSource<'a> {
     /// The thermal scattering law evaluation. Several files when a library
     /// publishes one file per temperature (JEFF-4.0's fuel tables); they are
     /// merged into one table, and must agree on everything but temperature.
+    /// A file whose later temperatures are copies within a few K of its first
+    /// is read and processed at its first temperature only
+    /// (`endf::thermal_scattering::first_temperature_only`).
     pub thermal: &'a [PathBuf],
     /// The incident-neutron evaluation of the principal atom.
     pub neutron: &'a Path,
@@ -503,6 +506,49 @@ pub fn write_version(dir: &Path, provenance: &Provenance) -> Result<(), Box<dyn 
     Ok(())
 }
 
+/// The later-temperature copies cut from a table's evaluation files, for
+/// one summary warning.
+#[derive(Default)]
+struct Copies {
+    files: usize,
+    records: usize,
+    invalid: usize,
+}
+
+impl Copies {
+    fn add(&mut self, cut: &FirstTemperatureCut) {
+        self.files += 1;
+        self.records += cut.dropped_mt2_records + cut.dropped_mt4_records;
+        self.invalid += cut.invalid_mt2_records;
+    }
+
+    fn warn(&self, name: &str, library: &str) {
+        if self.files == 0 {
+            return;
+        }
+        let invalid = if self.invalid == 0 {
+            String::new()
+        } else {
+            format!(
+                ", {} of them MF=7 MT=2 records that are not one factor per Bragg edge \
+                 and so are not valid ENDF-6",
+                self.invalid
+            )
+        };
+        eprintln!(
+            "warning: {name}: {} {library} evaluation file{} give{} a second temperature \
+             within a few K of the first, which NJOY's THERMR cannot tell apart from it; \
+             {} MF=7 LIST record{} at those temperatures were dropped{invalid}, and each \
+             file is read and processed at its first temperature only",
+            self.files,
+            if self.files == 1 { "" } else { "s" },
+            if self.files == 1 { "s" } else { "" },
+            self.records,
+            if self.records == 1 { "" } else { "s" },
+        );
+    }
+}
+
 /// Convert one thermal table into `output_dir/<name>.arrow/`, running NJOY on
 /// every evaluation file at all of its temperatures. Returns the folder.
 pub fn convert_thermal(
@@ -515,12 +561,29 @@ pub fn convert_thermal(
     std::fs::create_dir_all(output_dir)?;
     let mut laws = Vec::new();
     let mut aces = Vec::new();
+    let mut copies = Copies::default();
     for file in source.thermal {
-        let material = Material::from_file(file).map_err(|e| format!("{}: {e}", file.display()))?;
-        let law = ThermalScattering::from_endf(&material)?;
+        let located = |e: endf::Error| format!("{}: {e}", file.display());
+        let text = endf::material::read_text(file).map_err(located)?;
         // NJOY works in a directory of its own inside the output directory,
         // removed when `work` drops (see `entry::read` for why not /tmp).
         let work = endf::njoy::Scratch::new_in(output_dir, source.name)?;
+        // A file whose later temperatures are copies of its first, within the
+        // window NJOY cannot tell apart, is read and processed at its first
+        // temperature only (see `first_temperature_only` for why).
+        let (material, njoy_input) = match first_temperature_only(&text).map_err(located)? {
+            Some(cut) => {
+                copies.add(&cut);
+                let name = file
+                    .file_name()
+                    .ok_or("an evaluation path with no file name")?;
+                let path = work.path().join(name);
+                std::fs::write(&path, &cut.text)?;
+                (Material::from_str(&cut.text).map_err(located)?, path)
+            }
+            None => (Material::from_str(&text).map_err(located)?, file.clone()),
+        };
+        let law = ThermalScattering::from_endf(&material)?;
         let options = endf::njoy::ThermalAceOptions {
             table_name: source.ace_name.to_string(),
             zaids: source.zaids.to_vec(),
@@ -529,8 +592,14 @@ pub fn convert_thermal(
             njoy_exec: source.njoy_exec.to_string(),
             ..Default::default()
         };
-        let ace = endf::njoy::make_ace_thermal(source.neutron, &neutron, file, &material, &options)
-            .map_err(|e| format!("NJOY failed on {}: {e}", file.display()))?;
+        let ace = endf::njoy::make_ace_thermal(
+            source.neutron,
+            &neutron,
+            &njoy_input,
+            &material,
+            &options,
+        )
+        .map_err(|e| format!("NJOY failed on {}: {e}", file.display()))?;
         let text = std::fs::read_to_string(&ace)?;
         let tables = endf::ace::tables_from_str(&text, None)?
             .iter()
@@ -544,6 +613,7 @@ pub fn convert_thermal(
         .iter()
         .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_string))
         .collect();
+    copies.warn(source.name, &provenance.library);
     let prepared = Prepared::new(
         source.name,
         source.bound_nuclides,
