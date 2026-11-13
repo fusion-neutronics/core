@@ -89,7 +89,24 @@ pub fn verify_library(py: Python<'_>, path: &str) -> PyResult<Py<PyDict>> {
 ///     transmutation_decay_data = "/data/endf-b8.1"
 ///
 /// Running it again resumes: finished folders are kept and only the rest are
-/// converted. A folder holds one library built by one version of this package.
+/// converted. A folder holds one library built by one build of this package:
+/// the same version compiled from the same core commit.
+///
+/// The build is recorded in the release. ``manifest.json`` carries
+/// ``provenance.builder`` (``"yani-python <version>"``),
+/// ``provenance.builder_commit`` (the core commit this extension was compiled
+/// from, :data:`__commit__`) and ``provenance.builder_dirty``
+/// (:data:`__commit_dirty__`), both ``null`` when it was built outside a git
+/// checkout, beside ``provenance.njoy``. Every ``version.json`` and
+/// ``provenance.json`` carries the same as one ``converter`` stamp, such as
+/// ``"yani-python 0.22.1 (core 250c439e...)"``, and the manifest lists each
+/// distinct stamp as ``converters``.
+///
+/// An extension compiled from a tree with uncommitted changes
+/// (``__commit_dirty__`` is ``True``) writes data no commit describes, so it
+/// builds only a partial library (``parts``, ``nuclides`` or ``temperatures``
+/// given), which is never published. Commit the changes and rebuild to build
+/// a whole library.
 ///
 /// Some hosts serve their archives only to a web browser (the IAEA's FENDL and
 /// IRDFF-II files, JAEA's JENDL-5 files). The error then lists each file with
@@ -144,11 +161,13 @@ pub fn verify_library(py: Python<'_>, path: &str) -> PyResult<Py<PyDict>> {
 /// ValueError
 ///     An unknown keyword or part, or bad temperatures.
 /// RuntimeError
-///     The build cannot start (the folder, the NJOY, the disk space, or source
-///     files that need a browser), or did not finish: evaluations that failed
-///     and are not declared, a gate that failed, or Ctrl-C. Nothing finished is
-///     lost, and running again retries only what is left. Each failed
-///     evaluation's reason is in ``<path>/.build/failed/``.
+///     The build cannot start (an extension compiled from uncommitted changes
+///     asked for a whole library, the folder or another build in it, the NJOY,
+///     the disk space, or source files that need a browser), or did not
+///     finish: evaluations that failed and are not declared, a gate that
+///     failed, or Ctrl-C. Nothing finished is lost, and running again retries
+///     only what is left. Each failed evaluation's reason is in
+///     ``<path>/.build/failed/``.
 #[cfg(not(target_os = "emscripten"))]
 #[gen_stub_pyfunction]
 #[pyfunction]
@@ -185,7 +204,8 @@ pub fn generate_library(
         Some(n) => n,
         None => default_njoy(py)?,
     };
-    let builder = format!("yani-python {}", wheel_version(py));
+    let package = crate::build_identity::package(py);
+    let builder = crate::build_identity::identity(&package);
     let stop = AtomicBool::new(false);
     let path_buf = std::path::PathBuf::from(path);
     let downloads = downloads.map(std::path::PathBuf::from);
@@ -205,7 +225,7 @@ pub fn generate_library(
                     temperatures: temperatures.as_deref(),
                     njoy_exec: &njoy_exec,
                     downloads: downloads.as_deref(),
-                    builder: &builder,
+                    builder,
                     stop: Some(&stop),
                     progress: Some(&progress),
                 })
@@ -251,17 +271,6 @@ pub fn generate_library(
     dict.set_item("file_count", report.file_count)?;
     dict.set_item("total_bytes", report.total_bytes)?;
     Ok(dict.unbind())
-}
-
-/// The installed yani-core wheel's version, which the release tag sets. The
-/// crate's own `CARGO_PKG_VERSION` is not bumped, so it is only the fallback
-/// for an interpreter that never saw a wheel.
-#[cfg(not(target_os = "emscripten"))]
-fn wheel_version(py: Python<'_>) -> String {
-    py.import("importlib.metadata")
-        .and_then(|m| m.call_method1("version", ("yani-core",)))
-        .and_then(|v| v.extract::<String>())
-        .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string())
 }
 
 /// The `njoy` the njoy2016 wheel installs beside this interpreter, or `njoy`

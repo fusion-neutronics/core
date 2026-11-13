@@ -93,7 +93,7 @@ fn read_back(dir: &Path) -> Vec<BranchingCovarianceBlock> {
         sources: Default::default(),
     };
     let chain = std::collections::HashMap::from([("Nb93".to_string(), nuclide)]);
-    yani::export_chain_parts(&chain, &chain_dir, Some("test")).expect("chain exports");
+    yani::export_chain_parts(&chain, &chain_dir, Some("test"), "test").expect("chain exports");
     // A branching source carries its branching.arrow. Most of these tests
     // write the covariance alone, so they get an empty one: the blocks are
     // read whatever the curves are.

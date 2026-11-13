@@ -4,13 +4,17 @@
 //! In order, every check that can fail fast runs before anything is
 //! downloaded:
 //!
-//! 1. the arguments, the folder (not inside the download cache, not someone
-//!    else's folder), and an exclusive lock on `<path>/.build/lock`;
-//! 2. the build's state in `<path>/.build/state.json`: the release stamp
-//!    (the UTC date the first run started, kept on resume) and the builder
-//!    that wrote the folder, since a rerun by another version would mix two
-//!    converters' output under one manifest;
-//! 3. the NJOY the library needs, when neutron data is built, and the free
+//! 1. the arguments and the folder (not inside the download cache, not
+//!    someone else's folder);
+//! 2. a builder compiled from uncommitted changes, refused unless the build
+//!    is partial (some parts, nuclides or temperatures), which is never
+//!    published: no commit describes what it would write;
+//! 3. an exclusive lock on `<path>/.build/lock`, and the build's state in
+//!    `<path>/.build/state.json`: the release stamp (the UTC date the first
+//!    run started, kept on resume) and the builder that wrote the folder
+//!    (package, version, commit and dirty flag), since a rerun by another
+//!    build would mix two converters' output under one manifest;
+//! 4. the NJOY the library needs, when neutron data is built, and the free
 //!    disk a full build needs.
 //!
 //! Then the sources are fetched, unpacked and identified, the evaluations are
@@ -24,6 +28,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
+use nuclear_data_schema::BuildIdentity;
 use serde_json::{json, Value};
 use yamc_nuclide::storage::release;
 
@@ -54,9 +59,11 @@ pub struct Request<'a> {
     pub njoy_exec: &'a str,
     /// A folder searched first for source files fetched by hand.
     pub downloads: Option<&'a Path>,
-    /// What is building, recorded in the folder and the manifest, such as
-    /// `"yani-python 0.22.1"`. A rerun by another builder is refused.
-    pub builder: &'a str,
+    /// What is building: recorded in the folder's state, in the manifest's
+    /// provenance as `builder`, `builder_commit` and `builder_dirty`, and as
+    /// the `converter` stamp of every folder converted. A rerun by another
+    /// build is refused, and a dirty one builds only a partial library.
+    pub builder: BuildIdentity<'a>,
     /// Set from another thread to start nothing more.
     pub stop: Option<&'a AtomicBool>,
     /// Told what the build is doing, one line at a time.
@@ -104,11 +111,12 @@ pub fn generate(request: &Request) -> Result<Report, String> {
     check_temperatures(temperatures)?;
     let root = request.path;
     check_folder(root)?;
+    check_clean(&request.builder, partial(request, temperatures))?;
 
     let build = root.join(".build");
     fs::create_dir_all(&build).map_err(|e| format!("could not create {}: {e}", build.display()))?;
     let _lock = lock(&build)?;
-    let release = state(&build, recipe.keyword, request.builder)?;
+    let release = state(&build, recipe.keyword, &request.builder)?;
     let manifest = root.join("manifest.json");
     if manifest.exists() {
         fs::remove_file(&manifest)
@@ -153,9 +161,11 @@ pub fn generate(request: &Request) -> Result<Report, String> {
             names.join(", ")
         ));
     }
+    let converter = request.builder.stamp();
     let options = convert::Options {
         library: recipe.keyword,
         release: &release,
+        converter: &converter,
         njoy_exec: request.njoy_exec,
         temperatures,
         particles: &particles,
@@ -177,7 +187,9 @@ pub fn generate(request: &Request) -> Result<Report, String> {
             recipe.keyword
         ));
     }
-    let chain = chain::build(&materials, root, recipe, &parts, &release, &stamp)?;
+    let chain = chain::build(
+        &materials, root, recipe, &parts, &release, &stamp, &converter,
+    )?;
 
     say(&format!("{}: reading every folder back", recipe.keyword));
     let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
@@ -383,16 +395,42 @@ fn lock(build: &Path) -> Result<fs::File, String> {
     }
 }
 
+/// Whether the build is partial: some parts, some nuclides or other
+/// temperatures. Exactly the builds whose manifest provenance records
+/// `parts`, `nuclides` or `temperatures`, which publishing refuses.
+fn partial(request: &Request, temperatures: &[f64]) -> bool {
+    request.parts.is_some() || request.nuclides.is_some() || temperatures != TEMPERATURES
+}
+
+/// Refuse a builder compiled from uncommitted changes, unless the build is
+/// `partial` and so never published. A builder whose commit is unknown is
+/// not refused: its manifest records a null commit.
+fn check_clean(builder: &BuildIdentity, partial: bool) -> Result<(), String> {
+    if !builder.is_dirty() || partial {
+        return Ok(());
+    }
+    Err(format!(
+        "{} was compiled from core {} with uncommitted changes, so no commit \
+         describes the library it would build. Commit the changes and rebuild it \
+         (maturin develop --release) to build a whole library. A partial build \
+         (parts, nuclides or temperatures), which is never published, may use it",
+        builder.package,
+        builder.commit.unwrap_or_default()
+    ))
+}
+
 /// The release stamp of the build in this folder, recording the builder on
-/// the first run and refusing any other builder or library after it.
-fn state(build: &Path, keyword: &str, builder: &str) -> Result<String, String> {
+/// the first run and refusing any other builder or library after it. The
+/// builder is its package, version, commit and dirty flag: two builds from
+/// source both report version 0.0.0.dev0, and only the commit tells them
+/// apart.
+fn state(build: &Path, keyword: &str, builder: &BuildIdentity) -> Result<String, String> {
     let path = build.join(STATE);
     if let Ok(text) = fs::read_to_string(&path) {
         let state: Value =
             serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
         let field = |k: &str| state[k].as_str().unwrap_or("").to_string();
-        let (was_keyword, was_builder, release) =
-            (field("keyword"), field("builder"), field("release"));
+        let (was_keyword, release) = (field("keyword"), field("release"));
         if was_keyword != keyword {
             return Err(format!(
                 "{} holds a build of {was_keyword}, not {keyword}; build {keyword} in \
@@ -400,11 +438,17 @@ fn state(build: &Path, keyword: &str, builder: &str) -> Result<String, String> {
                 build.parent().unwrap_or(build).display()
             ));
         }
-        if was_builder != builder {
+        let was_package = field("builder");
+        let was = BuildIdentity {
+            package: &was_package,
+            commit: state["builder_commit"].as_str(),
+            dirty: state["builder_dirty"].as_bool(),
+        };
+        if was != *builder {
+            let (was, now) = (was.stamp(), builder.stamp());
             return Err(format!(
-                "{} was started by {was_builder}, and this is {builder}. A folder holds \
-                 the output of one builder, so resume it with {was_builder}, or build \
-                 into a new folder",
+                "{} was started by {was}, and this is {now}. A folder holds the output \
+                 of one build, so resume it with {was}, or build into a new folder",
                 build.parent().unwrap_or(build).display()
             ));
         }
@@ -413,7 +457,14 @@ fn state(build: &Path, keyword: &str, builder: &str) -> Result<String, String> {
     }
     let now = release::utc_timestamp(std::time::SystemTime::now())?;
     let release = now[..10].to_string();
-    let body = json!({"builder": builder, "keyword": keyword, "release": release, "started": now});
+    let body = json!({
+        "builder": builder.package,
+        "builder_commit": builder.commit,
+        "builder_dirty": builder.dirty,
+        "keyword": keyword,
+        "release": release,
+        "started": now,
+    });
     let part = build.join(format!("{STATE}.part"));
     fs::write(&part, body.to_string() + "\n")
         .and_then(|()| fs::rename(&part, &path))
@@ -478,7 +529,9 @@ fn provenance(
     njoy: Option<&str>,
 ) -> serde_json::Map<String, Value> {
     let mut p = serde_json::Map::new();
-    p.insert("builder".into(), json!(request.builder));
+    p.insert("builder".into(), json!(request.builder.package));
+    p.insert("builder_commit".into(), json!(request.builder.commit));
+    p.insert("builder_dirty".into(), json!(request.builder.dirty));
     p.insert("njoy".into(), json!(njoy));
     let sources: Vec<Value> = fetched
         .iter()
@@ -530,6 +583,155 @@ mod tests {
         let irdff = recipe::recipe("irdff-ii").unwrap();
         let got: Vec<_> = sublibraries(irdff, irdff.parts).into_iter().collect();
         assert_eq!(got, [Sublibrary::Neutron]);
+    }
+
+    const COMMIT: &str = "250c439e0000000000000000000000000000abcd";
+
+    fn identity(commit: Option<&'static str>, dirty: Option<bool>) -> BuildIdentity<'static> {
+        BuildIdentity {
+            package: "yani-python 0.0.0.dev0",
+            commit,
+            dirty,
+        }
+    }
+
+    fn request<'a>(path: &'a Path, builder: BuildIdentity<'a>) -> Request<'a> {
+        Request {
+            keyword: "irdff-ii",
+            path,
+            parts: None,
+            nuclides: None,
+            temperatures: None,
+            njoy_exec: "njoy",
+            downloads: None,
+            builder,
+            stop: None,
+            progress: None,
+        }
+    }
+
+    /// A fresh folder under the system temporary directory, removed on drop.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "nuclear-data-build-generate-{}-{name}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_dirty_builder_builds_only_a_partial_library() {
+        let dirty = identity(Some(COMMIT), Some(true));
+        let err = check_clean(&dirty, false).unwrap_err();
+        assert!(err.contains("uncommitted changes"), "{err}");
+        assert!(err.contains(COMMIT), "{err}");
+        assert!(check_clean(&dirty, true).is_ok());
+        assert!(check_clean(&identity(Some(COMMIT), Some(false)), false).is_ok());
+        // Built outside git: nothing to be dirty against, recorded as null.
+        assert!(check_clean(&identity(None, None), false).is_ok());
+    }
+
+    #[test]
+    fn partial_is_what_the_manifest_records_as_a_subset() {
+        let path = Path::new("unused");
+        let builder = identity(None, None);
+        assert!(!partial(&request(path, builder), &TEMPERATURES));
+        assert!(partial(&request(path, builder), &[293.6]));
+        let parts = [Part::Branching];
+        let r = Request {
+            parts: Some(&parts),
+            ..request(path, builder)
+        };
+        assert!(partial(&r, &TEMPERATURES));
+        let nuclides = ["Fe56".to_string()];
+        let r = Request {
+            nuclides: Some(&nuclides),
+            ..request(path, builder)
+        };
+        assert!(partial(&r, &TEMPERATURES));
+    }
+
+    /// The refusal comes before anything is written: the folder is not even
+    /// created.
+    #[test]
+    fn generate_refuses_a_whole_library_from_a_dirty_builder_before_writing() {
+        let scratch = Scratch::new("dirty");
+        let root = scratch.0.join("irdff-ii");
+        let err = generate(&request(&root, identity(Some(COMMIT), Some(true)))).unwrap_err();
+        assert!(err.contains("uncommitted changes"), "{err}");
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn the_state_records_the_build_and_refuses_another_commit() {
+        let scratch = Scratch::new("state");
+        let clean = identity(Some(COMMIT), Some(false));
+        let release = state(&scratch.0, "irdff-ii", &clean).unwrap();
+        let saved: Value =
+            serde_json::from_str(&fs::read_to_string(scratch.0.join(STATE)).unwrap()).unwrap();
+        assert_eq!(saved["builder"], "yani-python 0.0.0.dev0");
+        assert_eq!(saved["builder_commit"], COMMIT);
+        assert_eq!(saved["builder_dirty"], false);
+        assert_eq!(state(&scratch.0, "irdff-ii", &clean).unwrap(), release);
+
+        // The 0.0.0.dev0 case: the same version from another commit.
+        let other = identity(Some("ffff"), Some(false));
+        let err = state(&scratch.0, "irdff-ii", &other).unwrap_err();
+        assert!(err.contains(&format!("(core {COMMIT})")), "{err}");
+        assert!(err.contains("(core ffff)"), "{err}");
+        let dirty = identity(Some(COMMIT), Some(true));
+        assert!(state(&scratch.0, "irdff-ii", &dirty).is_err());
+        assert!(state(&scratch.0, "irdff-ii", &identity(None, None)).is_err());
+    }
+
+    #[test]
+    fn an_unknown_commit_is_recorded_as_null() {
+        let scratch = Scratch::new("unknown");
+        let unknown = identity(None, None);
+        state(&scratch.0, "irdff-ii", &unknown).unwrap();
+        let saved: Value =
+            serde_json::from_str(&fs::read_to_string(scratch.0.join(STATE)).unwrap()).unwrap();
+        assert!(saved["builder_commit"].is_null() && saved["builder_dirty"].is_null());
+        assert!(state(&scratch.0, "irdff-ii", &unknown).is_ok());
+
+        let p = provenance(
+            &request(&scratch.0, unknown),
+            &[Part::Branching],
+            &TEMPERATURES,
+            &[],
+            None,
+        );
+        assert_eq!(p["builder"], "yani-python 0.0.0.dev0");
+        assert!(p["builder_commit"].is_null() && p["builder_dirty"].is_null());
+    }
+
+    #[test]
+    fn the_provenance_records_the_builder_commit_and_dirty_flag() {
+        let dirty = identity(Some(COMMIT), Some(true));
+        let path = Path::new("unused");
+        let parts = [Part::Branching];
+        let r = Request {
+            parts: Some(&parts),
+            ..request(path, dirty)
+        };
+        let p = provenance(&r, &parts, &TEMPERATURES, &[], Some("2016.80"));
+        assert_eq!(p["builder"], "yani-python 0.0.0.dev0");
+        assert_eq!(p["builder_commit"], COMMIT);
+        assert_eq!(p["builder_dirty"], true);
+        assert_eq!(p["njoy"], "2016.80");
+        assert_eq!(p["parts"], json!(["branching"]));
     }
 
     #[test]

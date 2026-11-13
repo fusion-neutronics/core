@@ -492,7 +492,7 @@ pub fn write_version(dir: &Path, provenance: &Provenance) -> Result<(), Box<dyn 
         "format_version": nuclear_data_schema::FORMAT_VERSION,
         "library": provenance.library,
         "data_version": provenance.data_version,
-        "converter_version": concat!("yamc-convert ", env!("CARGO_PKG_VERSION")),
+        "converter": provenance.converter,
         "created_utc": provenance.created_utc,
         "particle": "thermal",
         "temperature_ranges": ranges,
@@ -741,6 +741,7 @@ mod tests {
                 library: "test".into(),
                 data_version: "2026-11-07".into(),
                 created_utc: "now".into(),
+                ..Default::default()
             },
         )
         .unwrap();

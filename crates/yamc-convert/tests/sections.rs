@@ -476,6 +476,7 @@ fn an_ace_conversion_loads_through_yamcs_own_reader() {
             library: "endf-b8.1".to_string(),
             data_version: "rust-check".to_string(),
             created_utc: "2026-08-10T00:00:00+00:00".to_string(),
+            converter: "yamc-convert test".to_string(),
         },
         false,
     )

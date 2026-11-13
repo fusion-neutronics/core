@@ -94,7 +94,7 @@ pub(crate) fn open(dir: &Path) -> Result<Option<Arc<LocalRelease>>, String> {
             manifest_sha256: release.manifest_sha256.clone(),
             format_version: release.manifest.format_version,
             offline: false,
-            converter_versions: release.manifest.converter_versions.clone(),
+            converters: release.manifest.converters.clone(),
         };
         Arc::new(LocalRelease {
             root: root.clone(),

@@ -5038,12 +5038,12 @@ class SimulationResults:
         ``manifest_sha256`` (the hash of that release's manifest, which pins
         every file in it), ``format_version``, ``offline`` (True when the
         data origin was unreachable and the newest complete cached release was
-        used; always False for a local folder) and ``converter_versions``
-        (every converter that wrote the release's files, with its version, as
-        its manifest lists them, e.g.
-        ``["yamc-convert 0.1.0", "yani-convert 0.1.0"]``; empty in results
-        saved before releases recorded them). Empty when all data came from
-        local directories that are not release folders.
+        used; always False for a local folder) and ``converters``
+        (every build that wrote the release's files, as its manifest lists
+        them: the package, its version and the core commit it was compiled
+        from, e.g. ``["yani-python 0.22.1 (core 250c439e...)"]``; empty for a
+        release published before releases recorded them). Empty when all data
+        came from local directories that are not release folders.
         """
     def __len__(self) -> builtins.int:
         r"""
@@ -6354,11 +6354,11 @@ class TransmutationResults:
         hash of that release's manifest, which pins every file in it),
         ``format_version``, ``offline`` (True when the data origin was
         unreachable and the newest complete cached release was used, always
-        False for a local folder) and ``converter_versions`` (every converter
-        that wrote the release's files, with its version, as its manifest lists
-        them; empty in results recorded before releases listed them). Empty
-        when every data source was a local directory that is not a release
-        folder.
+        False for a local folder) and ``converters`` (every build that
+        wrote the release's files, as its manifest lists them, such as
+        ``"yani-python 0.22.1 (core 250c439e...)"``; empty for a release
+        published before releases listed them). Empty when every data source
+        was a local directory that is not a release folder.
         """
     @property
     def num_steps(self) -> builtins.int:
@@ -8635,7 +8635,24 @@ def generate_library(keyword: builtins.str, path: builtins.str, *, parts: typing
         transmutation_decay_data = "/data/endf-b8.1"
     
     Running it again resumes: finished folders are kept and only the rest are
-    converted. A folder holds one library built by one version of this package.
+    converted. A folder holds one library built by one build of this package:
+    the same version compiled from the same core commit.
+    
+    The build is recorded in the release. ``manifest.json`` carries
+    ``provenance.builder`` (``"yani-python <version>"``),
+    ``provenance.builder_commit`` (the core commit this extension was compiled
+    from, :data:`__commit__`) and ``provenance.builder_dirty``
+    (:data:`__commit_dirty__`), both ``null`` when it was built outside a git
+    checkout, beside ``provenance.njoy``. Every ``version.json`` and
+    ``provenance.json`` carries the same as one ``converter`` stamp, such as
+    ``"yani-python 0.22.1 (core 250c439e...)"``, and the manifest lists each
+    distinct stamp as ``converters``.
+    
+    An extension compiled from a tree with uncommitted changes
+    (``__commit_dirty__`` is ``True``) writes data no commit describes, so it
+    builds only a partial library (``parts``, ``nuclides`` or ``temperatures``
+    given), which is never published. Commit the changes and rebuild to build
+    a whole library.
     
     Some hosts serve their archives only to a web browser (the IAEA's FENDL and
     IRDFF-II files, JAEA's JENDL-5 files). The error then lists each file with
@@ -8690,11 +8707,13 @@ def generate_library(keyword: builtins.str, path: builtins.str, *, parts: typing
     ValueError
         An unknown keyword or part, or bad temperatures.
     RuntimeError
-        The build cannot start (the folder, the NJOY, the disk space, or source
-        files that need a browser), or did not finish: evaluations that failed
-        and are not declared, a gate that failed, or Ctrl-C. Nothing finished is
-        lost, and running again retries only what is left. Each failed
-        evaluation's reason is in ``<path>/.build/failed/``.
+        The build cannot start (an extension compiled from uncommitted changes
+        asked for a whole library, the folder or another build in it, the NJOY,
+        the disk space, or source files that need a browser), or did not
+        finish: evaluations that failed and are not declared, a gate that
+        failed, or Ctrl-C. Nothing finished is lost, and running again retries
+        only what is left. Each failed evaluation's reason is in
+        ``<path>/.build/failed/``.
     """
 
 def get_neutron_cross_section_data() -> typing.Any:

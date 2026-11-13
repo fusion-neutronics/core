@@ -64,6 +64,7 @@ fn options<'a>(
     Options {
         library: "endf-b8.1",
         release: "2026-11-06",
+        converter: "yani-python 0.0.0.dev0 (core 0123abc)",
         njoy_exec,
         temperatures: TEMPERATURES,
         particles,
@@ -113,6 +114,7 @@ fn a_photon_element_is_converted_with_its_relaxation_and_tabulations() {
         serde_json::from_str(&std::fs::read_to_string(dir.join("version.json")).unwrap()).unwrap();
     assert_eq!(marker["library"], "endf-b8.1");
     assert_eq!(marker["data_version"], "2026-11-06");
+    assert_eq!(marker["converter"], "yani-python 0.0.0.dev0 (core 0123abc)");
 }
 
 #[test]

@@ -688,7 +688,7 @@ fn session_with_sm158_law(law: Option<yani::Interpolation>) -> Option<YaniSessio
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&dir);
-    yani::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+    yani::export_chain_parts(&chain, &dir, Some("test"), "test").expect("export succeeds");
     let mut session = YaniSession::new();
     for (subsection, file) in [
         ("decay", "nuclides.arrow"),

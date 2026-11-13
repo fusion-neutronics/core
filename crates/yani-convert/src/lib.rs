@@ -683,22 +683,19 @@ fn evaluated_yields_columns(chain: &Chain) -> Result<Option<Vec<ArrayRef>>, Box<
 fn write_provenance(
     dir: &Path,
     subsection: &str,
-    library: &str,
-    decay_library: &str,
-    data_version: &str,
-    created_utc: &str,
+    provenance: &Provenance,
     extra: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Result<(), Box<dyn Error>> {
     let mut body = serde_json::json!({
         "subsection": subsection,
-        "library": library,
+        "library": provenance.library,
         // Always present, empty when the caller did not say, so a reader can
         // tell "not recorded" from "same as library" rather than guessing.
-        "decay_library": decay_library,
-        "data_version": data_version,
+        "decay_library": provenance.decay_library,
+        "data_version": provenance.data_version,
         "source": "endf",
-        "converter_version": concat!("yani-convert ", env!("CARGO_PKG_VERSION")),
-        "created_utc": created_utc,
+        "converter": provenance.converter,
+        "created_utc": provenance.created_utc,
     });
     if let (Some(extra), Some(record)) = (extra, body.as_object_mut()) {
         for (key, value) in extra {
@@ -760,7 +757,7 @@ fn merge_manifest(
         "format_version": nuclear_data_schema::FORMAT_VERSION,
         "library": provenance.library,
         "data_version": provenance.data_version,
-        "converter_version": concat!("yani-convert ", env!("CARGO_PKG_VERSION")),
+        "converter": provenance.converter,
         "created_utc": provenance.created_utc,
         "subsections": subsections,
     });
@@ -786,6 +783,12 @@ pub struct Provenance {
     /// Supplied rather than read from the clock, so a caller that wants a
     /// reproducible directory can fix it.
     pub created_utc: String,
+    /// What wrote the directory, recorded as `converter` in every
+    /// `provenance.json` and the manifest: the package and version that ran
+    /// the conversion and the core commit it was built from, such as
+    /// `"yani-python 0.22.1 (core 250c439e...)"`. Supplied by the caller,
+    /// since only the binding knows the commit it was compiled from.
+    pub converter: String,
 }
 
 /// What a chain is built from: two sublibraries of evaluations, and the Q
@@ -834,12 +837,6 @@ pub fn convert_transmutation(
     provenance: &Provenance,
 ) -> Result<Chain, Box<dyn Error>> {
     let (decay, fpy, q_values) = (inputs.decay, inputs.fpy, inputs.q_values);
-    let Provenance {
-        library,
-        decay_library,
-        data_version,
-        created_utc,
-    } = provenance;
     let mut chain = Chain::from_endf(decay, fpy, q_values, reactions)?;
     if let Some(path) = branch_ratios {
         apply_branch_ratios(&mut chain, path)?;
@@ -887,10 +884,7 @@ pub fn convert_transmutation(
         write_provenance(
             &out.join(subsection),
             subsection,
-            library,
-            decay_library,
-            data_version,
-            created_utc,
+            provenance,
             match *subsection {
                 "decay" => Some(&decay_record),
                 "reactions" => Some(&reactions_record),
@@ -1266,15 +1260,7 @@ pub fn convert_branching_files(
     ] {
         mf40_gaps.insert(key.to_string(), serde_json::json!(lines));
     }
-    write_provenance(
-        &dir,
-        "branching",
-        &provenance.library,
-        &provenance.decay_library,
-        &provenance.data_version,
-        &provenance.created_utc,
-        Some(&mf40_gaps),
-    )?;
+    write_provenance(&dir, "branching", provenance, Some(&mf40_gaps))?;
     let parents: Vec<String> = rows
         .iter()
         .map(|r| r.nuclide.clone())

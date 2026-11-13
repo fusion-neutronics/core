@@ -263,6 +263,7 @@ fn the_rows_reach_yanis_reader() {
         ]),
         dir.join("stub"),
         None,
+        "test",
     )
     .unwrap();
     std::fs::copy(
