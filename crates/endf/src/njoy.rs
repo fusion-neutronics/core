@@ -498,6 +498,10 @@ pub struct ThermalAceOptions {
     pub njoy_exec: String,
     /// Where to keep a copy of the input deck, for a person to read.
     pub input_filename: Option<PathBuf>,
+    /// Where to keep the PENDF tape the bound THERMR writes, which holds the
+    /// elastic part on THERMR's own grids (see [`read_thermr_incoherent`]).
+    /// Not kept by default: it runs to hundreds of MB.
+    pub pendf: Option<PathBuf>,
 }
 
 impl Default for ThermalAceOptions {
@@ -516,6 +520,7 @@ impl Default for ThermalAceOptions {
             output_dir: PathBuf::from("."),
             njoy_exec: "njoy".to_string(),
             input_filename: None,
+            pendf: None,
         }
     }
 }
@@ -679,7 +684,135 @@ acer / %%%%%%%%%%%%%%%%%%%%%%%% Write out in ACE format %%%%%%%%%%%%%%%%%%%%%%%%
         );
     }
     deck.commands.push_str("stop\n");
+    if let Some(pendf) = &options.pendf {
+        deck.tapeout.insert(nbound, pendf.clone());
+    }
     Ok(deck)
+}
+
+/// The grids of the incoherent elastic cross section on a PENDF tape from
+/// the bound THERMR, at one temperature.
+///
+/// THERMR (thermr.f90 `iel`) evaluates the cross section at the incident
+/// energies of its own fixed grid (`calcem`'s, which it lists in MF=6),
+/// puts it on the tape's energy grid (MF=3) by three-point Lagrange
+/// interpolation in those values, and ACER reads it from MF=3 by linear
+/// interpolation at each MF=6 energy up to `emax`. So these two grids are
+/// what it takes to say what NJOY writes for a given closed form.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThermrIncoherentGrid {
+    /// The temperature in Kelvin (MF=6's TAB2).
+    pub temperature: f64,
+    /// THERMR's incident energies in eV (MF=6), which run one past `emax`.
+    pub calcem_energy: Vec<f64>,
+    /// The energies of MF=3 in eV.
+    pub pendf_energy: Vec<f64>,
+}
+
+/// The MT the bound THERMR writes the incoherent elastic part under, when
+/// the law has one: 223 when it is the only elastic part, 224 beside a
+/// coherent part in 223 (the MTs the deck of [`thermal_ace_deck`] asks for).
+pub fn thermr_incoherent_mt(law: &crate::ThermalScattering) -> Option<i32> {
+    match law.elastic.as_ref()? {
+        crate::ThermalElastic::Coherent(_) => None,
+        crate::ThermalElastic::Incoherent(_) => Some(223),
+        crate::ThermalElastic::Mixed { .. } => Some(224),
+    }
+}
+
+/// Read the incoherent elastic grids, one per temperature in the order of
+/// the tape, from a PENDF tape the bound THERMR wrote (MF=3 and MF=6 under
+/// `mt`). Reads the tape line by line: it can be hundreds of MB.
+pub fn read_thermr_incoherent(path: &Path, mt: i32) -> Result<Vec<ThermrIncoherentGrid>> {
+    use std::io::BufRead;
+    let bad = |what: String| Error::InvalidArgument {
+        what: format!("{}: {what}", path.display()),
+    };
+    // The lines of each MF=3 and MF=6 section under `mt`, in tape order.
+    let mut sections: Vec<(i32, Vec<String>)> = Vec::new();
+    let mut open = false;
+    for line in std::io::BufReader::new(std::fs::File::open(path)?).lines() {
+        let line = line?;
+        let control =
+            |a: usize, b: usize| line.get(a..b).and_then(|s| s.trim().parse::<i32>().ok());
+        let (mf, this_mt) = (control(70, 72), control(72, 75));
+        if this_mt == Some(mt) && matches!(mf, Some(3) | Some(6)) {
+            if !open {
+                sections.push((mf.unwrap_or(0), Vec::new()));
+                open = true;
+            }
+            if let Some((_, lines)) = sections.last_mut() {
+                lines.push(line);
+            }
+        } else {
+            open = false;
+        }
+    }
+    let fields = |line: &str| -> [f64; 6] {
+        std::array::from_fn(|i| {
+            crate::records::float_endf(line.get(11 * i..11 * (i + 1)).unwrap_or(""))
+        })
+    };
+    let int = |x: f64| x.round() as usize;
+    let mut pendf = Vec::new();
+    let mut calcem = Vec::new();
+    for (mf, lines) in &sections {
+        let field = |i: usize| -> Result<[f64; 6]> {
+            lines
+                .get(i)
+                .map(|l| fields(l))
+                .ok_or_else(|| bad(format!("MF={mf} MT={mt} is cut short")))
+        };
+        if *mf == 3 {
+            // HEAD, then TAB1: NR interpolation pairs and NP (E, sigma) pairs.
+            let tab1 = field(1)?;
+            let (nr, np) = (int(tab1[4]), int(tab1[5]));
+            let first = 2 + (2 * nr).div_ceil(6);
+            let interpolation = field(2)?;
+            if nr != 1 || int(interpolation[1]) != 2 {
+                return Err(bad(format!("MF=3 MT={mt} is not linear-linear throughout")));
+            }
+            let mut values = Vec::with_capacity(2 * np);
+            for i in first..first + (2 * np).div_ceil(6) {
+                values.extend(field(i)?);
+            }
+            values.truncate(2 * np);
+            pendf.push(values.iter().step_by(2).copied().collect::<Vec<_>>());
+        } else {
+            // HEAD, a TAB1 of two points, then a TAB2 (temperature, NE) and
+            // NE LIST records whose C2 is the incident energy.
+            let tab1 = field(1)?;
+            let mut i = 2 + (2 * int(tab1[4])).div_ceil(6) + (2 * int(tab1[5])).div_ceil(6);
+            let tab2 = field(i)?;
+            let (temperature, nr, ne) = (tab2[0], int(tab2[4]), int(tab2[5]));
+            i += 1 + (2 * nr).div_ceil(6);
+            let mut energy = Vec::with_capacity(ne);
+            for _ in 0..ne {
+                let list = field(i)?;
+                energy.push(list[1]);
+                i += 1 + int(list[4]).div_ceil(6);
+            }
+            calcem.push((temperature, energy));
+        }
+    }
+    if pendf.len() != calcem.len() {
+        return Err(bad(format!(
+            "{} MF=3 and {} MF=6 sections under MT={mt}",
+            pendf.len(),
+            calcem.len()
+        )));
+    }
+    Ok(calcem
+        .into_iter()
+        .zip(pendf)
+        .map(
+            |((temperature, calcem_energy), pendf_energy)| ThermrIncoherentGrid {
+                temperature,
+                calcem_energy,
+                pendf_energy,
+            },
+        )
+        .collect())
 }
 
 /// Generate a thermal scattering ACE file, running NJOY to do it.
@@ -1148,6 +1281,128 @@ mod tests {
             output_dir: PathBuf::from("out"),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn the_bound_pendf_is_kept_only_when_asked_for() {
+        let mut o = options("sio2-b", &[8016, 14028]);
+        let deck = thermal_deck(SIO2, &o).unwrap();
+        assert!(!deck.tapeout.contains_key(&25));
+        o.pendf = Some(PathBuf::from("bound.pendf"));
+        let deck = thermal_deck(SIO2, &o).unwrap();
+        // tape25 is what the bound THERMR writes and ACER reads.
+        assert!(deck.commands.contains("\n21 24 25\n"));
+        assert_eq!(deck.tapeout[&25], PathBuf::from("bound.pendf"));
+    }
+
+    /// One line of an ENDF tape: six fields and the control columns.
+    fn endf_line(fields: [f64; 6], ints: &[usize], mf: i32, mt: i32) -> String {
+        let mut text = String::new();
+        for (i, f) in fields.iter().enumerate() {
+            if ints.contains(&i) {
+                text.push_str(&format!("{:>11}", *f as i64));
+            } else {
+                text.push_str(&format!("{f:>11.5E}"));
+            }
+        }
+        format!("{text}{:>4}{mf:>2}{mt:>3}{:>5}\n", 125, 1)
+    }
+
+    #[test]
+    fn thermr_incoherent_grids_are_read_per_temperature() {
+        let mut tape = String::new();
+        for (temperature, shift) in [(20.0, 0.0), (77.0, 0.25)] {
+            tape.push_str(&endf_line(
+                [1001.0, 0.99, 0., 0., 0., 0.],
+                &[2, 3, 4, 5],
+                1,
+                451,
+            ));
+            // Another MT of MF=3 first, which is not read.
+            tape.push_str(&endf_line(
+                [1001.0, 0.99, 0., 0., 0., 0.],
+                &[2, 3, 4, 5],
+                3,
+                223,
+            ));
+            tape.push_str(&endf_line([0., 0., 0., 0., 1., 1.], &[2, 3, 4, 5], 3, 223));
+            tape.push_str(&endf_line(
+                [1., 2., 0., 0., 0., 0.],
+                &[0, 1, 2, 3, 4, 5],
+                3,
+                223,
+            ));
+            tape.push_str(&endf_line([9.0, 9.0, 0., 0., 0., 0.], &[], 3, 223));
+            // MF=3 MT=224: four points, one interpolation region.
+            tape.push_str(&endf_line(
+                [1001.0, 0.99, 0., 0., 0., 0.],
+                &[2, 3, 4, 5],
+                3,
+                224,
+            ));
+            tape.push_str(&endf_line([0., 0., 0., 0., 1., 4.], &[2, 3, 4, 5], 3, 224));
+            tape.push_str(&endf_line(
+                [4., 2., 0., 0., 0., 0.],
+                &[0, 1, 2, 3, 4, 5],
+                3,
+                224,
+            ));
+            tape.push_str(&endf_line(
+                [1e-5, 5.0, 1.0 + shift, 4.0, 1.5, 3.0],
+                &[],
+                3,
+                224,
+            ));
+            tape.push_str(&endf_line([2.0, 2.0, 0., 0., 0., 0.], &[], 3, 224));
+            tape.push_str(&endf_line([0.; 6], &[0, 1, 2, 3, 4, 5], 3, 0));
+            // MF=6 MT=224: HEAD, a TAB1 of two points, a TAB2 and one LIST
+            // per incident energy (C2), each with two cosines here.
+            tape.push_str(&endf_line(
+                [1001.0, 0.99, 0., 6., 0., 0.],
+                &[2, 3, 4, 5],
+                6,
+                224,
+            ));
+            tape.push_str(&endf_line([1., 1., -2., 1., 1., 2.], &[2, 3, 4, 5], 6, 224));
+            tape.push_str(&endf_line(
+                [2., 2., 0., 0., 0., 0.],
+                &[0, 1, 2, 3, 4, 5],
+                6,
+                224,
+            ));
+            tape.push_str(&endf_line([1e-5, 1., 5.0, 1., 0., 0.], &[], 6, 224));
+            tape.push_str(&endf_line(
+                [temperature, 0., 3., 0., 1., 3.],
+                &[2, 3, 4, 5],
+                6,
+                224,
+            ));
+            tape.push_str(&endf_line(
+                [3., 2., 0., 0., 0., 0.],
+                &[0, 1, 2, 3, 4, 5],
+                6,
+                224,
+            ));
+            for e in [1e-5, 1.0, 7.0] {
+                tape.push_str(&endf_line([0., e, 0., 0., 4., 4.], &[2, 3, 4, 5], 6, 224));
+                tape.push_str(&endf_line([e, 1., -0.5, 0.5, 0., 0.], &[], 6, 224));
+            }
+            tape.push_str(&endf_line([0.; 6], &[0, 1, 2, 3, 4, 5], 6, 0));
+        }
+        let dir = std::env::temp_dir().join(format!("endf-thermr-grid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pendf");
+        std::fs::write(&path, &tape).unwrap();
+        let grids = read_thermr_incoherent(&path, 224).unwrap();
+        assert_eq!(grids.len(), 2);
+        assert_eq!(grids[0].temperature, 20.0);
+        assert_eq!(grids[1].temperature, 77.0);
+        assert_eq!(grids[0].calcem_energy, [1e-5, 1.0, 7.0]);
+        assert_eq!(grids[0].pendf_energy, [1e-5, 1.0, 1.5, 2.0]);
+        assert_eq!(grids[1].pendf_energy, [1e-5, 1.25, 1.5, 2.0]);
+        // Nothing under an MT that is not on the tape.
+        assert!(read_thermr_incoherent(&path, 225).unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
