@@ -23,6 +23,7 @@ use std::sync::Arc;
 use arrow_array::builder::{Float32Builder, ListBuilder};
 use arrow_array::ArrayRef;
 use endf::data::temperature_str;
+use endf::njoy::ThermrIncoherentGrid;
 use endf::thermal_ace::InelasticDistribution;
 use endf::thermal_scattering::SecondaryModel;
 use endf::{Material, ThermalAce, ThermalElastic, ThermalScattering};
@@ -62,6 +63,10 @@ struct Temperature {
     label: String,
     kelvin: f64,
     ace: ThermalAce,
+    /// THERMR's grids for the incoherent elastic part, when the law has one:
+    /// what [`Prepared::check_against_njoy`] needs to say what NJOY makes of
+    /// the closed form.
+    incoherent_grid: Option<ThermrIncoherentGrid>,
     /// Index of this temperature in `law`'s own list.
     index: usize,
     law: usize,
@@ -89,18 +94,144 @@ type ElasticRow = (
     Option<(f64, f64)>,
 );
 
-/// How far the elastic part may stray from what NJOY wrote, relative: far
-/// above the rounding of a PENDF tape, far below any convention mix-up (a
-/// factor of `nmix` or of M0).
+/// How far the elastic part may stray from what NJOY wrote, relative, once
+/// NJOY's own approximations are modelled: far above the rounding of a PENDF
+/// tape (the largest difference across the JEFF-4.0, ENDF/B-VIII.1 and
+/// JENDL-5.0 tables is a few parts in 10^7), far below any convention mix-up
+/// (a factor of `nmix` or of M0).
 const NJOY_TOLERANCE: f64 = 1e-4;
 
 fn same(a: f64, b: f64) -> bool {
     (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0)
 }
 
+/// How many of the evaluation's Bragg edges NJOY's cumulative factor at the
+/// ACE edge `e` (eV) sums: those at or below `e`.
+///
+/// THERMR (thermr.f90 `sigcoh`, `coh`) tabulates the coherent cross section
+/// one unit of the seventh significant figure either side of every edge
+/// (`sigfig(edge, 7, -1)` and `sigfig(edge, 7, +1)`), summing only the edges
+/// below the energy (`elim >= e` ends the sum). ACER (aceth.f90) then walks
+/// that grid and records a point as an edge where `E * sigma` has grown by
+/// more than `(previous + 1) / 10^6`. An edge whose own step is smaller than
+/// that is not recorded where it is, and its step shows up at the next grid
+/// point instead, which is the point just below the following edge. So an
+/// ACE edge sits a part in 10^7 above the edge it stands for, or a part in
+/// 10^7 below the next one, and either way its factor is the sum over the
+/// edges below it. Counting the edges within a relative 10^-6 above `e`
+/// (as this check once did) takes in the following edge for the second
+/// kind and reads it as a disagreement as large as that edge's step: 0.9%
+/// in Ge3Bi4O12 and 0.4% in SrH2 (JEFF-4.0), where NJOY is right. Where two
+/// edges are one unit of the seventh figure apart, the point above the first
+/// is the second, and NJOY's factor there has both, as the format has it (an
+/// edge counts from its own energy up), so an edge at `e` itself counts; the
+/// 10^-9 only absorbs rounding, far inside the 10^-7 grid spacing.
+fn njoy_edges_below(edges: &[f64], e: f64) -> usize {
+    edges.partition_point(|&x| x <= e * (1.0 + 1e-9))
+}
+
+/// Which of the coherent elastic temperatures THERMR takes the Bragg factors
+/// from when asked for `kelvin`.
+///
+/// THERMR (thermr.f90 `rdelas`) starts from the first temperature and then
+/// takes each later one within `kelvin / 1000 + 5` K, so the last of those
+/// wins even where the evaluation has `kelvin` itself. JEFF-4.0's C in CH2
+/// gives factors at 300 and 303 K, and NJOY's 300 K table has the 303 K
+/// factors, 1% from the 300 K ones. The closed form keeps the evaluation's
+/// own temperature; the check compares with what NJOY took.
+fn rdelas_temperature(temperatures: &[f64], kelvin: f64) -> usize {
+    (1..temperatures.len())
+        .rev()
+        .find(|&j| (temperatures[j] - kelvin).abs() < kelvin / 1000.0 + 5.0)
+        .unwrap_or(0)
+}
+
+/// What NJOY writes for the incoherent elastic cross section at `e` (eV),
+/// given the closed form's values `at_nodes` at THERMR's incident energies.
+///
+/// The closed form is exact; NJOY's is not, in two steps. THERMR (thermr.f90
+/// `iel`) evaluates it at its own fixed incident energies and puts it on the
+/// PENDF grid by three-point Lagrange interpolation in those values (`terp`
+/// with order 3), and ACER (aceth.f90) reads it back at each incident energy
+/// by linear interpolation on the PENDF grid. That grid is the neutron
+/// evaluation's, refined only at Bragg edges, and nothing ties it to this
+/// cross section: above the last edge of H in MgH2 (JEFF-4.0) it runs
+/// 1.644331, 1.75 eV, so NJOY's 1.7 eV value is a chord of a curve close to
+/// 1/E and 0.12% high. The Lagrange step alone is a few parts in 10^4 there.
+/// Modelling both steps reproduces what NJOY wrote to the precision of the
+/// tape, so the check can stay tight and still hold the closed form to
+/// NJOY's conventions. `None` when `e` is outside the PENDF grid.
+fn njoy_incoherent(grid: &ThermrIncoherentGrid, at_nodes: &[f64], e: f64) -> Option<f64> {
+    let p = &grid.pendf_energy;
+    let thermr = |x: f64| thermr_lagrange(&grid.calcem_energy, at_nodes, x);
+    // ACE energies are MeV scaled to eV, so a grid point comes back a
+    // rounding away from itself.
+    let near = |x: f64| (x - e).abs() <= 1e-9 * e;
+    let j = p.partition_point(|&x| x < e);
+    if let Some(&x) = [j.checked_sub(1), Some(j)]
+        .into_iter()
+        .flatten()
+        .filter_map(|i| p.get(i))
+        .find(|&&x| near(x))
+    {
+        return Some(thermr(x));
+    }
+    if j == 0 || j == p.len() {
+        return None;
+    }
+    let (a, b) = (p[j - 1], p[j]);
+    let (fa, fb) = (thermr(a), thermr(b));
+    Some(fa + (fb - fa) * (e - a) / (b - a))
+}
+
+/// THERMR's `terp(x, y, n, arg, 3)` for increasing `x`: Lagrange
+/// interpolation through three of the points, one at or below `arg` and two
+/// above where there are, with the same choice of points at either end.
+fn thermr_lagrange(x: &[f64], y: &[f64], arg: f64) -> f64 {
+    const ORDER: usize = 3;
+    let small = 1e-10 * arg;
+    let n = x.len();
+    let start = if n <= ORDER {
+        0
+    } else {
+        // `terp`'s ilow and ihi (one-based il/2 + 1 and n - il/2 - 1).
+        let (low, high) = (1, n - 3);
+        if (arg - x[low]).abs() < small {
+            return y[low];
+        }
+        if arg <= x[low] {
+            0
+        } else if (x[high] - arg).abs() < small {
+            return y[high];
+        } else if x[high] <= arg {
+            n - ORDER
+        } else {
+            match (low + 1..high).find(|&m| (x[m] - arg).abs() < small || x[m] > arg) {
+                Some(m) if (x[m] - arg).abs() < small => return y[m],
+                Some(m) => m - 1,
+                None => high - 1,
+            }
+        }
+    };
+    let points = start..start + n.min(ORDER);
+    points
+        .clone()
+        .map(|i| {
+            let weight: f64 = points
+                .clone()
+                .filter(|&k| k != i)
+                .map(|k| (arg - x[k]) / (x[i] - x[k]))
+                .product();
+            weight * y[i]
+        })
+        .sum()
+}
+
 impl Prepared {
     /// Pair each law's temperatures with the ACE tables NJOY wrote for them,
-    /// in order, and check the laws describe one table.
+    /// and with THERMR's incoherent elastic grids when the law has an
+    /// incoherent part (none otherwise), in order, and check the laws
+    /// describe one table.
     pub fn new(
         name: &str,
         bound_nuclides: &[String],
@@ -108,6 +239,7 @@ impl Prepared {
         nmix: u32,
         laws: Vec<ThermalScattering>,
         aces: Vec<Vec<ThermalAce>>,
+        grids: Vec<Vec<ThermrIncoherentGrid>>,
     ) -> Result<Self, Box<dyn Error>> {
         let first = laws
             .first()
@@ -135,11 +267,32 @@ impl Prepared {
                 .into());
             }
         }
-        if aces.len() != laws.len() {
-            return Err("one ACE file per evaluation file is needed".into());
+        if aces.len() != laws.len() || grids.len() != laws.len() {
+            return Err(
+                "one ACE file and one set of THERMR grids per evaluation file is needed".into(),
+            );
         }
         let mut temperatures = Vec::new();
-        for (l, (law, tables)) in laws.iter().zip(aces).enumerate() {
+        for (l, ((law, tables), grids)) in laws.iter().zip(aces).zip(grids).enumerate() {
+            let incoherent = endf::njoy::thermr_incoherent_mt(law).is_some();
+            let mut grids: Vec<Option<ThermrIncoherentGrid>> = if incoherent {
+                if grids.len() != law.temperatures.len() {
+                    return Err(format!(
+                        "{name}: THERMR wrote {} incoherent elastic grids for {} temperatures",
+                        grids.len(),
+                        law.temperatures.len()
+                    )
+                    .into());
+                }
+                grids.into_iter().map(Some).collect()
+            } else if grids.is_empty() {
+                vec![None; law.temperatures.len()]
+            } else {
+                return Err(format!(
+                    "{name}: incoherent elastic grids for a law with no incoherent elastic part"
+                )
+                .into());
+            };
             if tables.len() != law.temperatures.len() {
                 return Err(format!(
                     "{name}: NJOY wrote {} tables for {} temperatures",
@@ -156,10 +309,21 @@ impl Prepared {
                     )
                     .into());
                 }
+                let incoherent_grid = grids[index].take();
+                if let Some(g) = &incoherent_grid
+                    && (g.temperature - kelvin).abs() > 1e-3 * kelvin
+                {
+                    return Err(format!(
+                        "{name}: THERMR's grid at {} K was paired with the {kelvin} K law",
+                        g.temperature
+                    )
+                    .into());
+                }
                 temperatures.push(Temperature {
                     label: temperature_str(kelvin),
                     kelvin,
                     ace,
+                    incoherent_grid,
                     index,
                     law: l,
                 });
@@ -350,6 +514,14 @@ impl Prepared {
     /// factor at every edge ACER kept, and the incoherent cross section at
     /// every energy of its grid. The closed forms are kept rather than ACER's
     /// equiprobable cosines, so this is what holds them to NJOY's conventions.
+    /// Each is compared with what NJOY makes of the closed form, rather than
+    /// with the closed form itself: where NJOY puts its Bragg edges
+    /// ([`njoy_edges_below`]), which temperature's factors it takes
+    /// ([`rdelas_temperature`]) and how it interpolates the incoherent part
+    /// ([`njoy_incoherent`]). Together they reproduce what NJOY wrote to a
+    /// few parts in 10^7, the precision of its tapes. What is written is the
+    /// closed form at the evaluation's own temperature, which those
+    /// approximations of NJOY's do not touch.
     pub fn check_against_njoy(&self) -> Result<(), Box<dyn Error>> {
         use endf::thermal_ace::AceElastic;
         let off = |what: &str, e: f64, ours: f64, njoy: f64| -> Result<(), String> {
@@ -400,25 +572,54 @@ impl Prepared {
                 )
                 .into());
             }
-            if let (Some((edges, factors)), Some((ace_edges, ace_factors))) = (&bragg, ace_bragg) {
+            if let (Some((edges, _)), Some((ace_edges, ace_factors))) = (&bragg, ace_bragg) {
+                // The factors at the temperature THERMR took them from, which
+                // is not always this one (see `rdelas_temperature`).
+                let coherent = match self.laws[t.law].elastic.as_ref() {
+                    Some(ThermalElastic::Coherent(c))
+                    | Some(ThermalElastic::Mixed { coherent: c, .. }) => c,
+                    _ => unreachable!("a coherent part was found above"),
+                };
+                let factors =
+                    &coherent.factors[rdelas_temperature(&coherent.temperatures, t.kelvin)];
                 for (&e, &f) in ace_edges
                     .iter()
                     .zip(ace_factors)
                     .filter(|&(&e, _)| e <= emax)
                 {
-                    let n = edges.partition_point(|&x| x <= e * (1.0 + 1e-6));
-                    let ours = if n == 0 { 0.0 } else { factors[n - 1] };
+                    let n = njoy_edges_below(edges, e);
+                    let ours = if n == 0 {
+                        0.0
+                    } else {
+                        factors[n - 1] / self.nmix
+                    };
                     off("the cumulative Bragg factor", e, ours, f)?;
                 }
             }
             if let (Some((sb, w)), Some((energy, xs))) = (inc, ace_inc) {
-                for (&e, &njoy) in energy.iter().zip(xs).filter(|&(&e, _)| e <= emax) {
+                let grid = t.incoherent_grid.as_ref().ok_or_else(|| {
+                    format!(
+                        "{}: no THERMR grid to check the incoherent elastic part at {} K by",
+                        self.name, t.kelvin
+                    )
+                })?;
+                let closed_form = |e: f64| {
                     let x = 2.0 * e * w;
-                    let ours = if x == 0.0 {
+                    if x == 0.0 {
                         sb
                     } else {
                         sb / 2.0 * -(-2.0 * x).exp_m1() / x
-                    };
+                    }
+                };
+                let at_nodes: Vec<f64> =
+                    grid.calcem_energy.iter().map(|&e| closed_form(e)).collect();
+                for (&e, &njoy) in energy.iter().zip(xs).filter(|&(&e, _)| e <= emax) {
+                    let ours = njoy_incoherent(grid, &at_nodes, e).ok_or_else(|| {
+                        format!(
+                            "{}: {e} eV is outside THERMR's incoherent elastic grid at {} K",
+                            self.name, t.kelvin
+                        )
+                    })?;
                     off("the incoherent elastic cross section", e, ours, njoy)?;
                 }
             }
@@ -530,6 +731,7 @@ pub fn convert_thermal(
     std::fs::create_dir_all(output_dir)?;
     let mut laws = Vec::new();
     let mut aces = Vec::new();
+    let mut grids = Vec::new();
     for file in source.thermal {
         let material = Material::from_file(file).map_err(|e| format!("{}: {e}", file.display()))?;
         let law = ThermalScattering::from_endf(&material)?;
@@ -542,10 +744,17 @@ pub fn convert_thermal(
             nmix: source.nmix,
             output_dir: work.path().to_path_buf(),
             njoy_exec: source.njoy_exec.to_string(),
+            pendf: Some(work.path().join("pendf")),
             ..Default::default()
         };
         let ace = endf::njoy::make_ace_thermal(source.neutron, &neutron, file, &material, &options)
             .map_err(|e| format!("NJOY failed on {}: {e}", file.display()))?;
+        // THERMR's grids for the incoherent elastic part, which the check
+        // needs to model NJOY's interpolation; the tape goes with `work`.
+        grids.push(match endf::njoy::thermr_incoherent_mt(&law) {
+            Some(mt) => endf::njoy::read_thermr_incoherent(&work.path().join("pendf"), mt)?,
+            None => Vec::new(),
+        });
         let text = std::fs::read_to_string(&ace)?;
         let tables = endf::ace::tables_from_str(&text, None)?
             .iter()
@@ -566,6 +775,7 @@ pub fn convert_thermal(
         source.nmix,
         laws,
         aces,
+        grids,
     )?;
     prepared.check_against_njoy()?;
     let dir = output_dir.join(format!("{}.arrow", source.name));
@@ -724,6 +934,25 @@ mod tests {
             .collect()
     }
 
+    /// THERMR's incoherent elastic grids for `law`, none when it has no
+    /// incoherent part: incident energies a factor of 1.3 apart, the ones the
+    /// stand-in ACE tables of [`prepared_against_njoy`] list, and a PENDF
+    /// grid of the same energies, on which NJOY's interpolation is exact.
+    fn grids_for(law: &ThermalScattering) -> Vec<ThermrIncoherentGrid> {
+        if endf::njoy::thermr_incoherent_mt(law).is_none() {
+            return vec![];
+        }
+        let energy: Vec<f64> = (0..41).map(|k| 1e-5 * 1.3f64.powi(k)).collect();
+        law.temperatures
+            .iter()
+            .map(|&temperature| ThermrIncoherentGrid {
+                temperature,
+                calcem_energy: energy.clone(),
+                pendf_energy: energy.clone(),
+            })
+            .collect()
+    }
+
     fn law(fixture: &[u8]) -> ThermalScattering {
         ThermalScattering::from_endf(&Material::from_str(&xz(fixture)).unwrap()).unwrap()
     }
@@ -745,6 +974,7 @@ mod tests {
             1,
             vec![l.clone()],
             vec![aces],
+            vec![grids_for(&l)],
         )
         .unwrap();
         let tmp = tempfile::tempdir().unwrap();
@@ -879,14 +1109,28 @@ mod tests {
         let l = law(ZR_ZRH);
         let mut aces = aces_for(&l);
         aces.pop();
-        assert!(Prepared::new("c", &[], "s", 1, vec![l], vec![aces]).is_err());
+        let grids = grids_for(&l);
+        assert!(Prepared::new("c", &[], "s", 1, vec![l.clone()], vec![aces], vec![grids]).is_err());
+        let mut grids = grids_for(&l);
+        grids.pop();
+        assert!(Prepared::new(
+            "c",
+            &[],
+            "s",
+            1,
+            vec![l.clone()],
+            vec![aces_for(&l)],
+            vec![grids]
+        )
+        .is_err());
     }
 
     #[test]
     fn two_files_that_are_not_one_table_are_refused() {
         let (a, b) = (law(SIO2), law(ZR_ZRH));
         let (aa, ab) = (aces_for(&a), aces_for(&b));
-        assert!(Prepared::new("c", &[], "s", 1, vec![a, b], vec![aa, ab]).is_err());
+        let grids = vec![grids_for(&a), grids_for(&b)];
+        assert!(Prepared::new("c", &[], "s", 1, vec![a, b], vec![aa, ab], grids).is_err());
     }
 
     const S_CH4: &[u8] = include_bytes!("../../endf/fixtures/tsl-s-CH4.endf.xz");
@@ -934,7 +1178,17 @@ mod tests {
                 ThermalElastic::Mixed { .. } => unreachable!(),
             });
         }
-        Prepared::new("c_Test", &[], "t.endf", nmix, vec![l], vec![aces]).unwrap()
+        let grids = grids_for(&l);
+        Prepared::new(
+            "c_Test",
+            &[],
+            "t.endf",
+            nmix,
+            vec![l],
+            vec![aces],
+            vec![grids],
+        )
+        .unwrap()
     }
 
     #[test]
@@ -962,7 +1216,16 @@ mod tests {
         for a in &mut aces {
             a.elastic = None;
         }
-        let p = Prepared::new("c_Test", &[], "t.endf", 1, vec![l.clone()], vec![aces]).unwrap();
+        let p = Prepared::new(
+            "c_Test",
+            &[],
+            "t.endf",
+            1,
+            vec![l.clone()],
+            vec![aces],
+            vec![vec![]],
+        )
+        .unwrap();
         p.check_against_njoy().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("c_Test.arrow");
@@ -981,10 +1244,18 @@ mod tests {
             .ace
             .elastic
             .clone();
-        let err = Prepared::new("c_Test", &[], "t.endf", 1, vec![l], vec![aces])
-            .unwrap()
-            .check_against_njoy()
-            .unwrap_err();
+        let err = Prepared::new(
+            "c_Test",
+            &[],
+            "t.endf",
+            1,
+            vec![l],
+            vec![aces],
+            vec![vec![]],
+        )
+        .unwrap()
+        .check_against_njoy()
+        .unwrap_err();
         assert!(err.to_string().contains("no elastic part"), "{err}");
     }
 
@@ -1018,5 +1289,227 @@ mod tests {
         };
         let want: Vec<f64> = c.factors[0].iter().map(|f| f / 3.0).collect();
         assert_eq!(factors.values().to_vec(), want);
+    }
+
+    /// One temperature (20 K) of a law whose ACE table is `elastic`, as NJOY
+    /// wrote it.
+    fn at_20_k(
+        mut l: ThermalScattering,
+        elastic: endf::thermal_ace::AceElastic,
+        grids: Vec<ThermrIncoherentGrid>,
+    ) -> Prepared {
+        l.temperatures = vec![20.0];
+        l.energy_max = 5.000001;
+        let mut ace = aces_for(&l).remove(0);
+        ace.elastic = Some(elastic);
+        Prepared::new(
+            "c_Test",
+            &[],
+            "t.endf",
+            1,
+            vec![l],
+            vec![vec![ace]],
+            vec![grids],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn bragg_factors_are_compared_where_njoy_puts_the_edges() {
+        use endf::thermal_ace::AceElastic;
+        // Slices of the 20 K Bragg edges of JEFF-4.0 SrH2 and Ge3Bi4O12, and
+        // what NJOY 2016.80 wrote for them. The step at 0.05240225 eV (and at
+        // 0.126302 eV) is below ACER's (previous + 1) / 10^6, so it is not
+        // recorded where it is but at the next grid point, 0.05251176 eV, a
+        // part in 10^7 below the next edge, which a 10^-6 window took in: the
+        // 0.43% (and 0.9%) the check once reported. Edges 0.1019424 and
+        // 0.1019425 eV are one unit of the seventh figure apart, and NJOY's
+        // one point at 0.1019425 eV has both, as the format says (an edge
+        // counts from its own energy up).
+        let coherent = |edges: Vec<f64>, factors: Vec<f64>| {
+            let mut l = law(SIO2);
+            l.elastic = Some(ThermalElastic::Coherent(
+                endf::thermal_scattering::CoherentElastic {
+                    temperatures: vec![20.0],
+                    bragg_edges: edges,
+                    factors: vec![factors],
+                },
+            ));
+            l
+        };
+        let sr = coherent(
+            vec![
+                0.05235597, 0.05240225, 0.05251177, 0.05256381, 0.1017868, 0.1019424, 0.1019425,
+                0.1019737, 0.1019793,
+            ],
+            vec![
+                0.1210418, 0.1210429, 0.1215627, 0.1216082, 0.1983521, 0.1983642, 0.1985774,
+                0.1985853, 0.1987971,
+            ],
+        );
+        let sr_njoy = AceElastic::Coherent {
+            bragg_edges: vec![
+                0.05235598, 0.05251176, 0.05251178, 0.05256382, 0.1017869, 0.1019425, 0.1019738,
+                0.1019794,
+            ],
+            factors: vec![
+                0.121041790162,
+                0.121042915041,
+                0.121562722741,
+                0.12160818474,
+                0.19835213203,
+                0.198577363738,
+                0.198585307727,
+                0.198797112669,
+            ],
+        };
+        at_20_k(sr, sr_njoy, vec![]).check_against_njoy().unwrap();
+        let ge = coherent(
+            vec![0.1259327, 0.126302, 0.1266713, 0.1270406],
+            vec![0.5420752, 0.5420768, 0.5469641, 0.5475611],
+        );
+        let ge_njoy = AceElastic::Coherent {
+            bragg_edges: vec![0.1259328, 0.1266712, 0.1266714, 0.1270407],
+            factors: vec![
+                0.542075218944,
+                0.542076859951,
+                0.546964065086,
+                0.547561043006,
+            ],
+        };
+        at_20_k(ge, ge_njoy, vec![]).check_against_njoy().unwrap();
+        // The edges each ACE edge sums: the one a part in 10^7 below it, not
+        // the one a part in 10^7 above it.
+        let edges = [0.05240225, 0.05251177];
+        assert_eq!(njoy_edges_below(&edges, 0.05251176), 1);
+        assert_eq!(njoy_edges_below(&edges, 0.05251178), 2);
+        assert_eq!(njoy_edges_below(&edges, 0.05251177), 2);
+    }
+
+    #[test]
+    fn bragg_factors_are_compared_at_the_temperature_njoy_took_them_from() {
+        use endf::thermal_ace::AceElastic;
+        // JEFF-4.0 C in CH2 gives factors at 300 and 303 K, among others.
+        // THERMR takes the last temperature within T/1000 + 5 K, so its
+        // 300 K table has the 303 K factors; the 300 K ones are written.
+        let temperatures = vec![
+            20.0, 77.0, 196.0, 233.0, 293.6, 300.0, 303.0, 313.0, 323.0, 333.0, 343.0, 350.0,
+        ];
+        assert_eq!(rdelas_temperature(&temperatures, 300.0), 6);
+        assert_eq!(rdelas_temperature(&temperatures, 303.0), 6);
+        assert_eq!(rdelas_temperature(&temperatures, 293.6), 4);
+        assert_eq!(rdelas_temperature(&temperatures, 20.0), 0);
+        assert_eq!(rdelas_temperature(&temperatures, 350.0), 11);
+        let mut l = law(SIO2);
+        l.elastic = Some(ThermalElastic::Coherent(
+            endf::thermal_scattering::CoherentElastic {
+                temperatures: vec![300.0, 303.0],
+                bragg_edges: vec![0.1, 0.2],
+                factors: vec![vec![0.0980, 0.0990], vec![0.0970, 0.0980]],
+            },
+        ));
+        l.temperatures = vec![300.0];
+        let mut ace = aces_for(&l).remove(0);
+        ace.elastic = Some(AceElastic::Coherent {
+            bragg_edges: vec![0.1000001, 0.2000001],
+            factors: vec![0.0970, 0.0980],
+        });
+        let p = Prepared::new("c", &[], "t", 1, vec![l], vec![vec![ace]], vec![vec![]]).unwrap();
+        p.check_against_njoy().unwrap();
+        let (_, bragg, _) = p.elastic_row(&p.temperatures[0]).unwrap();
+        assert_eq!(bragg.unwrap().1, vec![0.0980, 0.0990]);
+    }
+
+    #[test]
+    fn the_incoherent_part_is_compared_as_njoy_interpolates_it() {
+        use endf::thermal_ace::AceElastic;
+        // H in MgH2 (JEFF-4.0) at 20 K: SB = 80.26 b, M0 = 1, W' = 9.908219
+        // per eV. Above its last Bragg edge (1.64433 eV) the PENDF grid is
+        // H-1's, and NJOY 2016.80 wrote 1.1926471723 b at 1.7 eV, the chord
+        // from 1.644331 to 1.75 eV of THERMR's interpolated values; the
+        // closed form is 1.1912273 b, 0.12% lower.
+        let mut l = law(ZR_ZRH);
+        l.principal_count = 1.0;
+        l.elastic = Some(ThermalElastic::Incoherent(
+            endf::thermal_scattering::IncoherentElastic {
+                bound_xs: 80.26,
+                debye_waller: endf::Tabulated1D::new(vec![10.0, 30.0], vec![9.908219, 9.908219]),
+            },
+        ));
+        // A stretch of THERMR's incident grid around the energies checked,
+        // and the PENDF points either side of each.
+        let grid = ThermrIncoherentGrid {
+            temperature: 20.0,
+            calcem_energy: vec![
+                1.16, 1.28, 1.42, 1.55, 1.70, 1.855, 2.02, 2.18, 2.36, 2.59, 2.855,
+            ],
+            pendf_energy: vec![1.644331, 1.75, 1.8125, 1.875, 2.0, 2.09375],
+        };
+        let energy = vec![1.7, 1.855, 2.02];
+        let njoy = vec![1.1926471723, 1.092099, 1.00295575467];
+        // An ACE energy a rounding below a PENDF point is that point.
+        let below = 1.75 * (1.0 - 1e-15);
+        assert_eq!(
+            njoy_incoherent(&grid, &[1.0; 11], below),
+            njoy_incoherent(&grid, &[1.0; 11], 1.75)
+        );
+        assert_eq!(njoy_incoherent(&grid, &[1.0; 11], 1.6), None);
+        let at_nodes: Vec<f64> = grid
+            .calcem_energy
+            .iter()
+            .map(|&e| 80.26 / 2.0 * -(-4.0 * e * 9.908219f64).exp_m1() / (2.0 * e * 9.908219))
+            .collect();
+        for (&e, &n) in energy.iter().zip(&njoy) {
+            let modelled = njoy_incoherent(&grid, &at_nodes, e).unwrap();
+            assert!(
+                (modelled - n).abs() < 1e-6 * n,
+                "{e} eV: {modelled} against {n}"
+            );
+        }
+        let closed_form = 80.26 / (4.0 * 1.7 * 9.908219);
+        assert!((njoy[0] / closed_form - 1.0 - 1.19e-3).abs() < 1e-5);
+        let elastic = AceElastic::Incoherent {
+            energy,
+            xs: njoy,
+            mu: vec![],
+            n_mu: 0,
+        };
+        at_20_k(l.clone(), elastic.clone(), vec![grid])
+            .check_against_njoy()
+            .unwrap();
+        // Without THERMR's grid there is nothing to model NJOY by.
+        let mut ace = aces_for(&law(ZR_ZRH)).remove(0);
+        ace.elastic = Some(elastic);
+        l.temperatures = vec![20.0];
+        assert!(Prepared::new("c", &[], "t", 1, vec![l], vec![vec![ace]], vec![vec![]]).is_err());
+    }
+
+    #[test]
+    fn thermr_lagrange_follows_njoy_terp() {
+        // Three points of a parabola are exact; the points used are one at or
+        // below the argument and two above, and the three end points within
+        // the last two intervals at either end.
+        let x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let y: Vec<f64> = x.iter().map(|v| v * v).collect();
+        for arg in [0.5, 1.5, 2.0, 2.5, 4.5, 5.5, 7.0] {
+            assert!(
+                (thermr_lagrange(&x, &y, arg) - arg * arg).abs() < 1e-12,
+                "{arg}"
+            );
+        }
+        // 1/x is not a parabola, so which points are used shows: at 2.5 they
+        // are 2, 3 and 4 (not 1, 2 and 3).
+        let y: Vec<f64> = x.iter().map(|v| 1.0 / v).collect();
+        let through = |a: f64, b: f64, c: f64, t: f64| {
+            let f = |v: f64| 1.0 / v;
+            f(a) * (t - b) * (t - c) / ((a - b) * (a - c))
+                + f(b) * (t - a) * (t - c) / ((b - a) * (b - c))
+                + f(c) * (t - a) * (t - b) / ((c - a) * (c - b))
+        };
+        assert!((thermr_lagrange(&x, &y, 2.5) - through(2.0, 3.0, 4.0, 2.5)).abs() < 1e-15);
+        assert!((thermr_lagrange(&x, &y, 1.5) - through(1.0, 2.0, 3.0, 1.5)).abs() < 1e-15);
+        assert!((thermr_lagrange(&x, &y, 3.5) - through(3.0, 4.0, 5.0, 3.5)).abs() < 1e-15);
+        assert!((thermr_lagrange(&x, &y, 4.5) - through(4.0, 5.0, 6.0, 4.5)).abs() < 1e-15);
+        assert!((thermr_lagrange(&x, &y, 5.5) - through(4.0, 5.0, 6.0, 5.5)).abs() < 1e-15);
     }
 }
