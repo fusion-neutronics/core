@@ -1,9 +1,10 @@
 //! Pure mesh-construction kernels used by the CAD export pipeline.
 //!
 //! These were previously per-element Python loops in `yamc.cad`; they are the
-//! compiled core the Python side now calls. `weld_vertices` merges coincident
-//! boundary vertices into a watertight, index-shared mesh; `tet_adjacency_flat`
-//! exposes the adjacency builder on the flat arrays the Arrow writer uses.
+//! compiled core the Python side now calls. `weld_vertices` merges the copies
+//! the faces of a model hold of each point they share into a watertight,
+//! index-shared mesh; `tet_adjacency_flat` exposes the adjacency builder on
+//! the flat arrays the Arrow writer uses.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -11,13 +12,26 @@ use crate::mesh::topology::build_tet_adjacency;
 use crate::query::intersect::{add, dot, length, scale, sub};
 use crate::types::VertexId;
 
-/// Weld coincident vertices of a triangle mesh into a watertight boundary.
+/// Weld the per-face triangulations of a model into a watertight boundary.
 ///
-/// Only the vertices referenced by `triangles` are considered. Their bounding
-/// extent sets a quantization step (`max_extent * rel_tol`); vertices whose
-/// quantized coordinates match are merged, keeping the first as representative.
-/// Triangles that collapse to a degenerate (two shared indices) after welding
-/// are dropped.
+/// `vertex_faces[v]` is the face vertex `v` was meshed on, one per vertex, and
+/// each triangle indexes the vertices of one face. Faces that meet each hold
+/// a copy of every point along their common edges, and the weld merges those
+/// copies: the vertices on the open boundary of their faces' triangles within
+/// `rel_tol` times the extent of the used vertices of each other. A vertex
+/// inside its face's triangles is no copy; it merges only with vertices at
+/// exactly its position.
+///
+/// Two vertices of one face merge only within `seam_rel_tol` times the
+/// extent, as the copies of a point on the face's seam or at a pole do (they
+/// differ by rounding); further apart they are two points of the face. The
+/// closest pairs merge first, and no merge joins two such points of one face,
+/// so a solid thinner than `rel_tol` keeps its sides apart: the faces around
+/// its rim hold points of both. Whether two copies merge does not depend on
+/// where they fall on a grid.
+///
+/// Each merged vertex takes the position of its copy with the lowest index.
+/// Triangles left with two corners on one vertex are dropped.
 ///
 /// Returns `(welded_vertices, welded_triangles, kept)` where `welded_triangles`
 /// index into `welded_vertices` and `kept` lists the original triangle indices
@@ -25,7 +39,9 @@ use crate::types::VertexId;
 pub fn weld_vertices(
     vertices: &[[f64; 3]],
     triangles: &[[VertexId; 3]],
+    vertex_faces: &[u32],
     rel_tol: f64,
+    seam_rel_tol: f64,
 ) -> (Vec<[f64; 3]>, Vec<[VertexId; 3]>, Vec<usize>) {
     // Sorted-unique vertex ids actually referenced by the triangles.
     let used: Vec<VertexId> = triangles
@@ -38,7 +54,7 @@ pub fn weld_vertices(
         return (Vec::new(), Vec::new(), Vec::new());
     }
 
-    // Bounding extent over the used vertices sets the merge quantum.
+    // Bounding extent over the used vertices sets the tolerances.
     let mut min = [f64::INFINITY; 3];
     let mut max = [f64::NEG_INFINITY; 3];
     for &g in &used {
@@ -49,32 +65,65 @@ pub fn weld_vertices(
         }
     }
     let max_extent = (max[0] - min[0]).max(max[1] - min[1]).max(max[2] - min[2]);
-    let quantum = if max_extent != 0.0 { max_extent } else { 1.0 } * rel_tol;
+    let scale = if max_extent != 0.0 { max_extent } else { 1.0 };
+    let tolerance = scale * rel_tol;
+    let seam_tolerance = scale * seam_rel_tol;
 
-    let mut key_to_local: HashMap<(i64, i64, i64), VertexId> = HashMap::new();
-    let mut gid_to_local: HashMap<VertexId, VertexId> = HashMap::new();
+    // Vertices at one position are one vertex. The copies on the faces'
+    // boundaries go on to the tolerance, one per position.
+    let open = open_boundary(triangles, vertices.len());
+    let mut copies = Copies::new(vertices.len());
+    let mut at: HashMap<[u64; 3], (VertexId, bool)> = HashMap::new();
+    let mut candidates: Vec<VertexId> = Vec::new();
+    for &g in &used {
+        let (first, has_candidate) = at
+            .entry(vertices[g as usize].map(f64::to_bits))
+            .or_insert((g, false));
+        let (root_first, root_g) = (copies.find(*first), copies.find(g));
+        if root_first != root_g {
+            copies.union(root_first, root_g);
+        }
+        if open[g as usize] && !*has_candidate {
+            *has_candidate = true;
+            candidates.push(g);
+        }
+    }
+    drop(at);
+
+    for (_, a, b) in close_pairs(vertices, &candidates, tolerance) {
+        let (root_a, root_b) = (copies.find(a), copies.find(b));
+        if root_a == root_b {
+            continue;
+        }
+        // Two points of one face, further apart than its seam copies.
+        let splits_a_face = copies.members(root_a).iter().any(|&p| {
+            copies.members(root_b).iter().any(|&q| {
+                vertex_faces[p as usize] == vertex_faces[q as usize]
+                    && distance(vertices[p as usize], vertices[q as usize]) > seam_tolerance
+            })
+        });
+        if !splits_a_face {
+            copies.union(root_a, root_b);
+        }
+    }
+
+    // `used` is ascending, so each merged vertex meets its lowest copy first.
+    let mut local_of_root = vec![VertexId::MAX; vertices.len()];
+    let mut local = vec![VertexId::MAX; vertices.len()];
     let mut local_verts: Vec<[f64; 3]> = Vec::new();
     for &g in &used {
-        let v = vertices[g as usize];
-        let key = (
-            (v[0] / quantum).round() as i64,
-            (v[1] / quantum).round() as i64,
-            (v[2] / quantum).round() as i64,
-        );
-        let local = *key_to_local.entry(key).or_insert_with(|| {
-            let idx = local_verts.len() as VertexId;
-            local_verts.push(v);
-            idx
-        });
-        gid_to_local.insert(g, local);
+        let root = copies.find(g) as usize;
+        if local_of_root[root] == VertexId::MAX {
+            local_of_root[root] = local_verts.len() as VertexId;
+            local_verts.push(vertices[g as usize]);
+        }
+        local[g as usize] = local_of_root[root];
     }
 
     let mut welded_tris: Vec<[VertexId; 3]> = Vec::new();
     let mut kept: Vec<usize> = Vec::new();
     for (t, tri) in triangles.iter().enumerate() {
-        let a = gid_to_local[&tri[0]];
-        let b = gid_to_local[&tri[1]];
-        let c = gid_to_local[&tri[2]];
+        let [a, b, c] = tri.map(|g| local[g as usize]);
         // Drop seams that collapsed to a degenerate triangle.
         if a != b && b != c && a != c {
             welded_tris.push([a, b, c]);
@@ -83,6 +132,143 @@ pub fn weld_vertices(
     }
 
     (local_verts, welded_tris, kept)
+}
+
+/// Whether each of the `n` vertices lies on the open boundary of `triangles`:
+/// on an edge that other than two of them use. As each face's triangles index
+/// vertices of its own, these are the vertices on its edges, along its seam
+/// and at its poles.
+fn open_boundary(triangles: &[[VertexId; 3]], n: usize) -> Vec<bool> {
+    let mut edges: Vec<(VertexId, VertexId)> = triangles
+        .iter()
+        .flat_map(|t| [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])])
+        .map(|(a, b)| (a.min(b), a.max(b)))
+        .collect();
+    edges.sort_unstable();
+    let mut open = vec![false; n];
+    for uses in edges.chunk_by(|a, b| a == b) {
+        if uses.len() != 2 {
+            let (a, b) = uses[0];
+            open[a as usize] = true;
+            open[b as usize] = true;
+        }
+    }
+    open
+}
+
+/// One of each opposite pair of the 26 cells around a cell, so that a pass
+/// over the cells meets every two neighbouring cells once.
+const FORWARD_NEIGHBOURS: [[i64; 3]; 13] = [
+    [1, -1, -1],
+    [1, -1, 0],
+    [1, -1, 1],
+    [1, 0, -1],
+    [1, 0, 0],
+    [1, 0, 1],
+    [1, 1, -1],
+    [1, 1, 0],
+    [1, 1, 1],
+    [0, 1, -1],
+    [0, 1, 0],
+    [0, 1, 1],
+    [0, 0, 1],
+];
+
+/// Every pair of `points` (vertex ids) within `tolerance` of each other, as
+/// `(distance, lower id, higher id)`, closest first and ties by id.
+fn close_pairs(
+    vertices: &[[f64; 3]],
+    points: &[VertexId],
+    tolerance: f64,
+) -> Vec<(f64, VertexId, VertexId)> {
+    // Cells as wide as the tolerance: a point's neighbours within it lie in
+    // its own cell or the 26 around it.
+    let mut cells: HashMap<[i64; 3], Vec<VertexId>> = HashMap::new();
+    for &v in points {
+        let cell = vertices[v as usize].map(|c| (c / tolerance).floor() as i64);
+        cells.entry(cell).or_default().push(v);
+    }
+    let mut pairs = Vec::new();
+    let mut add = |a: VertexId, b: VertexId| {
+        let d = distance(vertices[a as usize], vertices[b as usize]);
+        if d <= tolerance {
+            pairs.push((d, a.min(b), a.max(b)));
+        }
+    };
+    for (cell, members) in &cells {
+        for (i, &a) in members.iter().enumerate() {
+            for &b in &members[i + 1..] {
+                add(a, b);
+            }
+        }
+        for offset in FORWARD_NEIGHBOURS {
+            let next = [0, 1, 2].map(|i| cell[i].saturating_add(offset[i]));
+            if let Some(others) = cells.get(&next) {
+                for &a in members {
+                    for &b in others {
+                        add(a, b);
+                    }
+                }
+            }
+        }
+    }
+    pairs.sort_unstable_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)).then(x.2.cmp(&y.2)));
+    pairs
+}
+
+fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
+    let d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+}
+
+/// Vertices gathered into sets of copies of one point (union-find), each set
+/// with the list of its members.
+struct Copies {
+    parent: Vec<VertexId>,
+    /// Members of each set of two or more, by its root.
+    members: HashMap<VertexId, Vec<VertexId>>,
+}
+
+impl Copies {
+    fn new(n: usize) -> Self {
+        Self {
+            parent: (0..n as VertexId).collect(),
+            members: HashMap::new(),
+        }
+    }
+
+    fn find(&mut self, mut v: VertexId) -> VertexId {
+        while self.parent[v as usize] != v {
+            let grandparent = self.parent[self.parent[v as usize] as usize];
+            self.parent[v as usize] = grandparent;
+            v = grandparent;
+        }
+        v
+    }
+
+    /// The members of the set whose root is `root`.
+    fn members(&self, root: VertexId) -> &[VertexId] {
+        match self.members.get(&root) {
+            Some(members) => members,
+            // A root is its own parent.
+            None => std::slice::from_ref(&self.parent[root as usize]),
+        }
+    }
+
+    /// Join the sets with roots `a` and `b`, the smaller into the larger.
+    fn union(&mut self, a: VertexId, b: VertexId) {
+        let (big, small) = if self.members(a).len() >= self.members(b).len() {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        let moved = self.members.remove(&small).unwrap_or_else(|| vec![small]);
+        self.members
+            .entry(big)
+            .or_insert_with(|| vec![big])
+            .extend(moved);
+        self.parent[small as usize] = big;
+    }
 }
 
 /// Tet-to-tet adjacency from flat connectivity, as `[n0,n1,n2,n3, ...]` per tet
@@ -312,6 +498,166 @@ pub fn flatten_tet_blocks(blocks: &[(u32, usize, Vec<[u32; 4]>)]) -> (Vec<[u32; 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Quads as the CAD pipeline hands faces to the weld: each with its own
+    /// copies of its corners and two triangles, and the face of every vertex.
+    fn faces(quads: &[[[f64; 3]; 4]]) -> (Vec<[f64; 3]>, Vec<[VertexId; 3]>, Vec<u32>) {
+        let mut vertices = Vec::new();
+        let mut triangles = Vec::new();
+        let mut vertex_faces = Vec::new();
+        for (face, quad) in quads.iter().enumerate() {
+            let base = vertices.len() as VertexId;
+            vertices.extend_from_slice(quad);
+            vertex_faces.extend([face as u32; 4]);
+            triangles.push([base, base + 1, base + 2]);
+            triangles.push([base, base + 2, base + 3]);
+        }
+        (vertices, triangles, vertex_faces)
+    }
+
+    /// The six faces of the box from `lo` to `hi`.
+    fn box_faces(lo: [f64; 3], hi: [f64; 3]) -> Vec<[[f64; 3]; 4]> {
+        let c = |i: usize, j: usize, k: usize| {
+            [[lo[0], hi[0]][i], [lo[1], hi[1]][j], [lo[2], hi[2]][k]]
+        };
+        vec![
+            [c(0, 0, 0), c(0, 1, 0), c(1, 1, 0), c(1, 0, 0)],
+            [c(0, 0, 1), c(1, 0, 1), c(1, 1, 1), c(0, 1, 1)],
+            [c(0, 0, 0), c(1, 0, 0), c(1, 0, 1), c(0, 0, 1)],
+            [c(0, 1, 0), c(0, 1, 1), c(1, 1, 1), c(1, 1, 0)],
+            [c(0, 0, 0), c(0, 0, 1), c(0, 1, 1), c(0, 1, 0)],
+            [c(1, 0, 0), c(1, 1, 0), c(1, 1, 1), c(1, 0, 1)],
+        ]
+    }
+
+    #[test]
+    fn weld_merges_the_copies_of_a_shared_edge() {
+        let (vertices, triangles, vertex_faces) = faces(&[
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            [
+                [1.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [2.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+            ],
+        ]);
+        let (welded, tris, kept) = weld_vertices(&vertices, &triangles, &vertex_faces, 1e-6, 1e-9);
+        assert_eq!(welded.len(), 6);
+        assert_eq!(kept, vec![0, 1, 2, 3]);
+        // The second face's copies take the first face's vertices.
+        assert_eq!(tris, vec![[0, 1, 2], [0, 2, 3], [1, 4, 5], [1, 5, 2]]);
+    }
+
+    #[test]
+    fn weld_merges_copies_either_side_of_a_grid_line() {
+        // Two copies of one point 2e-12 apart that rounding to a grid of the
+        // tolerance put in different cells, leaving a crack.
+        let x = 0.5 + 0.5e-6;
+        let (mut vertices, triangles, vertex_faces) = faces(&[
+            [
+                [0.0, 0.0, 0.0],
+                [x, 0.0, 0.0],
+                [x, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            [
+                [x, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [x, 1.0, 0.0],
+            ],
+        ]);
+        vertices[1][0] = x - 1e-12;
+        vertices[4][0] = x + 1e-12;
+        assert_ne!(
+            (vertices[1][0] / 1e-6).round(),
+            (vertices[4][0] / 1e-6).round()
+        );
+        let (welded, _, _) = weld_vertices(&vertices, &triangles, &vertex_faces, 1e-6, 1e-9);
+        assert_eq!(welded.len(), 6);
+    }
+
+    #[test]
+    fn weld_keeps_the_sides_of_a_solid_thinner_than_its_tolerance_apart() {
+        // A plate down to a hundredth of the weld's tolerance thick: the
+        // faces around its rim hold copies of both sides' corners.
+        for thickness in [1e-5, 1e-6, 1e-7, 1e-8] {
+            let (vertices, triangles, vertex_faces) =
+                faces(&box_faces([0.0, 0.0, 0.0], [1.0, 1.0, thickness]));
+            let (welded, tris, kept) =
+                weld_vertices(&vertices, &triangles, &vertex_faces, 1e-6, 1e-9);
+            assert_eq!(welded.len(), 8, "thickness {thickness}");
+            assert_eq!(tris.len(), 12, "thickness {thickness}");
+            assert_eq!(kept, (0..12).collect::<Vec<_>>());
+            let top = welded.iter().filter(|v| v[2] == thickness).count();
+            assert_eq!(top, 4, "thickness {thickness}");
+        }
+    }
+
+    #[test]
+    fn weld_collapses_a_solid_within_its_seam_tolerance() {
+        // Closer than the seam tolerance, two points of one face are one: the
+        // plate's rim faces collapse and its sides fall onto each other.
+        let (vertices, triangles, vertex_faces) =
+            faces(&box_faces([0.0, 0.0, 0.0], [1.0, 1.0, 1e-10]));
+        let (welded, tris, kept) = weld_vertices(&vertices, &triangles, &vertex_faces, 1e-6, 1e-9);
+        assert_eq!(welded.len(), 4);
+        assert_eq!(kept, vec![0, 1, 2, 3]);
+        assert_eq!(tris.len(), 4);
+    }
+
+    #[test]
+    fn weld_merges_seam_copies_of_one_face_only_within_the_seam_tolerance() {
+        // A face of two triangles whose open boundary meets itself, as a
+        // seam does: vertices 0 and 3 are two copies of one point.
+        let weld = |gap: f64| {
+            let vertices = [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [gap, 0.0, 0.0],
+            ];
+            weld_vertices(&vertices, &[[0, 1, 2], [3, 2, 1]], &[7; 4], 1e-6, 1e-9)
+        };
+        assert_eq!(weld(1e-13).0.len(), 3);
+        assert_eq!(weld(1e-8).0.len(), 4);
+    }
+
+    #[test]
+    fn weld_keeps_vertices_inside_their_face() {
+        // Two faces sharing their rim, each a fan around a centre of its own
+        // `gap` from the other's: the rims are copies, and the centres merge
+        // only at one position.
+        let weld = |gap: f64| {
+            let mut vertices = Vec::new();
+            let mut triangles = Vec::new();
+            let mut vertex_faces = Vec::new();
+            for (face, z) in [(0u32, 0.0), (1, gap)] {
+                let base = vertices.len() as VertexId;
+                vertices.extend([
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [1.0, 1.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                ]);
+                vertices.push([0.5, 0.5, z]);
+                vertex_faces.extend([face; 5]);
+                for i in 0..4 {
+                    triangles.push([base + i, base + (i + 1) % 4, base + 4]);
+                }
+            }
+            weld_vertices(&vertices, &triangles, &vertex_faces, 1e-6, 1e-9)
+        };
+        let (welded, tris, _) = weld(1e-9);
+        assert_eq!(welded.len(), 6);
+        assert_eq!(tris.len(), 8);
+        assert_eq!(weld(0.0).0.len(), 5);
+    }
 
     fn two_solids() -> Vec<(u32, Vec<i64>)> {
         // Solid 1 owns faces 10, 11; solid 2 owns faces 11 (shared), 12.

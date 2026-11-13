@@ -17,10 +17,14 @@ integrates from the CAD (see _occ_face_area and _occ_signed_volume):
   preserve area. A negative mesh volume means the facets enclose the solid
   the wrong way round (inside out, or with surfaces that cross), which
   transport reads as the solid's complement. A CAD solid whose own volume is
-  negative (a reversed solid) is reported as such.
+  negative (a reversed solid) is reported as such. A solid whose mesh encloses
+  next to nothing, or has facets lying on each other, has collapsed: thinner
+  than the weld resolves, its sides were welded together, and the particles
+  entering it are lost.
 
 Tolerances scale with the requested deflection so legitimately coarse
-meshes of small parts do not trip the gate.
+meshes of small parts do not trip the gate; a collapsed solid is refused
+whatever the deflection.
 
 Two more checks need no CAD. Every solid's boundary must be closed, short of
 the cracks two facetings of an edge can leave (see check_closed): the volume
@@ -34,6 +38,8 @@ a loose angular tolerance, can have its two faces cut through each other over
 a strip, which barely moves the volume but puts the solid's boundary in the
 wrong order there, so particles crossing the strip are lost or mis-tracked.
 """
+
+from collections import Counter
 
 from OCP.Bnd import Bnd_Box
 from OCP.BRepAdaptor import BRepAdaptor_Surface
@@ -55,6 +61,12 @@ from OCP.gp import gp_Pnt
 from yamc._core import solid_open_edges, solid_self_intersections
 
 from ._overlap import _name, _solid_triangles
+from ._scene_extract import _SEAM_WELD_REL_TOL
+
+# A solid whose mesh encloses less than this fraction of its CAD volume has
+# collapsed. The volume allowance below grows without bound as a solid thins,
+# so it cannot catch one.
+_COLLAPSED_FRACTION = 0.01
 
 # OCC's default integration is a fixed Gauss rule, which misses dense spline
 # faces badly (a stellarator coil casing came out 31% low in volume), so every
@@ -179,11 +191,13 @@ def check_mesh_fidelity(mesh, pa, tolerance):
         for fid, info in pa.faces.items()
     }
 
-    # Group triangle areas and signed volume contributions per face.
+    # Group triangles, their areas and signed volume contributions per face.
     face_area = {}
     face_signed_vol = {}
+    face_tris = {}
     verts = mesh.vertices
     for tri, fid in zip(mesh.triangles, mesh.triangle_face_ids):
+        face_tris.setdefault(fid, []).append(tri)
         a = verts[tri[0]]
         b = verts[tri[1]]
         c = verts[tri[2]]
@@ -207,8 +221,9 @@ def check_mesh_fidelity(mesh, pa, tolerance):
     # correct mesh's area deficit is O(tolerance / curvature radius); allow a
     # generous multiple of that (using an area-derived length scale), floored
     # at 2%. The seam-wire degenerate meshes lose 30-60% of the area.
+    cad_area = {}
     for fid, occ_face in pa.face_to_occ.items():
-        area_occ = _occ_face_area(occ_face)
+        area_occ = cad_area[fid] = _occ_face_area(occ_face)
         if area_occ <= 0.0:
             continue
         area_mesh = face_area.get(fid, 0.0)
@@ -226,6 +241,7 @@ def check_mesh_fidelity(mesh, pa, tolerance):
     # solid. The length scale 3V/A (the inradius for simple shapes, the
     # half-thickness for thin shells) converts the deflection into an
     # expected relative volume error.
+    extent = None
     for sid, fids in mesh.solid_faces.items():
         shape = pa.solid_shapes.get(sid)
         if shape is None:
@@ -249,6 +265,23 @@ def check_mesh_fidelity(mesh, pa, tolerance):
             area_sum += face_area.get(fid, 0.0)
         r_eff = 3.0 * vol_occ / max(area_sum, 1e-12)
         allowed = max(0.02, 8.0 * tolerance[sid] / max(r_eff, 1e-12))
+        own = list(dict.fromkeys(fids))
+        lying = _lying_facets(tri for fid in own for tri in face_tris.get(fid, ()))
+        if area_sum > 0.0 and (lying or abs(total) < _COLLAPSED_FRACTION * vol_occ):
+            if extent is None:
+                extent = _extent(verts)
+            thickness = 2.0 * vol_occ / max(sum(cad_area[fid] for fid in own), 1e-300)
+            problems.append(
+                f"{_name(mesh, sid)}: collapsed, its mesh encloses {total:.3g} of its "
+                f"CAD volume of {vol_occ:.6g}"
+                + (f" and {lying} of its facets lie on each other" if lying else "")
+                + ": its sides have been meshed onto each other, which loses the "
+                f"particles entering it. It is {thickness:.3g} thick (twice its volume "
+                "over its area), and the mesh resolves no solid thinner than "
+                f"{_SEAM_WELD_REL_TOL * extent:.3g} ({_SEAM_WELD_REL_TOL:g} of the "
+                "model's extent): thicken it in the CAD, or leave it out"
+            )
+            continue
         if total < 0.0:
             # Transport would read the solid from the wrong side of its
             # facets. A mesh pointing the wrong way everywhere has the right
@@ -272,6 +305,18 @@ def check_mesh_fidelity(mesh, pa, tolerance):
             )
 
     return problems
+
+
+def _lying_facets(triangles):
+    """How many of *triangles* lie on another one: on the same three
+    vertices, wound either way."""
+    counts = Counter(tuple(sorted(tri)) for tri in triangles)
+    return sum(n for n in counts.values() if n > 1)
+
+
+def _extent(vertices):
+    """The longest side of the box around *vertices*."""
+    return max(max(v[i] for v in vertices) - min(v[i] for v in vertices) for i in range(3))
 
 
 def check_closed(mesh, tolerance):

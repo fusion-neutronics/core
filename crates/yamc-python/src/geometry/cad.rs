@@ -838,59 +838,48 @@ pub fn solid_open_edges(
     )
 }
 
-/// Weld coincident vertices of a triangle mesh into a watertight, index-shared
-/// boundary (the compiled core of the CAD pipeline's vertex welding).
-///
-/// Args:
-///     vertices: List of ``[x, y, z]`` coordinates.
-///     triangles: List of ``[i, j, k]`` vertex indices.
-///     rel_tol: Merge tolerance as a fraction of the mesh extent.
-///
-/// Returns:
-///     ``(welded_vertices, welded_triangles, kept)``: the merged vertices, the
-///     triangles reindexed into them (degenerate ones dropped), and the
-///     original indices of the surviving triangles (to filter parallel arrays).
-#[gen_stub_pyfunction]
-#[pyfunction]
-#[pyo3(signature = (vertices, triangles, rel_tol=1e-6))]
-pub fn weld_mesh(
-    vertices: Vec<[f64; 3]>,
-    triangles: Vec<[u32; 3]>,
-    rel_tol: f64,
-) -> (Vec<[f64; 3]>, Vec<[u32; 3]>, Vec<usize>) {
-    yamt::mesh::cad_build::weld_vertices(&vertices, &triangles, rel_tol)
-}
-
 /// Combine per-face triangulations into one welded surface mesh (the compiled
 /// core of the CAD pipeline's mesh assembly).
 ///
 /// Faces are taken in the order given. A face's degenerate triangles (two
 /// equal corners, or ``|(b - a) x (c - a)|^2`` below ``min_cross_sq``) are
 /// dropped, and a face left with none gets no surface id; the others get
-/// 1-based surface ids in order. Their vertices are concatenated and welded as
-/// by :func:`weld_mesh`, which also drops the triangles that collapse.
+/// 1-based surface ids in order. Their vertices are concatenated and welded.
+/// Vertices at one position become one. The copies that faces hold of a
+/// point on their common edge, the vertices on the open boundary of each
+/// face's triangles, are merged within ``rel_tol`` times the mesh extent of
+/// each other, but two vertices of one face only within ``seam_rel_tol``
+/// times it, as the copies of a point on its seam or at a pole are. So a
+/// solid thinner than ``rel_tol`` keeps its sides apart, and one thinner than
+/// ``seam_rel_tol`` collapses. Triangles the weld collapses are dropped.
 ///
 /// Args:
 ///     faces: ``(face_id, vertices, triangles)`` per face, the triangles as
 ///         0-based indices into that face's vertices.
-///     rel_tol: Weld tolerance as a fraction of the mesh extent.
+///     rel_tol: Weld tolerance between faces, as a fraction of the mesh
+///         extent.
 ///     min_cross_sq: Squared cross-product magnitude below which a triangle is
 ///         degenerate.
+///     seam_rel_tol: Weld tolerance within one face, as a fraction of the
+///         mesh extent.
 ///
 /// Returns:
 ///     ``(vertices, triangles, triangle_face_ids, triangle_surface_ids,
 ///     face_surface_ids)``, the last as ``[(face_id, surface_id), ...]``.
 ///
 /// Raises:
-///     ValueError: If a triangle indexes past its face's vertices.
+///     ValueError: If a triangle indexes past its face's vertices or uses a
+///         vertex that is not finite, ``rel_tol`` is not positive, or
+///         ``seam_rel_tol`` is negative.
 #[gen_stub_pyfunction]
 #[pyfunction]
-#[pyo3(signature = (faces, rel_tol=1e-6, min_cross_sq=1e-24))]
+#[pyo3(signature = (faces, rel_tol=1e-6, min_cross_sq=1e-24, seam_rel_tol=1e-9))]
 #[allow(clippy::type_complexity)]
 pub fn assemble_face_meshes(
     faces: Vec<(u32, Vec<[f64; 3]>, Vec<[u32; 3]>)>,
     rel_tol: f64,
     min_cross_sq: f64,
+    seam_rel_tol: f64,
 ) -> PyResult<(
     Vec<[f64; 3]>,
     Vec<[u32; 3]>,
@@ -898,7 +887,18 @@ pub fn assemble_face_meshes(
     Vec<u32>,
     Vec<(u32, u32)>,
 )> {
+    if !(rel_tol > 0.0 && rel_tol.is_finite()) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "rel_tol must be a positive number, got {rel_tol}"
+        )));
+    }
+    if !(seam_rel_tol >= 0.0 && seam_rel_tol.is_finite()) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "seam_rel_tol must be a non-negative number, got {seam_rel_tol}"
+        )));
+    }
     let mut vertices: Vec<[f64; 3]> = Vec::new();
+    let mut vertex_faces: Vec<u32> = Vec::new();
     let mut triangles: Vec<[u32; 3]> = Vec::new();
     let mut face_ids: Vec<u32> = Vec::new();
     let mut surface_ids: Vec<u32> = Vec::new();
@@ -920,6 +920,14 @@ pub fn assemble_face_meshes(
         if kept.is_empty() {
             continue;
         }
+        if let Some(t) = kept.iter().find(|t| {
+            t.iter()
+                .any(|&i| !verts[i as usize].iter().all(|c| c.is_finite()))
+        }) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "face {face_id}: triangle {t:?} uses a vertex that is not finite"
+            )));
+        }
         if vertices.len() + verts.len() > u32::MAX as usize {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "the assembled mesh has more vertices than 32-bit indices can address",
@@ -929,6 +937,7 @@ pub fn assemble_face_meshes(
         face_surface_ids.push((face_id, surface_id));
         let base = vertices.len() as u32;
         vertices.extend_from_slice(&verts);
+        vertex_faces.extend(std::iter::repeat_n(face_id, verts.len()));
         for t in kept {
             triangles.push([t[0] + base, t[1] + base, t[2] + base]);
             face_ids.push(face_id);
@@ -938,8 +947,13 @@ pub fn assemble_face_meshes(
     if vertices.is_empty() {
         return Ok((vertices, triangles, face_ids, surface_ids, face_surface_ids));
     }
-    let (vertices, triangles, kept) =
-        yamt::mesh::cad_build::weld_vertices(&vertices, &triangles, rel_tol);
+    let (vertices, triangles, kept) = yamt::mesh::cad_build::weld_vertices(
+        &vertices,
+        &triangles,
+        &vertex_faces,
+        rel_tol,
+        seam_rel_tol,
+    );
     let face_ids = kept.iter().map(|&i| face_ids[i]).collect();
     let surface_ids = kept.iter().map(|&i| surface_ids[i]).collect();
     Ok((vertices, triangles, face_ids, surface_ids, face_surface_ids))

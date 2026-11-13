@@ -47,6 +47,16 @@ _MIN_EDGE_LENGTH = 1e-10
 # collapse to ~zero area; matches the legacy BRepMesh path's filter.
 _MIN_TRI_CROSS_SQ = 1e-24
 
+# The weld merges the copies two faces hold of a point on their common edge
+# within this fraction of the model's extent of each other, and two vertices
+# of one face, the copies of a point on its seam or at a pole (which differ by
+# rounding, by 6e-13 of the extent at most on the models measured), within
+# the second: further apart they are two points of the face. So a solid
+# thinner than the first keeps its two sides apart, and one thinner than the
+# second collapses, which the fidelity gate refuses.
+_WELD_REL_TOL = 1e-6
+_SEAM_WELD_REL_TOL = 1e-9
+
 
 def _tri_cross_sq(a, b, c):
     """Squared magnitude of (b-a) x (c-a) for 3D points a, b, c."""
@@ -256,13 +266,14 @@ def assemble_surface_mesh(pa, per_face_meshes):
     global arrays.
 
     Degenerate triangles are dropped. Surface ids are 1-indexed and assigned in
-    ``pa.faces`` order to faces that keep triangles. Coincident vertices are
-    then welded so the surface is watertight at the INDEX level (faces append
-    their own boundary vertices and the structured-grid fallback duplicates
-    seam/pole vertices ~1e-12 apart; transport ray-fire leaks through those
-    micro-gaps otherwise). All of that runs in the Rust core
-    (``assemble_face_meshes``). Returns ``(vertices, triangles,
-    triangle_face_ids, triangle_surface_ids, face_to_surface_id)``.
+    ``pa.faces`` order to faces that keep triangles. The copies faces hold of
+    the points they share are then welded so the surface is watertight at the
+    INDEX level (faces append their own boundary vertices and the
+    structured-grid fallback duplicates seam/pole vertices ~1e-12 apart;
+    transport ray-fire leaks through those micro-gaps otherwise), without
+    merging two points of one face (see ``_WELD_REL_TOL``). All of that runs
+    in the Rust core (``assemble_face_meshes``). Returns ``(vertices,
+    triangles, triangle_face_ids, triangle_surface_ids, face_to_surface_id)``.
     """
     faces = []
     for fid in pa.faces:
@@ -270,7 +281,9 @@ def assemble_surface_mesh(pa, per_face_meshes):
         if mesh and mesh[1]:
             faces.append((fid, mesh[0], mesh[1]))
     vertices, triangles, triangle_face_ids, triangle_surface_ids, face_surface = (
-        assemble_face_meshes(faces, 1e-6, _MIN_TRI_CROSS_SQ)
+        assemble_face_meshes(
+            faces, _WELD_REL_TOL, _MIN_TRI_CROSS_SQ, seam_rel_tol=_SEAM_WELD_REL_TOL
+        )
     )
     return (vertices, triangles, triangle_face_ids, triangle_surface_ids,
             dict(face_surface))
