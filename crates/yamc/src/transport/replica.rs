@@ -108,7 +108,7 @@ use yani_transmute::cross_material::CrossMaterial;
 use yani_transmute::resonance_rates::TransportResonance;
 use yani_transmute::{ReplicaChanges, TransmutationTallies};
 
-use crate::xs_perturbation::{grid_terms, resonance_sampling, sampled_names};
+use crate::xs_perturbation::{grid_terms, production_weights, resonance_sampling, sampled_names};
 
 /// The share of each nuclide's correlation its kept modes hold. Fewer modes
 /// cost less per event; what they miss leaves the estimate unbiased and only
@@ -756,14 +756,11 @@ fn deposit_table(
 /// deuteron, triton, helion and alpha production), or `None` for any other
 /// MT.
 ///
-/// A production cross section is `Σ_mt c_mt σ_mt` over the reactions that
-/// emit the particle, `c_mt` the count of it each emits by the reaction's
-/// definition ([`endf::reaction::light_particles`]). Each covered reaction
-/// joins its source's table with that weight. The denominator is the
-/// nuclide's stored production row, the one the tally scores. Production the
-/// stated reactions do not account for, as an evaluation that carries its
-/// charged particles inside MT 5 has, is attributed to MT 5 where MT 5 is
-/// covered: the part of the row MT 5 is the only candidate for.
+/// Each reaction joins its source's table with its share of the stored
+/// production row, the one the tally scores
+/// ([`crate::xs_perturbation::production_weights`]): its count of the
+/// particle where its MT states one, and the break-up or MT 5 emission the
+/// MTs do not name otherwise.
 fn production_table(
     x: i32,
     held: &BTreeMap<i32, Arc<Reaction>>,
@@ -773,48 +770,15 @@ fn production_table(
     if !(203..=207).contains(&x) {
         return None;
     }
-    let particle = (x - 203) as usize;
     let nominal = match held.get(&x) {
         Some(row) => on_grid(row, n),
         None => return Some((Vec::new(), vec![0.0; n])),
     };
     let mut by_source: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
-    let mut explained = vec![0.0; n];
-    for (mt, reaction) in held {
-        if reaction.redundant {
-            continue;
-        }
-        let Some(counts) = endf::reaction::light_particles(*mt) else {
-            continue;
-        };
-        let c = counts[particle] as f64;
-        if c == 0.0 {
-            continue;
-        }
-        let xs = on_grid(reaction, n);
-        for (e, v) in explained.iter_mut().zip(&xs) {
-            *e += c * v;
-        }
-        if let Some(terms) = terms_of.get(mt) {
-            add_terms(&mut by_source, terms, &xs, |_| c);
-        }
-    }
-    if let (Some(terms5), Some(r5)) = (terms_of.get(&5), held.get(&5).filter(|r| !r.redundant)) {
-        let residual: Vec<f64> = nominal
-            .iter()
-            .zip(&explained)
-            .map(|(row, known)| (row - known).max(0.0))
-            .collect();
-        if residual.iter().any(|v| *v > 0.0) {
-            // The residual moves by MT 5's relative change, so each of its
-            // terms carries the residual's share of MT 5 at each point.
-            let xs5 = on_grid(r5, n);
-            let share: Vec<f64> = residual
-                .iter()
-                .zip(&xs5)
-                .map(|(r, x)| if *x > 0.0 { r / x } else { 0.0 })
-                .collect();
-            add_terms(&mut by_source, terms5, &xs5, |i| share[i]);
+    let weights = production_weights(x, &nominal, held.iter().map(|(mt, r)| (*mt, r.as_ref())), n);
+    for (mt, w) in weights {
+        if let Some(terms) = terms_of.get(&mt) {
+            add_terms(&mut by_source, terms, &on_grid(&held[&mt], n), |i| w[i]);
         }
     }
     Some((by_source.into_iter().collect(), nominal))
