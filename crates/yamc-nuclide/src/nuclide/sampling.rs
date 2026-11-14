@@ -807,6 +807,7 @@ impl Nuclide {
             .map(|idx| fast_grid.scatter_xs_interp(i_grid, f, idx))
             .unwrap_or(0.0);
         let smooth_scatter = xs_scattering;
+        let (smooth_absorption, smooth_fission) = (xs_absorption, xs_fission);
 
         let mut scatter = xs_scattering;
         // `None` in band means the elastic:inelastic split below uses the smooth
@@ -855,11 +856,20 @@ impl Nuclide {
             None => 0.0,
         };
         let sigma_i = (scatter - sigma_e).max(0.0);
+        let smooth = urr_elastic.map(|_| {
+            [
+                smooth_elastic,
+                smooth_absorption,
+                (smooth_scatter - smooth_elastic).max(0.0),
+                smooth_fission,
+            ]
+        });
         Some(ReactionPartials {
             sigma_e,
             sigma_a: xs_absorption,
             sigma_i,
             sigma_f: xs_fission,
+            smooth,
         })
     }
 

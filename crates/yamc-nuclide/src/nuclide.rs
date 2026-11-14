@@ -206,6 +206,11 @@ pub struct ReactionPartials {
     pub sigma_i: f64,
     /// Fission cross-section (zero for non-fissionable nuclides).
     pub sigma_f: f64,
+    /// The smooth partials `[elastic, absorption, inelastic, fission]` a
+    /// probability-table band scaled these from, or `None` off a table, where
+    /// the partials are the smooth ones. Data tabulated on the smooth cross
+    /// sections, such as photon production, reads the band through the ratio.
+    pub smooth: Option<[f64; 4]>,
 }
 
 /// Pre-computed cross-section data for fast lookup

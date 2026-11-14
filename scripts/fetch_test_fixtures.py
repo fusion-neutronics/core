@@ -160,7 +160,9 @@ NUCLIDES = [
     # from sampled parameters with the first-order rows'. About 20 MB.
     "W186",
 ]
-ELEMENTS = ["Be", "Fe", "Li"]
+# Photon data. W carries the capture photons of W186 through
+# crates/yamc/tests/urr_capture_photons.rs.
+ELEMENTS = ["Be", "Fe", "Li", "W"]
 CHAIN_FIXTURE = "transmutation-endf-b8.1-sfr"
 
 
