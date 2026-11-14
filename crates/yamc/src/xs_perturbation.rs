@@ -93,6 +93,247 @@ pub(crate) fn on_full_grid(reaction: &Reaction, n: usize) -> Vec<f64> {
     out
 }
 
+/// How a particle-production row (MT 203 to 207) is shared over the
+/// non-redundant reactions of `reactions`: per reaction, the weight `w(E)`
+/// on the grid of `n` points with which its cross section enters the row, so
+/// that the row moves by `Σ w_mt δσ_mt` when the reactions move by `δσ_mt`.
+///
+/// A reaction whose definition states the particle
+/// ([`endf::reaction::light_particles`]) weighs its count. The rest of the
+/// stored row comes from emission the MT does not name. Where a non-redundant
+/// MT 5 is non-zero that rest is MT 5's, its only candidate. Elsewhere it is
+/// the break-up of a residual (the LR flags of MF 3: Li7's inelastic levels
+/// emit a triton and an alpha, Be9's `(n,2n)` leaves Be8, two alphas, C12's
+/// levels above 7.7 MeV three alphas). The processed data does not carry
+/// those flags, but a break-up emits a fixed number of particles per
+/// reaction, so the rest is fitted, by non-negative least squares over the
+/// grid, as `Σ c_mt σ_mt` over the reactions that leave a residual nucleus
+/// (not elastic, capture or fission), with each `c_mt` constant in energy.
+/// The fitted shares are then scaled point by point so that the attributed
+/// part is exactly the rest of the row. ENDF/B-VIII.1 C12 has an MT 5 that is
+/// zero below 20 MeV, and its alphas there are its `(n,n'3a)` levels'.
+pub(crate) fn production_weights<'a>(
+    x: i32,
+    row: &[f64],
+    reactions: impl IntoIterator<Item = (i32, &'a Reaction)>,
+    n: usize,
+) -> Vec<(i32, Vec<f64>)> {
+    debug_assert!((203..=207).contains(&x));
+    let particle = (x - 203) as usize;
+    let partials: Vec<(i32, &Reaction)> = reactions
+        .into_iter()
+        .filter(|(_, r)| !r.redundant)
+        .collect();
+    let mut out = Vec::new();
+    let mut explained = vec![0.0; n];
+    for &(mt, reaction) in &partials {
+        let Some(counts) = endf::reaction::light_particles(mt) else {
+            continue;
+        };
+        let c = counts[particle] as f64;
+        if c == 0.0 {
+            continue;
+        }
+        for (e, v) in explained.iter_mut().zip(on_full_grid(reaction, n)) {
+            *e += c * v;
+        }
+        out.push((mt, vec![c; n]));
+    }
+    let rest: Vec<f64> = row
+        .iter()
+        .zip(&explained)
+        .map(|(r, e)| (r - e).max(0.0))
+        .collect();
+    // Below this the rest is rounding in the stored row.
+    let scale = row.iter().fold(0.0_f64, |m, v| m.max(*v));
+    if !rest.iter().any(|v| *v > 1e-9 * scale) {
+        return out;
+    }
+    let mut rest = rest;
+    if let Some((_, r5)) = partials.iter().find(|(mt, _)| *mt == 5) {
+        let xs5 = on_full_grid(r5, n);
+        let share: Vec<f64> = rest
+            .iter()
+            .zip(&xs5)
+            .map(|(r, x)| if *x > 0.0 { r / x } else { 0.0 })
+            .collect();
+        for (r, x) in rest.iter_mut().zip(&xs5) {
+            if *x > 0.0 {
+                *r = 0.0;
+            }
+        }
+        out.push((5, share));
+        if !rest.iter().any(|v| *v > 1e-9 * scale) {
+            return out;
+        }
+    }
+    let candidates: Vec<(i32, Vec<f64>)> = partials
+        .iter()
+        .filter(|(mt, _)| {
+            *mt != 2
+                && *mt != 102
+                && endf::reaction::light_particles(*mt).is_some()
+                && !endf::reaction::FISSION_MTS.contains(mt)
+        })
+        .map(|(mt, r)| (*mt, on_full_grid(r, n)))
+        .filter(|(_, xs)| xs.iter().any(|v| *v > 0.0))
+        .collect();
+    let columns: Vec<&[f64]> = candidates.iter().map(|(_, xs)| xs.as_slice()).collect();
+    let c = nonnegative_least_squares(&columns, &rest);
+    let mut fitted = vec![0.0; n];
+    for ((_, xs), ci) in candidates.iter().zip(&c) {
+        for (f, v) in fitted.iter_mut().zip(xs) {
+            *f += ci * v;
+        }
+    }
+    let ratio: Vec<f64> = rest
+        .iter()
+        .zip(&fitted)
+        .map(|(r, f)| if *f > 0.0 { r / f } else { 0.0 })
+        .collect();
+    for ((mt, _), ci) in candidates.iter().zip(&c) {
+        if *ci <= 0.0 {
+            continue;
+        }
+        let w: Vec<f64> = ratio.iter().map(|q| ci * q).collect();
+        match out.iter_mut().find(|(m, _)| m == mt) {
+            Some((_, have)) => {
+                for (h, v) in have.iter_mut().zip(&w) {
+                    *h += v;
+                }
+            }
+            None => out.push((*mt, w)),
+        }
+    }
+    out
+}
+
+/// The `c >= 0` minimising `|Σ c_j a_j - b|`, by Lawson and Hanson's active
+/// set method on the normal equations. The columns are scaled to unit norm
+/// for the solve, so cross sections of very different size are fitted alike.
+fn nonnegative_least_squares(columns: &[&[f64]], b: &[f64]) -> Vec<f64> {
+    let k = columns.len();
+    let norms: Vec<f64> = columns
+        .iter()
+        .map(|a| a.iter().map(|v| v * v).sum::<f64>().sqrt())
+        .collect();
+    let mut gram = vec![0.0; k * k];
+    let mut rhs = vec![0.0; k];
+    for i in 0..k {
+        if norms[i] == 0.0 {
+            continue;
+        }
+        rhs[i] = columns[i].iter().zip(b).map(|(a, y)| a * y).sum::<f64>() / norms[i];
+        for j in 0..=i {
+            if norms[j] == 0.0 {
+                continue;
+            }
+            let g = columns[i]
+                .iter()
+                .zip(columns[j])
+                .map(|(a, c)| a * c)
+                .sum::<f64>()
+                / (norms[i] * norms[j]);
+            gram[i * k + j] = g;
+            gram[j * k + i] = g;
+        }
+    }
+    let gradient = |x: &[f64]| -> Vec<f64> {
+        (0..k)
+            .map(|i| rhs[i] - (0..k).map(|j| gram[i * k + j] * x[j]).sum::<f64>())
+            .collect()
+    };
+    // Solve the normal equations restricted to `set`, zero elsewhere.
+    let solve = |set: &[usize]| -> Option<Vec<f64>> {
+        let m = set.len();
+        let mut a: Vec<f64> = set
+            .iter()
+            .flat_map(|&i| set.iter().map(move |&j| (i, j)))
+            .map(|(i, j)| gram[i * k + j])
+            .collect();
+        let mut y: Vec<f64> = set.iter().map(|&i| rhs[i]).collect();
+        for p in 0..m {
+            let pivot =
+                (p..m).max_by(|&r, &s| a[r * m + p].abs().total_cmp(&a[s * m + p].abs()))?;
+            if a[pivot * m + p].abs() < 1e-12 {
+                return None;
+            }
+            for c in 0..m {
+                a.swap(p * m + c, pivot * m + c);
+            }
+            y.swap(p, pivot);
+            for r in p + 1..m {
+                let f = a[r * m + p] / a[p * m + p];
+                for c in p..m {
+                    a[r * m + c] -= f * a[p * m + c];
+                }
+                y[r] -= f * y[p];
+            }
+        }
+        for p in (0..m).rev() {
+            let s: f64 = (p + 1..m).map(|c| a[p * m + c] * y[c]).sum();
+            y[p] = (y[p] - s) / a[p * m + p];
+        }
+        let mut z = vec![0.0; k];
+        for (&i, v) in set.iter().zip(y) {
+            z[i] = v;
+        }
+        Some(z)
+    };
+    let tolerance = 1e-10 * rhs.iter().fold(1.0_f64, |m, v| m.max(v.abs()));
+    let mut x = vec![0.0; k];
+    let mut passive: Vec<usize> = Vec::new();
+    let mut collinear: Vec<usize> = Vec::new();
+    for _ in 0..3 * k.max(1) {
+        let w = gradient(&x);
+        let Some(next) = (0..k)
+            .filter(|i| {
+                !passive.contains(i)
+                    && !collinear.contains(i)
+                    && norms[*i] > 0.0
+                    && w[*i] > tolerance
+            })
+            .max_by(|&i, &j| w[i].total_cmp(&w[j]))
+        else {
+            break;
+        };
+        passive.push(next);
+        loop {
+            let Some(z) = solve(&passive) else {
+                // A column collinear with those already in: leave it out.
+                passive.retain(|&i| i != next);
+                collinear.push(next);
+                break;
+            };
+            if passive.iter().all(|&i| z[i] > 0.0) {
+                x = z;
+                break;
+            }
+            let alpha = passive
+                .iter()
+                .filter(|&&i| z[i] <= 0.0)
+                .map(|&i| x[i] / (x[i] - z[i]))
+                .fold(f64::INFINITY, f64::min);
+            for (xi, zi) in x.iter_mut().zip(&z) {
+                *xi += alpha * (zi - *xi);
+            }
+            passive.retain(|&i| x[i] > 1e-14);
+            for (i, xi) in x.iter_mut().enumerate() {
+                if !passive.contains(&i) {
+                    *xi = 0.0;
+                }
+            }
+            if passive.is_empty() {
+                break;
+            }
+        }
+    }
+    x.iter()
+        .zip(&norms)
+        .map(|(v, s)| if *s > 0.0 { v / s } else { 0.0 })
+        .collect()
+}
+
 /// One [`DerivedTerm`] of a partial, on the nuclide's energy grid.
 pub(crate) struct GridTerm {
     /// The reaction whose cells the term reads.
@@ -484,43 +725,24 @@ pub fn perturbed_nuclide(
             new.insert(sum, Arc::new(shifted(&stored, &change)));
         }
         // Particle-production rows (MT 203 to 207) move by what the reactions
-        // emitting the particle moved, each weighted by how many it emits, and
-        // the part of the row no stated reaction explains moves with MT 5, its
-        // only candidate (see `transport::replica`, which reads the same rule).
+        // emitting the particle moved, each weighted by its share of the row
+        // (see `production_weights`, which `transport::replica` reads too).
         for x in 203..=207 {
             let Some(stored) = new.get(&x).cloned() else {
                 continue;
             };
-            let particle = (x - 203) as usize;
+            let row = on_full_grid(&stored, n);
             let mut change = vec![0.0; n];
-            let mut explained = vec![0.0; n];
-            for (mt, before) in reactions {
-                if before.redundant {
-                    continue;
-                }
-                let Some(counts) = endf::reaction::light_particles(*mt) else {
-                    continue;
-                };
-                let c = counts[particle] as f64;
-                if c == 0.0 {
-                    continue;
-                }
-                let (b, a) = (on_full_grid(before, n), on_full_grid(&new[mt], n));
+            let weights = production_weights(
+                x,
+                &row,
+                reactions.iter().map(|(mt, r)| (*mt, r.as_ref())),
+                n,
+            );
+            for (mt, w) in weights {
+                let (b, a) = (on_full_grid(&reactions[&mt], n), on_full_grid(&new[&mt], n));
                 for i in 0..n {
-                    explained[i] += c * b[i];
-                    change[i] += c * (a[i] - b[i]);
-                }
-            }
-            if let (Some(b5), Some(a5)) = (reactions.get(&5), new.get(&5))
-                && !b5.redundant
-            {
-                let (b, a) = (on_full_grid(b5, n), on_full_grid(a5, n));
-                let row = on_full_grid(&stored, n);
-                for i in 0..n {
-                    if b[i] > 0.0 {
-                        let residual = (row[i] - explained[i]).max(0.0);
-                        change[i] += residual * (a[i] / b[i] - 1.0);
-                    }
+                    change[i] += w[i] * (a[i] - b[i]);
                 }
             }
             new.insert(x, Arc::new(shifted(&stored, &change)));
@@ -704,4 +926,90 @@ pub fn perturbed_material(
     }
     out.invalidate_xs_cache();
     Ok((out, floored))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nonnegative_least_squares_recovers_constant_multiplicities() {
+        let a: Vec<f64> = (0..50).map(|i| (i as f64 * 0.1).sin().abs()).collect();
+        let b: Vec<f64> = (0..50).map(|i| (i as f64 * 0.07).exp() * 0.1).collect();
+        let c: Vec<f64> = (0..50).map(|i| if i > 20 { 1.0 } else { 0.0 }).collect();
+        // Two of the first and three of the third; the second plays no part.
+        let y: Vec<f64> = (0..50).map(|i| 2.0 * a[i] + 3.0 * c[i]).collect();
+        let x = nonnegative_least_squares(&[&a, &b, &c], &y);
+        assert!((x[0] - 2.0).abs() < 1e-9, "{x:?}");
+        assert!(x[1].abs() < 1e-9, "{x:?}");
+        assert!((x[2] - 3.0).abs() < 1e-9, "{x:?}");
+    }
+
+    #[test]
+    fn nonnegative_least_squares_holds_negative_fits_at_zero() {
+        let a = [1.0, 2.0, 3.0];
+        let b = [1.0, 1.0, 1.0];
+        // The unconstrained fit is 1 a - 1 b.
+        let y = [0.0, 1.0, 2.0];
+        let x = nonnegative_least_squares(&[&a, &b], &y);
+        assert!(x.iter().all(|v| *v >= 0.0), "{x:?}");
+        assert_eq!(x[1], 0.0, "{x:?}");
+    }
+
+    /// The share each reaction of a cached fixture takes of production row
+    /// `x`, and the row's value against the shares' sum, at 14.1 MeV.
+    type Shares = (Vec<(i32, f64)>, f64, f64);
+
+    fn shares(nuclide: &str, x: i32) -> Option<Shares> {
+        let path = yamc_test_cache::transport_nuclide(nuclide)?;
+        let n = yamc_nuclide::arrow::nuclide_arrow::read_nuclide_from_arrow(
+            std::path::Path::new(&path),
+            &yamc_nuclide::LoadScope::full(),
+        )
+        .ok()?;
+        let t = n.get_temp_idx("294")?;
+        let grid = n.energy.as_ref()?.get("294")?.as_slice().to_vec();
+        let len = grid.len();
+        let i = grid.partition_point(|e| *e < 14.1e6);
+        let reactions = &n.reactions[t];
+        let row = on_full_grid(reactions.get(&x)?, len);
+        let weights = production_weights(
+            x,
+            &row,
+            reactions.iter().map(|(m, r)| (*m, r.as_ref())),
+            len,
+        );
+        let mut total = 0.0;
+        let mut out = Vec::new();
+        for (mt, w) in weights {
+            let share = w[i] * on_full_grid(&reactions[&mt], len)[i];
+            total += share;
+            out.push((mt, share / row[i]));
+        }
+        Some((out, row[i], total))
+    }
+
+    /// Li7's tritons, Be9's and C12's alphas come from the break-up of the
+    /// residual, which no MT names. Each row is attributed in full to the
+    /// reactions that make it, so a data draw moves it.
+    #[test]
+    fn break_up_production_is_attributed_to_the_reactions_that_make_it() {
+        for (nuclide, x) in [("Li7", 205), ("Li7", 207), ("Be9", 207), ("C12", 207)] {
+            let Some((shares, row, total)) = shares(nuclide, x) else {
+                eprintln!("skipping {nuclide}: fixture not cached");
+                continue;
+            };
+            eprintln!("{nuclide} MT {x}: row {row:e} b, {shares:?}");
+            assert!(row > 0.0);
+            assert!(
+                (total / row - 1.0).abs() < 1e-9,
+                "{nuclide} MT {x}: {total} of {row}"
+            );
+            if nuclide == "Be9" {
+                // Be8, left by (n,2n), is two alphas.
+                let n2n = shares.iter().find(|(mt, _)| *mt == 16).map_or(0.0, |s| s.1);
+                assert!(n2n > 0.95, "Be9 (n,2n) carries {n2n} of the alphas");
+            }
+        }
+    }
 }
