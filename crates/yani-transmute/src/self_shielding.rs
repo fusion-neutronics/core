@@ -67,7 +67,13 @@ const MT_TOTAL: i32 = 1;
 /// stated together; [`crate::multigroup`] looks the reaction up with it.
 pub const MT_ELASTIC: i32 = 2;
 
-/// Lethargy steps per collision window. 24 converges the march to 0.3%.
+/// Lethargy steps per collision window.
+///
+/// Against 192 steps on the endf-b8.1 294 K data, the `(n,gamma)` group
+/// factor at 24 is within 0.3% for W186 (15 to 25 eV, 100 to 300 eV), Co59
+/// (100 to 200 eV) and Mn55 (1 to 3 keV) at chords of 0.01 to 100 cm, but
+/// 3.5% to 6% high for Fe56 at 20 to 35 keV at chords of 1 cm and more,
+/// whose narrow resonances fall between the march points.
 const STEPS_PER_WINDOW: usize = 24;
 /// Windows of asymptotic flux before the march is trusted.
 const BURN_IN_WINDOWS: usize = 3;
@@ -426,13 +432,8 @@ pub fn flux_shape(
                 );
             }
 
-            // Trapezoid weights for the in-scattering integral, and the
-            // self-scatter term held back so it can be solved implicitly.
             let width = STEPS_PER_WINDOW;
-            let kernel: Vec<f64> = (1..=width)
-                .map(|k| (-(k as f64) * step).exp() / (1.0 - alpha) * step)
-                .collect();
-            let self_weight = 0.5 * step / (1.0 - alpha);
+            let (kernel, self_weight) = scattering_weights(alpha, step, width);
 
             let mut phi = vec![1.0; n];
             let burn = (width * BURN_IN_WINDOWS).min(n);
@@ -452,6 +453,33 @@ pub fn flux_shape(
             FluxShape { energy, phi }
         }
     }
+}
+
+/// Trapezoid weights for the in-scattering integral over one collision
+/// window of `width` lethargy steps of `step`: the weight of each point `k`
+/// steps above the one being solved for (`k = 1..=width`), and the
+/// self-scatter weight of the point itself, held back so it can be solved
+/// implicitly.
+///
+/// Both ends of the window are trapezoid ends and take half a step. The
+/// kernel `e^{-(u-u')} / (1-alpha)` integrates to exactly 1 over the window,
+/// which is neutron conservation in elastic scattering, so the weights are
+/// scaled to sum to 1: a flat pure scatterer then solves to a flat flux at
+/// any chord, rather than gaining the trapezoid's error on every collision.
+fn scattering_weights(alpha: f64, step: f64, width: usize) -> (Vec<f64>, f64) {
+    let mut kernel: Vec<f64> = (1..=width)
+        .map(|k| (-(k as f64) * step).exp() / (1.0 - alpha) * step)
+        .collect();
+    if let Some(far) = kernel.last_mut() {
+        *far *= 0.5;
+    }
+    let mut self_weight = 0.5 * step / (1.0 - alpha);
+    let sum = self_weight + kernel.iter().sum::<f64>();
+    for w in &mut kernel {
+        *w /= sum;
+    }
+    self_weight /= sum;
+    (kernel, self_weight)
 }
 
 /// Group-averaged cross section under a shielded flux shape.
@@ -537,6 +565,62 @@ mod tests {
             .unwrap();
         let wire = Shape::Wire { radius_cm: radius }.chord_cm(None).unwrap();
         assert!((long - wire).abs() < 0.01 * wire, "{long} vs {wire}");
+    }
+
+    #[test]
+    fn the_scattering_weights_conserve_neutrons() {
+        for mass in [1.0, 2.0, 9.0, 56.0, 184.0, 238.0] {
+            let alpha = alpha_of(mass);
+            let window = if alpha > 0.0 { (1.0 / alpha).ln() } else { 5.0 };
+            let step = window / STEPS_PER_WINDOW as f64;
+            let (kernel, self_weight) = scattering_weights(alpha, step, STEPS_PER_WINDOW);
+            let sum = self_weight + kernel.iter().sum::<f64>();
+            assert!(
+                (sum - 1.0).abs() < 1e-12,
+                "A = {mass}: weights sum to {sum}"
+            );
+            // The far end is a trapezoid end, as the near end is.
+            let ratio = kernel[STEPS_PER_WINDOW - 1] / kernel[STEPS_PER_WINDOW - 2];
+            assert!((ratio - 0.5 * (-step).exp()).abs() < 1e-12, "A = {mass}");
+        }
+    }
+
+    fn flat(mt: i32, value: f64) -> Reaction {
+        Reaction {
+            cross_section: vec![value, value].into(),
+            threshold_idx: 0,
+            energy: vec![BOTTOM_ENERGY_EV, TOP_ENERGY_EV].into(),
+            mt_number: mt,
+            q_value: 0.0,
+            products: vec![].into(),
+            scatter_in_cm: false,
+            redundant: false,
+        }
+    }
+
+    #[test]
+    fn a_flat_pure_scatterer_keeps_a_flat_flux_at_any_chord() {
+        let (total, elastic) = (flat(MT_TOTAL, 10.0), flat(MT_ELASTIC, 10.0));
+        for mass in [9.0, 56.0, 184.0] {
+            for chord in [0.01, 1.0, 10.0, 100.0] {
+                let mixture = MixtureTotal {
+                    entries: vec![(0.06, &total)],
+                };
+                let shape = flux_shape(
+                    &mixture,
+                    Some(&elastic),
+                    0.06,
+                    mass,
+                    &Shielding::new(chord).unwrap(),
+                );
+                let (_, phi) = shape.points();
+                let worst = phi.iter().map(|p| (p - 1.0).abs()).fold(0.0, f64::max);
+                assert!(
+                    worst < 1e-9,
+                    "A = {mass}, chord {chord} cm: flux off 1 by {worst}"
+                );
+            }
+        }
     }
 
     #[test]
