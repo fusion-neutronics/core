@@ -94,37 +94,33 @@ pub fn per_edge_rates(chain: &HashMap<String, ChainNuclide>, rates: &ReactionRat
     out
 }
 
-/// Map decay types to the light particles they emit.
-/// Returns (nuclide_name, count) pairs.
-/// The target nuclide is handled separately - this only returns the emitted particles.
-/// Maps each decay mode to the light particles it emits.
-pub fn decay_particle_products(decay_type: &str) -> &'static [(&'static str, f64)] {
-    match decay_type {
-        // Alpha decay emits one He4 (the target is the residual nucleus)
-        "alpha" => &[("He4", 1.0)],
-
-        // Proton decay emits one H1
-        "p" => &[("H1", 1.0)],
-        "p,p" => &[("H1", 2.0)],
-
-        // Delayed particle emissions (beta followed by particle)
-        "beta-,alpha" => &[("He4", 1.0)],
-        "beta-,2alpha" => &[("He4", 2.0)],
-        "ec/beta+,alpha" => &[("He4", 1.0)],
-        "ec/beta+,2alpha" => &[("He4", 2.0)],
-        "ec/beta+,p" => &[("H1", 1.0)],
-        "ec/beta+,2p" => &[("H1", 2.0)],
-
-        // Beta decay modes without particle emission
-        // (electrons/positrons don't affect nuclide inventory)
-        "beta-" | "beta+" | "ec/beta+" | "ec" | "IT" | "SF" => &[],
-
-        // Neutron emission (doesn't affect nuclide inventory for transmutation purposes)
-        "n" | "beta-,n" | "beta-,n,n" | "beta-,2n" | "ec/beta+,n" => &[],
-
-        // Unknown decay type - no particles
-        _ => &[],
+/// The light particles decay mode `decay_type` emits, as `(nuclide, count)`
+/// pairs. The residual nucleus is the mode's target and is handled
+/// separately.
+///
+/// Read from the mode's comma-separated parts, one per RTYP digit, which is
+/// how the decay reader names a mode (`crates/endf/src/decay.rs`): each `p`
+/// part is one H1 and each `alpha` part one He4, so `"ec/beta+,p,p"` emits two
+/// protons. Betas, neutrons, gammas and fission fragments leave no light
+/// nuclide in the inventory.
+pub fn decay_particle_products(decay_type: &str) -> Vec<(&'static str, f64)> {
+    let mut protons = 0.0;
+    let mut alphas = 0.0;
+    for part in decay_type.split(',') {
+        match part.trim() {
+            "p" => protons += 1.0,
+            "alpha" => alphas += 1.0,
+            _ => {}
+        }
     }
+    let mut out = Vec::new();
+    if alphas > 0.0 {
+        out.push(("He4", alphas));
+    }
+    if protons > 0.0 {
+        out.push(("H1", protons));
+    }
+    out
 }
 
 /// Map reaction types to the light particles they emit.
@@ -381,7 +377,7 @@ where
                     sink(row, col, decay.branching * lambda);
                 }
                 // Add light particle production from decay (He4 from alpha decay, etc.)
-                for &(particle, count) in decay_particle_products(&decay.kind) {
+                for (particle, count) in decay_particle_products(&decay.kind) {
                     if let Some(&row) = index.get(particle) {
                         sink(row, col, decay.branching * lambda * count);
                     }
@@ -1878,10 +1874,16 @@ mod tests {
     #[test]
     fn test_decay_particle_products_known_types() {
         // Verify our light particle mappings
-        assert_eq!(decay_particle_products("alpha"), &[("He4", 1.0)]);
-        assert_eq!(decay_particle_products("p"), &[("H1", 1.0)]);
-        assert_eq!(decay_particle_products("beta-,alpha"), &[("He4", 1.0)]);
-        assert_eq!(decay_particle_products("ec/beta+,p"), &[("H1", 1.0)]);
+        assert_eq!(decay_particle_products("alpha"), [("He4", 1.0)]);
+        assert_eq!(decay_particle_products("p"), [("H1", 1.0)]);
+        assert_eq!(decay_particle_products("beta-,alpha"), [("He4", 1.0)]);
+        assert_eq!(decay_particle_products("ec/beta+,p"), [("H1", 1.0)]);
+        // Two particles are two parts, as the decay reader spells them.
+        assert_eq!(decay_particle_products("p,p"), [("H1", 2.0)]);
+        assert_eq!(decay_particle_products("ec/beta+,p,p"), [("H1", 2.0)]);
+        assert_eq!(decay_particle_products("beta-,alpha,alpha"), [("He4", 2.0)]);
+        assert!(decay_particle_products("beta-,n,n").is_empty());
+        assert!(decay_particle_products("ec/beta+,sf").is_empty());
         assert!(decay_particle_products("beta-").is_empty());
         assert!(decay_particle_products("IT").is_empty());
         assert!(decay_particle_products("SF").is_empty());
