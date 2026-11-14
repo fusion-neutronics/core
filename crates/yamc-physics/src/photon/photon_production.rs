@@ -9,6 +9,70 @@ use rand::RngExt;
 use yamc_nuclide::nuclide::{FastXSGrid, Nuclide};
 use yamc_particle::particle::{Particle, ParticleType};
 
+/// How a collision's channels stand against the smooth cross sections the
+/// photon-production tables are built on, for a collision sampled from
+/// cross sections other than the smooth ones (a probability-table band).
+///
+/// Photons are born per unit flux at `Σ_mt f_mt σ_mt y_mt`, each reaction's
+/// smooth production scaled by its channel's factor (a band's capture factor
+/// for capture, and so on), and a collision sampled from `total` carries
+/// `1 / total` of that. Scaling the whole production by the total's factor
+/// instead, as dividing the smooth production by the smooth total does,
+/// gives capture the band's total factor rather than its capture factor.
+#[derive(Debug, Clone, Copy)]
+pub struct CollisionChannels {
+    /// The microscopic total the collision was sampled against.
+    pub total: f64,
+    /// `[elastic, absorption, inelastic, fission]` as sampled.
+    sampled: [f64; 4],
+    /// The same four, smooth.
+    smooth: [f64; 4],
+}
+
+impl CollisionChannels {
+    /// The channels of a collision whose partials `[elastic, absorption,
+    /// inelastic, fission]` were `sampled` from the `smooth` ones.
+    pub fn new(sampled: [f64; 4], smooth: [f64; 4]) -> Self {
+        CollisionChannels {
+            total: sampled.iter().sum(),
+            sampled,
+            smooth,
+        }
+    }
+
+    /// Sampled over smooth, for the channels `which` sums, or 1 where they
+    /// are smoothly zero.
+    fn ratio(&self, which: &[usize]) -> f64 {
+        let smooth: f64 = which.iter().map(|&c| self.smooth[c]).sum();
+        if smooth > 0.0 {
+            which.iter().map(|&c| self.sampled[c]).sum::<f64>() / smooth
+        } else {
+            1.0
+        }
+    }
+
+    /// The factor reaction `mt`'s smooth cross section takes in this
+    /// collision: its channel's. A summed reaction carrying products of its
+    /// own (MT 3, MT 1) takes the factor of what it sums.
+    pub fn factor(&self, mt: i32) -> f64 {
+        use yamc_nuclide::nuclide::{is_absorption_mt, is_fission_mt, is_scattering_mt};
+        const ELASTIC: usize = 0;
+        const ABSORPTION: usize = 1;
+        const INELASTIC: usize = 2;
+        const FISSION: usize = 3;
+        match mt {
+            2 => self.ratio(&[ELASTIC]),
+            1 => self.ratio(&[ELASTIC, ABSORPTION, INELASTIC, FISSION]),
+            3 => self.ratio(&[ABSORPTION, INELASTIC, FISSION]),
+            4 => self.ratio(&[INELASTIC]),
+            _ if is_fission_mt(mt) => self.ratio(&[FISSION]),
+            _ if is_scattering_mt(mt) => self.ratio(&[INELASTIC]),
+            _ if is_absorption_mt(mt) => self.ratio(&[ABSORPTION]),
+            _ => 1.0,
+        }
+    }
+}
+
 /// Sample secondary photons from a neutron collision and bank them.
 ///
 /// # Arguments
@@ -21,6 +85,8 @@ use yamc_particle::particle::{Particle, ParticleType};
 /// * `interp_factor` - Interpolation factor from lookup_grid_index
 /// * `micro_xs_total` - Microscopic total XS at the collision energy
 /// * `photon_prod_xs` - Microscopic photon production XS at the collision energy
+/// * `channels` - The collision's channels where it was sampled from other
+///   than the smooth cross sections; `micro_xs_total` is then not read
 /// * `bank` - Particle bank to push photon secondaries into
 /// * `rng` - Random number generator
 #[allow(clippy::too_many_arguments)]
@@ -34,10 +100,28 @@ pub fn sample_secondary_photons<R: rand::Rng>(
     interp_factor: f64,
     micro_xs_total: f64,
     photon_prod_xs: f64,
+    channels: Option<&CollisionChannels>,
     bank: &mut ParticleBank,
     rng: &mut R,
     mut on_photon: impl FnMut(&mut Particle, i32),
 ) {
+    let factor = |mt: i32| channels.map_or(1.0, |c| c.factor(mt));
+    let (photon_prod_xs, micro_xs_total) = match channels {
+        None => (photon_prod_xs, micro_xs_total),
+        // The smooth production, each reaction's share moved by its
+        // channel's factor, over the total the collision was sampled from.
+        Some(c) => {
+            let (scaled, smooth) = photon_production_weights(
+                fast_grid,
+                i_grid,
+                interp_factor,
+                incoming_energy,
+                &factor,
+            );
+            let moved = if smooth > 0.0 { scaled / smooth } else { 1.0 };
+            (photon_prod_xs * moved, c.total)
+        }
+    };
     if photon_prod_xs <= 0.0 || micro_xs_total <= 0.0 {
         return;
     }
@@ -60,11 +144,17 @@ pub fn sample_secondary_photons<R: rand::Rng>(
 
     for _ in 0..n_photons {
         // Sample which reaction and product this photon comes from
-        let (reaction, product_idx) =
-            match sample_photon_product(fast_grid, i_grid, interp_factor, energy_in, rng) {
-                Some(result) => result,
-                None => continue,
-            };
+        let (reaction, product_idx) = match sample_photon_product(
+            fast_grid,
+            i_grid,
+            interp_factor,
+            energy_in,
+            &factor,
+            rng,
+        ) {
+            Some(result) => result,
+            None => continue,
+        };
 
         // Get the photon product at the sampled index
         let mut photon_product_idx = 0;
@@ -135,6 +225,59 @@ pub fn sample_secondary_photons<R: rand::Rng>(
     }
 }
 
+/// The delayed-photon scaling of a fission reaction's photon production at
+/// the collision's grid point, 1 for any other reaction.
+fn delayed_scaling(fast_grid: &FastXSGrid, i_grid: usize, interp_factor: f64, mt: i32) -> f64 {
+    if yamc_nuclide::nuclide::is_fission_mt(mt) && !fast_grid.delayed_photon_scaling.is_empty() {
+        if i_grid + 1 < fast_grid.delayed_photon_scaling.len() {
+            fast_grid.delayed_photon_scaling[i_grid]
+                + interp_factor
+                    * (fast_grid.delayed_photon_scaling[i_grid + 1]
+                        - fast_grid.delayed_photon_scaling[i_grid])
+        } else {
+            fast_grid.delayed_photon_scaling[i_grid.min(fast_grid.delayed_photon_scaling.len() - 1)]
+        }
+    } else {
+        1.0
+    }
+}
+
+/// `(Σ factor_mt w_mt, Σ w_mt)` over the photon products of the collision's
+/// reactions, `w_mt` a product's grid-consistent `σ_mt y` (fission's scaled
+/// for its delayed photons): the weights [`sample_photon_product`] draws from,
+/// with and without the channel factors.
+fn photon_production_weights(
+    fast_grid: &FastXSGrid,
+    i_grid: usize,
+    interp_factor: f64,
+    energy: f64,
+    factor: &impl Fn(i32) -> f64,
+) -> (f64, f64) {
+    let mut scaled = 0.0;
+    let mut smooth = 0.0;
+    for (j, &mt) in fast_grid.photon_rxn_mt_numbers.iter().enumerate() {
+        let reaction = &fast_grid.photon_rxn_reactions[j];
+        let rxn_xs = fast_grid.photon_rxn_xs_interp(i_grid, interp_factor, j);
+        if rxn_xs <= 0.0 {
+            continue;
+        }
+        let d = delayed_scaling(fast_grid, i_grid, interp_factor, mt);
+        let f = d * factor(mt);
+        for product in reaction.products.iter() {
+            if product.is_particle_type(&ParticleType::Photon) {
+                let y = product
+                    .product_yield
+                    .as_ref()
+                    .map(|yld| yld.evaluate(energy))
+                    .unwrap_or(1.0);
+                scaled += f * rxn_xs * y;
+                smooth += d * rxn_xs * y;
+            }
+        }
+    }
+    (scaled, smooth)
+}
+
 /// Sample which reaction and product to emit the photon from.
 ///
 /// Uses grid-consistent XS values: per-reaction XS is interpolated on the same
@@ -146,55 +289,23 @@ pub fn sample_secondary_photons<R: rand::Rng>(
 /// using that same total as the cutoff normalization.
 ///
 /// Returns `Some((&Reaction, photon_product_index))` or `None`.
+///
+/// `factor` scales each reaction's share by its channel's factor in this
+/// collision ([`CollisionChannels::factor`]); 1 for a smooth collision.
 fn sample_photon_product<'a, R: rand::Rng>(
     fast_grid: &'a FastXSGrid,
     i_grid: usize,
     interp_factor: f64,
     energy: f64,
+    factor: &impl Fn(i32) -> f64,
     rng: &mut R,
 ) -> Option<(&'a yamc_nuclide::reaction::Reaction, usize)> {
-    // Helper to get delayed photon scaling factor for fission reactions.
-    // Scale fission photon production by delayed photon factor.
-    let scaling_factor = |mt: i32| -> f64 {
-        if yamc_nuclide::nuclide::is_fission_mt(mt) && !fast_grid.delayed_photon_scaling.is_empty()
-        {
-            if i_grid + 1 < fast_grid.delayed_photon_scaling.len() {
-                fast_grid.delayed_photon_scaling[i_grid]
-                    + interp_factor
-                        * (fast_grid.delayed_photon_scaling[i_grid + 1]
-                            - fast_grid.delayed_photon_scaling[i_grid])
-            } else if !fast_grid.delayed_photon_scaling.is_empty() {
-                fast_grid.delayed_photon_scaling
-                    [i_grid.min(fast_grid.delayed_photon_scaling.len() - 1)]
-            } else {
-                1.0
-            }
-        } else {
-            1.0
-        }
-    };
+    let scaling_factor =
+        |mt: i32| delayed_scaling(fast_grid, i_grid, interp_factor, mt) * factor(mt);
 
     // First pass: compute total photon production probability using grid-consistent XS.
-    let mut total_prob = 0.0;
-    for (j, &mt) in fast_grid.photon_rxn_mt_numbers.iter().enumerate() {
-        let reaction = &fast_grid.photon_rxn_reactions[j];
-        let rxn_xs = fast_grid.photon_rxn_xs_interp(i_grid, interp_factor, j);
-        if rxn_xs <= 0.0 {
-            continue;
-        }
-        let f = scaling_factor(mt);
-        for product in reaction.products.iter() {
-            if product.is_particle_type(&ParticleType::Photon) {
-                let y = product
-                    .product_yield
-                    .as_ref()
-                    .map(|yld| yld.evaluate(energy))
-                    .unwrap_or(1.0);
-                total_prob += f * rxn_xs * y;
-            }
-        }
-    }
-
+    let (total_prob, _) =
+        photon_production_weights(fast_grid, i_grid, interp_factor, energy, factor);
     if total_prob <= 0.0 {
         return None;
     }
@@ -241,6 +352,25 @@ fn sample_photon_product<'a, R: rand::Rng>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_reaction_takes_its_own_channel_factor() {
+        // A band that doubles capture, halves elastic, leaves inelastic and
+        // has no fission.
+        let c = CollisionChannels::new([5.0, 2.0, 1.0, 0.0], [10.0, 1.0, 1.0, 0.0]);
+        assert_eq!(c.total, 8.0);
+        assert_eq!(c.factor(102), 2.0);
+        assert_eq!(c.factor(107), 2.0);
+        assert_eq!(c.factor(2), 0.5);
+        assert_eq!(c.factor(51), 1.0);
+        assert_eq!(c.factor(4), 1.0);
+        assert_eq!(c.factor(16), 1.0);
+        // No smooth fission: nothing to scale.
+        assert_eq!(c.factor(18), 1.0);
+        // The nonelastic sum moves as what it sums.
+        assert_eq!(c.factor(3), 1.5);
+        assert_eq!(c.factor(1), 8.0 / 12.0);
+    }
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 
@@ -341,6 +471,7 @@ mod tests {
                 f,
                 total_xs,
                 photon_prod_xs,
+                None,
                 &mut bank,
                 &mut rng,
                 |_, _| {},
@@ -395,6 +526,7 @@ mod tests {
                 f,
                 total_xs,
                 boosted_prod,
+                None,
                 &mut bank,
                 &mut rng,
                 |_, _| {},

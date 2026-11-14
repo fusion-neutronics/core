@@ -1890,6 +1890,11 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
         // the surviving weight fraction, and the fission fraction the banked
         // progeny are scaled by. Applied after photon sampling.
         let mut survival_capture: Option<(f64, f64)> = None;
+        // The collision's channels against the smooth cross sections, where
+        // a probability-table band moved them: the secondary photons read it.
+        let mut photon_channels: Option<
+            yamc_physics::photon::photon_production::CollisionChannels,
+        > = None;
         let reaction_type = {
             match nuclide.reaction_partials(
                 particle.energy,
@@ -1916,6 +1921,14 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
                         material.bound_elastic_xs(nuclide_name, particle.energy, p.sigma_e)
                     {
                         p.sigma_e = bound_el;
+                    }
+                    if let Some(smooth) = p.smooth {
+                        photon_channels = Some(
+                            yamc_physics::photon::photon_production::CollisionChannels::new(
+                                [p.sigma_e, p.sigma_a, p.sigma_i, p.sigma_f],
+                                smooth,
+                            ),
+                        );
                     }
                     // Analog: the denominator is the full total, mirroring
                     // shared.rs (sel_denom == sigma_t). Survival biasing
@@ -2029,6 +2042,7 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
                                     i_grid,
                                     f,
                                     total_xs,
+                                    photon_channels.as_ref(),
                                     particle_bank,
                                     rng,
                                     inherit,
@@ -2050,6 +2064,7 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
                                 f,
                                 total_xs,
                                 photon_prod_xs,
+                                photon_channels.as_ref(),
                                 particle_bank,
                                 rng,
                                 inherit,

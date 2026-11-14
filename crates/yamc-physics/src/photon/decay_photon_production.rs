@@ -8,6 +8,7 @@ use rand::RngExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::photon::photon_production::CollisionChannels;
 use crate::util::bank::ParticleBank;
 use yamc_nuclide::buffer::F64Buffer;
 use yamc_nuclide::nuclide::{FastXSGrid, Nuclide};
@@ -330,16 +331,32 @@ pub fn sample_decay_photons<R: rand::Rng>(
     i_grid: usize,
     interp_factor: f64,
     micro_xs_total: f64,
+    channels: Option<&CollisionChannels>,
     bank: &mut ParticleBank,
     rng: &mut R,
     mut on_photon: impl FnMut(&mut Particle, i32),
 ) {
+    let factor = |mt: i32| channels.map_or(1.0, |c| c.factor(mt));
+    let micro_xs_total = channels.map_or(micro_xs_total, |c| c.total);
     if micro_xs_total <= 0.0 || decay_photon_data.channels.is_empty() {
         return;
     }
 
-    // Interpolate precomputed D1S photon_prod at collision energy
-    let photon_prod = decay_photon_data.lookup_photon_prod(i_grid, interp_factor);
+    // Interpolate precomputed D1S photon_prod at collision energy. A
+    // collision sampled from other than the smooth cross sections moves each
+    // channel's share by its reaction's factor (a band's capture factor on
+    // the emitters capture makes).
+    let photon_prod = match channels {
+        None => decay_photon_data.lookup_photon_prod(i_grid, interp_factor),
+        Some(_) => decay_photon_data
+            .channels
+            .iter()
+            .map(|ch| {
+                factor(ch.mt) * interp_value(&ch.xs, i_grid, interp_factor) * ch.yield_constant
+            })
+            .filter(|w| *w > 0.0)
+            .sum(),
+    };
     if photon_prod <= 0.0 {
         return;
     }
@@ -356,7 +373,7 @@ pub fn sample_decay_photons<R: rand::Rng>(
     let mut selected_idx = decay_photon_data.channels.len() - 1;
 
     for (idx, ch) in decay_photon_data.channels.iter().enumerate() {
-        let xs = interp_value(&ch.xs, i_grid, interp_factor);
+        let xs = factor(ch.mt) * interp_value(&ch.xs, i_grid, interp_factor);
         if xs > 0.0 {
             prob += xs * ch.yield_constant;
             selected_idx = idx;
@@ -784,6 +801,7 @@ mod tests {
                 i_grid,
                 f,
                 total_xs,
+                None,
                 &mut bank,
                 &mut rng,
                 |_, _| {},
@@ -984,6 +1002,7 @@ mod tests {
                 i_grid,
                 f,
                 total_xs,
+                None,
                 &mut bank,
                 &mut rng,
                 |_, _| {},
@@ -1308,6 +1327,7 @@ mod tests {
             0,
             0.0,
             1.0,
+            None,
             &mut bank,
             &mut rng,
             |_, _| {},
