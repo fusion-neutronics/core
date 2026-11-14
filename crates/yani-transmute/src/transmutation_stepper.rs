@@ -272,7 +272,7 @@ pub(crate) fn reachable<'a>(
                 {
                     queue.push_back(target.clone());
                 }
-                for &(particle, _) in decay_particle_products(&decay.kind) {
+                for (particle, _) in decay_particle_products(&decay.kind) {
                     let p = particle.to_string();
                     if chain.contains_key(&p) && visited.insert(p.clone()) {
                         queue.push_back(p);
