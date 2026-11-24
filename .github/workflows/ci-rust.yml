@@ -97,6 +97,10 @@ jobs:
             macOS) echo "DYLD_FALLBACK_LIBRARY_PATH=$libdir:${DYLD_FALLBACK_LIBRARY_PATH:-}" >> "$GITHUB_ENV" ;;
           esac
       - name: Lint
+        # Formatting is the same on every OS, and on Windows rustfmt's argument
+        # list (every file, as an absolute path under D:\a\yamc-and-yani\...)
+        # overruns the command-line limit (os error 206).
+        if: runner.os == 'Linux'
         run: cargo fmt --check --all
       - name: clippy
         # All targets except benches: the yamc-gpu benches reference the
