@@ -1,10 +1,10 @@
 [package]
 name = "yani-python"
-# Not the yani-core wheel's version, and not bumped. The wheel's version is
-# `project.version` in packages/yani-core/pyproject.toml, which the release
+# Not the yani wheel's version, and not bumped. The wheel's version is
+# `project.version` in packages/yani/pyproject.toml, which the release
 # workflow sets from the release tag. This crate is never published to
 # crates.io, so its own number is unused; read the wheel's at runtime with
-# `importlib.metadata.version("yani-core")`, not `CARGO_PKG_VERSION`.
+# `importlib.metadata.version("yani")`, not `CARGO_PKG_VERSION`.
 version = "0.25.0"
 edition = "2024"
 rust-version.workspace = true
@@ -20,7 +20,7 @@ path = "src/lib.rs"
 doctest = false
 
 [[bin]]
-# Emits packages/yani-core/python/yani/_core.pyi. Must be built WITHOUT
+# Emits packages/yani/python/yani/_core.pyi. Must be built WITHOUT
 # `extension-module` so it can link libpython.
 name = "stub_gen"
 path = "src/bin/stub_gen.rs"

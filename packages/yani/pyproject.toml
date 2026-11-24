@@ -1,0 +1,43 @@
+[build-system]
+requires = ["maturin>=1.14,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "yani"
+# Not bumped by hand. The release workflow writes the version the release tag
+# names into this field before it builds (scripts/set-wheel-version.sh), so a
+# wheel's version comes from the tag alone. The placeholder below is what a
+# build from an untagged checkout reports. See docs/developer/developer_info.md.
+version = "0.0.0.dev0"
+description = "Yet Another Nuclide Inventory: transmutation and activation calculations"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE", "THIRD-PARTY-LICENSES.html"]
+dependencies = []
+keywords = ["nuclear", "transmutation", "activation", "inventory", "fusion", "neutronics"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+[project.urls]
+Homepage = "https://fusion-neutronics.github.io/yamc-and-yani/yani/"
+Documentation = "https://fusion-neutronics.github.io/yamc-and-yani/yani/"
+Repository = "https://github.com/fusion-neutronics/yamc-and-yani"
+Issues = "https://github.com/fusion-neutronics/yamc-and-yani/issues"
+
+[project.optional-dependencies]
+dev = ["pytest", "maturin>=1.14"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "yani._core"
+manifest-path = "../../crates/yani-python/Cargo.toml"
+# `extension-module` is off by default on yani-python so that the yamc wheel,
+# which links the same crate as an rlib, never gets a second `PyInit__core`.
+# This wheel is the one that wants it.
+features = ["yani-python/extension-module"]
+include = ["python/yani/py.typed", "python/yani/**/*.pyi"]

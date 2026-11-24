@@ -1,7 +1,7 @@
 """Put the process-global nuclear-data settings back after every parity test.
 
 This directory belongs to neither package, so it inherits no conftest. The
-autouse restore fixture in packages/yamc-core/tests/conftest.py covered these
+autouse restore fixture in packages/yamc/tests/conftest.py covered these
 files while they lived under pytests/ next to it, and after the split it does
 not reach them: `_inventory` in test_yani_package_parity.py sets
 `neutron_cross_section_data` and three `transmutation_*` sources on yamc AND on yani and
@@ -26,7 +26,7 @@ import os
 
 import pytest
 
-# yani's module-property shim (packages/yani-core/python/yani/__init__.py)
+# yani's module-property shim (packages/yani/python/yani/__init__.py)
 # mirrors yamc's setter for setter, and each extension module carries its own
 # copy of the `CONFIG` behind them, so the two are saved and restored
 # independently.

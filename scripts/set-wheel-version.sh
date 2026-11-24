@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Write the version a wheel will publish at into its package's pyproject.toml.
 #
-#   scripts/set-wheel-version.sh yamc-core 0.8.1
+#   scripts/set-wheel-version.sh yamc 0.8.1
 #
 # The release workflow runs this in every wheel job, with the version the
 # release tag (or a dispatch override) names, so the committed placeholder in
@@ -12,8 +12,8 @@
 # leaving the lock untouched keeps `cargo about --locked` and friends happy.
 set -euo pipefail
 
-package="${1:?usage: set-wheel-version.sh <yamc-core|yani-core> <version>}"
-version="${2:?usage: set-wheel-version.sh <yamc-core|yani-core> <version>}"
+package="${1:?usage: set-wheel-version.sh <yamc|yani> <version>}"
+version="${2:?usage: set-wheel-version.sh <yamc|yani> <version>}"
 pyproject="packages/$package/pyproject.toml"
 
 [ -f "$pyproject" ] || { echo "no such package: $pyproject" >&2; exit 1; }

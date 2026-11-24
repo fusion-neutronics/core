@@ -48,10 +48,10 @@ pub struct InteractiveViewParams {
 // Compile-time embedded yamt WASM binary (only included in mesh HTML).
 #[cfg(feature = "mesh")]
 static YAMT_WASM_BYTES: &[u8] =
-    include_bytes!("../../../packages/yamc-core/python/yamc/_wasm/yamt_bg.wasm");
+    include_bytes!("../../../packages/yamc/python/yamc/_wasm/yamt_bg.wasm");
 // Compile-time embedded yamt wasm-bindgen JS glue (only included in mesh HTML).
 #[cfg(feature = "mesh")]
-static YAMT_WASM_JS: &str = include_str!("../../../packages/yamc-core/python/yamc/_wasm/yamt.js");
+static YAMT_WASM_JS: &str = include_str!("../../../packages/yamc/python/yamc/_wasm/yamt.js");
 
 /// Viewer JavaScript body -- model-independent rendering / interaction
 /// code. Lives in `viewer.js` so it can be edited as a real JS file;

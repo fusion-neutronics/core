@@ -31,8 +31,8 @@ from types import ModuleType
 
 ROOT = Path(__file__).resolve().parent.parent
 PACKAGES = {
-    "yamc": ROOT / "packages" / "yamc-core" / "python" / "yamc",
-    "yani": ROOT / "packages" / "yani-core" / "python" / "yani",
+    "yamc": ROOT / "packages" / "yamc" / "python" / "yamc",
+    "yani": ROOT / "packages" / "yani" / "python" / "yani",
 }
 
 

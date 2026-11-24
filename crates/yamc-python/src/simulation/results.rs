@@ -1312,7 +1312,7 @@ impl PyTallyIter {
     }
 }
 
-/// The version to stamp into run provenance: the installed `yamc-core`
+/// The version to stamp into run provenance: the installed `yamc`
 /// distribution, not this crate's compile-time version.
 ///
 /// A results file is provenance for whoever reads it later, so the number in
@@ -1327,7 +1327,7 @@ impl PyTallyIter {
 pub(crate) fn provenance_version() -> String {
     Python::attach(|py| {
         py.import("importlib.metadata")
-            .and_then(|m| m.call_method1("version", ("yamc-core",)))
+            .and_then(|m| m.call_method1("version", ("yamc",)))
             .and_then(|v| v.extract::<String>())
             .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string())
     })

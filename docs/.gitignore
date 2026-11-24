@@ -1,0 +1,10 @@
+# The workspace .gitignore drops every *.png, *.svg, *.txt and *.html; under
+# docs/ those are sources (logos, the splash page, data the pages read).
+!*.png
+!*.svg
+!*.txt
+!*.html
+# Build output, and files the executed code blocks write.
+site/
+*.vtkhdf
+*.h5

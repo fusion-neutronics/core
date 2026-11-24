@@ -46,7 +46,7 @@ pub mod reaction_ranges;
 /// 2 since the union energy grids moved out of `nuclide.arrow` into
 /// `energy.arrow` and `reactions.arrow` became one record batch per (MT,
 /// temperature). Changing it changes the published format, so both binding
-/// versions move with it (`docs/developer_info.md`, "Bumping a version").
+/// versions move with it (`docs/developer/developer_info.md`, "Bumping a version").
 pub const FORMAT_VERSION: u32 = 2;
 
 /// Every section, keyed by its path within the output directory.

@@ -115,7 +115,7 @@ _VTKHDF = ("to_vtkhdf", _m(
     "to_vtkhdf(self, filename: builtins.str, **kwargs: typing.Any) -> None",
     "Write to a VTK-HDF file for ParaView. Requires h5py (pip install yamc[viz])."))
 
-# Methods added to _core classes at runtime in packages/yamc-core/python/yamc/__init__.py (monkey-
+# Methods added to _core classes at runtime in packages/yamc/python/yamc/__init__.py (monkey-
 # patched, so invisible to pyo3-stub-gen) plus the .plot()/interactive_plot()
 # methods skipped in Rust (pyo3-stub-gen Option<&str>-default bug). Injected
 # here with import-clean signatures. class -> [(method_name, source_block)].
@@ -503,7 +503,7 @@ def rewrite_package_references(pkg: Package) -> None:
 PACKAGES = [
     Package(
         name="yamc",
-        core=ROOT / "packages" / "yamc-core" / "python" / "yamc" / "_core",
+        core=ROOT / "packages" / "yamc" / "python" / "yamc" / "_core",
         crate="yamc-python",
         features="stub-gen,mesh,cad",
         submodules=SUBMODULES,
@@ -514,7 +514,7 @@ PACKAGES = [
     # monkey-patched plotting/vtkhdf methods to declare.
     Package(
         name="yani",
-        core=ROOT / "packages" / "yani-core" / "python" / "yani" / "_core",
+        core=ROOT / "packages" / "yani" / "python" / "yani" / "_core",
         crate="yani-python",
         features="stub-gen",
         # No transport, so no `parallel`, and `sources` holds only the

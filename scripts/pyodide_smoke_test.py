@@ -1,4 +1,4 @@
-"""Smoke test of the yamc-core Pyodide wheel, run inside Pyodide.
+"""Smoke test of the yamc Pyodide wheel, run inside Pyodide.
 
 Usage (from a `pyodide venv` with the wheel installed)::
 
@@ -28,7 +28,7 @@ and the fetcher answers `Range` requests as the origin does: one range as the
 bytes alone, several as `multipart/byteranges`.
 
 `publish`, `origin` and `check_release_requests` are shared with
-`pyodide_smoke_test_yani.py`, which serves the yani-core wheel the same release
+`pyodide_smoke_test_yani.py`, which serves the yani wheel the same release
 with the transmutation chain added.
 """
 

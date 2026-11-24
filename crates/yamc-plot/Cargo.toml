@@ -20,7 +20,7 @@ crate-type = ["rlib"]
 default = []
 # Enables the mesh-geometry path inside build_interactive_html, which
 # embeds the yamt wasm blob into the saved viewer HTML. Only available
-# when the wasm files at `packages/yamc-core/python/yamc/_wasm/yamt_*`
+# when the wasm files at `packages/yamc/python/yamc/_wasm/yamt_*`
 # exist. They are not committed: the `wasm-blobs` job builds them in CI,
 # and `scripts/build_wasm_blobs.sh` is the same build locally. A fresh
 # checkout has none until one of those has run.

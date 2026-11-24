@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the wasm blobs the yamc-core wheel ships.
+# Build the wasm blobs the yamc wheel ships.
 #
 # These used to be committed binaries. They are not any more, because
 # `python-source = "python"` copies that tree verbatim into the wheel, so a
@@ -17,7 +17,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-dest="packages/yamc-core/python/yamc/_wasm"
+dest="packages/yamc/python/yamc/_wasm"
 
 if ! command -v wasm-pack >/dev/null 2>&1; then
     echo "wasm-pack is not installed. Install it with:" >&2

@@ -1,0 +1,14 @@
+# Docs toolchain (build from docs/yamc: mkdocs build). `yamc` is not listed:
+# the workflow installs the wheel the same run built.
+mkdocs>=1.6
+mkdocs-material>=9.5
+mkdocstrings[python]>=1.0
+mkdocs-exporter>=6.2,<7     # 7.0 drops mkdocs_exporter.preprocessor; builds the PDF download; also needs `playwright install chromium`
+mypy>=1.11                  # type-checks the prose examples against the wheel's stubs
+markdown-exec>=1.9          # executes the code blocks in the pages and embeds their output
+matplotlib
+numpy
+h5py
+# Interactive 3D mesh-tally view (VTK-HDF export + vtk.js volume render in results.md).
+pyvista[jupyter]>=0.44
+nest_asyncio2

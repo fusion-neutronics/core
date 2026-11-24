@@ -1,0 +1,27 @@
+/* Print layout for the PDF built by mkdocs-exporter. Only the PDF render
+   loads this; the website is unaffected. */
+@page {
+  size: A4;
+  margin: 18mm 16mm 20mm 16mm;
+  @bottom-center {
+    content: counter(page);
+    font-size: 9pt;
+    color: #666;
+  }
+}
+
+.md-typeset {
+  font-size: 10.5pt;
+}
+
+/* Keep code and tables whole, and headings with the text that follows. */
+.md-typeset pre,
+.md-typeset table {
+  break-inside: avoid;
+}
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3 {
+  break-after: avoid;
+}

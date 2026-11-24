@@ -1,4 +1,4 @@
-# Builds yamc-core and yani-core as Pyodide (Emscripten) wheels and runs each
+# Builds yamc and yani as Pyodide (Emscripten) wheels and runs each
 # inside Pyodide.
 #
 # yamc-online and yani-online (the browser pages that run yamc and yani Python
@@ -25,7 +25,7 @@ on:
     # A change to prose alone cannot break a build or a test: no test, script or
     # include_str! reads a Markdown file. Pushes to main and releases are not
     # filtered.
-    paths-ignore: ['**/*.md', 'docs/**', 'mkdocs.yml', 'LICENSE*']
+    paths-ignore: ['**/*.md', 'docs/**', 'LICENSE*']
   workflow_dispatch:
   # ci-python.yml, on a run that publishes. Not a `release` trigger here as
   # well, which would build the same wheels twice.
@@ -33,18 +33,18 @@ on:
     inputs:
       projects:
         # Only what the run publishes: `collect` refuses a wheel of a project
-        # the run does not publish, so a yani-core-only release must not build
-        # yamc-core's.
-        description: 'The projects to build, as a JSON list: ["yamc-core"], ["yani-core"] or both'
+        # the run does not publish, so a yani-only release must not build
+        # yamc's.
+        description: 'The projects to build, as a JSON list: ["yamc"], ["yani"] or both'
         type: string
         required: true
       yamc_version:
-        description: "yamc-core version to build at: the release tag's, or ci-python.yml's dispatch override"
+        description: "yamc version to build at: the release tag's, or ci-python.yml's dispatch override"
         type: string
         required: false
         default: ""
       yani_version:
-        description: "yani-core version to build at: the release tag's, or ci-python.yml's dispatch override"
+        description: "yani version to build at: the release tag's, or ci-python.yml's dispatch override"
         type: string
         required: false
         default: ""
@@ -65,7 +65,7 @@ env:
   CARGO_TERM_COLOR: always
   # Three tries over ten seconds is all cargo gives a registry that is briefly
   # unreachable, and a release has already been lost to a twelve-second one
-  # (yani-core 0.11.0). Ten stretches the same ladder over about a minute.
+  # (yani 0.11.0). Ten stretches the same ladder over about a minute.
   CARGO_NET_RETRY: 10
   # The Pyodide release the wheels are built against. MUST match
   # vendor/PYODIDE_VERSION in yamc-online and yani-online: the wheel's platform
@@ -89,7 +89,7 @@ jobs:
       fail-fast: false
       matrix:
         # Both on a push or a pull request, where there are no inputs.
-        project: ${{ fromJSON(inputs.projects || '["yamc-core", "yani-core"]') }}
+        project: ${{ fromJSON(inputs.projects || '["yamc", "yani"]') }}
     env:
       PROJECT: ${{ matrix.project }}
 
@@ -98,16 +98,16 @@ jobs:
 
       # The version ci-python.yml's plan resolved (tag or dispatch override), so
       # the Pyodide wheel goes out at the same number as the native wheels.
-      - name: Set yamc-core's version
-        if: matrix.project == 'yamc-core' && inputs.yamc_version != ''
+      - name: Set yamc's version
+        if: matrix.project == 'yamc' && inputs.yamc_version != ''
         env:
           VERSION: ${{ inputs.yamc_version }}
-        run: bash scripts/set-wheel-version.sh yamc-core "$VERSION"
-      - name: Set yani-core's version
-        if: matrix.project == 'yani-core' && inputs.yani_version != ''
+        run: bash scripts/set-wheel-version.sh yamc "$VERSION"
+      - name: Set yani's version
+        if: matrix.project == 'yani' && inputs.yani_version != ''
         env:
           VERSION: ${{ inputs.yani_version }}
-        run: bash scripts/set-wheel-version.sh yani-core "$VERSION"
+        run: bash scripts/set-wheel-version.sh yani "$VERSION"
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -147,12 +147,12 @@ jobs:
       - name: Generate THIRD-PARTY-LICENSES.html for the wheel
         run: cargo about generate about.hbs --all-features --locked -o "packages/$PROJECT/THIRD-PARTY-LICENSES.html"
 
-      # `--no-default-features` drops download-tls, and for yamc-core mesh,
+      # `--no-default-features` drops download-tls, and for yamc mesh,
       # cad and gpu as well. Pyodide has no sockets, so downloads go through
       # the fetcher the host installs with `_core._set_data_fetcher` (one hook,
       # registered by yani-python for both wheels; in the pages, a helper
       # worker's concurrent fetch() calls, which the Python worker blocks on
-      # with Atomics.wait). The wasm viewer blobs the native yamc-core wheels
+      # with Atomics.wait). The wasm viewer blobs the native yamc wheels
       # ship under yamc/_wasm/ are not added: the page draws plots without them.
       - name: Build the wheel
         working-directory: packages/${{ matrix.project }}
@@ -189,15 +189,15 @@ jobs:
       # that serves the fixtures above as a published release (pointer,
       # manifest, files) and runs through the same release resolution,
       # verification and cache code the pages run: a Li-6 transport for
-      # yamc-core, and for yani-core an iron irradiation read back as activity
+      # yamc, and for yani an iron irradiation read back as activity
       # and decay heat, with the transmutation chain served as the release's
       # subsections.
       - name: Smoke test the wheel inside Pyodide
         run: |
           set -euo pipefail
           case "$PROJECT" in
-            yamc-core) smoke=scripts/pyodide_smoke_test.py ;;
-            yani-core) smoke=scripts/pyodide_smoke_test_yani.py ;;
+            yamc) smoke=scripts/pyodide_smoke_test.py ;;
+            yani) smoke=scripts/pyodide_smoke_test_yani.py ;;
           esac
           pyodide venv .venv-pyodide
           .venv-pyodide/bin/pip install packages/"$PROJECT"/dist/*.whl

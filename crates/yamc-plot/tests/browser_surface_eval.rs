@@ -23,8 +23,7 @@ use yamc_plot::{
     InteractiveViewParams, MeshMeta,
 };
 
-const APP_JS: &str =
-    include_str!("../../../packages/yamc-core/python/yamc/_browser_template/app.js");
+const APP_JS: &str = include_str!("../../../packages/yamc/python/yamc/_browser_template/app.js");
 
 /// Every `SurfaceKind` as named in the JSON, from serde's own list (its error
 /// for an unknown kind names them all). A new kind then fails these tests

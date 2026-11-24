@@ -6,7 +6,7 @@ inventory, bit for bit. That is the guard that splitting the bindings out
 changed no physics.
 
 Skipped unless the standalone ``yani`` wheel is installed alongside ``yamc``;
-``maturin develop -m packages/yani-core/pyproject.toml`` puts it there.
+``maturin develop -m packages/yani/pyproject.toml`` puts it there.
 """
 
 import inspect

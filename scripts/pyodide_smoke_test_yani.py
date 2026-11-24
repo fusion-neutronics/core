@@ -1,4 +1,4 @@
-"""Smoke test of the yani-core Pyodide wheel, run inside Pyodide.
+"""Smoke test of the yani Pyodide wheel, run inside Pyodide.
 
 Usage (from a `pyodide venv` with the wheel installed)::
 

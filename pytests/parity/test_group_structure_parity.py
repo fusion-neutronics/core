@@ -6,7 +6,7 @@ both wheels carry the pair and neither may drift from the other.
 
 This is the one group-structure test that needs both wheels in one interpreter,
 which is why it lives here instead of alongside the yamc-only tests in
-packages/yamc-core/tests/unit_tests/test_group_structures.py: that suite is run
+packages/yamc/tests/unit_tests/test_group_structures.py: that suite is run
 with the yamc wheel alone.
 """
 

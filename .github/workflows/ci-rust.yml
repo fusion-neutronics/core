@@ -8,7 +8,7 @@ on:
   pull_request:
     # A change to prose alone cannot break a build or a test: no test, script or
     # include_str! reads a Markdown file. Pushes to main are not filtered.
-    paths-ignore: ['**/*.md', 'docs/**', 'mkdocs.yml', 'LICENSE*']
+    paths-ignore: ['**/*.md', 'docs/**', 'LICENSE*']
   # Not on a release. A release tags a commit on main whose push already ran
   # this whole workflow, and nothing here builds or publishes what goes out, so
   # a second run only competed with the release's own wheel builds for runners,
@@ -26,7 +26,7 @@ env:
   CARGO_TERM_COLOR: always
   # Three tries over ten seconds is all cargo gives a registry that is briefly
   # unreachable, and a release has already been lost to a twelve-second one
-  # (yani-core 0.11.0). Ten stretches the same ladder over about a minute.
+  # (yani 0.11.0). Ten stretches the same ladder over about a minute.
   CARGO_NET_RETRY: 10
 
 jobs:

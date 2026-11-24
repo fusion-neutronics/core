@@ -35,7 +35,7 @@ pub fn set_wheel(package: &str) {
 }
 
 /// `"<wheel>-python <version>"`, such as `"yamc-python 0.24.0"`, with the
-/// version of the installed `<wheel>-core` distribution, which the release tag
+/// version of the installed `<wheel>` distribution, which the release tag
 /// sets. `"unknown"` stands in for the version when the interpreter has no
 /// metadata for it, rather than the crate's own `CARGO_PKG_VERSION`, which is
 /// never bumped and would name a release that did not write the data.
@@ -43,7 +43,7 @@ pub fn package(py: Python<'_>) -> String {
     let wheel = WHEEL.get().map(String::as_str).unwrap_or("yani");
     let version = py
         .import("importlib.metadata")
-        .and_then(|m| m.call_method1("version", (format!("{wheel}-core"),)))
+        .and_then(|m| m.call_method1("version", (wheel,)))
         .and_then(|v| v.extract::<String>())
         .unwrap_or_else(|_| "unknown".to_string());
     format!("{wheel}-python {version}")

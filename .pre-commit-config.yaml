@@ -58,13 +58,13 @@ repos:
         pass_filenames: false
 
       # pre-commit runs hooks from the repo root, which holds no pyproject.toml:
-      # the wheel is defined by packages/yamc-core/pyproject.toml. `maturin
+      # the wheel is defined by packages/yamc/pyproject.toml. `maturin
       # develop` has no flag that points at a pyproject (its -m takes a Cargo
       # manifest instead), so the package directory has to be the working
       # directory. .venv stays at the repo root, hence ../../ once cd'd in.
       - id: maturin-develop
         name: maturin develop (no MPI)
-        entry: bash -c 'cd packages/yamc-core && ../../.venv/bin/maturin develop --release --features mesh,cad'
+        entry: bash -c 'cd packages/yamc && ../../.venv/bin/maturin develop --release --features mesh,cad'
         language: system
         types_or: [rust, python]
         pass_filenames: false
@@ -74,7 +74,7 @@ repos:
       # files are read by the type checkers and never collected by pytest.
       - id: pytest
         name: pytest (yamc, no MPI)
-        entry: .venv/bin/python -m pytest packages/yamc-core/tests/ --ignore=packages/yamc-core/tests/cad
+        entry: .venv/bin/python -m pytest packages/yamc/tests/ --ignore=packages/yamc/tests/cad
         language: system
         types: [python]
         pass_filenames: false
@@ -89,7 +89,7 @@ repos:
         # `packages/*/python` pathspec silently matches nothing, so the hook
         # passed on real drift; and --porcelain catches a brand-new untracked
         # .pyi, which `git diff` would miss.
-        entry: bash -c '.venv/bin/python scripts/build_stubs.py && test -z "$(git status --porcelain -- packages/yamc-core/python/yamc/_core/ packages/yani-core/python/yani/_core/)"'
+        entry: bash -c '.venv/bin/python scripts/build_stubs.py && test -z "$(git status --porcelain -- packages/yamc/python/yamc/_core/ packages/yani/python/yani/_core/)"'
         language: system
         types_or: [rust, python]
         pass_filenames: false
@@ -108,14 +108,14 @@ repos:
       # MPI hooks disabled -- MPI build environment not available
       # - id: maturin-develop-mpi
       #   name: maturin develop (with MPI)
-      #   entry: bash -c 'cd packages/yamc-core && BINDGEN_EXTRA_CLANG_ARGS="-I/usr/lib/gcc/x86_64-linux-gnu/14/include" ../../.venv/bin/maturin develop --release --features "mesh,cad,mpi"'
+      #   entry: bash -c 'cd packages/yamc && BINDGEN_EXTRA_CLANG_ARGS="-I/usr/lib/gcc/x86_64-linux-gnu/14/include" ../../.venv/bin/maturin develop --release --features "mesh,cad,mpi"'
       #   language: system
       #   types_or: [rust, python]
       #   pass_filenames: false
 
       # - id: pytest-mpi
       #   name: pytest (with MPI)
-      #   entry: .venv/bin/python -m pytest packages/yamc-core/tests/ --ignore=packages/yamc-core/tests/cad
+      #   entry: .venv/bin/python -m pytest packages/yamc/tests/ --ignore=packages/yamc/tests/cad
       #   language: system
       #   types: [python]
       #   pass_filenames: false

@@ -1,4 +1,4 @@
-//! Generates `packages/yamc-core/python/yamc/_core.pyi` from the PyO3 bindings' embedded type
+//! Generates `packages/yamc/python/yamc/_core.pyi` from the PyO3 bindings' embedded type
 //! metadata (registered by the `#[gen_stub_*]` macros). Run with:
 //!
 //!   cargo run --bin stub_gen --features "stub-gen,mesh,cad,gpu"

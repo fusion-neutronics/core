@@ -33,7 +33,7 @@ __pycache__/
 *.html
 # The browser-demo HTML template ships inside the wheel and is consumed
 # by Model.export(...). Exempt it from the broad `*.html` ignore.
-!packages/yamc-core/python/yamc/_browser_template/*.html
+!packages/yamc/python/yamc/_browser_template/*.html
 # THIRD-PARTY-LICENSES.html is intentionally NOT committed: it's generated
 # fresh by cargo-about in the wheel-build CI and shipped in the wheel, so it
 # stays covered by the broad `*.html` ignore.
@@ -47,8 +47,6 @@ dist/
 *.svg
 perf*.data
 *.txt
-!docs/requirements.txt
-!docs/assets/*.png
 # Embedded nuclear-data tables consumed via include_str! (source, not artifacts)
 !crates/yamc-nuclide/src/data/**/*.txt
 # Auxiliary photon tabulations, read at runtime by endf::PhotonData and shipped

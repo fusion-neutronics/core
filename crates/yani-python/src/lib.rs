@@ -306,7 +306,7 @@ fn _core(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 /// Build the [`pyo3_stub_gen::StubInfo`] the `stub_gen` binary uses to emit
-/// `packages/yani-core/python/yani/_core.pyi`. The pyproject lives in the wheel's
+/// `packages/yani/python/yani/_core.pyi`. The pyproject lives in the wheel's
 /// package directory, not in this crate, so this cannot use
 /// `define_stub_info_gatherer!`. Defining it in the lib (and calling it from
 /// the bin) also forces the rlib, and thus the `inventory`-registered stub
@@ -318,6 +318,6 @@ pub fn gen_stub_info() -> pyo3_stub_gen::Result<pyo3_stub_gen::StubInfo> {
         .and_then(std::path::Path::parent)
         .expect("crate is at <workspace>/crates/yani-python");
     pyo3_stub_gen::StubInfo::from_pyproject_toml(
-        workspace_root.join("packages/yani-core/pyproject.toml"),
+        workspace_root.join("packages/yani/pyproject.toml"),
     )
 }
