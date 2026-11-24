@@ -1,0 +1,71 @@
+# Keep the builder's absolute paths out of the shipped binaries. cargo bakes
+# the registry path of every dependency into panic locations, so an unremapped
+# build leaks either the CI container layout or, for anything built by hand, a
+# developer's home directory. The whole home root is remapped rather than just
+# `.cargo`, because `.rustup` leaks too when the rust-src component is present.
+# `--remap-path-prefix` on a prefix that is not present is a no-op, so all three
+# runner layouts are listed rather than computed; cargo does not expand env vars
+# in `rustflags`.
+#
+# This does not hide dependency names or versions, and is not meant to:
+# THIRD-PARTY-LICENSES.html publishes both, by design, in every wheel.
+#
+# `/rustc/<hash>` paths are not remappable here. They are baked into the
+# precompiled std, so rewriting them would need -Zbuild-std on nightly. They
+# name the compiler commit and nothing about the machine.
+#
+# LANDMINE: a `RUSTFLAGS` env var REPLACES this block rather than adding to it,
+# so any job that sets one gets none of these remaps. Today that is `test-mpi`
+# and `stubs-typing`, both via `actions-rust-lang/setup-rust-toolchain`, which
+# defaults to `RUSTFLAGS=-D warnings`. Neither ships a binary, so nothing leaks
+# today. The four wheel jobs use `dtolnay/rust-toolchain`, which sets no
+# RUSTFLAGS, which is the only reason this works. Swap a wheel job to the other
+# action and the remap silently dies; `scripts/check_binary_paths.py` runs in
+# those jobs so that this is caught rather than shipped.
+[build]
+rustflags = [
+    '--remap-path-prefix=/root=/build',
+    '--remap-path-prefix=/home/runner=/build',
+    '--remap-path-prefix=/Users/runner=/build',
+]
+
+# The remaps are repeated here because cargo does not merge this with
+# `[build].rustflags`: a target-specific array wins outright, so a `[build]`
+# entry alone would be silently ignored for exactly this target. The `--cfg`
+# has to stay in the same array for the same reason.
+#
+# This target matters most, and used to matter most for a worse reason. The
+# three blobs under `packages/yamc-core/python/yamc/_wasm/` were committed
+# binaries built by hand, and `python-source = "python"` copies that tree
+# verbatim into the wheel, so the committed bytes WERE the shipped bytes: 92
+# distinct `/home/jon/.cargo/...` and `/home/jon/.rustup/...` paths in every
+# published wheel. No remap list could fix that, because a developer's home
+# cannot be enumerated here and cargo does not expand environment variables in
+# `rustflags`. They are built in CI now, on a runner whose home IS one of the
+# prefixes above, so they come out as `/build/...`.
+# `scripts/build_wasm_blobs.sh` is the local build, and it passes a `$HOME`
+# remap on the command line where the shell can expand it.
+[target.wasm32-unknown-unknown]
+rustflags = [
+    '--cfg', 'getrandom_backend="wasm_js"',
+    '--remap-path-prefix=/root=/build',
+    '--remap-path-prefix=/home/runner=/build',
+    '--remap-path-prefix=/Users/runner=/build',
+]
+
+# The Pyodide wheel (.github/workflows/ci-pyodide.yml). Same reason as above:
+# pyodide-build passes its link flags in CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS,
+# a target-specific source, so `[build].rustflags` is skipped for this target.
+# cargo joins that variable with this entry rather than replacing it, so the
+# remaps survive alongside pyodide-build's flags.
+[target.wasm32-unknown-emscripten]
+rustflags = [
+    '--remap-path-prefix=/root=/build',
+    '--remap-path-prefix=/home/runner=/build',
+    '--remap-path-prefix=/Users/runner=/build',
+]
+
+[alias]
+# GPU tests share a process-global cubecl client, so they must run
+# single-threaded (parallel launches corrupt results). See developer_info.md.
+test-gpu = "test -p yamc-gpu -p yamc --features yamc/gpu --release -- --test-threads=1"

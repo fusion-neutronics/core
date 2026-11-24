@@ -1,0 +1,2177 @@
+//! Driving NJOY: checking which NJOY it is, writing its input deck and
+//! running it.
+//!
+//! NJOY turns an evaluation into the processed forms a transport code reads:
+//! a pointwise ENDF file, or an ACE table at a given temperature. It takes its
+//! instructions on standard input and refers to files by unit number, so the
+//! work here is composing the deck and staging the tapes. Which NJOY runs
+//! matters as much as the deck, so [`require`] lets a caller refuse one of
+//! the wrong flavour, or too old for a library, before any work starts.
+//! [`run`] and [`make_ace`] do not check: they run the NJOY they are given.
+
+use std::collections::BTreeMap;
+use std::fmt;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::error::{Error, Result};
+use crate::material::Material;
+
+/// The library each NLIB value names.
+pub const LIBRARY: [(i64, &str); 19] = [
+    (0, "ENDF/B"),
+    (1, "ENDF/A"),
+    (2, "JEFF"),
+    (3, "EFF"),
+    (4, "ENDF/B High Energy"),
+    (5, "CENDL"),
+    (6, "JENDL"),
+    (17, "TENDL"),
+    (18, "ROSFOND"),
+    (21, "SG-23"),
+    (31, "INDL/V"),
+    (32, "INDL/A"),
+    (33, "FENDL"),
+    (34, "IRDF"),
+    (35, "BROND"),
+    (36, "INGDB-90"),
+    (37, "FENDL/A"),
+    (38, "IAEA/PD"),
+    (41, "BROND"),
+];
+
+/// The library an NLIB value names, or `"Unknown"`.
+pub fn library_name(nlib: i64) -> &'static str {
+    LIBRARY
+        .iter()
+        .find(|&&(k, _)| k == nlib)
+        .map_or("Unknown", |&(_, name)| name)
+}
+
+/// Where each NJOY module's output tape should go.
+///
+/// `None` means the module is not run at all; `Some(None)` runs it and writes
+/// its tape under `output_dir` with the module's own name; `Some(Some(path))`
+/// runs it and writes the tape there.
+pub type ModuleOutput = Option<Option<PathBuf>>;
+
+/// What to ask NJOY for.
+#[derive(Debug, Clone)]
+pub struct AceOptions {
+    /// Temperatures in kelvin. Empty means room temperature alone.
+    pub temperatures: Vec<f64>,
+    /// Fractional tolerance for reconstruction and broadening.
+    pub error: f64,
+    pub pendf: ModuleOutput,
+    pub broadr: ModuleOutput,
+    pub heatr: ModuleOutput,
+    pub gaspr: ModuleOutput,
+    pub purr: ModuleOutput,
+    pub acer: ModuleOutput,
+    /// Where the ACE file goes. Defaults to `output_dir/ace`.
+    pub ace: Option<PathBuf>,
+    /// Where the xsdir goes. Defaults to sitting beside the ACE file.
+    pub xsdir: Option<PathBuf>,
+    /// Where the tapes go by default. NJOY also works in a directory of its
+    /// own inside this one while it runs (see [`run`]).
+    pub output_dir: PathBuf,
+    /// Whether ACER thins and smooths the elastic and capture cross sections
+    /// at low energy.
+    pub smoothing: bool,
+    /// The NJOY executable.
+    pub njoy_exec: String,
+    /// Where to keep a copy of the input deck, for a person to read.
+    pub input_filename: Option<PathBuf>,
+}
+
+impl Default for AceOptions {
+    /// Every module on, room temperature, output in the current directory:
+    /// the same defaults the Python package has.
+    fn default() -> Self {
+        AceOptions {
+            temperatures: Vec::new(),
+            error: 0.001,
+            pendf: None,
+            broadr: Some(None),
+            heatr: Some(None),
+            gaspr: Some(None),
+            purr: Some(None),
+            acer: Some(None),
+            ace: None,
+            xsdir: None,
+            output_dir: PathBuf::from("."),
+            smoothing: true,
+            njoy_exec: "njoy".to_string(),
+            input_filename: None,
+        }
+    }
+}
+
+impl AceOptions {
+    /// The options for a pointwise ENDF file: every module but `reconr` off.
+    pub fn pendf_only(pendf: impl Into<PathBuf>) -> AceOptions {
+        AceOptions {
+            pendf: Some(Some(pendf.into())),
+            broadr: None,
+            heatr: None,
+            gaspr: None,
+            purr: None,
+            acer: None,
+            ..Default::default()
+        }
+    }
+}
+
+/// The input deck, and where its tapes come from and go.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Deck {
+    /// The commands, as NJOY reads them on standard input.
+    pub commands: String,
+    /// Input files, by the unit number NJOY calls them.
+    pub tapein: BTreeMap<i32, PathBuf>,
+    /// Output files, likewise.
+    pub tapeout: BTreeMap<i32, PathBuf>,
+    /// The temperatures ACER was asked for, in the order it writes them.
+    pub temperatures: Vec<f64>,
+    /// Whether the target is metastable, which ACER does not record in the
+    /// ZAID it writes.
+    pub isomeric_state: i64,
+}
+
+/// Compose the NJOY input deck for an evaluation.
+///
+/// Separated from running it so the deck can be inspected, written out or
+/// tested without NJOY installed.
+pub fn ace_deck(filename: &Path, material: &Material, options: &AceOptions) -> Result<Deck> {
+    let metadata = material.mf1_mt451().ok_or(Error::Unsupported {
+        what: "an evaluation with no MF=1 MT=451 to process",
+    })?;
+    let mat = material.mat;
+    // The Python reader leaves ZSYMAM as the file wrote it, padding and all,
+    // and NJOY takes it that way.
+    let zsymam = metadata.zsymam.clone().unwrap_or_default();
+    let library = format!(
+        "{}-{}.{}",
+        library_name(metadata.nlib),
+        metadata.nver,
+        metadata.lrel
+    );
+
+    let temperatures = if options.temperatures.is_empty() {
+        vec![293.6]
+    } else {
+        options.temperatures.clone()
+    };
+    let temps = temperatures
+        .iter()
+        .map(|t| crate::data::python_float_str(*t))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let error = options.error;
+
+    let out = &options.output_dir;
+    // `Some(None)` means the module runs and names its own tape.
+    let named = |module: &ModuleOutput, default: &str| -> Option<PathBuf> {
+        module
+            .as_ref()
+            .map(|path| path.clone().unwrap_or_else(|| out.join(default)))
+    };
+
+    // NJOY refers to files by unit number, and each module reads the tape the
+    // one before it wrote, so the numbers thread through in sequence.
+    let (nendf, npendf) = (20, 21);
+    let mut deck = Deck {
+        tapein: BTreeMap::from([(nendf, filename.to_path_buf())]),
+        temperatures: temperatures.clone(),
+        isomeric_state: metadata.liso,
+        ..Default::default()
+    };
+
+    if let Some(path) = named(&options.pendf, "pendf") {
+        deck.tapeout.insert(npendf, path);
+    }
+
+    deck.commands.push_str(&format!(
+        "
+reconr / %%%%%%%%%%%%%%%%%%% Reconstruct XS for neutrons %%%%%%%%%%%%%%%%%%%%%%%
+{nendf} {npendf}
+'{library} PENDF for {zsymam}'/
+{mat} 2/
+{error}/ err
+'{library}: {zsymam}'/
+'Processed by NJOY'/
+0/
+"
+    ));
+    let mut nlast = npendf;
+
+    if let Some(path) = named(&options.broadr, "broadr") {
+        let nbroadr = nlast + 1;
+        deck.tapeout.insert(nbroadr, path);
+        let num_temp = temperatures.len();
+        deck.commands.push_str(&format!(
+            "
+broadr / %%%%%%%%%%%%%%%%%%%%%%% Doppler broaden XS %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+{nendf} {npendf} {nbroadr}
+{mat} {num_temp} 0 0 0. /
+{error}/ errthn
+{temps}
+0/
+"
+        ));
+        nlast = nbroadr;
+    }
+
+    if options.heatr.is_some() {
+        // Two runs: one where photons deposit their energy locally, one where
+        // they carry it away.
+        let nheatr_in = nlast;
+        let nheatr_local = nheatr_in + 1;
+        let local = match &options.heatr {
+            Some(Some(path)) => {
+                let mut name = path.clone().into_os_string();
+                name.push("_local");
+                PathBuf::from(name)
+            }
+            _ => out.join("heatr_local"),
+        };
+        deck.tapeout.insert(nheatr_local, local);
+        deck.commands.push_str(&format!(
+            "
+heatr / %%%%%%%%%%%%%%%%% Add heating kerma (local photons) %%%%%%%%%%%%%%%%%%%%
+{nendf} {nheatr_in} {nheatr_local} /
+{mat} 4 0 0 1 /
+302 318 402 444 /
+"
+        ));
+
+        let nheatr = nheatr_local + 1;
+        deck.tapeout
+            .insert(nheatr, named(&options.heatr, "heatr").expect("heatr is on"));
+        deck.commands.push_str(&format!(
+            "
+heatr / %%%%%%%%%%%%%%%%%%%%%%%%% Add heating kerma %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+{nendf} {nheatr_in} {nheatr} /
+{mat} 4 0 0 0 /
+302 318 402 444 /
+"
+        ));
+        nlast = nheatr;
+    }
+
+    if let Some(path) = named(&options.gaspr, "gaspr") {
+        let ngaspr_in = nlast;
+        let ngaspr = ngaspr_in + 1;
+        deck.tapeout.insert(ngaspr, path);
+        deck.commands.push_str(&format!(
+            "
+gaspr / %%%%%%%%%%%%%%%%%%%%%%%%% Add gas production %%%%%%%%%%%%%%%%%%%%%%%%%%%
+{nendf} {ngaspr_in} {ngaspr} /
+"
+        ));
+        nlast = ngaspr;
+    }
+
+    if let Some(path) = named(&options.purr, "purr") {
+        let npurr_in = nlast;
+        let npurr = npurr_in + 1;
+        deck.tapeout.insert(npurr, path);
+        let num_temp = temperatures.len();
+        deck.commands.push_str(&format!(
+            "
+purr / %%%%%%%%%%%%%%%%%%%%%%%% Add probability tables %%%%%%%%%%%%%%%%%%%%%%%%%
+{nendf} {npurr_in} {npurr} /
+{mat} {num_temp} 1 20 64 /
+{temps}
+1.e10
+0/
+"
+        ));
+        nlast = npurr;
+    }
+
+    if options.acer.is_some() {
+        let nacer_in = nlast;
+        let ismooth = i32::from(options.smoothing);
+        for (i, &temperature) in temperatures.iter().enumerate() {
+            // One ACER run per temperature, each writing its own ACE and
+            // xsdir tape.
+            let nace = nacer_in + 1 + 2 * i as i32;
+            let ndir = nace + 1;
+            let ext = format!("{:02}", i + 1);
+            let t = crate::data::python_float_str(temperature);
+            deck.commands.push_str(&format!(
+                "
+acer / %%%%%%%%%%%%%%%%%%%%%%%% Write out in ACE format %%%%%%%%%%%%%%%%%%%%%%%%
+{nendf} {nacer_in} 0 {nace} {ndir}
+1 0 1 .{ext} /
+'{library}: {zsymam} at {t}'/
+{mat} {t}
+1 1 {ismooth}/
+/
+"
+            ));
+            deck.tapeout
+                .insert(nace, out.join(format!("ace_{temperature:.1}")));
+            deck.tapeout
+                .insert(ndir, out.join(format!("xsdir_{temperature:.1}")));
+        }
+    }
+
+    deck.commands.push_str("stop\n");
+    Ok(deck)
+}
+
+/// Run NJOY with the given deck.
+///
+/// NJOY reads and writes its tapes in the directory it runs in, as `tape20`,
+/// `tape21` and so on, so it runs in a [`Scratch`] directory made inside
+/// `scratch`: the inputs are copied in, the outputs are moved out afterwards,
+/// and the directory goes whether NJOY succeeded or not. Its scratch units, 10
+/// to 19, are not named tapes: the Fortran runtime makes them in `TMPDIR`, or
+/// `/tmp` without it, so `TMPDIR` is set to that directory for NJOY too.
+///
+/// `scratch` should be on the disk the output goes to, which is why
+/// [`make_ace`] passes its output directory. One evaluation's tapes can run to
+/// hundreds of MB, and the system temporary directory is often a small
+/// RAM-backed tmpfs or under a per-user quota. Filling it does not fail with a
+/// message that names the cause: NJOY exits with an error or leaves a tape cut
+/// short, and the largest evaluations are the ones that fail.
+pub fn run(
+    deck: &Deck,
+    njoy_exec: &str,
+    input_filename: Option<&Path>,
+    scratch: &Path,
+) -> Result<String> {
+    if let Some(path) = input_filename {
+        std::fs::write(path, &deck.commands)?;
+    }
+
+    let work = Scratch::new_in(scratch, "run")?;
+    run_in(deck, njoy_exec, work.path())
+}
+
+fn run_in(deck: &Deck, njoy_exec: &str, work: &Path) -> Result<String> {
+    for (unit, filename) in &deck.tapein {
+        std::fs::copy(filename, work.join(format!("tape{unit}")))?;
+    }
+
+    let mut child = std::process::Command::new(njoy_exec)
+        .current_dir(work)
+        // Where gfortran makes the files behind NJOY's scratch units. It
+        // unlinks each as it opens it, so they take space while NJOY runs and
+        // none is ever left behind.
+        .env("TMPDIR", work)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or(Error::Unsupported {
+            what: "an NJOY process with no standard input",
+        })?
+        .write_all(deck.commands.as_bytes())?;
+
+    let output = child.wait_with_output()?;
+    let log = String::from_utf8_lossy(&output.stdout).into_owned();
+    if !output.status.success() {
+        // Standard error as well. NJOY prints its own errors on standard
+        // output, but the Fortran runtime prints on standard error, and a
+        // scratch disk that filled up is named only there: standard output
+        // stops at the banner and the module that died.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        let what = if stderr.is_empty() {
+            format!("NJOY exited with {}: {log}", output.status)
+        } else {
+            format!(
+                "NJOY exited with {}: {log}\nstandard error:\n{stderr}",
+                output.status
+            )
+        };
+        return Err(Error::BadAceTable { what });
+    }
+
+    for (unit, filename) in &deck.tapeout {
+        let written = work.join(format!("tape{unit}"));
+        if written.is_file() {
+            if let Some(parent) = filename.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            // Rename fails across filesystems, so fall back to a copy.
+            if std::fs::rename(&written, filename).is_err() {
+                std::fs::copy(&written, filename)?;
+                std::fs::remove_file(&written)?;
+            }
+        }
+    }
+    Ok(log)
+}
+
+/// Generate an ACE file from an evaluation, running NJOY to do it.
+///
+/// The per-temperature ACE tapes are concatenated into one file and one xsdir,
+/// as the Python package does.
+pub fn make_ace(filename: &Path, material: &Material, options: &AceOptions) -> Result<()> {
+    if !options.output_dir.is_dir() {
+        return Err(Error::Unsupported {
+            what: "an output directory that is not a directory",
+        });
+    }
+    let deck = ace_deck(filename, material, options)?;
+    run(
+        &deck,
+        &options.njoy_exec,
+        options.input_filename.as_deref(),
+        &options.output_dir,
+    )?;
+
+    if options.acer.is_none() {
+        return Ok(());
+    }
+    let ace = match (&options.ace, &options.acer) {
+        (Some(path), _) => path.clone(),
+        (None, Some(Some(path))) => path.clone(),
+        _ => options.output_dir.join("ace"),
+    };
+    let xsdir = options.xsdir.clone().unwrap_or_else(|| {
+        ace.parent()
+            .unwrap_or(Path::new("."))
+            .join("xsdir")
+            .to_path_buf()
+    });
+
+    let mut ace_text = String::new();
+    let mut xsdir_text = String::new();
+    for &temperature in &deck.temperatures {
+        let per_temperature = options.output_dir.join(format!("ace_{temperature:.1}"));
+        let text = std::fs::read_to_string(&per_temperature)?;
+        ace_text.push_str(&metastable_zaid(&text, deck.isomeric_state));
+        xsdir_text.push_str(&std::fs::read_to_string(
+            options.output_dir.join(format!("xsdir_{temperature:.1}")),
+        )?);
+    }
+    std::fs::write(&ace, ace_text)?;
+    std::fs::write(&xsdir, xsdir_text)?;
+
+    for &temperature in &deck.temperatures {
+        let _ = std::fs::remove_file(options.output_dir.join(format!("ace_{temperature:.1}")));
+        let _ = std::fs::remove_file(options.output_dir.join(format!("xsdir_{temperature:.1}")));
+    }
+    Ok(())
+}
+
+/// What to ask NJOY for when processing a thermal scattering law.
+///
+/// The cards follow the NJOY2016 manual (LA-UR-17-20093): THERMR runs twice,
+/// once for the free-gas cross section of the principal atom (MT 221) and once
+/// for the bound law read from the thermal tape (MT 222, with elastic in
+/// MT 223 when the evaluation has MF=7 MT=2), and ACER writes one thermal
+/// table (`iopt=2`) per temperature.
+#[derive(Debug, Clone)]
+pub struct ThermalAceOptions {
+    /// Temperatures in Kelvin. Empty means every temperature of the
+    /// evaluation's MF=7 MT=4.
+    pub temperatures: Vec<f64>,
+    /// Fractional tolerance for reconstruction, broadening and THERMR.
+    pub error: f64,
+    /// Equiprobable cosines per outgoing energy (THERMR `nbin`).
+    pub nbin: u32,
+    /// Bins for incoherent elastic scattering (ACER `nbint`).
+    pub nbint: u32,
+    /// ACER's weighting option: 0 variable, 1 constant, 2 tabulated.
+    pub iwt: i32,
+    /// The thermal ZAID name ACER writes, six characters at most.
+    pub table_name: String,
+    /// The ZA values of the nuclides the table applies to (ACER card 8a).
+    pub zaids: Vec<i64>,
+    /// The number of atom types in a mixed moderator (ACER `nmix`).
+    pub nmix: u32,
+    /// Where the concatenated ACE file goes. Defaults to `output_dir/ace`.
+    pub ace: Option<PathBuf>,
+    /// Where the xsdir goes. Defaults to sitting beside the ACE file.
+    pub xsdir: Option<PathBuf>,
+    pub output_dir: PathBuf,
+    pub njoy_exec: String,
+    /// Where to keep a copy of the input deck, for a person to read.
+    pub input_filename: Option<PathBuf>,
+    /// Where to keep the PENDF tape the bound THERMR writes, which holds the
+    /// elastic part on THERMR's own grids (see [`read_thermr_incoherent`]).
+    /// Not kept by default: it runs to hundreds of MB.
+    pub pendf: Option<PathBuf>,
+}
+
+impl Default for ThermalAceOptions {
+    fn default() -> Self {
+        ThermalAceOptions {
+            temperatures: Vec::new(),
+            error: 0.001,
+            nbin: 16,
+            nbint: 64,
+            iwt: 2,
+            table_name: String::new(),
+            zaids: Vec::new(),
+            nmix: 1,
+            ace: None,
+            xsdir: None,
+            output_dir: PathBuf::from("."),
+            njoy_exec: "njoy".to_string(),
+            input_filename: None,
+            pendf: None,
+        }
+    }
+}
+
+/// The temperatures, in Kelvin, of a thermal scattering law's MF=7 MT=4.
+pub fn thermal_temperatures(thermal: &Material) -> Result<Vec<f64>> {
+    Ok(crate::ThermalScattering::from_endf(thermal)?.temperatures)
+}
+
+/// Compose the NJOY input deck for a thermal scattering law.
+///
+/// `neutron` is the incident-neutron evaluation of the principal atom, which
+/// THERMR adds the thermal data to; `thermal` is the thermal scattering law.
+pub fn thermal_ace_deck(
+    neutron_file: &Path,
+    neutron: &Material,
+    thermal_file: &Path,
+    thermal: &Material,
+    options: &ThermalAceOptions,
+) -> Result<Deck> {
+    let n_meta = neutron.mf1_mt451().ok_or(Error::Unsupported {
+        what: "a neutron evaluation with no MF=1 MT=451 to process",
+    })?;
+    let t_meta = thermal.mf1_mt451().ok_or(Error::Unsupported {
+        what: "a thermal scattering law with no MF=1 MT=451 to process",
+    })?;
+    if t_meta.nsub != 12 {
+        return Err(Error::Unsupported {
+            what: "a thermal scattering law whose NSUB is not 12",
+        });
+    }
+    if options.table_name.is_empty() || options.table_name.len() > 6 {
+        return Err(Error::Unsupported {
+            what: "a thermal table name that is empty or longer than six characters",
+        });
+    }
+    if options.zaids.is_empty() || options.zaids.len() > 16 {
+        return Err(Error::Unsupported {
+            what: "a thermal table with no ZA values, or more than the sixteen ACER takes",
+        });
+    }
+    let law = crate::ThermalScattering::from_endf(thermal)?;
+    let mat = neutron.mat;
+    let mat_thermal = thermal.mat;
+    let zsymam = n_meta.zsymam.clone().unwrap_or_default();
+    let zsymam_thermal = t_meta.zsymam.clone().unwrap_or_default();
+    let zsymam_thermal = zsymam_thermal.trim();
+    let library = format!(
+        "{}-{}.{}",
+        library_name(n_meta.nlib),
+        n_meta.nver,
+        n_meta.lrel
+    );
+    let library_thermal = format!(
+        "{}-{}.{}",
+        library_name(t_meta.nlib),
+        t_meta.nver,
+        t_meta.lrel
+    );
+
+    let temperatures = if options.temperatures.is_empty() {
+        law.temperatures.clone()
+    } else {
+        options.temperatures.clone()
+    };
+    let temps = temperatures
+        .iter()
+        .map(|t| crate::data::python_float_str(*t))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let num_temp = temperatures.len();
+    let error = options.error;
+    let energy_max = crate::data::python_float_str(law.energy_max);
+    let natom = law.principal_count.round() as i64;
+    // Elastic, when the evaluation has it: ACER's ielas is LTHR - 1
+    // (0 coherent, 1 incoherent, 2 mixed).
+    let (icoh, mt_elastic, ielas) = match &law.elastic {
+        Some(e) => (1, 223, e.lthr() - 1),
+        None => (0, 0, 0),
+    };
+    let nbin = options.nbin;
+    let nbint = options.nbint;
+    let iwt = options.iwt;
+    let nmix = options.nmix;
+    let tname = &options.table_name;
+    let nza = options.zaids.len();
+    let zaids = options
+        .zaids
+        .iter()
+        .map(|z| z.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let (nendf, nthermal, npendf) = (20, 21, 22);
+    let nbroadr = npendf + 1;
+    let nfree = nbroadr + 1;
+    let nbound = nfree + 1;
+    let mut deck = Deck {
+        tapein: BTreeMap::from([
+            (nendf, neutron_file.to_path_buf()),
+            (nthermal, thermal_file.to_path_buf()),
+        ]),
+        temperatures: temperatures.clone(),
+        isomeric_state: 0,
+        ..Default::default()
+    };
+    deck.commands.push_str(&format!(
+        "
+reconr / %%%%%%%%%%%%%%%%%%% Reconstruct XS for neutrons %%%%%%%%%%%%%%%%%%%%%%%
+{nendf} {npendf}
+'{library} PENDF for {zsymam}'/
+{mat} 2/
+{error}/ err
+'{library}: {zsymam}'/
+'Processed by NJOY'/
+0/
+
+broadr / %%%%%%%%%%%%%%%%%%%%%%% Doppler broaden XS %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+{nendf} {npendf} {nbroadr}
+{mat} {num_temp} 0 0 0. /
+{error}/ errthn
+{temps}
+0/
+
+thermr / %%%%%%%%%%%%%%%% Add thermal scattering data (free gas) %%%%%%%%%%%%%%%
+0 {nbroadr} {nfree}
+0 {mat} {nbin} {num_temp} 1 0 0 1 221 1/
+{temps}
+{error} {energy_max}
+
+thermr / %%%%%%%%%%%%%%%% Add thermal scattering data (bound) %%%%%%%%%%%%%%%%%%
+{nthermal} {nfree} {nbound}
+{mat_thermal} {mat} {nbin} {num_temp} 2 {icoh} 0 {natom} 222 1/
+{temps}
+{error} {energy_max}
+"
+    ));
+    for (i, &temperature) in temperatures.iter().enumerate() {
+        let nace = nbound + 1 + 2 * i as i32;
+        let ndir = nace + 1;
+        let ext = format!("{:02}", i + 1);
+        let t = crate::data::python_float_str(temperature);
+        deck.commands.push_str(&format!(
+            "
+acer / %%%%%%%%%%%%%%%%%%%%%%%% Write out in ACE format %%%%%%%%%%%%%%%%%%%%%%%%
+{nendf} {nbound} 0 {nace} {ndir}
+2 0 1 .{ext}/
+'{library_thermal}: {zsymam_thermal} processed by NJOY'/
+{mat} {t} '{tname}' {nza} /
+{zaids} /
+222 {nbint} {mt_elastic} {ielas} {nmix} {energy_max} {iwt}/
+"
+        ));
+        deck.tapeout.insert(
+            nace,
+            options.output_dir.join(format!("ace_{temperature:.1}")),
+        );
+        deck.tapeout.insert(
+            ndir,
+            options.output_dir.join(format!("xsdir_{temperature:.1}")),
+        );
+    }
+    deck.commands.push_str("stop\n");
+    if let Some(pendf) = &options.pendf {
+        deck.tapeout.insert(nbound, pendf.clone());
+    }
+    Ok(deck)
+}
+
+/// The grids of the incoherent elastic cross section on a PENDF tape from
+/// the bound THERMR, at one temperature.
+///
+/// THERMR (thermr.f90 `iel`) evaluates the cross section at the incident
+/// energies of its own fixed grid (`calcem`'s, which it lists in MF=6),
+/// puts it on the tape's energy grid (MF=3) by three-point Lagrange
+/// interpolation in those values, and ACER reads it from MF=3 by linear
+/// interpolation at each MF=6 energy up to `emax`. So these two grids are
+/// what it takes to say what NJOY writes for a given closed form.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThermrIncoherentGrid {
+    /// The temperature in Kelvin (MF=6's TAB2).
+    pub temperature: f64,
+    /// THERMR's incident energies in eV (MF=6), which run one past `emax`.
+    pub calcem_energy: Vec<f64>,
+    /// The energies of MF=3 in eV.
+    pub pendf_energy: Vec<f64>,
+}
+
+/// The MT the bound THERMR writes the incoherent elastic part under, when
+/// the law has one: 223 when it is the only elastic part, 224 beside a
+/// coherent part in 223 (the MTs the deck of [`thermal_ace_deck`] asks for).
+pub fn thermr_incoherent_mt(law: &crate::ThermalScattering) -> Option<i32> {
+    match law.elastic.as_ref()? {
+        crate::ThermalElastic::Coherent(_) => None,
+        crate::ThermalElastic::Incoherent(_) => Some(223),
+        crate::ThermalElastic::Mixed { .. } => Some(224),
+    }
+}
+
+/// Read the incoherent elastic grids, one per temperature in the order of
+/// the tape, from a PENDF tape the bound THERMR wrote (MF=3 and MF=6 under
+/// `mt`). Reads the tape line by line: it can be hundreds of MB.
+pub fn read_thermr_incoherent(path: &Path, mt: i32) -> Result<Vec<ThermrIncoherentGrid>> {
+    use std::io::BufRead;
+    let bad = |what: String| Error::InvalidArgument {
+        what: format!("{}: {what}", path.display()),
+    };
+    // The lines of each MF=3 and MF=6 section under `mt`, in tape order.
+    let mut sections: Vec<(i32, Vec<String>)> = Vec::new();
+    let mut open = false;
+    for line in std::io::BufReader::new(std::fs::File::open(path)?).lines() {
+        let line = line?;
+        let control =
+            |a: usize, b: usize| line.get(a..b).and_then(|s| s.trim().parse::<i32>().ok());
+        let (mf, this_mt) = (control(70, 72), control(72, 75));
+        if this_mt == Some(mt) && matches!(mf, Some(3) | Some(6)) {
+            if !open {
+                sections.push((mf.unwrap_or(0), Vec::new()));
+                open = true;
+            }
+            if let Some((_, lines)) = sections.last_mut() {
+                lines.push(line);
+            }
+        } else {
+            open = false;
+        }
+    }
+    let fields = |line: &str| -> [f64; 6] {
+        std::array::from_fn(|i| {
+            crate::records::float_endf(line.get(11 * i..11 * (i + 1)).unwrap_or(""))
+        })
+    };
+    let int = |x: f64| x.round() as usize;
+    let mut pendf = Vec::new();
+    let mut calcem = Vec::new();
+    for (mf, lines) in &sections {
+        let field = |i: usize| -> Result<[f64; 6]> {
+            lines
+                .get(i)
+                .map(|l| fields(l))
+                .ok_or_else(|| bad(format!("MF={mf} MT={mt} is cut short")))
+        };
+        if *mf == 3 {
+            // HEAD, then TAB1: NR interpolation pairs and NP (E, sigma) pairs.
+            let tab1 = field(1)?;
+            let (nr, np) = (int(tab1[4]), int(tab1[5]));
+            let first = 2 + (2 * nr).div_ceil(6);
+            let interpolation = field(2)?;
+            if nr != 1 || int(interpolation[1]) != 2 {
+                return Err(bad(format!("MF=3 MT={mt} is not linear-linear throughout")));
+            }
+            let mut values = Vec::with_capacity(2 * np);
+            for i in first..first + (2 * np).div_ceil(6) {
+                values.extend(field(i)?);
+            }
+            values.truncate(2 * np);
+            pendf.push(values.iter().step_by(2).copied().collect::<Vec<_>>());
+        } else {
+            // HEAD, a TAB1 of two points, then a TAB2 (temperature, NE) and
+            // NE LIST records whose C2 is the incident energy.
+            let tab1 = field(1)?;
+            let mut i = 2 + (2 * int(tab1[4])).div_ceil(6) + (2 * int(tab1[5])).div_ceil(6);
+            let tab2 = field(i)?;
+            let (temperature, nr, ne) = (tab2[0], int(tab2[4]), int(tab2[5]));
+            i += 1 + (2 * nr).div_ceil(6);
+            let mut energy = Vec::with_capacity(ne);
+            for _ in 0..ne {
+                let list = field(i)?;
+                energy.push(list[1]);
+                i += 1 + int(list[4]).div_ceil(6);
+            }
+            calcem.push((temperature, energy));
+        }
+    }
+    if pendf.len() != calcem.len() {
+        return Err(bad(format!(
+            "{} MF=3 and {} MF=6 sections under MT={mt}",
+            pendf.len(),
+            calcem.len()
+        )));
+    }
+    Ok(calcem
+        .into_iter()
+        .zip(pendf)
+        .map(
+            |((temperature, calcem_energy), pendf_energy)| ThermrIncoherentGrid {
+                temperature,
+                calcem_energy,
+                pendf_energy,
+            },
+        )
+        .collect())
+}
+
+/// Generate a thermal scattering ACE file, running NJOY to do it.
+///
+/// One table per temperature, concatenated into one ACE file and one xsdir.
+pub fn make_ace_thermal(
+    neutron_file: &Path,
+    neutron: &Material,
+    thermal_file: &Path,
+    thermal: &Material,
+    options: &ThermalAceOptions,
+) -> Result<PathBuf> {
+    if !options.output_dir.is_dir() {
+        return Err(Error::Unsupported {
+            what: "an output directory that is not a directory",
+        });
+    }
+    let deck = thermal_ace_deck(neutron_file, neutron, thermal_file, thermal, options)?;
+    run(
+        &deck,
+        &options.njoy_exec,
+        options.input_filename.as_deref(),
+        &options.output_dir,
+    )?;
+    let ace = options
+        .ace
+        .clone()
+        .unwrap_or_else(|| options.output_dir.join("ace"));
+    let xsdir = options
+        .xsdir
+        .clone()
+        .unwrap_or_else(|| ace.parent().unwrap_or(Path::new(".")).join("xsdir"));
+    let mut ace_text = String::new();
+    let mut xsdir_text = String::new();
+    for &temperature in &deck.temperatures {
+        let a = options.output_dir.join(format!("ace_{temperature:.1}"));
+        let d = options.output_dir.join(format!("xsdir_{temperature:.1}"));
+        ace_text.push_str(&std::fs::read_to_string(&a)?);
+        xsdir_text.push_str(&std::fs::read_to_string(&d)?);
+        let _ = std::fs::remove_file(a);
+        let _ = std::fs::remove_file(d);
+    }
+    std::fs::write(&ace, ace_text)?;
+    std::fs::write(&xsdir, xsdir_text)?;
+    Ok(ace)
+}
+
+/// Mark a metastable target in the ZAID an ACE table opens with.
+///
+/// ACER does not record the isomeric state, so 400 is added to the mass
+/// number the way MCNP libraries do. A first digit above two would carry, so
+/// those are left alone, the same guard the Python package has.
+fn metastable_zaid(text: &str, isomeric_state: i64) -> String {
+    if isomeric_state == 0 {
+        return text.to_string();
+    }
+    let bytes = text.as_bytes();
+    let Some(digit) = bytes.get(3).and_then(|b| (*b as char).to_digit(10)) else {
+        return text.to_string();
+    };
+    if digit > 2 {
+        return text.to_string();
+    }
+    format!("{}{}{}", &text[..3], digit + 4, &text[4..])
+}
+
+/// An NJOY release, as its banner reports it.
+///
+/// NJOY2016 numbers its releases 2016.0, 2016.1 and onwards, so the part after
+/// the point is a whole number and not a decimal fraction: 2016.9 (2017) is
+/// older than 2016.80 (2026).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Version {
+    /// 2016 for NJOY2016.
+    pub year: u32,
+    /// The release within that line: 80 for 2016.80.
+    pub minor: u32,
+    /// Whether this is the IAEA-NDS fork, which ends its version in `+`: its
+    /// `src/vers.f90` holds `vers='2016.77+'` where upstream's holds a bare
+    /// `'2016.78'`. That suffix is the only thing the binary itself exposes,
+    /// so it is what an NJOY is judged on.
+    pub iaea_fork: bool,
+}
+
+impl Version {
+    /// Whether this is `needed`'s flavour, at its minimum or later.
+    fn meets(self, needed: Flavour) -> bool {
+        let minimum = needed.minimum();
+        self.iaea_fork == minimum.iaea_fork
+            && (self.year, self.minor) >= (minimum.year, minimum.minor)
+    }
+}
+
+/// As NJOY prints it: `2016.80`, or `2016.77+` for the fork.
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let fork = if self.iaea_fork { "+" } else { "" };
+        write!(f, "{}.{}{fork}", self.year, self.minor)
+    }
+}
+
+/// Which NJOY a library is processed with.
+///
+/// Getting this wrong is quiet: the conversion succeeds and the numbers are
+/// subtly wrong, which is why [`require`] judges the executable rather than
+/// trusting whatever `njoy` is first on PATH.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Flavour {
+    /// LANL's NJOY2016 (github.com/njoy/NJOY2016), for every library but
+    /// FENDL.
+    Upstream,
+    /// The IAEA Nuclear Data Section's fork (github.com/IAEA-NDS/NJOY2016),
+    /// which FENDL is processed with. Upstream does not reproduce the official
+    /// release: measured on FENDL-3.2d against LANL's 2016.78, the fork changes
+    /// the URR probability tables by up to 100% (La139), and MT 301 heating
+    /// and MT 444 damage by up to 77% below about 1 keV.
+    IaeaFork,
+}
+
+impl Flavour {
+    /// The oldest release of this flavour a library may be processed with.
+    ///
+    /// Upstream needs 2016.80. Older releases sum the harmonic numbers in
+    /// samm.f90's `bigeta` with integer division (njoy/NJOY2016#415, fixed by
+    /// #417), which gives wrong Coulomb penetrabilities in R-matrix limited
+    /// evaluations with charged-particle channels: Ca40 (n,p) at 925 keV came
+    /// out at 3.1e-3 b instead of 5.6e-7 b. The fork needs 2016.77+, which
+    /// carries 2016.77's fix to the URR background.
+    pub const fn minimum(self) -> Version {
+        match self {
+            Flavour::Upstream => Version {
+                year: 2016,
+                minor: 80,
+                iaea_fork: false,
+            },
+            Flavour::IaeaFork => Version {
+                year: 2016,
+                minor: 77,
+                iaea_fork: true,
+            },
+        }
+    }
+
+    /// How to get an NJOY of this flavour, which a refusal ends with.
+    pub(crate) fn how_to_get(self) -> String {
+        match self {
+            Flavour::Upstream => format!(
+                "Install it with\n    {PIP_INSTALL}\nor build tag {} of \
+                 https://github.com/njoy/NJOY2016, and pass its path as njoy_exec \
+                 if it is not the njoy on PATH",
+                self.minimum()
+            ),
+            Flavour::IaeaFork => IAEA_BUILD.to_string(),
+        }
+    }
+}
+
+/// How to get NJOY when there is no version to judge: the flavour a library
+/// needs, if the caller said, and otherwise the upstream wheel with a pointer
+/// to the fork.
+pub(crate) fn install_hint(needed: Option<Flavour>) -> String {
+    let Some(needed) = needed else {
+        return format!(
+            "Install NJOY2016 with\n    {PIP_INSTALL}\n(FENDL needs the IAEA-NDS fork \
+             instead, https://github.com/IAEA-NDS/NJOY2016), or pass njoy_exec the path \
+             to an njoy executable"
+        );
+    };
+    let name = match needed {
+        Flavour::Upstream => "upstream NJOY2016",
+        Flavour::IaeaFork => "the IAEA-NDS fork of NJOY2016",
+    };
+    format!(
+        "This library needs {name}, {} or later. {}",
+        needed.minimum(),
+        needed.how_to_get()
+    )
+}
+
+/// Installs upstream NJOY2016: the njoy2016 wheel puts an `njoy` beside the
+/// Python interpreter. `--upgrade` because an older wheel is the usual reason
+/// to be refused. `--index-url` so that pip takes njoy2016 from that index
+/// alone, never a higher-numbered package of the same name on PyPI. It has no
+/// dependencies to fetch from anywhere else.
+const PIP_INSTALL: &str =
+    "pip install --upgrade njoy2016 --index-url https://shimwell.github.io/wheels";
+
+/// Builds the IAEA-NDS fork, which has no wheel.
+const IAEA_BUILD: &str = concat!(
+    "Build it (this needs git, cmake and gfortran) with\n",
+    "    git clone https://github.com/IAEA-NDS/NJOY2016\n",
+    "    cmake -S NJOY2016 -B NJOY2016/build -DCMAKE_BUILD_TYPE=Release\n",
+    "    cmake --build NJOY2016/build\n",
+    "and pass the full path to NJOY2016/build/njoy as njoy_exec",
+);
+
+/// The version of an NJOY executable, read from the banner it prints.
+///
+/// NJOY2016 has no `--version`: run with it, NJOY prints its banner,
+/// ` njoy 2016.80  08Oct26` and then the date and time, and stops at the end
+/// of its empty input deck with a non-zero exit. So the exit status says
+/// nothing and is not checked, and the version is the first
+/// `njoy <year>.<minor>` printed, with the `+` the IAEA fork appends. Ported
+/// from `njoy_version` in nuclear_data_generation_scripts' ensure_njoy.sh.
+///
+/// `njoy_exec` is a name looked up on PATH or a path, a relative one taken
+/// from the current directory. NJOY runs in a scratch directory made in the
+/// system temporary directory. Fails with [`Error::NjoyMissing`] if it cannot
+/// be started, [`Error::NjoyNoVersion`] if it prints no version, and
+/// [`Error::Io`], naming `njoy_exec` and what failed, if a relative path
+/// cannot be resolved or the scratch directory cannot be made.
+pub fn version(njoy_exec: &str) -> Result<Version> {
+    probe(njoy_exec, None, &std::env::temp_dir())
+}
+
+/// Check that `njoy_exec` is the NJOY a library needs, and return its version
+/// for the record.
+///
+/// Refuses one of the other flavour, or older than [`Flavour::minimum`], with
+/// [`Error::NjoyUnsuitable`], whose message names the executable, the version
+/// found, the version needed and how to get it. Ported from `verify` in
+/// ensure_njoy.sh. Fails as [`version`] does when there is no version to
+/// judge, with messages that say how to get this flavour.
+pub fn require(njoy_exec: &str, needed: Flavour) -> Result<Version> {
+    let found = probe(njoy_exec, Some(needed), &std::env::temp_dir())?;
+    if found.meets(needed) {
+        Ok(found)
+    } else {
+        Err(Error::NjoyUnsuitable {
+            njoy_exec: njoy_exec.to_string(),
+            found,
+            needed,
+        })
+    }
+}
+
+/// [`version`], running NJOY in a fresh directory made inside `scratch`.
+/// `needed` goes into the errors, so that one from [`require`] says which
+/// NJOY to get.
+fn probe(njoy_exec: &str, needed: Option<Flavour>, scratch: &Path) -> Result<Version> {
+    let program = program(njoy_exec)?;
+    // NJOY writes its listing to a file called `output` in the directory it
+    // runs in before it reads anything, so it runs in a scratch directory
+    // rather than over a file of that name in the caller's. Nothing has run
+    // yet if that fails, so the error says so rather than reading as a
+    // missing NJOY.
+    let dir = Scratch::new_in(scratch, "version").map_err(|e| match e {
+        Error::Io(e) => Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("{e}, to run NJOY \"{njoy_exec}\" in"),
+        )),
+        e => e,
+    })?;
+    let ran = std::process::Command::new(program)
+        .arg("--version")
+        .current_dir(dir.path())
+        // NJOY reads its deck from standard input. Closed, it stops at once
+        // instead of reading the caller's.
+        .stdin(std::process::Stdio::null())
+        .output();
+    drop(dir);
+    let ran = ran.map_err(|source| Error::NjoyMissing {
+        njoy_exec: njoy_exec.to_string(),
+        needed,
+        source,
+    })?;
+
+    // The banner goes to standard output. Standard error is read as well, as
+    // ensure_njoy.sh reads both.
+    let stdout = String::from_utf8_lossy(&ran.stdout);
+    let stderr = String::from_utf8_lossy(&ran.stderr);
+    parse_version(&stdout)
+        .or_else(|| parse_version(&stderr))
+        .ok_or_else(|| Error::NjoyNoVersion {
+            njoy_exec: njoy_exec.to_string(),
+            needed,
+            status: ran.status,
+            output: shorten(
+                &[stdout.trim(), stderr.trim()]
+                    .into_iter()
+                    .filter(|text| !text.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+        })
+}
+
+/// At most the first [`OUTPUT_LINES`] lines of what a probed executable
+/// printed, so that one which prints a great deal does not end up whole in
+/// an error message. NJOY's own failure text is about 20 lines.
+fn shorten(output: &str) -> String {
+    let mut lines = output.lines();
+    let kept = lines
+        .by_ref()
+        .take(OUTPUT_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let cut = kept.char_indices().nth(OUTPUT_CHARS).map(|(at, _)| at);
+    if cut.is_none() && lines.next().is_none() {
+        return kept;
+    }
+    format!("{}\n(truncated)", &kept[..cut.unwrap_or(kept.len())])
+}
+
+const OUTPUT_LINES: usize = 20;
+const OUTPUT_CHARS: usize = 4000;
+
+/// The first `njoy <year>.<minor>` in `text`, with a `+` if one follows: the
+/// match ensure_njoy.sh makes with `njoy +[0-9]{4}\.[0-9]+\+?`.
+fn parse_version(text: &str) -> Option<Version> {
+    text.match_indices("njoy").find_map(|(at, word)| {
+        let rest = text[at + word.len()..]
+            .strip_prefix(' ')?
+            .trim_start_matches(' ');
+        let (year, rest) = rest.split_at_checked(4)?;
+        let rest = rest.strip_prefix('.')?;
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 || !year.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        Some(Version {
+            year: year.parse().ok()?,
+            minor: rest[..digits].parse().ok()?,
+            iaea_fork: rest[digits..].starts_with('+'),
+        })
+    })
+}
+
+/// `njoy_exec` as a program to start in another working directory.
+///
+/// A path with a directory part is made absolute against the current
+/// directory, since a child given a working directory of its own resolves a
+/// relative one there instead (Linux does). A bare name is left to the PATH
+/// search.
+fn program(njoy_exec: &str) -> Result<PathBuf> {
+    let path = Path::new(njoy_exec);
+    if path.components().count() <= 1 {
+        return Ok(path.to_path_buf());
+    }
+    std::path::absolute(path).map_err(|e| {
+        Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("could not resolve NJOY \"{njoy_exec}\" against the current directory: {e}"),
+        ))
+    })
+}
+
+/// A working directory for NJOY, made inside a directory the caller names and
+/// removed when dropped.
+///
+/// The caller names it so it can sit beside the output, not in the system
+/// temporary directory (see [`run`] for why). The name starts with a dot, so
+/// `ls` and shell globs pass it by, and ends in a number, so nothing that
+/// looks for `*.arrow` folders takes it for a nuclide. It carries a label,
+/// the process id and a counter, so conversions running at the same time, in
+/// this process or another, each get their own. A name that is already taken
+/// is skipped, never reused, so a directory that another process made is
+/// never written into or deleted.
+///
+/// Dropping it removes it: on success, on an early return and on a panic.
+/// Only a process that is killed leaves one behind.
+///
+/// Hand-rolled because the crate has no dependencies.
+#[derive(Debug)]
+pub struct Scratch {
+    path: PathBuf,
+}
+
+impl Scratch {
+    /// Make a fresh directory inside `parent`, which must exist. `label` goes
+    /// into the name, so a directory left by a killed process says what it
+    /// was for.
+    pub fn new_in(parent: &Path, label: &str) -> Result<Scratch> {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        Scratch::numbered_by(parent, label, &COUNTER)
+    }
+
+    /// [`Scratch::new_in`] with the counter passed in, so a test knows which
+    /// names it will try.
+    fn numbered_by(parent: &Path, label: &str, counter: &AtomicU64) -> Result<Scratch> {
+        // Absolute, since NJOY is handed it as TMPDIR from inside it, where a
+        // relative path would mean somewhere else.
+        let parent = std::path::absolute(parent).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!(
+                    "could not make NJOY's working directory in {}: {e}",
+                    parent.display()
+                ),
+            )
+        })?;
+        let pid = std::process::id();
+        for _ in 0..64 {
+            let n = counter.fetch_add(1, Ordering::Relaxed);
+            let path = parent.join(format!(".njoy-{label}-{pid}-{n}"));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(Scratch { path }),
+                // Left by an earlier process that had the same id.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => {
+                    return Err(std::io::Error::new(
+                        e.kind(),
+                        format!(
+                            "could not make NJOY's working directory {}: {e}",
+                            path.display()
+                        ),
+                    )
+                    .into());
+                }
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "64 names for NJOY's working directory in {} were taken \
+                 (.njoy-{label}-{pid}-*). Killed runs leave these behind; \
+                 remove the ones no running process is using",
+                parent.display()
+            ),
+        )
+        .into())
+    }
+
+    /// The directory, as an absolute path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        // There is no one to tell from a destructor. A directory that cannot
+        // be removed stays, under a name that says what made it.
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const AM244: &[u8] = include_bytes!("../fixtures/n-095_Am_244.endf.xz");
+    /// The deck the Python `make_ace` composes for the same evaluation and the
+    /// same options, captured with its `run` stubbed out.
+    const REFERENCE_DECK: &[u8] = include_bytes!("../tests/reference/njoy-deck.txt.xz");
+
+    const CH4: &[u8] = include_bytes!("../fixtures/tsl-s-CH4.endf.xz");
+    const SIO2: &[u8] = include_bytes!("../fixtures/tsl-SiO2-beta.endf.xz");
+
+    fn thermal_deck(tsl: &[u8], options: &ThermalAceOptions) -> Result<Deck> {
+        let neutron = Material::from_str(&crate::testdata::text(AM244)).unwrap();
+        let thermal = Material::from_str(&crate::testdata::text(tsl)).unwrap();
+        thermal_ace_deck(
+            Path::new("n.endf"),
+            &neutron,
+            Path::new("t.endf"),
+            &thermal,
+            options,
+        )
+    }
+
+    fn options(name: &str, zaids: &[i64]) -> ThermalAceOptions {
+        ThermalAceOptions {
+            table_name: name.to_string(),
+            zaids: zaids.to_vec(),
+            output_dir: PathBuf::from("out"),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_bound_pendf_is_kept_only_when_asked_for() {
+        let mut o = options("sio2-b", &[8016, 14028]);
+        let deck = thermal_deck(SIO2, &o).unwrap();
+        assert!(!deck.tapeout.contains_key(&25));
+        o.pendf = Some(PathBuf::from("bound.pendf"));
+        let deck = thermal_deck(SIO2, &o).unwrap();
+        // tape25 is what the bound THERMR writes and ACER reads.
+        assert!(deck.commands.contains("\n21 24 25\n"));
+        assert_eq!(deck.tapeout[&25], PathBuf::from("bound.pendf"));
+    }
+
+    /// One line of an ENDF tape: six fields and the control columns.
+    fn endf_line(fields: [f64; 6], ints: &[usize], mf: i32, mt: i32) -> String {
+        let mut text = String::new();
+        for (i, f) in fields.iter().enumerate() {
+            if ints.contains(&i) {
+                text.push_str(&format!("{:>11}", *f as i64));
+            } else {
+                text.push_str(&format!("{f:>11.5E}"));
+            }
+        }
+        format!("{text}{:>4}{mf:>2}{mt:>3}{:>5}\n", 125, 1)
+    }
+
+    #[test]
+    fn thermr_incoherent_grids_are_read_per_temperature() {
+        let mut tape = String::new();
+        for (temperature, shift) in [(20.0, 0.0), (77.0, 0.25)] {
+            tape.push_str(&endf_line(
+                [1001.0, 0.99, 0., 0., 0., 0.],
+                &[2, 3, 4, 5],
+                1,
+                451,
+            ));
+            // Another MT of MF=3 first, which is not read.
+            tape.push_str(&endf_line(
+                [1001.0, 0.99, 0., 0., 0., 0.],
+                &[2, 3, 4, 5],
+                3,
+                223,
+            ));
+            tape.push_str(&endf_line([0., 0., 0., 0., 1., 1.], &[2, 3, 4, 5], 3, 223));
+            tape.push_str(&endf_line(
+                [1., 2., 0., 0., 0., 0.],
+                &[0, 1, 2, 3, 4, 5],
+                3,
+                223,
+            ));
+            tape.push_str(&endf_line([9.0, 9.0, 0., 0., 0., 0.], &[], 3, 223));
+            // MF=3 MT=224: four points, one interpolation region.
+            tape.push_str(&endf_line(
+                [1001.0, 0.99, 0., 0., 0., 0.],
+                &[2, 3, 4, 5],
+                3,
+                224,
+            ));
+            tape.push_str(&endf_line([0., 0., 0., 0., 1., 4.], &[2, 3, 4, 5], 3, 224));
+            tape.push_str(&endf_line(
+                [4., 2., 0., 0., 0., 0.],
+                &[0, 1, 2, 3, 4, 5],
+                3,
+                224,
+            ));
+            tape.push_str(&endf_line(
+                [1e-5, 5.0, 1.0 + shift, 4.0, 1.5, 3.0],
+                &[],
+                3,
+                224,
+            ));
+            tape.push_str(&endf_line([2.0, 2.0, 0., 0., 0., 0.], &[], 3, 224));
+            tape.push_str(&endf_line([0.; 6], &[0, 1, 2, 3, 4, 5], 3, 0));
+            // MF=6 MT=224: HEAD, a TAB1 of two points, a TAB2 and one LIST
+            // per incident energy (C2), each with two cosines here.
+            tape.push_str(&endf_line(
+                [1001.0, 0.99, 0., 6., 0., 0.],
+                &[2, 3, 4, 5],
+                6,
+                224,
+            ));
+            tape.push_str(&endf_line([1., 1., -2., 1., 1., 2.], &[2, 3, 4, 5], 6, 224));
+            tape.push_str(&endf_line(
+                [2., 2., 0., 0., 0., 0.],
+                &[0, 1, 2, 3, 4, 5],
+                6,
+                224,
+            ));
+            tape.push_str(&endf_line([1e-5, 1., 5.0, 1., 0., 0.], &[], 6, 224));
+            tape.push_str(&endf_line(
+                [temperature, 0., 3., 0., 1., 3.],
+                &[2, 3, 4, 5],
+                6,
+                224,
+            ));
+            tape.push_str(&endf_line(
+                [3., 2., 0., 0., 0., 0.],
+                &[0, 1, 2, 3, 4, 5],
+                6,
+                224,
+            ));
+            for e in [1e-5, 1.0, 7.0] {
+                tape.push_str(&endf_line([0., e, 0., 0., 4., 4.], &[2, 3, 4, 5], 6, 224));
+                tape.push_str(&endf_line([e, 1., -0.5, 0.5, 0., 0.], &[], 6, 224));
+            }
+            tape.push_str(&endf_line([0.; 6], &[0, 1, 2, 3, 4, 5], 6, 0));
+        }
+        let dir = std::env::temp_dir().join(format!("endf-thermr-grid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pendf");
+        std::fs::write(&path, &tape).unwrap();
+        let grids = read_thermr_incoherent(&path, 224).unwrap();
+        assert_eq!(grids.len(), 2);
+        assert_eq!(grids[0].temperature, 20.0);
+        assert_eq!(grids[1].temperature, 77.0);
+        assert_eq!(grids[0].calcem_energy, [1e-5, 1.0, 7.0]);
+        assert_eq!(grids[0].pendf_energy, [1e-5, 1.0, 1.5, 2.0]);
+        assert_eq!(grids[1].pendf_energy, [1e-5, 1.25, 1.5, 2.0]);
+        // Nothing under an MT that is not on the tape.
+        assert!(read_thermr_incoherent(&path, 225).unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn thermal_deck_runs_thermr_twice_and_acer_per_temperature() {
+        let deck = thermal_deck(SIO2, &options("sio2-b", &[8016, 14028])).unwrap();
+        let neutron = Material::from_str(&crate::testdata::text(AM244)).unwrap();
+        let thermal = Material::from_str(&crate::testdata::text(SIO2)).unwrap();
+        let law = crate::ThermalScattering::from_endf(&thermal).unwrap();
+        let (mat, mat_t) = (neutron.mat, thermal.mat);
+        let emax = crate::data::python_float_str(law.energy_max);
+        let lines: Vec<&str> = deck.commands.lines().collect();
+        let after = |head: &str, n: usize| -> Vec<&str> {
+            let at = lines.iter().position(|l| l.starts_with(head)).unwrap();
+            lines[at + 1..at + 1 + n].to_vec()
+        };
+        // Free gas first, from the broadened tape; then the bound law from
+        // the thermal tape (unit 21), coherent elastic on (SiO2 is LTHR=1).
+        let free = after(
+            "thermr / %%%%%%%%%%%%%%%% Add thermal scattering data (free",
+            2,
+        );
+        assert_eq!(
+            free,
+            vec!["0 23 24", &format!("0 {mat} 16 2 1 0 0 1 221 1/")]
+        );
+        let bound = after(
+            "thermr / %%%%%%%%%%%%%%%% Add thermal scattering data (bound",
+            4,
+        );
+        assert_eq!(bound[0], "21 24 25");
+        assert_eq!(bound[1], format!("{mat_t} {mat} 16 2 2 1 0 1 222 1/"));
+        assert_eq!(bound[3], format!("0.001 {emax}"));
+        // Two temperatures, two ACER runs with iopt=2, elastic in MT 223 as
+        // coherent (ielas 0).
+        let acers: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.starts_with("acer"))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(acers.len(), 2);
+        assert_eq!(lines[acers[0] + 1], "20 25 0 26 27");
+        assert_eq!(lines[acers[0] + 2], "2 0 1 .01/");
+        assert_eq!(lines[acers[0] + 5], "8016 14028 /");
+        assert_eq!(lines[acers[0] + 6], format!("222 64 223 0 1 {emax} 2/"));
+        assert_eq!(lines[acers[1] + 1], "20 25 0 28 29");
+        assert_eq!(deck.tapein[&21], PathBuf::from("t.endf"));
+        assert_eq!(deck.temperatures, law.temperatures);
+    }
+
+    #[test]
+    fn thermal_deck_with_incoherent_elastic_and_four_principal_atoms() {
+        // CH4 (solid): incoherent elastic (icoh 1, ielas 1), and the four H
+        // of the molecule are the principal atoms (natom = M0 = 4).
+        let deck = thermal_deck(CH4, &options("sch4", &[1001])).unwrap();
+        assert!(deck.commands.contains(" 2 1 0 4 222 1/"));
+        assert!(deck.commands.contains("222 64 223 1 1 "));
+    }
+
+    #[test]
+    fn thermal_deck_refuses_a_bad_table_name_or_no_zaids() {
+        assert!(thermal_deck(CH4, &options("", &[1001])).is_err());
+        assert!(thermal_deck(CH4, &options("toolongname", &[1001])).is_err());
+        assert!(thermal_deck(CH4, &options("sch4", &[])).is_err());
+        let neutron = Material::from_str(&crate::testdata::text(AM244)).unwrap();
+        // A neutron evaluation given as the thermal one is refused.
+        assert!(thermal_ace_deck(
+            Path::new("n"),
+            &neutron,
+            Path::new("t"),
+            &neutron,
+            &options("x", &[1001])
+        )
+        .is_err());
+    }
+
+    fn am244() -> Material {
+        Material::from_str(&crate::testdata::text(AM244)).unwrap()
+    }
+
+    #[test]
+    fn composes_the_same_deck_as_the_python_package() {
+        let options = AceOptions {
+            temperatures: vec![293.6, 900.0],
+            ..Default::default()
+        };
+        let deck = ace_deck(Path::new("tests/n-095_Am_244.endf.xz"), &am244(), &options).unwrap();
+        assert_eq!(deck.commands, crate::testdata::text(REFERENCE_DECK));
+    }
+
+    #[test]
+    fn the_tapes_thread_through_in_sequence() {
+        let options = AceOptions {
+            temperatures: vec![293.6, 900.0],
+            ..Default::default()
+        };
+        let deck = ace_deck(Path::new("in.endf"), &am244(), &options).unwrap();
+
+        // One input, on unit 20.
+        assert_eq!(
+            deck.tapein.keys().copied().collect::<Vec<_>>(),
+            [20],
+            "the evaluation goes in on tape20"
+        );
+        // reconr writes 21 but pendf is off, so 21 is not kept. Then broadr,
+        // the two heatr runs, gaspr, purr, and an ACE and xsdir per
+        // temperature.
+        assert_eq!(
+            deck.tapeout.keys().copied().collect::<Vec<_>>(),
+            [22, 23, 24, 25, 26, 27, 28, 29, 30]
+        );
+        assert!(deck.tapeout[&27].ends_with("ace_293.6"));
+        assert!(deck.tapeout[&28].ends_with("xsdir_293.6"));
+        assert!(deck.tapeout[&29].ends_with("ace_900.0"));
+        assert_eq!(deck.temperatures, [293.6, 900.0]);
+    }
+
+    #[test]
+    fn turning_a_module_off_closes_the_gap_it_leaves() {
+        let options = AceOptions {
+            heatr: None,
+            gaspr: None,
+            ..Default::default()
+        };
+        let deck = ace_deck(Path::new("in.endf"), &am244(), &options).unwrap();
+        assert!(!deck.commands.contains("heatr"));
+        assert!(!deck.commands.contains("gaspr"));
+        // purr now reads broadr's tape directly, and the numbering has no hole.
+        assert!(deck.commands.contains("20 22 23 /"));
+        assert_eq!(
+            deck.tapeout.keys().copied().collect::<Vec<_>>(),
+            [22, 23, 24, 25]
+        );
+    }
+
+    #[test]
+    fn a_pointwise_run_is_reconr_alone() {
+        let options = AceOptions::pendf_only("out.pendf");
+        let deck = ace_deck(Path::new("in.endf"), &am244(), &options).unwrap();
+        assert!(deck.commands.contains("reconr"));
+        for module in ["broadr", "heatr", "gaspr", "purr", "acer"] {
+            assert!(!deck.commands.contains(module), "{module} should be off");
+        }
+        assert_eq!(deck.tapeout[&21], PathBuf::from("out.pendf"));
+        assert!(deck.commands.ends_with("stop\n"));
+    }
+
+    #[test]
+    fn smoothing_shows_up_in_the_acer_card() {
+        let on = ace_deck(Path::new("f"), &am244(), &AceOptions::default()).unwrap();
+        assert!(on.commands.contains("1 1 1/"));
+        let off = ace_deck(
+            Path::new("f"),
+            &am244(),
+            &AceOptions {
+                smoothing: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(off.commands.contains("1 1 0/"));
+    }
+
+    #[test]
+    fn a_metastable_target_is_marked_in_the_zaid() {
+        // ACER writes no isomeric state, so 400 goes onto the mass number.
+        // The header right-justifies the ZAID in ten columns, so the mass
+        // number's first digit is the fourth character.
+        assert_eq!(&metastable_zaid(" 95242.00c rest", 1)[..6], " 95642");
+        // The ground state is left alone.
+        assert_eq!(&metastable_zaid(" 95242.00c rest", 0)[..6], " 95242");
+        // A first digit above two would carry, so it is left alone.
+        assert_eq!(&metastable_zaid(" 95942.00c rest", 1)[..6], " 95942");
+    }
+
+    #[test]
+    fn names_the_libraries_nlib_numbers() {
+        assert_eq!(library_name(0), "ENDF/B");
+        assert_eq!(library_name(2), "JEFF");
+        assert_eq!(library_name(17), "TENDL");
+        assert_eq!(library_name(99), "Unknown");
+    }
+
+    // What `njoy --version` prints on standard output, captured from real
+    // builds: the banner, then NJOY stops at the end of its empty deck.
+
+    /// LANL's 2016.80, built from its tag (ab27c64) by ensure_njoy.sh.
+    const UPSTREAM_2016_80: &str = concat!(
+        "\n njoy 2016.80  08Oct26                                       10/23/26 19:56:22\n",
+        " *****************************************************************************\n",
+    );
+    /// LANL's 2016.78, from before the bigeta fix.
+    const UPSTREAM_2016_78: &str = concat!(
+        "\n njoy 2016.78  03Feb25                                       10/23/26 19:56:22\n",
+        " *****************************************************************************\n",
+    );
+    /// The IAEA-NDS fork at 3835cff, built by ensure_njoy.sh. The `+` fills
+    /// the version's eight columns, so one space follows it rather than two.
+    const IAEA_FORK: &str = concat!(
+        "\n njoy 2016.77+ 23Oct24                                       10/23/26 19:56:22\n",
+        " *****************************************************************************\n",
+    );
+    /// The njoy2016 2016.80.post8 wheel on the extra index, the NJOY users are
+    /// told to install. Its binary holds the tag's `vers` and `vday`
+    /// (`2016.80 08Oct26 `) and prints them through the same format, so its
+    /// banner is the tag's line.
+    const WHEEL_2016_80: &str = UPSTREAM_2016_80;
+    /// The 2016.79.post8 wheel the extra index served before it.
+    const WHEEL_2016_79: &str = concat!(
+        "\n njoy 2016.79  18Mar25                                       10/23/26 19:56:22\n",
+        " *****************************************************************************\n",
+    );
+
+    fn v(year: u32, minor: u32, iaea_fork: bool) -> Version {
+        Version {
+            year,
+            minor,
+            iaea_fork,
+        }
+    }
+
+    #[test]
+    fn reads_the_banners_real_builds_print() {
+        for (banner, want, upstream, fork) in [
+            (UPSTREAM_2016_80, v(2016, 80, false), true, false),
+            (UPSTREAM_2016_78, v(2016, 78, false), false, false),
+            (IAEA_FORK, v(2016, 77, true), false, true),
+            // Passes for every library but FENDL as it is.
+            (WHEEL_2016_80, v(2016, 80, false), true, false),
+            (WHEEL_2016_79, v(2016, 79, false), false, false),
+        ] {
+            let found = parse_version(banner).unwrap_or_else(|| panic!("no version in {banner:?}"));
+            assert_eq!(found, want, "{banner:?}");
+            assert_eq!(
+                found.meets(Flavour::Upstream),
+                upstream,
+                "{found} for upstream"
+            );
+            assert_eq!(found.meets(Flavour::IaeaFork), fork, "{found} for the fork");
+        }
+    }
+
+    #[test]
+    fn prints_a_version_as_njoy_does() {
+        assert_eq!(v(2016, 80, false).to_string(), "2016.80");
+        assert_eq!(v(2016, 77, true).to_string(), "2016.77+");
+        assert_eq!(v(2016, 8, false).to_string(), "2016.8");
+        assert_eq!(Flavour::Upstream.minimum().to_string(), "2016.80");
+        assert_eq!(Flavour::IaeaFork.minimum().to_string(), "2016.77+");
+    }
+
+    #[test]
+    fn finds_nothing_in_what_is_not_a_banner() {
+        for text in [
+            "",
+            "njoy",
+            "njoy 2016",
+            "njoy 2016.",
+            "njoy2016.80",
+            "NJOY 2016.80",
+            "njoy 16.80",
+            "njoy 20166.80",
+            "njoy: 2016.80",
+            "true (GNU coreutils) 9.4\nWritten by Jim Meyering.\n",
+        ] {
+            assert_eq!(parse_version(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn long_output_is_cut_short() {
+        assert_eq!(shorten("one\ntwo"), "one\ntwo");
+        let many: String = (0..100).map(|n| format!("line {n}\n")).collect();
+        let short = shorten(many.trim_end());
+        assert!(short.ends_with("line 19\n(truncated)"), "{short}");
+        let wide = "x".repeat(10_000);
+        assert_eq!(shorten(&wide), format!("{}\n(truncated)", "x".repeat(4000)));
+    }
+
+    #[test]
+    fn reads_a_banner_as_ensure_njoy_does() {
+        // `njoy +[0-9]{4}\.[0-9]+\+?`: one space or more before the version,
+        // and the fork's `+` only straight after it.
+        assert_eq!(parse_version("njoy   2016.80"), Some(v(2016, 80, false)));
+        assert_eq!(
+            parse_version(" njoy 2016.80  08Oct26 x+"),
+            Some(v(2016, 80, false))
+        );
+        // An "njoy" that is not a version does not end the search.
+        assert_eq!(
+            parse_version(&format!("/usr/bin/njoy: started\n{UPSTREAM_2016_80}")),
+            Some(v(2016, 80, false))
+        );
+    }
+
+    #[test]
+    fn upstream_needs_2016_80_and_the_fork_2016_77() {
+        for (found, upstream, fork) in [
+            (v(2016, 80, false), true, false),
+            (v(2016, 81, false), true, false),
+            (v(2017, 0, false), true, false),
+            (v(2016, 79, false), false, false),
+            // 2016.9 (2017) and 2016.8 are older than 2016.80, which a
+            // comparison of decimals would get wrong.
+            (v(2016, 9, false), false, false),
+            (v(2016, 8, false), false, false),
+            (v(2016, 77, true), false, true),
+            (v(2016, 80, true), false, true),
+            (v(2016, 76, true), false, false),
+        ] {
+            assert_eq!(
+                found.meets(Flavour::Upstream),
+                upstream,
+                "{found} for upstream"
+            );
+            assert_eq!(found.meets(Flavour::IaeaFork), fork, "{found} for the fork");
+        }
+    }
+
+    #[test]
+    fn a_refusal_names_the_binary_both_versions_and_how_to_get_njoy() {
+        let refusal = |found, needed| {
+            Error::NjoyUnsuitable {
+                njoy_exec: "/opt/njoy/bin/njoy".to_string(),
+                found,
+                needed,
+            }
+            .to_string()
+        };
+        let upstream = ["pip install --upgrade njoy2016", "github.com/njoy/NJOY2016"];
+        let fork = [
+            "git clone https://github.com/IAEA-NDS/NJOY2016",
+            "cmake --build",
+        ];
+        for (message, reported, minimum, how) in [
+            (
+                refusal(v(2016, 78, false), Flavour::Upstream),
+                "2016.78",
+                "2016.80",
+                upstream,
+            ),
+            (
+                refusal(v(2016, 77, true), Flavour::Upstream),
+                "2016.77+",
+                "2016.80",
+                upstream,
+            ),
+            (
+                refusal(v(2016, 80, false), Flavour::IaeaFork),
+                "2016.80",
+                "2016.77+",
+                fork,
+            ),
+            (
+                refusal(v(2016, 76, true), Flavour::IaeaFork),
+                "2016.76+",
+                "2016.77+",
+                fork,
+            ),
+        ] {
+            for part in ["\"/opt/njoy/bin/njoy\"", reported, minimum, how[0], how[1]] {
+                assert!(message.contains(part), "{part:?} is not in: {message}");
+            }
+        }
+        assert!(refusal(v(2016, 77, true), Flavour::Upstream).contains("the IAEA-NDS fork,"));
+        assert!(refusal(v(2016, 80, false), Flavour::IaeaFork).contains("upstream NJOY2016,"));
+    }
+
+    #[test]
+    fn a_missing_executable_is_named_with_how_to_get_njoy() {
+        let missing = std::env::temp_dir()
+            .join(format!("endf-no-njoy-here-{}", std::process::id()))
+            .join("njoy");
+        let missing = missing.to_str().expect("a UTF-8 temporary directory");
+        // Asked for no flavour, it points to both.
+        let error = version(missing).unwrap_err();
+        assert!(matches!(error, Error::NjoyMissing { .. }), "{error:?}");
+        let message = error.to_string();
+        assert!(message.contains(missing), "{message}");
+        assert!(message.contains(PIP_INSTALL), "{message}");
+        assert!(message.contains("IAEA-NDS"), "{message}");
+        // Asked for one, it says that one and how to get it, and nothing else.
+        let upstream = require(missing, Flavour::Upstream).unwrap_err();
+        assert!(
+            matches!(upstream, Error::NjoyMissing { .. }),
+            "{upstream:?}"
+        );
+        let upstream = upstream.to_string();
+        for part in [missing, "upstream NJOY2016, 2016.80 or later", PIP_INSTALL] {
+            assert!(upstream.contains(part), "{part:?} is not in: {upstream}");
+        }
+        assert!(!upstream.contains("IAEA-NDS"), "{upstream}");
+        let fork = require(missing, Flavour::IaeaFork).unwrap_err().to_string();
+        for part in [
+            missing,
+            "IAEA-NDS fork of NJOY2016, 2016.77+ or later",
+            IAEA_BUILD,
+        ] {
+            assert!(fork.contains(part), "{part:?} is not in: {fork}");
+        }
+        assert!(!fork.contains("pip install"), "{fork}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_executable_that_is_not_njoy_is_refused() {
+        // GNU `true --version` prints coreutils' version and the BSD one
+        // prints nothing; neither is a banner.
+        let error = version("true").unwrap_err();
+        assert!(matches!(error, Error::NjoyNoVersion { .. }), "{error:?}");
+        assert!(
+            error
+                .to_string()
+                .starts_with("\"true\" printed no NJOY version"),
+            "{error}"
+        );
+        // Asked for a flavour, it says how to get that one.
+        let fork = require("true", Flavour::IaeaFork).unwrap_err();
+        assert!(matches!(fork, Error::NjoyNoVersion { .. }), "{fork:?}");
+        let fork = fork.to_string();
+        assert!(
+            fork.contains("2016.77+") && fork.contains(IAEA_BUILD),
+            "{fork}"
+        );
+    }
+
+    #[test]
+    fn a_scratch_directory_that_cannot_be_made_is_named() {
+        // NJOY never starts, so this must not read as an NJOY that is missing.
+        let nowhere = std::env::temp_dir().join(format!("endf-no-dir-here-{}", std::process::id()));
+        let error = probe("njoy", None, &nowhere).unwrap_err();
+        let Error::Io(e) = &error else {
+            panic!("{error:?}")
+        };
+        assert_eq!(e.kind(), std::io::ErrorKind::NotFound, "{e}");
+        let message = error.to_string();
+        for part in [nowhere.to_str().unwrap(), "to run NJOY \"njoy\""] {
+            assert!(message.contains(part), "{part:?} is not in: {message}");
+        }
+    }
+
+    #[test]
+    fn a_relative_path_is_taken_from_the_callers_directory() {
+        // NJOY is started in a scratch directory, so a relative path would
+        // otherwise be looked for there.
+        assert_eq!(program("njoy").unwrap(), PathBuf::from("njoy"));
+        let relative = program("bin/njoy").unwrap();
+        assert!(relative.is_absolute(), "{relative:?}");
+        assert_eq!(
+            relative,
+            std::env::current_dir().unwrap().join("bin").join("njoy")
+        );
+        // Tests run in the crate directory, where this file is found and then
+        // refused for not being executable. Looked for from the scratch
+        // directory, it would not be found at all.
+        #[cfg(unix)]
+        {
+            let error = version("src/njoy.rs").unwrap_err();
+            let Error::NjoyMissing { source, .. } = &error else {
+                panic!("{error:?}")
+            };
+            assert_eq!(
+                source.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "{error}"
+            );
+        }
+    }
+
+    /// A stand-in for NJOY that writes where it ran to a file beside itself,
+    /// prints its banner on standard error alone and exits 2, so the probe is
+    /// checked where NJOY is not installed.
+    #[cfg(unix)]
+    #[test]
+    fn reads_a_banner_on_standard_error_in_a_directory_it_then_removes() {
+        let dir = std::env::temp_dir().join(format!("endf-njoy-stand-in-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let (njoy, ran_in) = (dir.join("njoy"), dir.join("ran_in"));
+        let script = format!(
+            "#!/bin/sh\npwd -P > '{}'\necho ' njoy 2016.80  08Oct26' >&2\nexit 2\n",
+            ran_in.display()
+        );
+        // Written by `sh`, not by this process. A child another test starts
+        // holds this process's open files until it execs, and a script that
+        // is open for writing fails to run with "Text file busy".
+        let written = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "printf '%s' \"$2\" > \"$1\" && chmod 755 \"$1\"",
+                "sh",
+            ])
+            .arg(&njoy)
+            .arg(&script)
+            .status()
+            .unwrap();
+        assert!(written.success());
+
+        assert_eq!(version(njoy.to_str().unwrap()).unwrap(), v(2016, 80, false));
+        let ran_in = PathBuf::from(std::fs::read_to_string(&ran_in).unwrap().trim_end());
+        let here = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert_ne!(ran_in, here, "the probe ran in the working directory");
+        assert!(!ran_in.exists(), "the probe left {ran_in:?} behind");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The NJOY on PATH, when this machine has one. Announces a loud skip
+    /// otherwise, as the NJOY-gated tests in yamc-convert do. PATH is searched
+    /// rather than NJOY run to find out, since running it here would leave its
+    /// listing in this directory, which is what this checks the probe does
+    /// not do.
+    #[test]
+    fn reads_the_version_of_the_njoy_on_path() {
+        let on_path = std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path)
+                .any(|dir| dir.join("njoy").is_file() || dir.join("njoy.exe").is_file())
+        });
+        if !on_path {
+            eprintln!("SKIP: no njoy on PATH; this test checked nothing");
+            return;
+        }
+
+        // NJOY rewrites its listing wherever it runs, so an `output` here that
+        // appears or changes would be the probe's.
+        let listing = || {
+            Path::new("output")
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+        };
+        let before = listing();
+        let found = version("njoy").expect("the njoy on PATH reports its version");
+        assert_eq!(found.year, 2016, "{found} is not an NJOY2016");
+        // The gate judges what the probe read.
+        for needed in [Flavour::Upstream, Flavour::IaeaFork] {
+            assert_eq!(
+                require("njoy", needed).is_ok(),
+                found.meets(needed),
+                "{found} for {needed:?}"
+            );
+        }
+        assert_eq!(
+            listing(),
+            before,
+            "the probe wrote NJOY's listing into the working directory"
+        );
+    }
+
+    /// A fresh directory for one test, under the system temporary directory.
+    fn fresh_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("endf-njoy-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// What a directory holds, sorted.
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A stand-in for NJOY, so where it runs and what it leaves can be checked
+    /// without NJOY installed: a shell script that writes the directory it was
+    /// started in to `ran_in` beside itself and the one its `TMPDIR` names to
+    /// `tmpdir`, saves its deck where it runs, then runs `body` there.
+    ///
+    /// Written by `sh`, not by this process. A process another test starts
+    /// inherits, for a moment, every file this one has open, and running the
+    /// script while a copy of it is open for writing fails with "Text file
+    /// busy".
+    #[cfg(unix)]
+    fn stand_in(dir: &Path, body: &str) -> PathBuf {
+        let script = dir.join("njoy");
+        let text = format!(
+            "#!/bin/sh\npwd -P > '{}'\n(cd \"${{TMPDIR:-/tmp}}\" && pwd -P) > '{}'\n\
+             cat > deck\n{body}\n",
+            dir.join("ran_in").display(),
+            dir.join("tmpdir").display()
+        );
+        let mut sh = std::process::Command::new("sh")
+            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(&script)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        sh.stdin.take().unwrap().write_all(text.as_bytes()).unwrap();
+        assert!(sh.wait().unwrap().success());
+        script
+    }
+
+    /// What the stand-in under `root` wrote down: where it ran (`ran_in`) or
+    /// where its TMPDIR pointed (`tmpdir`), with symlinks resolved.
+    #[cfg(unix)]
+    fn recorded(root: &Path, what: &str) -> PathBuf {
+        let text = std::fs::read_to_string(root.join(what)).expect("NJOY was run");
+        PathBuf::from(text.trim_end())
+    }
+
+    /// `path`, which is absolute, as a path from the current directory.
+    #[cfg(unix)]
+    fn relative_to_here(path: &Path) -> PathBuf {
+        let here = std::env::current_dir().unwrap();
+        let mut relative: PathBuf = here.components().skip(1).map(|_| "..").collect();
+        relative.push(path.strip_prefix("/").unwrap());
+        relative
+    }
+
+    /// The evaluation on disk, an empty output directory, and the options for
+    /// a pointwise run of `njoy` that writes its one tape there.
+    #[cfg(unix)]
+    fn pendf_into(root: &Path, njoy: &Path) -> (PathBuf, PathBuf, AceOptions) {
+        let evaluation = root.join("in.endf");
+        std::fs::write(&evaluation, crate::testdata::text(AM244)).unwrap();
+        let out = root.join("out");
+        std::fs::create_dir(&out).unwrap();
+        let options = AceOptions {
+            output_dir: out.clone(),
+            njoy_exec: njoy.to_str().unwrap().to_string(),
+            ..AceOptions::pendf_only(out.join("pendf"))
+        };
+        (evaluation, out, options)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn njoy_runs_in_a_directory_of_its_own_inside_the_output_directory() {
+        let root = fresh_dir("runs-inside");
+        let njoy = stand_in(&root, "echo pointwise > tape21");
+        let (evaluation, out, options) = pendf_into(&root, &njoy);
+
+        make_ace(&evaluation, &am244(), &options).unwrap();
+
+        let ran_in = recorded(&root, "ran_in");
+        assert_eq!(
+            ran_in.parent(),
+            Some(std::fs::canonicalize(&out).unwrap().as_path()),
+            "NJOY ran in {}, not in a directory of its own inside {}",
+            ran_in.display(),
+            out.display()
+        );
+        let name = ran_in.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with(".njoy-run-"), "{name}");
+        // Its scratch units go there too, not to /tmp.
+        assert_eq!(recorded(&root, "tmpdir"), ran_in);
+        // The tape the deck asked for came out, and the working directory went.
+        assert_eq!(entries(&out), ["pendf"]);
+        assert_eq!(
+            std::fs::read_to_string(out.join("pendf")).unwrap(),
+            "pointwise\n"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_output_directory_reaches_njoy_as_an_absolute_tmpdir() {
+        let root = fresh_dir("relative");
+        // NJOY reads TMPDIR from inside its own directory, where a relative
+        // one names a directory that is not there.
+        let njoy = stand_in(
+            &root,
+            "case \"$TMPDIR\" in /*) ;; *) exit 9 ;; esac\necho pointwise > tape21",
+        );
+        let (evaluation, out, mut options) = pendf_into(&root, &njoy);
+        options.output_dir = relative_to_here(&out);
+
+        make_ace(&evaluation, &am244(), &options).unwrap();
+
+        assert_eq!(recorded(&root, "tmpdir"), recorded(&root, "ran_in"));
+        assert_eq!(entries(&out), ["pendf"]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_njoy_run_leaves_nothing_in_the_output_directory() {
+        let root = fresh_dir("fails");
+        // As NJOY dies when its scratch disk fills: the module on standard
+        // output, the cause from the Fortran runtime on standard error.
+        let njoy = stand_in(
+            &root,
+            "echo partial > tape21\necho ' reconr...'\n\
+             echo 'Fortran runtime error: No space left on device' >&2\nexit 2",
+        );
+        let (evaluation, out, options) = pendf_into(&root, &njoy);
+
+        let err = make_ace(&evaluation, &am244(), &options)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("NJOY exited with"), "{err}");
+        assert!(err.contains("reconr..."), "{err}");
+        assert!(
+            err.contains("Fortran runtime error: No space left on device"),
+            "{err}"
+        );
+        // It ran in the output directory, and neither its working directory
+        // nor the tape it cut short is left there.
+        let ran_in = recorded(&root, "ran_in");
+        assert!(
+            ran_in.starts_with(std::fs::canonicalize(&out).unwrap()),
+            "NJOY ran in {}",
+            ran_in.display()
+        );
+        assert_eq!(entries(&out), Vec::<String>::new());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_scratch_directory_is_hidden_its_own_and_gone_once_dropped() {
+        let root = fresh_dir("scratch");
+        let a = Scratch::new_in(&root, "Fe56").unwrap();
+        let b = Scratch::new_in(&root, "Fe56").unwrap();
+        assert_ne!(a.path(), b.path(), "two conversions shared a directory");
+        for scratch in [&a, &b] {
+            assert!(scratch.path().is_dir());
+            assert!(scratch.path().is_absolute());
+            assert_eq!(scratch.path().parent(), Some(root.as_path()));
+            let name = scratch.path().file_name().unwrap().to_string_lossy();
+            assert!(name.starts_with(".njoy-Fe56-"), "{name}");
+        }
+
+        // Dropped with a tape in it, it goes, and takes nothing else with it.
+        std::fs::write(a.path().join("tape20"), "evaluation").unwrap();
+        let b_name = b.path().file_name().unwrap().to_string_lossy().into_owned();
+        drop(a);
+        assert_eq!(entries(&root), [b_name]);
+        drop(b);
+        assert_eq!(entries(&root), Vec::<String>::new());
+
+        // A parent that does not exist is an error that names the path.
+        let err = Scratch::new_in(&root.join("absent"), "x")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("absent"), "{err}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_name_already_taken_is_skipped_and_left_alone() {
+        let root = fresh_dir("taken");
+        let pid = std::process::id();
+        let name = |n: u64| root.join(format!(".njoy-x-{pid}-{n}"));
+        // What a killed run that had this process id would leave.
+        std::fs::create_dir(name(0)).unwrap();
+        std::fs::write(name(0).join("tape20"), "left by a killed run").unwrap();
+
+        let fresh = Scratch::numbered_by(&root, "x", &AtomicU64::new(0)).unwrap();
+        assert_eq!(fresh.path(), name(1));
+        drop(fresh);
+        assert_eq!(
+            std::fs::read_to_string(name(0).join("tape20")).unwrap(),
+            "left by a killed run"
+        );
+
+        // With every name it would try taken, it says so rather than reuse one.
+        for n in 1..64 {
+            std::fs::create_dir(name(n)).unwrap();
+        }
+        let err = Scratch::numbered_by(&root, "x", &AtomicU64::new(0))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("were taken"), "{err}");
+        assert_eq!(entries(&root).len(), 64);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+}

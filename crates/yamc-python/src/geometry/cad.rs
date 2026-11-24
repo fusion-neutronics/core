@@ -1,0 +1,997 @@
+use crate::geometry::mesh_geometry::physical_groups_json;
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use pyo3::prelude::*;
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
+
+use yamm::mesher::{self, EdgeInput, FaceInput, MeshMode};
+use yamt::io::arrow::{write_arrow_mesh, MeshData};
+
+/// Run `work` on a pool of `threads` threads made for it, or on rayon's
+/// global pool when `threads` is `None`.
+///
+/// The global pool can only be sized once per process, so a caller limiting
+/// the threads of one mesh gets a pool of its own, dropped afterwards. Rayon
+/// work started inside runs on that pool, nested `par_iter`s included.
+pub(crate) fn on_threads<T: Send>(
+    threads: Option<usize>,
+    work: impl FnOnce() -> T + Send,
+) -> PyResult<T> {
+    let Some(n) = threads else {
+        return Ok(work());
+    };
+    if n == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "threads must be a positive integer, got 0",
+        ));
+    }
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(n)
+        .build()
+        .map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "could not start a pool of {n} threads: {e}"
+            ))
+        })?;
+    Ok(pool.install(work))
+}
+
+/// Mesh a single face in UV space.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (face_id, boundary_edges, holes=None, is_planar=true, mesh_mode="coarse".to_string()))]
+pub fn mesh_face(
+    face_id: u64,
+    boundary_edges: Vec<Bound<'_, PyAny>>,
+    holes: Option<Vec<Vec<Bound<'_, PyAny>>>>,
+    is_planar: bool,
+    mesh_mode: String,
+) -> PyResult<PyFaceOutput> {
+    let edges = parse_edges(&boundary_edges)?;
+
+    let hole_edges: Vec<Vec<EdgeInput>> = match holes {
+        Some(h) => h
+            .iter()
+            .map(|wire| parse_edges(wire))
+            .collect::<PyResult<_>>()?,
+        None => vec![],
+    };
+
+    let mode = parse_mode(&mesh_mode)?;
+
+    let input = FaceInput {
+        face_id,
+        boundary_edges: edges,
+        holes: hole_edges,
+        is_planar,
+        mode,
+    };
+
+    // The face stands alone and its UV polylines are its geometry, so
+    // refinement may split a boundary segment it comes too close to
+    // (Ruppert); the points it adds there lead `interior_uv_vertices`.
+    let output = mesher::mesh_face_with(&input, yamm::cdt::BoundarySplits::InPlace)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+    Ok(PyFaceOutput {
+        face_id: output.face_id,
+        interior_uv_vertices: output.interior_uv_vertices,
+        triangles: output.triangles,
+        num_boundary_vertices: output.num_boundary_vertices,
+    })
+}
+
+fn parse_edges(edges: &[Bound<'_, PyAny>]) -> PyResult<Vec<EdgeInput>> {
+    edges
+        .iter()
+        .map(|e| {
+            let edge_id: u64 = e.get_item("edge_id")?.extract()?;
+            let uv_points: Vec<[f64; 2]> = e.get_item("uv_points")?.extract()?;
+            let reversed: bool = e.get_item("reversed")?.extract()?;
+            Ok(EdgeInput {
+                edge_id,
+                uv_points,
+                reversed,
+            })
+        })
+        .collect()
+}
+
+fn parse_mode(mode: &str) -> PyResult<MeshMode> {
+    if mode == "coarse" {
+        Ok(MeshMode::Coarse)
+    } else if let Some(len_str) = mode.strip_prefix("fine:") {
+        let target_edge_length: f64 = len_str.parse().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid edge length: {e}"))
+        })?;
+        Ok(MeshMode::Fine { target_edge_length })
+    } else {
+        Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Invalid mesh_mode: '{mode}'. Use 'coarse' or 'fine:<length>'"
+        )))
+    }
+}
+
+/// Mesh multiple faces in batch.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (faces, scheduler="dag".to_string()))]
+pub fn mesh_faces(faces: Vec<Bound<'_, PyAny>>, scheduler: String) -> PyResult<Vec<PyFaceOutput>> {
+    let inputs = parse_face_inputs(&faces)?;
+
+    let outputs = match scheduler.as_str() {
+        "dag" => mesher::mesh_faces_dag(inputs),
+        "parallel" => mesher::mesh_faces_parallel(&inputs),
+        "sequential" => mesher::mesh_faces(&inputs),
+        _ => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Invalid scheduler: '{}'. Use 'dag', 'parallel', or 'sequential'",
+                scheduler
+            )));
+        }
+    }
+    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+    Ok(outputs
+        .into_iter()
+        .map(|o| PyFaceOutput {
+            face_id: o.face_id,
+            interior_uv_vertices: o.interior_uv_vertices,
+            triangles: o.triangles,
+            num_boundary_vertices: o.num_boundary_vertices,
+        })
+        .collect())
+}
+
+fn parse_face_inputs(faces: &[Bound<'_, PyAny>]) -> PyResult<Vec<FaceInput>> {
+    faces
+        .iter()
+        .map(|f| {
+            let face_id: u64 = f.get_item("face_id")?.extract()?;
+            let boundary_edges: Vec<Bound<'_, PyAny>> = f.get_item("boundary_edges")?.extract()?;
+            let edges = parse_edges(&boundary_edges)?;
+
+            let holes: Option<Vec<Vec<Bound<'_, PyAny>>>> =
+                f.get_item("holes").ok().and_then(|h| h.extract().ok());
+            let hole_edges: Vec<Vec<EdgeInput>> = match holes {
+                Some(h) => h
+                    .iter()
+                    .map(|wire| parse_edges(wire))
+                    .collect::<PyResult<_>>()?,
+                None => vec![],
+            };
+
+            let is_planar: bool = f
+                .get_item("is_planar")
+                .ok()
+                .and_then(|v| v.extract().ok())
+                .unwrap_or(true);
+            let mesh_mode: String = f
+                .get_item("mesh_mode")
+                .ok()
+                .and_then(|v| v.extract().ok())
+                .unwrap_or_else(|| "coarse".to_string());
+            let mode = parse_mode(&mesh_mode)?;
+
+            Ok(FaceInput {
+                face_id,
+                boundary_edges: edges,
+                holes: hole_edges,
+                is_planar,
+                mode,
+            })
+        })
+        .collect()
+}
+
+/// Python-visible face output.
+#[gen_stub_pyclass]
+#[pyclass(module = "yamc._core", name = "FaceOutput")]
+pub struct PyFaceOutput {
+    #[pyo3(get)]
+    pub face_id: u64,
+    #[pyo3(get)]
+    pub interior_uv_vertices: Vec<[f64; 2]>,
+    #[pyo3(get)]
+    pub triangles: Vec<[usize; 3]>,
+    #[pyo3(get)]
+    pub num_boundary_vertices: usize,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyFaceOutput {
+    fn __repr__(&self) -> String {
+        format!(
+            "PyFaceOutput(face_id={}, interior_uv_vertices={}, triangles={}, num_boundary_vertices={})",
+            self.face_id,
+            self.interior_uv_vertices.len(),
+            self.triangles.len(),
+            self.num_boundary_vertices
+        )
+    }
+}
+
+/// Compute adjacency/AABBs from the flat arrays and write the Arrow file.
+#[allow(clippy::too_many_arguments)]
+fn write_mesh_file(
+    path: Option<&str>,
+    vertices: Vec<f64>,
+    triangles: Vec<u32>,
+    triangle_surface_ids: Vec<u32>,
+    triangle_physical_groups: Vec<i32>,
+    tetrahedra: Vec<u32>,
+    tet_volume_ids: Vec<u32>,
+    tet_physical_groups: Vec<i32>,
+    physical_groups_json: String,
+    surface_volumes_json: String,
+    volume_measures_json: String,
+    imprinted: Option<bool>,
+    contact_tolerance: Option<f64>,
+    overlaps: Vec<[u32; 2]>,
+    separated: Vec<[u32; 2]>,
+) -> PyResult<Option<Vec<u8>>> {
+    use yamt::mesh::cad_build::tet_adjacency_flat;
+
+    if !overlaps.is_empty() && imprinted != Some(false) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "overlaps only apply to a mesh written with imprinted=False: an imprinted \
+             mesh has already split overlapping solids apart",
+        ));
+    }
+    if !separated.is_empty() && imprinted != Some(false) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "separated only applies to a mesh written with imprinted=False",
+        ));
+    }
+    if let Some(tol) = contact_tolerance {
+        if !(tol.is_finite() && tol >= 0.0) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "contact_tolerance must be a non-negative number of cm, got {tol}"
+            )));
+        }
+        if imprinted != Some(false) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "contact_tolerance only applies to a mesh written with imprinted=False: an \
+                 imprinted mesh shares the surface between touching solids, so there is no \
+                 contact to resolve",
+            ));
+        }
+    }
+
+    let tet_adjacency = tet_adjacency_flat(&tetrahedra);
+
+    let data = MeshData {
+        vertices,
+        triangles,
+        triangle_surface_ids,
+        triangle_physical_groups,
+        tetrahedra,
+        tet_volume_ids,
+        tet_physical_groups,
+        tet_adjacency,
+        physical_groups_json,
+        surface_volumes_json,
+        volume_measures_json,
+        imprinted,
+        contact_tolerance,
+        overlaps,
+        separated,
+    };
+
+    let failed =
+        |e| pyo3::exceptions::PyIOError::new_err(format!("Failed to write Arrow file: {e}"));
+    match path {
+        Some(path) => write_arrow_mesh(data, &PathBuf::from(path))
+            .map(|()| None)
+            .map_err(failed),
+        None => {
+            let mut bytes = Vec::new();
+            yamt::write_arrow_mesh_to(data, &mut bytes).map_err(failed)?;
+            Ok(Some(bytes))
+        }
+    }
+}
+
+/// Write mesh data to an Arrow IPC file.
+///
+/// Tet adjacency is computed here from the flat connectivity, so the caller
+/// does not supply it. Bounding boxes are not stored; they are computed from
+/// the vertices when the file is read.
+///
+/// ``surface_volumes_json`` gives, for each surface, the 0-based ids of the
+/// volume its triangles' normals point out of and of the one they point into,
+/// ``null`` for the implicit complement. A surface with the same volume in
+/// both is an internal face of that volume: it bounds nothing, and particles
+/// pass it as if it were not there.
+///
+/// ``imprinted=False`` records that the solids were meshed one by one, so
+/// touching solids each have their own surface where they meet;
+/// :class:`MeshGeometry` then tracks the mesh discontinuously, with
+/// ``contact_tolerance`` (cm) as the distance within which two solids'
+/// surfaces count as touching. Both are left out of the file when ``None``.
+/// ``overlaps`` lists ``(low, high)`` pairs of 0-based volume ids whose
+/// solids overlap; where they do, the cell is ``high``.
+/// ``separated`` lists ``(a, b)`` pairs of 0-based volume ids whose surfaces
+/// come within the contact tolerance although the solids do not touch, so the
+/// gap between them is kept rather than filled.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (
+    path,
+    vertices,
+    triangles,
+    triangle_surface_ids,
+    triangle_physical_groups,
+    tetrahedra=vec![],
+    tet_volume_ids=vec![],
+    tet_physical_groups=vec![],
+    physical_groups_json="{}".to_string(),
+    surface_volumes_json="[]".to_string(),
+    volume_measures_json="".to_string(),
+    imprinted=None,
+    contact_tolerance=None,
+    overlaps=vec![],
+    separated=vec![],
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn mesh_to_arrow(
+    path: String,
+    vertices: Vec<f64>,
+    triangles: Vec<u32>,
+    triangle_surface_ids: Vec<u32>,
+    triangle_physical_groups: Vec<i32>,
+    tetrahedra: Vec<u32>,
+    tet_volume_ids: Vec<u32>,
+    tet_physical_groups: Vec<i32>,
+    physical_groups_json: String,
+    surface_volumes_json: String,
+    volume_measures_json: String,
+    imprinted: Option<bool>,
+    contact_tolerance: Option<f64>,
+    overlaps: Vec<(u32, u32)>,
+    separated: Vec<(u32, u32)>,
+) -> PyResult<()> {
+    write_mesh_file(
+        Some(&path),
+        vertices,
+        triangles,
+        triangle_surface_ids,
+        triangle_physical_groups,
+        tetrahedra,
+        tet_volume_ids,
+        tet_physical_groups,
+        physical_groups_json,
+        surface_volumes_json,
+        volume_measures_json,
+        imprinted,
+        contact_tolerance,
+        overlaps.into_iter().map(|(l, h)| [l, h]).collect(),
+        separated.into_iter().map(|(a, b)| [a, b]).collect(),
+    )
+    .map(|_| ())
+}
+
+/// Physical group id for a solid: group ids equal solid ids, and a solid
+/// without a material tag maps to the -1 sentinel.
+fn pg_of(solid_id: u32, n_tags: usize) -> i32 {
+    if solid_id >= 1 && solid_id as usize <= n_tags {
+        solid_id as i32
+    } else {
+        -1
+    }
+}
+
+/// Finalize the CAD pipeline's mesh and write it to an Arrow IPC file, or
+/// return the file's bytes when ``path`` is ``None``.
+///
+/// Runs the whole export in the compiled core: assigns each
+/// triangle and tet the physical group of its first owning solid, offsets the
+/// per-solid tet blocks into the global vertex array, builds the physical-group
+/// and surface-to-volume topology metadata, and writes the file. The Python
+/// exporter does no per-element work.
+///
+/// Args:
+///     path: Output file path, or ``None`` to return the bytes.
+///     vertices: Global ``[x, y, z]`` vertex array (tet vertex blocks appended).
+///     triangles: Per-triangle global vertex indices.
+///     triangle_surface_ids: 1-based surface id per triangle.
+///     triangle_face_ids: BRep face id per triangle.
+///     solid_faces: ``(solid_id, face_ids)`` pairs in ascending solid order.
+///     material_tags: Material tag per solid; solid ``i + 1`` carries tag ``i``.
+///     face_to_surface_id: ``(face_id, surface_id)`` pairs (surface ids 1-based).
+///     face_solid_reversed: ``(solid_id, face_id) -> reversed`` orientation map.
+///     tet_blocks: ``(solid_id, vertex_offset, tets)`` per tetrahedralized solid.
+///     boundary_tags: ``(boundary_name, surface_ids)`` pairs written as
+///         ``dim=2`` ``boundary:<name>`` physical groups (surface ids 1-based).
+///     imprinted: Whether the assembly was imprinted before meshing. ``False``
+///         makes :class:`MeshGeometry` track the mesh discontinuously.
+///     contact_tolerance: For a mesh that was not imprinted, the distance
+///         (cm) within which two solids' surfaces count as touching.
+///     overlaps: For a mesh that was not imprinted, ``(low, high)`` solid
+///         pairs (1-based solid ids) that overlap; where they do, the cell is
+///         ``high``.
+///     volume_measures: Optional volume (cm³) per solid, in solid order,
+///         written instead of the volumes the reader would compute from the
+///         surfaces (for solids that give up an overlap).
+///     separated: For a mesh that was not imprinted, ``(a, b)`` solid pairs
+///         (1-based solid ids) within the contact tolerance in the mesh that
+///         do not touch in the CAD, so the gap between them is kept.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (
+    path,
+    vertices,
+    triangles,
+    triangle_surface_ids,
+    triangle_face_ids,
+    solid_faces,
+    material_tags,
+    face_to_surface_id,
+    face_solid_reversed,
+    tet_blocks=vec![],
+    boundary_tags=vec![],
+    imprinted=true,
+    contact_tolerance=None,
+    overlaps=vec![],
+    volume_measures=None,
+    separated=vec![],
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn cad_mesh_to_arrow(
+    py: Python<'_>,
+    path: Option<String>,
+    vertices: Vec<[f64; 3]>,
+    triangles: Vec<[u32; 3]>,
+    triangle_surface_ids: Vec<u32>,
+    triangle_face_ids: Vec<i64>,
+    solid_faces: Vec<(u32, Vec<i64>)>,
+    material_tags: Vec<String>,
+    face_to_surface_id: Vec<(i64, u32)>,
+    face_solid_reversed: HashMap<(u32, i64), bool>,
+    tet_blocks: Vec<(u32, usize, Vec<[u32; 4]>)>,
+    boundary_tags: Vec<(String, Vec<u32>)>,
+    imprinted: bool,
+    contact_tolerance: Option<f64>,
+    overlaps: Vec<(u32, u32)>,
+    volume_measures: Option<Vec<f64>>,
+    separated: Vec<(u32, u32)>,
+) -> PyResult<Option<Py<pyo3::types::PyBytes>>> {
+    use yamt::mesh::cad_build::{
+        face_owners, flatten_tet_blocks, surface_volume_pairs, triangle_owner_ids,
+    };
+
+    let owners = face_owners(&solid_faces);
+    let n_tags = material_tags.len();
+
+    let triangle_physical_groups: Vec<i32> = triangle_owner_ids(&triangle_face_ids, &owners)
+        .into_iter()
+        .map(|s| if s > 0 { pg_of(s as u32, n_tags) } else { -1 })
+        .collect();
+
+    let (tets, tet_volume_ids) = flatten_tet_blocks(&tet_blocks);
+    let tet_physical_groups: Vec<i32> = tet_volume_ids.iter().map(|&s| pg_of(s, n_tags)).collect();
+
+    let surface_volumes = surface_volume_pairs(&face_to_surface_id, &owners, &face_solid_reversed);
+
+    let bytes = write_mesh_file(
+        path.as_deref(),
+        vertices.into_iter().flatten().collect(),
+        triangles.into_iter().flatten().collect(),
+        triangle_surface_ids,
+        triangle_physical_groups,
+        tets.into_iter().flatten().collect(),
+        tet_volume_ids,
+        tet_physical_groups,
+        physical_groups_json(&material_tags, &boundary_tags),
+        serde_json::to_string(&surface_volumes).expect("serializing surface_volumes"),
+        volume_measures
+            .map(|v| serde_json::to_string(&v).expect("serializing volume_measures"))
+            .unwrap_or_default(),
+        Some(imprinted),
+        contact_tolerance,
+        overlaps
+            .into_iter()
+            .map(|(low, high)| {
+                if low == 0 || high == 0 {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "overlaps take 1-based solid ids",
+                    ));
+                }
+                Ok([low - 1, high - 1])
+            })
+            .collect::<PyResult<_>>()?,
+        separated
+            .into_iter()
+            .map(|(a, b)| {
+                if a == 0 || b == 0 {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "separated takes 1-based solid ids",
+                    ));
+                }
+                Ok([a - 1, b - 1])
+            })
+            .collect::<PyResult<_>>()?,
+    )?;
+    Ok(bytes.map(|b| pyo3::types::PyBytes::new(py, &b).unbind()))
+}
+
+/// Per-cell volume and material labels for the CAD VTKHDF export.
+///
+/// Returns ``(tri_volume_ids, tri_material_ids, tets, tet_volume_ids)``: the
+/// owning solid id (1-based, -1 when unowned) and material tag index (0-based,
+/// -1 when unowned) per triangle, plus the per-solid tet blocks flattened into
+/// the global vertex array with the owning solid id per tet.
+///
+/// Args:
+///     triangle_face_ids: BRep face id per triangle.
+///     solid_faces: ``(solid_id, face_ids)`` pairs in ascending solid order.
+///     tet_blocks: ``(solid_id, vertex_offset, tets)`` per tetrahedralized solid.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (triangle_face_ids, solid_faces, tet_blocks=vec![]))]
+#[allow(clippy::type_complexity)]
+pub fn cad_mesh_labels(
+    triangle_face_ids: Vec<i64>,
+    solid_faces: Vec<(u32, Vec<i64>)>,
+    tet_blocks: Vec<(u32, usize, Vec<[u32; 4]>)>,
+) -> (Vec<i32>, Vec<i32>, Vec<[u32; 4]>, Vec<u32>) {
+    use yamt::mesh::cad_build::{face_owners, flatten_tet_blocks, triangle_owner_ids};
+
+    let owners = face_owners(&solid_faces);
+    let tri_volume_ids = triangle_owner_ids(&triangle_face_ids, &owners);
+    let tri_material_ids: Vec<i32> = tri_volume_ids
+        .iter()
+        .map(|&s| if s > 0 { s - 1 } else { -1 })
+        .collect();
+    let (tets, tet_volume_ids) = flatten_tet_blocks(&tet_blocks);
+    (tri_volume_ids, tri_material_ids, tets, tet_volume_ids)
+}
+
+/// Pairs of solids whose surface meshes overlap deeper than ``depth_tolerance``.
+///
+/// Every vertex, edge and face interior of each solid's closed boundary is
+/// tested against every other solid whose bounding box it reaches (the
+/// compiled mesh-level overlap check). Contact is not overlap: a point within
+/// ``depth_tolerance`` of the other surface counts as touching it.
+///
+/// Args:
+///     vertices: Global ``[x, y, z]`` vertex array.
+///     solids: ``(solid_id, triangles)`` per solid, each its full closed
+///         boundary as ``[i, j, k]`` indices into ``vertices``.
+///     depth_tolerance: Penetration (3D units) at or below which a feature
+///         counts as touching rather than inside.
+///     threads: Threads to run the check on, or ``None`` (the default) for
+///         rayon's global pool.
+///
+/// Returns:
+///     ``[(solid_a, solid_b, max_depth, exposure), ...]`` for every
+///     overlapping pair, ``max_depth`` the deepest penetration found and
+///     ``exposure`` an order-of-magnitude estimate of the fraction of
+///     isotropic tracks through the model that cross the overlap.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (vertices, solids, depth_tolerance, threads=None))]
+pub fn solid_overlaps(
+    vertices: Vec<[f64; 3]>,
+    solids: Vec<(usize, Vec<[usize; 3]>)>,
+    depth_tolerance: f64,
+    threads: Option<usize>,
+) -> PyResult<Vec<(usize, usize, f64, f64)>> {
+    let found = on_threads(threads, || {
+        yamm::overlap::find_solid_overlaps(&vertices, &solids, &[], depth_tolerance)
+    })?;
+    Ok(found
+        .into_iter()
+        .map(|o| (o.solid_a, o.solid_b, o.max_depth, o.exposure))
+        .collect())
+}
+
+/// Volume shared by two solids' closed surface meshes.
+///
+/// Args:
+///     vertices: Global ``[x, y, z]`` vertex array.
+///     triangles_a: Closed boundary of the first solid, as indices into
+///         ``vertices``.
+///     triangles_b: Closed boundary of the second solid.
+///     tolerance: Distance below which the two surfaces count as touching.
+///     samples: Points sampled when the volume has to be estimated.
+///     seed: Seed of the deterministic sampler.
+///     threads: Threads to run the sampling on, or ``None`` (the default) for
+///         rayon's global pool.
+///
+/// Returns:
+///     ``(volume, std_err, embedded)``. When the surfaces never come within
+///     ``tolerance`` of each other and one solid lies inside the other,
+///     ``embedded`` is ``0`` or ``1`` (that solid is wholly shared; ``volume``
+///     is then 0 and the caller supplies the solid's own volume). Otherwise
+///     ``embedded`` is ``None`` and ``volume`` is a Monte Carlo estimate with
+///     standard error ``std_err``.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (vertices, triangles_a, triangles_b, tolerance, samples=200_000, seed=1, threads=None))]
+#[allow(clippy::too_many_arguments)]
+pub fn solid_shared_volume(
+    vertices: Vec<[f64; 3]>,
+    triangles_a: Vec<[usize; 3]>,
+    triangles_b: Vec<[usize; 3]>,
+    tolerance: f64,
+    samples: usize,
+    seed: u64,
+    threads: Option<usize>,
+) -> PyResult<(f64, f64, Option<usize>)> {
+    let shared = on_threads(threads, || {
+        yamm::overlap::shared_volume(
+            &vertices,
+            &triangles_a,
+            &triangles_b,
+            tolerance,
+            samples,
+            seed,
+        )
+    })?;
+    Ok(match shared {
+        yamm::overlap::SharedVolume::Embedded(i) => (0.0, 0.0, Some(i)),
+        yamm::overlap::SharedVolume::Estimate { volume, std_err } => (volume, std_err, None),
+    })
+}
+
+/// Points where two solids' surface meshes come within ``tolerance``.
+///
+/// For every pair of solids whose meshes come that close, up to ``samples``
+/// mesh vertices of one of them lying within ``tolerance`` of the other's
+/// surface. A mesh vertex lies on its solid's CAD surface, so its exact
+/// distance to the other CAD solid says whether the two touch there or are
+/// separated by a real gap that faceting has narrowed.
+///
+/// Args:
+///     vertices: Global ``[x, y, z]`` vertex array.
+///     solids: ``(solid_id, triangles)`` per solid.
+///     tolerance: The contact tolerance (3D units).
+///     samples: Points to return per pair at most.
+///     threads: Threads to run the search on, or ``None`` (the default) for
+///         rayon's global pool.
+///
+/// Returns:
+///     ``[(solid_a, solid_b, [[x, y, z], ...]), ...]``, the points on
+///     ``solid_a``'s surface. A pair whose meshes come close only between
+///     vertices returns no points, and so does a pair whose meshes share a
+///     vertex (which lies on both CAD surfaces, so the two touch).
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (vertices, solids, tolerance, samples=8, threads=None))]
+#[allow(clippy::type_complexity)]
+pub fn solid_contact_samples(
+    vertices: Vec<[f64; 3]>,
+    solids: Vec<(usize, Vec<[usize; 3]>)>,
+    tolerance: f64,
+    samples: usize,
+    threads: Option<usize>,
+) -> PyResult<Vec<(usize, usize, Vec<[f64; 3]>)>> {
+    on_threads(threads, || {
+        yamm::overlap::contact_samples(&vertices, &solids, tolerance, samples)
+    })
+}
+
+/// Solids whose surface mesh crosses itself.
+///
+/// Every pair of a solid's triangles that share no vertex (by index, or by
+/// position within the tolerance) is tested exactly for a crossing: a wall
+/// thinner than the faceting whose two faces have been meshed through each
+/// other. Triangles that touch, along an edge, at a point or within the
+/// tolerance, do not count, and degenerate ones are skipped.
+///
+/// Args:
+///     vertices: Global ``[x, y, z]`` vertex array.
+///     solids: ``(solid_id, triangles)`` per solid, each its full closed
+///         boundary as ``[i, j, k]`` indices into ``vertices``.
+///     rel_tol: The contact tolerance as a fraction of the diagonal of the
+///         box around the solids' vertices; the default is the tolerance
+///         the surface assembler welds vertices at.
+///     samples: Crossing points to return per solid at most, deepest first.
+///     threads: Threads to run the check on, or ``None`` (the default) for
+///         rayon's global pool.
+///
+/// Returns:
+///     ``[(solid_id, pairs, max_depth, [[x, y, z], ...]), ...]`` for every
+///     solid that crosses itself: the number of crossing triangle pairs, how
+///     far the deepest pair passes through each other, and the deepest
+///     crossing points.
+///
+/// Raises:
+///     ValueError: If a triangle indexes past ``vertices``, a vertex is not
+///         finite, or ``rel_tol`` is negative.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (vertices, solids, rel_tol=1e-6, samples=4, threads=None))]
+#[allow(clippy::type_complexity)]
+pub fn solid_self_intersections(
+    vertices: Vec<[f64; 3]>,
+    solids: Vec<(usize, Vec<[usize; 3]>)>,
+    rel_tol: f64,
+    samples: usize,
+    threads: Option<usize>,
+) -> PyResult<Vec<(usize, usize, f64, Vec<[f64; 3]>)>> {
+    let found = on_threads(threads, || {
+        yamm::self_intersection::find_self_intersections(&vertices, &solids, rel_tol, samples)
+    })?
+    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    Ok(found
+        .into_iter()
+        .map(|s| {
+            let points = s.samples.iter().map(|c| c.point).collect();
+            (s.solid, s.pairs, s.max_depth, points)
+        })
+        .collect())
+}
+
+/// Solids whose surface mesh is open.
+///
+/// Each solid is bounded by the surfaces :func:`cad_mesh_to_arrow` writes it
+/// with, their triangles wound outward from it. A closed surface runs along
+/// each edge of its triangles as often one way as the other; an edge a
+/// solid's triangles run along more often one way is open: the rim of a hole
+/// or of a face left one-sided, a face wound the wrong way round, or one side
+/// of a crack between two facetings of a CAD edge. A surface with the solid
+/// on both sides closes on itself. Cracks are not counted: an open edge with
+/// an open edge running back alongside it, within the solid's ``reach``.
+///
+/// Args:
+///     vertices: Global ``[x, y, z]`` vertex array.
+///     triangles: Per-triangle global vertex indices.
+///     triangle_surface_ids: 1-based surface id per triangle.
+///     solid_faces: ``(solid_id, face_ids)`` pairs in ascending solid order.
+///     face_to_surface_id: ``(face_id, surface_id)`` pairs (surface ids 1-based).
+///     face_solid_reversed: ``(solid_id, face_id) -> reversed`` orientation map.
+///     reach: ``{solid_id: distance}`` within which an open edge running back
+///         closes a crack; a solid it does not name has none.
+///     samples: Open edges to give the midpoint of per solid at most.
+///
+/// Returns:
+///     ``[(solid_id, edges, [[x, y, z], ...]), ...]`` for every solid with an
+///     open edge outside a crack: how many it has, and the midpoints of the
+///     first.
+///
+/// Raises:
+///     ValueError: If ``triangles`` and ``triangle_surface_ids`` differ in
+///         length, or a triangle indexes past ``vertices``.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (
+    vertices,
+    triangles,
+    triangle_surface_ids,
+    solid_faces,
+    face_to_surface_id,
+    face_solid_reversed,
+    reach,
+    samples=4,
+))]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn solid_open_edges(
+    vertices: Vec<[f64; 3]>,
+    triangles: Vec<[u32; 3]>,
+    triangle_surface_ids: Vec<u32>,
+    solid_faces: Vec<(u32, Vec<i64>)>,
+    face_to_surface_id: Vec<(i64, u32)>,
+    face_solid_reversed: HashMap<(u32, i64), bool>,
+    reach: HashMap<u32, f64>,
+    samples: usize,
+) -> PyResult<Vec<(u32, usize, Vec<[f64; 3]>)>> {
+    use yamt::mesh::cad_build::{
+        face_owners, open_volume_edges, surface_volume_pairs, unmatched_edges,
+    };
+
+    if triangles.len() != triangle_surface_ids.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{} triangles but {} triangle surface ids",
+            triangles.len(),
+            triangle_surface_ids.len()
+        )));
+    }
+    if let Some(&v) = triangles
+        .iter()
+        .flatten()
+        .find(|&&v| v as usize >= vertices.len())
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "a triangle indexes vertex {v} of {}",
+            vertices.len()
+        )));
+    }
+    let owners = face_owners(&solid_faces);
+    let surface_volumes = surface_volume_pairs(&face_to_surface_id, &owners, &face_solid_reversed);
+    Ok(
+        open_volume_edges(&triangles, &triangle_surface_ids, &surface_volumes)
+            .into_iter()
+            .filter_map(|(volume, edges)| {
+                let solid_id = volume + 1;
+                let reach = reach.get(&solid_id).copied().unwrap_or(0.0);
+                let edges = unmatched_edges(&vertices, &edges, reach);
+                let points: Vec<[f64; 3]> = edges
+                    .iter()
+                    .take(samples)
+                    .map(|&[a, b]| {
+                        let (p, q) = (vertices[a as usize], vertices[b as usize]);
+                        [
+                            0.5 * (p[0] + q[0]),
+                            0.5 * (p[1] + q[1]),
+                            0.5 * (p[2] + q[2]),
+                        ]
+                    })
+                    .collect();
+                (!edges.is_empty()).then_some((solid_id, edges.len(), points))
+            })
+            .collect(),
+    )
+}
+
+/// Combine per-face triangulations into one welded surface mesh (the compiled
+/// core of the CAD pipeline's mesh assembly).
+///
+/// Faces are taken in the order given. A face's degenerate triangles (two
+/// equal corners, or ``|(b - a) x (c - a)|^2`` below ``min_cross_sq``) are
+/// dropped, and a face left with none gets no surface id; the others get
+/// 1-based surface ids in order. Their vertices are concatenated and welded.
+/// Vertices at one position become one. The copies that faces hold of a
+/// point on their common edge, the vertices on the open boundary of each
+/// face's triangles, are merged within ``rel_tol`` times the mesh extent of
+/// each other, but two vertices of one face only within ``seam_rel_tol``
+/// times it, as the copies of a point on its seam or at a pole are. So a
+/// solid thinner than ``rel_tol`` keeps its sides apart, and one thinner than
+/// ``seam_rel_tol`` collapses. Triangles the weld collapses are dropped.
+///
+/// Args:
+///     faces: ``(face_id, vertices, triangles)`` per face, the triangles as
+///         0-based indices into that face's vertices.
+///     rel_tol: Weld tolerance between faces, as a fraction of the mesh
+///         extent.
+///     min_cross_sq: Squared cross-product magnitude below which a triangle is
+///         degenerate.
+///     seam_rel_tol: Weld tolerance within one face, as a fraction of the
+///         mesh extent.
+///
+/// Returns:
+///     ``(vertices, triangles, triangle_face_ids, triangle_surface_ids,
+///     face_surface_ids)``, the last as ``[(face_id, surface_id), ...]``.
+///
+/// Raises:
+///     ValueError: If a triangle indexes past its face's vertices or uses a
+///         vertex that is not finite, ``rel_tol`` is not positive, or
+///         ``seam_rel_tol`` is negative.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (faces, rel_tol=1e-6, min_cross_sq=1e-24, seam_rel_tol=1e-9))]
+#[allow(clippy::type_complexity)]
+pub fn assemble_face_meshes(
+    faces: Vec<(u32, Vec<[f64; 3]>, Vec<[u32; 3]>)>,
+    rel_tol: f64,
+    min_cross_sq: f64,
+    seam_rel_tol: f64,
+) -> PyResult<(
+    Vec<[f64; 3]>,
+    Vec<[u32; 3]>,
+    Vec<u32>,
+    Vec<u32>,
+    Vec<(u32, u32)>,
+)> {
+    if !(rel_tol > 0.0 && rel_tol.is_finite()) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "rel_tol must be a positive number, got {rel_tol}"
+        )));
+    }
+    if !(seam_rel_tol >= 0.0 && seam_rel_tol.is_finite()) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "seam_rel_tol must be a non-negative number, got {seam_rel_tol}"
+        )));
+    }
+    let mut vertices: Vec<[f64; 3]> = Vec::new();
+    let mut vertex_faces: Vec<u32> = Vec::new();
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let mut face_ids: Vec<u32> = Vec::new();
+    let mut surface_ids: Vec<u32> = Vec::new();
+    let mut face_surface_ids: Vec<(u32, u32)> = Vec::new();
+    for (face_id, verts, tris) in faces {
+        if let Some(t) = tris
+            .iter()
+            .find(|t| t.iter().any(|&i| i as usize >= verts.len()))
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "face {face_id}: triangle {t:?} indexes past its {} vertices",
+                verts.len()
+            )));
+        }
+        let kept: Vec<[u32; 3]> = tris
+            .into_iter()
+            .filter(|t| !degenerate_triangle(&verts, t, min_cross_sq))
+            .collect();
+        if kept.is_empty() {
+            continue;
+        }
+        if let Some(t) = kept.iter().find(|t| {
+            t.iter()
+                .any(|&i| !verts[i as usize].iter().all(|c| c.is_finite()))
+        }) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "face {face_id}: triangle {t:?} uses a vertex that is not finite"
+            )));
+        }
+        if vertices.len() + verts.len() > u32::MAX as usize {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "the assembled mesh has more vertices than 32-bit indices can address",
+            ));
+        }
+        let surface_id = face_surface_ids.len() as u32 + 1;
+        face_surface_ids.push((face_id, surface_id));
+        let base = vertices.len() as u32;
+        vertices.extend_from_slice(&verts);
+        vertex_faces.extend(std::iter::repeat_n(face_id, verts.len()));
+        for t in kept {
+            triangles.push([t[0] + base, t[1] + base, t[2] + base]);
+            face_ids.push(face_id);
+            surface_ids.push(surface_id);
+        }
+    }
+    if vertices.is_empty() {
+        return Ok((vertices, triangles, face_ids, surface_ids, face_surface_ids));
+    }
+    let (vertices, triangles, kept) = yamt::mesh::cad_build::weld_vertices(
+        &vertices,
+        &triangles,
+        &vertex_faces,
+        rel_tol,
+        seam_rel_tol,
+    );
+    let face_ids = kept.iter().map(|&i| face_ids[i]).collect();
+    let surface_ids = kept.iter().map(|&i| surface_ids[i]).collect();
+    Ok((vertices, triangles, face_ids, surface_ids, face_surface_ids))
+}
+
+/// Two equal corners, or a squared cross product below `min_cross_sq`,
+/// evaluated in the same order as the scene mesher's Python filter (so it
+/// drops exactly the triangles that one did). The BRepMesh path used to
+/// square with `**2`, which can differ from `x * x` in the last bit, so a
+/// triangle within an ulp of the threshold may now go the other way.
+fn degenerate_triangle(verts: &[[f64; 3]], t: &[u32; 3], min_cross_sq: f64) -> bool {
+    if t[0] == t[1] || t[1] == t[2] || t[0] == t[2] {
+        return true;
+    }
+    let (a, b, c) = (
+        verts[t[0] as usize],
+        verts[t[1] as usize],
+        verts[t[2] as usize],
+    );
+    let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    let cx = e1[1] * e2[2] - e1[2] * e2[1];
+    let cy = e1[2] * e2[0] - e1[0] * e2[2];
+    let cz = e1[0] * e2[1] - e1[1] * e2[0];
+    cx * cx + cy * cy + cz * cz < min_cross_sq
+}
+
+#[cfg(test)]
+mod tests {
+    use super::physical_groups_json;
+
+    #[test]
+    fn physical_groups_json_materials_only() {
+        let json = physical_groups_json(&["fuel".into(), "moderator".into()], &[]);
+        assert_eq!(
+            json,
+            r#"{"1":{"dim":3,"name":"mat:fuel"},"2":{"dim":3,"name":"mat:moderator"}}"#
+        );
+    }
+
+    #[test]
+    fn physical_groups_json_appends_boundary_groups_after_materials() {
+        let json = physical_groups_json(
+            &["fuel".into(), "moderator".into()],
+            &[("vacuum".into(), vec![2, 3, 4, 5, 6, 7])],
+        );
+        assert_eq!(
+            json,
+            r#"{"1":{"dim":3,"name":"mat:fuel"},"2":{"dim":3,"name":"mat:moderator"},"3":{"dim":2,"name":"boundary:vacuum","surface_ids":[2,3,4,5,6,7]}}"#
+        );
+    }
+}

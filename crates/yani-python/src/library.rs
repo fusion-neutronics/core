@@ -1,0 +1,406 @@
+//! Whole nuclear-data libraries in a folder: building one from its evaluated
+//! sources, and checking one against its manifest.
+//!
+//! Registered on both wheels: a library folder serves cross sections and the
+//! transmutation chain alike, and either wheel reads it. Building is native
+//! only: nothing in a browser runs NJOY.
+
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::prelude::*;
+use pyo3::types::PyDict;
+use pyo3_stub_gen::derive::gen_stub_pyfunction;
+use yamc_nuclide::storage::library_contents::{self, LibraryContents};
+
+/// What each hosted nuclear data library provides, keyed by library keyword.
+///
+/// Read from each library's release manifest, which lists every file the
+/// release publishes, so this downloads no data: only the small release
+/// pointer and the manifest, which are cached after the first call. The
+/// release is the one a calculation would read now, or, with the data
+/// origin unreachable, the newest cached one.
+///
+/// Every list is complete, so an empty list means the library has none of
+/// that: ``"photon": []`` says it publishes no photo-atomic data, not that it
+/// was not looked at. A library that could not be resolved at all has
+/// ``None`` for every entry and its reason under ``"error"``.
+///
+/// Each library's entry is a dict:
+///
+/// - ``release``: the release identifier, and ``offline``: whether it is the
+///   newest cached release because the origin could not be reached;
+/// - ``neutron``: nuclides with neutron cross sections;
+/// - ``neutron_covariances``: per kind, the nuclides that carry it:
+///   ``cross_section`` (MF=33), ``resonance_parameters`` (MF=32),
+///   ``angular_distribution`` (MF=34), ``nubar`` (MF=31) and
+///   ``fission_spectrum`` (MF=35);
+/// - ``thermal_scattering``: thermal scattering tables;
+/// - ``photon``: elements with photo-atomic data, what photon transport
+///   reads;
+/// - ``photonuclear``: targets with photonuclear data, a different thing
+///   from ``photon``;
+/// - ``decay``, ``reactions``, ``fission_yields``, ``isomeric_branching``:
+///   whether the library publishes that transmutation subsection;
+/// - ``sources``: the upstream files the release was built from, each a dict
+///   with ``name``, ``bytes`` and ``sha256``.
+///
+/// Returns:
+///     dict[str, dict]: Per library keyword, what it provides.
+///
+/// Examples:
+///     >>> libraries = yani.available_nuclear_data_libraries()
+///     >>> list(libraries)
+///     ['tendl-2025', 'tendl-2017', 'fendl-3.2d', 'endf-b8.1', 'jeff-4.0', 'jendl-5.0', 'irdff-ii']
+///     >>> libraries["jeff-4.0"]["photon"]
+///     []
+///     >>> "Fe56" in libraries["endf-b8.1"]["neutron_covariances"]["cross_section"]
+///     True
+#[gen_stub_pyfunction]
+#[pyfunction]
+pub fn available_nuclear_data_libraries(py: Python<'_>) -> PyResult<Py<PyDict>> {
+    let libraries = py.detach(library_contents::available_libraries);
+    let out = PyDict::new(py);
+    for (keyword, contents) in libraries {
+        out.set_item(keyword, contents_dict(py, contents)?)?;
+    }
+    Ok(out.unbind())
+}
+
+fn contents_dict<'py>(
+    py: Python<'py>,
+    contents: Result<LibraryContents, String>,
+) -> PyResult<Bound<'py, PyDict>> {
+    const KEYS: [&str; 12] = [
+        "release",
+        "offline",
+        "neutron",
+        "neutron_covariances",
+        "thermal_scattering",
+        "photon",
+        "photonuclear",
+        "decay",
+        "reactions",
+        "fission_yields",
+        "isomeric_branching",
+        "sources",
+    ];
+    let d = PyDict::new(py);
+    let c = match contents {
+        Ok(c) => c,
+        Err(error) => {
+            for key in KEYS {
+                d.set_item(key, py.None())?;
+            }
+            d.set_item("error", error)?;
+            return Ok(d);
+        }
+    };
+    d.set_item("release", &c.release)?;
+    d.set_item("offline", c.offline)?;
+    d.set_item("neutron", &c.neutron)?;
+    let covariances = PyDict::new(py);
+    for (kind, nuclides) in &c.covariances {
+        covariances.set_item(*kind, nuclides)?;
+    }
+    d.set_item("neutron_covariances", covariances)?;
+    d.set_item("thermal_scattering", &c.thermal_scattering)?;
+    d.set_item("photon", &c.photon)?;
+    d.set_item("photonuclear", &c.photonuclear)?;
+    for (name, published) in &c.transmutation {
+        d.set_item(*name, *published)?;
+    }
+    let sources = c
+        .sources
+        .iter()
+        .map(|s| {
+            let e = PyDict::new(py);
+            e.set_item("name", &s.name)?;
+            e.set_item("bytes", s.bytes)?;
+            e.set_item("sha256", &s.sha256)?;
+            Ok(e)
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    d.set_item("sources", sources)?;
+    d.set_item("error", py.None())?;
+    debug_assert!(KEYS.iter().all(|k| d.contains(*k).unwrap_or(false)));
+    Ok(d)
+}
+
+/// Check a nuclear-data library folder against its ``manifest.json``.
+///
+/// Re-hashes every file the manifest lists and compares its size and sha256
+/// with the manifest, then looks for files the manifest does not list.
+/// Loading data from a library folder only checks the sizes of the files it
+/// reads; this is the full check, for a library kept for offline use or built
+/// locally.
+///
+/// Parameters
+/// ----------
+/// path : str
+///     A library folder: ``manifest.json`` beside the ``neutron/``,
+///     ``photon/``, ``photonuclear/`` and ``transmutation/`` folders it
+///     describes, laid out as each release in :func:`cache_dir` is. A release
+///     folder in the cache holds only the files runs have downloaded, so the
+///     rest are reported missing.
+///
+/// Returns
+/// -------
+/// dict
+///     ``keyword``, ``release``, ``format_version`` and ``manifest_sha256``
+///     identify the release the manifest describes, and ``file_count`` and
+///     ``total_bytes`` count what it lists. ``missing`` (listed but absent),
+///     ``changed`` (listed, with another size or sha256) and ``unlisted``
+///     (in the release's ``<Name>.arrow/`` folders, or a particle's
+///     ``index.json``, but not listed) are sorted paths relative to the
+///     folder. ``ok`` is ``True`` when all three are empty.
+///
+///     An unlisted file fails the check: results record the manifest's sha256
+///     as the identity of the library a run read, and a file the manifest
+///     does not list is data that identity does not cover. Files outside the
+///     release's folders, such as a local build's ``.build/`` folder, are not
+///     looked at.
+///
+/// Raises
+/// ------
+/// RuntimeError
+///     If ``path`` is not a folder or holds no ``manifest.json``, if the
+///     manifest is not a version 1 release manifest or is in a
+///     ``format_version`` this build does not read, or if a listed file
+///     cannot be read.
+#[gen_stub_pyfunction]
+#[pyfunction]
+pub fn verify_library(py: Python<'_>, path: &str) -> PyResult<Py<PyDict>> {
+    let found = py
+        .detach(|| yamc_nuclide::storage::release::verify_folder(std::path::Path::new(path)))
+        .map_err(PyRuntimeError::new_err)?;
+    let manifest = &found.release.manifest;
+    let dict = PyDict::new(py);
+    dict.set_item("keyword", &manifest.keyword)?;
+    dict.set_item("release", &manifest.release)?;
+    dict.set_item("format_version", manifest.format_version)?;
+    dict.set_item("manifest_sha256", &found.release.manifest_sha256)?;
+    dict.set_item("file_count", manifest.files.len())?;
+    dict.set_item(
+        "total_bytes",
+        manifest.files.iter().map(|f| f.bytes).sum::<u64>(),
+    )?;
+    dict.set_item("missing", &found.missing)?;
+    dict.set_item("changed", &found.changed)?;
+    dict.set_item("unlisted", &found.unlisted)?;
+    dict.set_item("ok", found.ok())?;
+    Ok(dict.unbind())
+}
+
+/// Build a whole nuclear-data library from its evaluated sources into a folder.
+///
+/// Downloads the library's source archives (each checked against the size and
+/// sha256 it is pinned to), unpacks them, converts every evaluation, builds the
+/// transmutation chain, checks the result and writes ``manifest.json`` last. The
+/// folder is laid out as a published release, so it serves every setting:
+///
+/// .. code-block:: python
+///
+///     generate_library("endf-b8.1", "/data/endf-b8.1")
+///     neutron_cross_section_data = "/data/endf-b8.1"
+///     transmutation_decay_data = "/data/endf-b8.1"
+///
+/// Running it again resumes: finished folders are kept and only the rest are
+/// converted. A folder holds one library built by one build of this package:
+/// the same version compiled from the same core commit.
+///
+/// The build is recorded in the release. ``manifest.json`` carries
+/// ``provenance.builder`` (``"yani-python <version>"``),
+/// ``provenance.builder_commit`` (the core commit this extension was compiled
+/// from, :data:`__commit__`) and ``provenance.builder_dirty``
+/// (:data:`__commit_dirty__`), both ``null`` when it was built outside a git
+/// checkout, beside ``provenance.njoy``. Every ``version.json`` and
+/// ``provenance.json`` carries the same as one ``converter`` stamp, such as
+/// ``"yani-python 0.22.1 (core 250c439e...)"``, and the manifest lists each
+/// distinct stamp as ``converters``.
+///
+/// An extension compiled from a tree with uncommitted changes
+/// (``__commit_dirty__`` is ``True``) writes data no commit describes, so it
+/// builds only a partial library (``parts``, ``nuclides`` or ``temperatures``
+/// given), which is never published. Commit the changes and rebuild to build
+/// a whole library.
+///
+/// Some hosts serve their archives only to a web browser (the IAEA's FENDL and
+/// IRDFF-II files, JAEA's JENDL-5 files). The error then lists each file with
+/// its link; download them with a browser and run again. They are found in the
+/// Downloads folder, in ``downloads``, or in ``<path>/.build/downloads/``.
+///
+/// Parameters
+/// ----------
+/// keyword : str
+///     The library: ``"endf-b8.1"``, ``"jeff-4.0"``, ``"jendl-5.0"``,
+///     ``"tendl-2025"``, ``"tendl-2017"``, ``"fendl-3.2d"`` or ``"irdff-ii"``.
+/// path : str
+///     The folder to build in, created if absent. It must be new, empty or an
+///     earlier build of the same library, and not inside :func:`cache_dir`.
+/// parts : list of str, optional
+///     What to build, of ``"neutron"``, ``"photon"``, ``"photonuclear"``,
+///     ``"thermal"``, ``"decay"``, ``"reactions"``, ``"fission_yields"`` and
+///     ``"branching"``. The default is every part the library's published
+///     release carries. Only ``"neutron"`` and ``"thermal"`` run NJOY, so a
+///     chain alone builds in minutes. ``"thermal"`` is the thermal scattering
+///     tables (``thermal/c_H_in_H2O.arrow/`` and so on), which only
+///     ``"endf-b8.1"``, ``"jeff-4.0"`` and ``"jendl-5.0"`` publish.
+/// nuclides : list of str, optional
+///     Only these nuclides (``"Fe56"``, ``"Am242_m1"``) and elements (``"Fe"``,
+///     meaning every Fe evaluation and the Fe photon data), and thermal tables
+///     by name (``"c_H_in_H2O"``) or by what they bind to (``"H"`` is every
+///     table binding hydrogen). The transmutation chain is always built whole.
+///     A name the library does not have is refused.
+/// temperatures : list of float, optional
+///     Neutron temperatures in Kelvin. The default is 250, 293.6, 600, 900, 1200
+///     and 2500 K. The 0 K grid is always kept.
+/// njoy_exec : str, optional
+///     The NJOY executable. The default is the ``njoy`` installed beside this
+///     Python (``pip install njoy2016``), then the one on PATH. FENDL needs the
+///     IAEA-NDS fork of NJOY, and a refusal says how to build it.
+/// downloads : str, optional
+///     A folder of source archives fetched by hand, searched first.
+///
+/// Returns
+/// -------
+/// dict
+///     ``keyword``, ``release`` (the date the build started, the folder's
+///     release stamp), ``path``, ``parts``, ``converted`` and ``reused`` (sorted
+///     ``"<particle>/<Name>"`` keys), ``not_converted`` (the evaluations the
+///     library's recipe declares NJOY cannot process, with the reason each
+///     failed), ``stale_declarations`` (declared ones that converted after all),
+///     ``njoy`` (the NJOY version used, or ``None``), ``chain_nuclides``,
+///     ``manifest_sha256``, ``file_count`` and ``total_bytes``.
+///
+/// Raises
+/// ------
+/// ValueError
+///     An unknown keyword or part, or bad temperatures.
+/// RuntimeError
+///     The build cannot start (an extension compiled from uncommitted changes
+///     asked for a whole library, the folder or another build in it, the NJOY,
+///     the disk space, or source files that need a browser), or did not
+///     finish: evaluations that failed and are not declared, a gate that
+///     failed, or Ctrl-C. Nothing finished is lost, and running again retries
+///     only what is left. Each failed evaluation's reason is in
+///     ``<path>/.build/failed/``.
+#[cfg(not(target_os = "emscripten"))]
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (keyword, path, *, parts = None, nuclides = None, temperatures = None, njoy_exec = None, downloads = None))]
+#[allow(clippy::too_many_arguments)]
+pub fn generate_library(
+    py: Python<'_>,
+    keyword: &str,
+    path: &str,
+    parts: Option<Vec<String>>,
+    nuclides: Option<Vec<String>>,
+    temperatures: Option<Vec<f64>>,
+    njoy_exec: Option<String>,
+    downloads: Option<String>,
+) -> PyResult<Py<PyDict>> {
+    use nuclear_data_build::{Part, Request};
+    use pyo3::exceptions::PyValueError;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    nuclear_data_build::recipe::recipe(keyword).map_err(PyValueError::new_err)?;
+    let parts: Option<Vec<Part>> = parts
+        .map(|names| names.iter().map(|n| Part::parse(n)).collect())
+        .transpose()
+        .map_err(PyValueError::new_err)?;
+    if let Some(t) = temperatures.as_deref()
+        && (t.is_empty() || t.iter().any(|t| !t.is_finite() || *t <= 0.0))
+    {
+        return Err(PyValueError::new_err(
+            "temperatures must be a non-empty list of temperatures in Kelvin above \
+             0; the 0 K grid is always kept",
+        ));
+    }
+    let njoy_exec = match njoy_exec {
+        Some(n) => n,
+        None => default_njoy(py)?,
+    };
+    let package = crate::build_identity::package(py);
+    let builder = crate::build_identity::identity(&package);
+    let stop = AtomicBool::new(false);
+    let path_buf = std::path::PathBuf::from(path);
+    let downloads = downloads.map(std::path::PathBuf::from);
+    let progress = |line: &str| eprintln!("{line}");
+
+    // The build runs on its own thread with the GIL released, and this
+    // thread checks for Ctrl-C while it runs: on one, nothing more is
+    // started and the build returns once what is running finishes.
+    let result = py.detach(|| {
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                nuclear_data_build::generate(&Request {
+                    keyword,
+                    path: &path_buf,
+                    parts: parts.as_deref(),
+                    nuclides: nuclides.as_deref(),
+                    temperatures: temperatures.as_deref(),
+                    njoy_exec: &njoy_exec,
+                    downloads: downloads.as_deref(),
+                    builder,
+                    stop: Some(&stop),
+                    progress: Some(&progress),
+                })
+            });
+            let mut interrupted = None;
+            while !worker.is_finished() {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if interrupted.is_none()
+                    && let Err(e) = Python::attach(|py| py.check_signals())
+                {
+                    stop.store(true, Ordering::Relaxed);
+                    eprintln!("interrupted: finishing the conversions that are running");
+                    interrupted = Some(e);
+                }
+            }
+            let built = worker
+                .join()
+                .unwrap_or_else(|_| Err("the library builder panicked".to_string()));
+            (built, interrupted)
+        })
+    });
+    let report = match result {
+        (_, Some(interrupt)) => return Err(interrupt),
+        (Ok(report), None) => report,
+        (Err(e), None) => return Err(PyRuntimeError::new_err(e)),
+    };
+
+    let dict = PyDict::new(py);
+    dict.set_item("keyword", &report.keyword)?;
+    dict.set_item("release", &report.release)?;
+    dict.set_item("path", report.path.to_string_lossy())?;
+    dict.set_item(
+        "parts",
+        report.parts.iter().map(|p| p.name()).collect::<Vec<_>>(),
+    )?;
+    dict.set_item("converted", report.converted.iter().collect::<Vec<_>>())?;
+    dict.set_item("reused", report.reused.iter().collect::<Vec<_>>())?;
+    dict.set_item("not_converted", &report.not_converted)?;
+    dict.set_item("stale_declarations", &report.stale_declarations)?;
+    dict.set_item("njoy", &report.njoy)?;
+    dict.set_item("chain_nuclides", report.chain_nuclides)?;
+    dict.set_item("manifest_sha256", &report.manifest_sha256)?;
+    dict.set_item("file_count", report.file_count)?;
+    dict.set_item("total_bytes", report.total_bytes)?;
+    Ok(dict.unbind())
+}
+
+/// The `njoy` the njoy2016 wheel installs beside this interpreter, or `njoy`
+/// from PATH.
+#[cfg(not(target_os = "emscripten"))]
+fn default_njoy(py: Python<'_>) -> PyResult<String> {
+    let sysconfig = py.import("sysconfig")?;
+    let scripts: String = sysconfig
+        .call_method1("get_path", ("scripts",))?
+        .extract()?;
+    let name = if cfg!(windows) { "njoy.exe" } else { "njoy" };
+    let beside = std::path::Path::new(&scripts).join(name);
+    Ok(if beside.is_file() {
+        beside.to_string_lossy().into_owned()
+    } else {
+        "njoy".to_string()
+    })
+}

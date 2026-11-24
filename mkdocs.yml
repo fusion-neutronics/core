@@ -1,0 +1,47 @@
+# MkDocs configuration for this workspace's INTERNAL docs.
+#
+# The user-facing sites are built from the public repositories, against the
+# published wheels: fusion-neutronics/yamc and fusion-neutronics/yani. What is
+# left here is what only a person with this checkout needs: how to build the
+# workspace.
+#
+# Build: mkdocs build -f mkdocs.yml   (run from the repo root)
+site_name: core (internal)
+site_description: Internal reference for the core workspace - developer info
+docs_dir: docs
+
+theme:
+  name: material
+  logo: assets/logo.png
+  favicon: assets/logo.png
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+  palette:
+    # White header so the blue/orange yamc logo shows clearly (it blended into
+    # the default indigo banner). Accent stays indigo for links/controls.
+    - scheme: default
+      primary: white
+      accent: indigo
+
+plugins:
+  - search
+  # No mkdocstrings and no markdown-exec. The two wheels' API references are
+  # built in their own repositories from the .pyi stubs the published wheels
+  # ship, and the converter package that was the only thing documented from
+  # source here has been retired. Nothing left on this site is generated from
+  # Python, so this needs no handler and no import of anything.
+
+extra_css:
+  - css/nav.css
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight
+  # def_list and the ```mermaid custom fence went with the converter pages,
+  # which were the only ones using definition lists and format diagrams.
+  - pymdownx.superfences
+
+nav:
+  - Developer info: developer_info.md
