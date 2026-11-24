@@ -60,6 +60,10 @@ on:
         description: "yani version to publish at (required to publish yani from a dispatch)"
         type: string
         required: false
+      deploy_docs:
+        description: "Deploy both docs sites to GitHub Pages (run from main)"
+        type: boolean
+        default: false
 
 # A newer push to a pull request makes its older run moot, so that run is
 # cancelled. Only pull-request runs: a push to main, a release and a manual
@@ -1408,7 +1412,8 @@ jobs:
           retention-days: 7
 
   # The splash page and both sites as one GitHub Pages deployment, on a
-  # release only, so the published docs describe what is on PyPI. The
+  # release, so the published docs describe what is on PyPI, or on a dispatch
+  # from main with deploy_docs ticked (to republish without releasing). The
   # github-pages environment must allow the release tags (Settings >
   # Environments > github-pages > deployment branches and tags: `yamc-*`,
   # `yani-*`), since by default it accepts only the default branch.
@@ -1417,8 +1422,9 @@ jobs:
     needs: [plan, docs]
     if: >-
       ${{ !cancelled() &&
-          github.event_name == 'release' &&
-          needs.docs.result == 'success' }}
+          needs.docs.result == 'success' &&
+          (github.event_name == 'release' ||
+           (github.event_name == 'workflow_dispatch' && inputs.deploy_docs)) }}
     runs-on: ubuntu-latest
     concurrency:
       group: pages

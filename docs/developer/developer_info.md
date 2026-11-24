@@ -244,6 +244,9 @@ In CI the `docs` jobs of `ci-python.yml` build both sites from the wheels that
 run built, on every push and pull request. A release run assembles the splash
 page and both sites into one GitHub Pages deployment, so the published docs
 always describe the version on PyPI.
+To republish without releasing, run `ci-python.yml` from main (Actions >
+Python CI > Run workflow) with **deploy docs** ticked and publish left at
+`none`. Pages must have Settings > Pages > Source set to "GitHub Actions".
 
 ## Photonuclear Data Processing
 
