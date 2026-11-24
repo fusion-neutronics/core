@@ -144,6 +144,7 @@ nav:
     - Simulate shutdown dose: simulate_shutdown_dose.md
     - Results: results.md
   - Examples:
+    - From an ENDF file to a transport simulation: examples/endf_to_transport.md
     - Coupling to a heat solve: examples/thermal_coupling.md
   - Method: method.md
   - Python API: api.md
