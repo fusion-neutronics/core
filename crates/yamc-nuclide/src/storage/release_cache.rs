@@ -119,7 +119,7 @@ pub(crate) struct Timeouts {
 
 impl Timeouts {
     /// The values every download uses. See the type's docs for why each is
-    /// what it is; docs/developer_info.md quotes them.
+    /// what it is; docs/developer/developer_info.md quotes them.
     pub(crate) const DEFAULT: Timeouts = Timeouts {
         connect: Duration::from_secs(3),
         pointer: Duration::from_secs(3),

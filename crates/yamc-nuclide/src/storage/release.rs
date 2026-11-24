@@ -379,7 +379,7 @@ pub fn check_format_version(
         return Ok(());
     }
     let advice = if format_version > *SUPPORTED_FORMAT_VERSIONS.end() {
-        "Upgrade yamc-core / yani-core to a release that reads it"
+        "Upgrade yamc / yani to a release that reads it"
     } else {
         "This build no longer reads that format; use an older yamc release"
     };

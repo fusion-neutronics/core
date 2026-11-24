@@ -15,7 +15,7 @@ on:
     # A change to prose alone cannot break a build or a test: no test, script or
     # include_str! reads a Markdown file. Pushes to main and releases are not
     # filtered.
-    paths-ignore: ['**/*.md', 'docs/**', 'mkdocs.yml', 'LICENSE*']
+    paths-ignore: ['**/*.md', 'docs/**', 'LICENSE*']
   release:
     types: [published]
   workflow_dispatch:
@@ -31,7 +31,7 @@ env:
   CARGO_TERM_COLOR: always
   # Three tries over ten seconds is all cargo gives a registry that is briefly
   # unreachable, and a release has already been lost to a twelve-second one
-  # (yani-core 0.11.0). Ten stretches the same ladder over about a minute.
+  # (yani 0.11.0). Ten stretches the same ladder over about a minute.
   CARGO_NET_RETRY: 10
 
 jobs:

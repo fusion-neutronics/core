@@ -1,0 +1,11 @@
+Docs data
+
+Small inputs for the executed stellarator examples in docs/sources.md.
+
+- `w7x_fourier_zernike.json` -- the W7-X equilibrium shipped with DESC
+  (`desc/examples/W7-X_output.h5`, last member of the family, MIT licence),
+  as Fourier-Zernike coefficients in cm (`R_lmn`, `Z_lmn` times 100) with the
+  exact-zero modes dropped.
+- `cth_like_wout.json` -- `nfp`, `xm`, `xn`, `rmnc` and `zmns` (in m, shape
+  `(ns, mn_mode)`) from VMEC++'s `examples/data/wout_cth_like_fixed_bdy.nc`
+  (MIT licence), the raw arrays of a VMEC wout file.

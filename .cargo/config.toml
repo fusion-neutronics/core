@@ -35,7 +35,7 @@ rustflags = [
 # has to stay in the same array for the same reason.
 #
 # This target matters most, and used to matter most for a worse reason. The
-# three blobs under `packages/yamc-core/python/yamc/_wasm/` were committed
+# three blobs under `packages/yamc/python/yamc/_wasm/` were committed
 # binaries built by hand, and `python-source = "python"` copies that tree
 # verbatim into the wheel, so the committed bytes WERE the shipped bytes: 92
 # distinct `/home/jon/.cargo/...` and `/home/jon/.rustup/...` paths in every

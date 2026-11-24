@@ -1,0 +1,56 @@
+[build-system]
+requires = ["maturin>=1.14,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "yamc"
+# Not bumped by hand. The release workflow writes the version the release tag
+# names into this field before it builds (scripts/set-wheel-version.sh), so a
+# wheel's version comes from the tag alone. The placeholder below is what a
+# build from an untagged checkout reports. See docs/developer/developer_info.md.
+version = "0.0.0.dev0"
+description = "Yet Another Monte Carlo: neutron and photon transport with mesh geometry support"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT OR Apache-2.0"
+# Ship the project's own licenses plus the generated third-party license
+# bundle (regenerated and license-gated in CI by .github/workflows/licenses.yml).
+license-files = ["LICENSE-MIT", "LICENSE-APACHE", "THIRD-PARTY-LICENSES.html"]
+dependencies = []
+keywords = ["nuclear", "monte-carlo", "neutronics", "transport", "fusion", "shielding"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+[project.optional-dependencies]
+# TODO: when the next cadquery release (expected Dec 2026 or Jan 2027) supports
+# cadquery-ocp 8, require that cadquery here and in "all" and "dev", and test
+# against the cadquery-ocp 8 wheel only. yamc.cad already avoids the TopoDS.*_s
+# casts that cadquery-ocp 8 and conda-forge OCP 7.9.3.1 removed.
+cad = ["cadquery>=2.8.0"]
+viz = ["h5py", "numpy"]
+pandas = ["pandas>=2.2"]
+polars = ["polars>=0.20"]
+xarray = ["xarray", "pandas>=2.2"]
+all = ["cadquery>=2.8.0", "numpy", "h5py"]
+dev = ["pytest", "maturin>=1.14", "cadquery>=2.8.0", "numpy", "matplotlib", "tqdm", "pyarrow"]
+
+[project.urls]
+Homepage = "https://fusion-neutronics.github.io/yamc-and-yani/yamc/"
+Documentation = "https://fusion-neutronics.github.io/yamc-and-yani/yamc/"
+Repository = "https://github.com/fusion-neutronics/yamc-and-yani"
+Issues = "https://github.com/fusion-neutronics/yamc-and-yani/issues"
+
+[tool.maturin]
+python-source = "python"
+module-name = "yamc._core"
+manifest-path = "../../crates/yamc-python/Cargo.toml"
+# `extension-module` is not a default cargo feature (so the `stub_gen` binary
+# can link libpython); maturin must enable it for every wheel/develop build.
+features = ["yamc-python/extension-module"]
+# Ship the PEP 561 marker + generated type stubs in the wheel (belt-and-braces;
+# python-source already copies the tree, but be explicit for older maturin).
+include = ["python/yamc/py.typed", "python/yamc/**/*.pyi"]

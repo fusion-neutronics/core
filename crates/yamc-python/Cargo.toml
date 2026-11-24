@@ -1,10 +1,10 @@
 [package]
 name = "yamc-python"
-# Not the yamc-core wheel's version, and not bumped. The wheel's version is
-# `project.version` in packages/yamc-core/pyproject.toml, which the release
+# Not the yamc wheel's version, and not bumped. The wheel's version is
+# `project.version` in packages/yamc/pyproject.toml, which the release
 # workflow sets from the release tag. This crate is never published to
 # crates.io, so its own number is unused; read the wheel's at runtime with
-# `importlib.metadata.version("yamc-core")`, not `CARGO_PKG_VERSION`.
+# `importlib.metadata.version("yamc")`, not `CARGO_PKG_VERSION`.
 version = "0.21.0"
 edition = "2024"
 rust-version.workspace = true
@@ -22,7 +22,7 @@ path = "src/lib.rs"
 doctest = false
 
 [[bin]]
-# Emits packages/yamc-core/python/yamc/_core.pyi from the PyO3 bindings' embedded type metadata.
+# Emits packages/yamc/python/yamc/_core.pyi from the PyO3 bindings' embedded type metadata.
 # Gated behind `stub-gen` so normal `cargo build`/`test` skip it -- it must be
 # built WITHOUT `extension-module` so it can link libpython.
 #   cargo run --bin stub_gen --features "stub-gen,mesh,cad,gpu"
@@ -65,7 +65,7 @@ yamc-gpu = { path = "../yamc-gpu", optional = true }
 
 [features]
 # `gpu` is in here because the wheels have always built with it
-# (`--features mesh,cad,gpu` in all three yamc-core jobs) while the default did
+# (`--features mesh,cad,gpu` in all three yamc jobs) while the default did
 # not, so a developer's `maturin develop` produced a binary with a capability
 # the published one had. Reproducing a user's bug meant testing something else.
 #

@@ -114,7 +114,7 @@ impl PySurvivalBiasing {
 /// the argument to put the real static type back. Without it the stub says
 /// `typing.Any`, which silences the type checker entirely and leaves it
 /// disagreeing with the docstring right above it. The negative
-/// cases in `packages/yamc-core/tests/typing/sample_errors.py` are what keep
+/// cases in `packages/yamc/tests/typing/sample_errors.py` are what keep
 /// the override honest.
 fn rectangular_mesh(mesh: &Bound<'_, PyAny>, owner: &str) -> PyResult<PyRegularRectangularMesh> {
     mesh.extract::<PyRegularRectangularMesh>().map_err(|_| {

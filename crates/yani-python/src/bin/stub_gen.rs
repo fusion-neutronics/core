@@ -1,4 +1,4 @@
-//! Generates `packages/yani-core/python/yani/_core.pyi` from the PyO3 bindings'
+//! Generates `packages/yani/python/yani/_core.pyi` from the PyO3 bindings'
 //! embedded type metadata (registered by the `#[gen_stub_*]` macros). Run with:
 //!
 //!   cargo run -p yani-python --bin stub_gen --features stub-gen

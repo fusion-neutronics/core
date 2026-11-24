@@ -294,7 +294,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn datafiles() -> PathBuf {
-        // In `packages/yamc-core/python/yamc/data`, not beside this crate. They are not the
+        // In `packages/yamc/python/yamc/data`, not beside this crate. They are not the
         // parser's data: it takes paths and never looks a file up by name.
         // They are yamc's data, and living inside the Python package is what
         // puts them in the wheel under `yamc/data` rather than in a top-level

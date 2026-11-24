@@ -1,0 +1,13 @@
+# Docs toolchain (build from docs/yani: mkdocs build --strict). `yani` is not
+# listed: the workflow installs the wheel the same run built.
+mkdocs>=1.6
+mkdocs-material>=9.5
+mkdocstrings[python]>=1.0
+# Builds the PDF download. Also needs `playwright install chromium`.
+# 7.0 lists combined PDFs under `formats.pdf.books`; the `aggregator` it replaced
+# is deprecated, which fails the --strict build.
+mkdocs-exporter>=7.0
+
+# Type-checks the examples in the prose pages against the stubs inside the
+# yani wheel installed above. See docs/check_examples.py.
+mypy>=1.11

@@ -12,7 +12,7 @@
 #
 # The generated THIRD-PARTY-LICENSES.html is bundled into each wheel via the
 # `license-files` key in that package's own pyproject.toml (there are two
-# consumers, packages/yamc-core and packages/yani-core).
+# consumers, packages/yamc and packages/yani).
 
 accepted = [
     "Apache-2.0",

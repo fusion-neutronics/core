@@ -1,0 +1,23 @@
+Equal-wall-clock analog vs DeGVR weight windows (3 m concrete bioshield)
+mesh 50^3 over +/-1100 cm; concrete 700..1000 cm; 14.06 MeV ring source r=600
+
+analog wall:          1221.7 s   (stopped by max_runtime)
+WW generation:          15.0 s
+WW production wall:    1206.7 s
+WW total wall:         1221.7 s   (== analog budget, generation-inclusive)
+
+mesh coverage (flux>0):     analog  67.8%   WW 100.0%
+
+REACH -- deep region (outer half of the concrete + the air pad):
+  voxels resolved at all:        analog  29836   WW  70081   (WW 2.3x)
+  well-converged (rel err<0.5):  analog  19576   WW  34450   (WW 1.8x)
+  mean rel err over each's resolved set: analog 0.395 (n=29836)   WW 0.544 (n=70081)
+
+AGREEMENT / unbiasedness -- where both runs have signal:
+  median WW/analog flux ratio: 0.993   (1.0 = WW reproduces the analog answer)
+
+aggregate FOM (time-normalized): analog 2.844e+05   WW 1.446e+03
+  NOTE: the aggregate FOM is dominated by the bright near-source region,
+  where analog is already well converged and WW deliberately spends fewer
+  histories; it therefore favours analog and is NOT the deep-shielding
+  figure of merit. The reach numbers and the line plot are the honest proof.

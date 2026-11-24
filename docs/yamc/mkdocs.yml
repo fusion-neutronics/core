@@ -1,0 +1,154 @@
+# MkDocs configuration for the yamc docs.
+#
+# Why mkdocstrings (griffe backend): it follows the `from ._core import *`
+# re-export and reads the typed .pyi stubs, so the API reference shows the
+# public `yamc.Material` name with its typed constructor. (sphinx-autoapi could
+# not do this; it documents at the definition site, which forces the
+# `yamc._core` nesting to keep the types.)
+#
+# Both the stubs mkdocstrings reads and the importable module markdown-exec
+# runs come from the installed `yamc` wheel (built by ci-python.yml from
+# packages/yamc), which is why `paths` is absent below.
+#
+# The exporter plugin renders every page in headless Chromium and joins them
+# into one PDF, linked from the nav. Chromium rather than WeasyPrint because
+# the maths is typeset by MathJax, which needs a browser to run.
+#
+# Build, from this directory: pip install "yamc[all]" -r docs/requirements.txt;
+#   playwright install chromium; mkdocs build
+site_name: yamc
+site_description: Yet Another Monte Carlo -- neutron and photon transport
+site_url: https://fusion-neutronics.github.io/yamc-and-yani/yamc/
+repo_url: https://github.com/fusion-neutronics/yamc-and-yani
+docs_dir: docs
+
+theme:
+  name: material
+  logo: assets/logo.png
+  favicon: assets/logo.png
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    # Styles the hover text on the column headings of the library tables.
+    - content.tooltips
+  palette:
+    # White header so the blue/orange yamc logo shows clearly (it blended into
+    # the default indigo banner). Accent stays indigo for links/controls.
+    - scheme: default
+      primary: white
+      accent: indigo
+
+plugins:
+  - search
+  - markdown-exec          # executes code blocks and embeds output (replaces the Sphinx plot_directive)
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            # Read the typed .pyi stubs statically instead of inspecting the
+            # compiled extension (which carries no annotations).
+            allow_inspection: false
+            docstring_style: google
+            show_root_heading: true
+            show_signature_annotations: true
+            separate_signature: true
+            signature_crossrefs: true
+            members_order: source
+            # Type chips (class / method / attr) before each symbol -- another
+            # cue for where one object ends and the next starts.
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            # The griffe extension (below) copies PyO3's __new__ to __init__;
+            # merging it renders the real constructor on the class itself
+            # (Material(composition: ..., density: ...)) -- not as a __new__ member.
+            merge_init_into_class: true
+            show_submodules: false
+            # Hide private/dunder members (including the now-redundant __new__).
+            filters: ["!^_"]
+            # Promote PyO3 __new__ constructors to __init__ so they render on the class.
+            extensions:
+              - docs/griffe_ext.py:PyO3Constructor
+              # yamc's __all__ is dynamic (dir()-based); mark top-level names
+              # public so explicitly imported ones (Model, Cell, ...) render.
+              - docs/griffe_ext.py:PublicApi
+  - exporter:
+      formats:
+        pdf:
+          enabled: true
+          concurrency: 8
+          # The API reference is one long page, and Paged.js takes about half a
+          # minute to split it into sheets on a fast machine (every other page
+          # takes a second or two). On a CI runner sharing its cores with the
+          # other renders that passes the exporter's 60 s default and fails the
+          # build, so each page gets five minutes.
+          browser:
+            timeout: 300000
+          stylesheets:
+            - docs/pdf/pdf.css
+          scripts:
+            - docs/pdf/before-paging.js
+          aggregator:
+            enabled: true
+            output: yamc-documentation.pdf
+            covers: none
+
+# Keeps the inline plots intact in the PDF; see the module docstring.
+hooks:
+  - docs/pdf/exporter_hooks.py
+
+extra_css:
+  - css/api.css
+  - css/nav.css
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+
+markdown_extensions:
+  # Maths. `generic: true` emits MathJax-agnostic markup that the loader in
+  # docs/javascripts/mathjax.js renders; the equations on the method page are
+  # the reason this is here.
+  - pymdownx.arithmatex:
+      generic: true
+  - admonition
+  - pymdownx.highlight
+  # def_list renders the "term / : definition" lists the nuclear_data_to_arrow
+  # pages use; without it they come out as stray colons.
+  - def_list
+  - pymdownx.superfences:
+      custom_fences:
+        # ```mermaid fences, which the converter's format diagrams use.
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - Home: index.md
+  - Why YAMC: why_yamc.md
+  - Installation: installation.md
+  - Quick start: quick_start.md
+  - Usage guide:
+    - Overview: usage_guide.md
+    - Nuclear data libraries: nuclear_data_libraries.md
+    - Nuclear data: nuclear_data.md
+    - Materials: materials.md
+    - PNNL material list: pnnl_materials.md
+    - Geometry: geometry.md
+    - Sources: sources.md
+    - Tallies: tallies.md
+    - Models: models.md
+    - Weight windows: weight_windows.md
+    - Simulate transport: simulate_transport.md
+    - Simulate transmutation: simulate_transmutation.md
+    - Simulate shutdown dose: simulate_shutdown_dose.md
+    - Results: results.md
+  - Examples:
+    - Coupling to a heat solve: examples/thermal_coupling.md
+  - Method: method.md
+  - Python API: api.md
+  # The WebAssembly API page was here; it moves to core's docs, which are not
+  # public yet.
+  # Absolute, because the PDF is written by the exporter after the build and
+  # is not a file in docs/ for MkDocs to resolve a relative link against.
+  - Download as PDF: https://fusion-neutronics.github.io/yamc-and-yani/yamc/yamc-documentation.pdf

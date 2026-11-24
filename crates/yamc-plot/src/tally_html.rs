@@ -15,9 +15,9 @@ use crate::viewer_html::{escape_js, parse_hex_color, PresampledGrid};
 
 #[cfg(feature = "mesh")]
 static YAMT_WASM_BYTES: &[u8] =
-    include_bytes!("../../../packages/yamc-core/python/yamc/_wasm/yamt_bg.wasm");
+    include_bytes!("../../../packages/yamc/python/yamc/_wasm/yamt_bg.wasm");
 #[cfg(feature = "mesh")]
-static YAMT_WASM_JS: &str = include_str!("../../../packages/yamc-core/python/yamc/_wasm/yamt.js");
+static YAMT_WASM_JS: &str = include_str!("../../../packages/yamc/python/yamc/_wasm/yamt.js");
 
 /// Mesh-tally viewer JS body -- helpers + DOM bindings + init logic.
 /// Lives in `tally_viewer.js` so it can be edited as real JavaScript;
