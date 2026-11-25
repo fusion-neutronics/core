@@ -390,6 +390,13 @@ pub struct Material {
     /// Sorted MT numbers for macroscopic neutron XS (companion to flat buffer).
     /// Parallel to the column dimension of `macroscopic_xs_flat`.
     pub macroscopic_xs_mt_numbers: Vec<i32>,
+    /// The MT filter the cached macroscopic cross sections were built for.
+    ///
+    /// `macroscopic_xs_mt_numbers` lists the MTs the data actually had, which
+    /// can be fewer than were asked for (a nuclide with no MT 901), so it
+    /// cannot say whether a later request is already served. This can: a
+    /// request is covered when every MT it names was in this filter.
+    pub macroscopic_xs_mt_filter: Vec<i32>,
     /// Flat row-major buffer: `[n_energies × n_mts]` macroscopic neutron XS.
     /// Access XS at (energy index i, MT index j) via
     /// `macroscopic_xs_flat[i * n_mts + j]`.
@@ -724,6 +731,7 @@ impl Material {
             sorted_nuclide_ids: None,
             sorted_nuclides: None,
             macroscopic_xs_mt_numbers: Vec::new(),
+            macroscopic_xs_mt_filter: Vec::new(),
             macroscopic_xs_flat: Vec::new(),
             urr_lookup: None,
             s_alpha_beta: Vec::new(),
@@ -792,6 +800,7 @@ impl Material {
             sorted_nuclide_ids: None,
             sorted_nuclides: None,
             macroscopic_xs_mt_numbers: Vec::new(),
+            macroscopic_xs_mt_filter: Vec::new(),
             macroscopic_xs_flat: Vec::new(),
             urr_lookup: None,
             s_alpha_beta: Vec::new(),
@@ -927,6 +936,24 @@ impl Material {
         Ok(())
     }
 
+    /// Whether the cached cross sections already serve a transport run.
+    ///
+    /// A run needs the total on the fast lookup grid, the per-nuclide totals
+    /// that pick the collision partner, every MT in `mt_filter` and, for
+    /// per-nuclide tallies, the per-nuclide cross sections of each MT. A
+    /// material whose caches were filled by a query such as
+    /// `mean_free_path_neutron` or `macroscopic_cross_section` has some of
+    /// these and not others, and transporting through it as if prepared gives
+    /// no collisions or no heating, silently.
+    pub fn transport_xs_ready(&self, mt_filter: &[i32], per_nuclide_tallies: bool) -> bool {
+        self.fast_xs.is_some()
+            && self.macroscopic_xs_neutron_total_by_nuclide.is_some()
+            && mt_filter
+                .iter()
+                .all(|mt| self.macroscopic_xs_mt_filter.contains(mt))
+            && (!per_nuclide_tallies || self.macroscopic_xs_neutron_by_nuclide.is_some())
+    }
+
     pub fn invalidate_xs_cache(&mut self) {
         self.macroscopic_xs_neutron.clear();
         self.macroscopic_xs_neutron_total_by_nuclide = None;
@@ -941,6 +968,7 @@ impl Material {
         self.cached_microscopic_xs = None;
         self.element_indices.clear();
         self.macroscopic_xs_mt_numbers.clear();
+        self.macroscopic_xs_mt_filter.clear();
         self.macroscopic_xs_flat.clear();
     }
 
@@ -967,6 +995,7 @@ impl Material {
         self.urr_lookup = None;
         self.cached_microscopic_xs = None;
         self.macroscopic_xs_mt_numbers.clear();
+        self.macroscopic_xs_mt_filter.clear();
         self.macroscopic_xs_flat.clear();
     }
 
@@ -983,6 +1012,7 @@ impl Material {
         self.cached_atoms_per_barn_cm = None;
         self.cached_element_atom_densities.clear();
         self.macroscopic_xs_mt_numbers.clear();
+        self.macroscopic_xs_mt_filter.clear();
         self.macroscopic_xs_flat.clear();
         // Keep: unified_energy_grid_neutron, cached_microscopic_xs
     }

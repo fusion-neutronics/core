@@ -1829,8 +1829,12 @@ impl Model {
         // once here so the per-material loop borrows it without reallocating.
         let mt_filter = mt_filter.to_vec();
         for (i, material_arc) in self.geometry.materials_mut().iter_mut().enumerate() {
-            // Skip materials that already have transport XS computed (e.g., from transmutation step)
-            let prepared_neutrons = material_arc.fast_xs.is_some();
+            // Skip materials whose cross sections already serve this run (e.g.
+            // prepared by a transmutation step). Not merely `fast_xs.is_some()`:
+            // a query such as `mean_free_path_neutron` builds `fast_xs` from the
+            // total alone, and skipping on that transported with no collisions.
+            let prepared_neutrons =
+                material_arc.transport_xs_ready(&mt_filter, has_nuclide_tallies);
             if prepared_neutrons && !transport_secondary_photons {
                 if debug {
                     eprintln!("[DEBUG] Material slot {i} already has fast_xs, skipping...");

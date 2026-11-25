@@ -561,6 +561,7 @@ impl Material {
             }
             // Cache the results in the material
             self.macroscopic_xs_neutron = macro_xs.clone();
+            self.macroscopic_xs_mt_filter = mt_filter.clone();
 
             // Build fast O(1) energy lookup structure if we have total XS (MT=1)
             if let Some(total_xs) = macro_xs.get(&1) {
