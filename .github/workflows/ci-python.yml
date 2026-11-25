@@ -1417,8 +1417,16 @@ jobs:
   # github-pages environment must allow the release tags (Settings >
   # Environments > github-pages > deployment branches and tags: `yamc-*`,
   # `yani-*`), since by default it accepts only the default branch.
-  docs-deploy:
-    name: Deploy the docs to GitHub Pages
+  #
+  # Assembling the Pages artifact and deploying it are two jobs, not two steps.
+  # deploy-pages looks the artifact up by listing the run's artifacts, and that
+  # listing lags an upload: on the dispatch of 25 Nov it ran 0.3 s after
+  # upload-pages-artifact finalized, saw 9 of the run's 11 artifacts and failed
+  # with `No artifacts named "github-pages"`. A separate job starts long after
+  # the upload is visible, and a failed deploy can be re-run on its own without
+  # uploading a second `github-pages` artifact into the same run.
+  docs-pages-artifact:
+    name: Assemble the GitHub Pages site
     needs: [plan, docs]
     if: >-
       ${{ !cancelled() &&
@@ -1426,15 +1434,6 @@ jobs:
           (github.event_name == 'release' ||
            (github.event_name == 'workflow_dispatch' && inputs.deploy_docs)) }}
     runs-on: ubuntu-latest
-    concurrency:
-      group: pages
-      cancel-in-progress: false
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -1449,6 +1448,22 @@ jobs:
       - uses: actions/upload-pages-artifact@v5
         with:
           path: _site
+
+  docs-deploy:
+    name: Deploy the docs to GitHub Pages
+    needs: [docs-pages-artifact]
+    if: ${{ !cancelled() && needs.docs-pages-artifact.result == 'success' }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - id: deployment
         uses: actions/deploy-pages@v5
 
