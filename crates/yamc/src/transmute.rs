@@ -28,6 +28,27 @@ use yani_transmute::{
 /// goes from 1262 promotions to 113.
 const TRANSPORT_SHARE: f64 = 1.0e-10;
 
+/// Stream that keeps per-step transport seeds apart from every other use of
+/// the base seed.
+const STEP_STREAM: u32 = 0x57E9_5EED;
+
+/// The transport seed of coupled step `step`: `base` itself for step 0, and
+/// an independent seed derived from `base` and `step` for every later step.
+/// One seed reused for every step makes each step's Monte Carlo noise the
+/// same draw, so it accumulates through the run instead of averaging out.
+/// Deterministic, so a run repeats exactly, and a replica that shares the
+/// nominal base seed shares the nominal random numbers at every step.
+fn step_seed(base: u64, step: usize) -> u64 {
+    if step == 0 {
+        return base;
+    }
+    let key = yamc_rng::secondary_seed(
+        yamc_rng::secondary_seed(yamc_rng::fold_base_seed(base), STEP_STREAM),
+        step as u32,
+    );
+    yamc_rng::expand_seed(key) ^ base
+}
+
 /// The largest genuine cross section [barns] a nuclide's loaded data shows, or
 /// a bare elastic-scale stand-in when nothing is loaded for it yet.
 ///
@@ -185,9 +206,11 @@ impl Model {
     /// * `chain` - Parsed transmutation chain data
     /// * `parts` - Which optional subsections `chain` was built from
     /// * `settings` - Per-run transport settings (particle count, seed,
-    ///   threads, `max_runtime`). Every transport step uses the same settings,
+    ///   threads, `max_runtime`). Every transport step uses these settings,
     ///   so `total_particles` / `max_runtime` are applied afresh to each
     ///   step's transport solve (a per-step budget, not a whole-run one).
+    ///   The seed is the first step's; each later step transports on its own
+    ///   seed derived from it, so the steps' noise is independent.
     /// * `uncertainty` - Resample the single transport of independent mode
     ///   and re-solve, for every source [`yani_transmute::transport_replicas`]
     ///   applies. With the coupled method, run the whole coupled calculation
@@ -859,15 +882,19 @@ impl Model {
 
                     // The model's tallies are reset by the run itself.
                     let timer = crate::util::timer::Timer::start();
+                    let step_settings = crate::model::TransportSettings {
+                        seed: step_seed(settings.seed, step),
+                        ..settings.clone()
+                    };
                     self.run_internal::<NoOpTracker>(
-                        settings,
+                        &step_settings,
                         None,
                         Some(Arc::clone(&dep_tallies)),
                         false,
                     )?;
                     if snapshot_tallies {
                         step_tallies.runs.push(self.tally_results(
-                            settings.seed,
+                            step_settings.seed,
                             "cpu",
                             timer.elapsed_secs(),
                             version.to_string(),
@@ -1469,8 +1496,12 @@ impl Model {
             let mut folded = HashMap::new();
             if source_rate > 0.0 {
                 tallies.reset();
+                let step_settings = crate::model::TransportSettings {
+                    seed: step_seed(settings.seed, step),
+                    ..settings.clone()
+                };
                 self.run_internal::<NoOpTracker>(
-                    settings,
+                    &step_settings,
                     None,
                     Some(Arc::clone(&tallies)),
                     false,
@@ -1699,6 +1730,21 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Step 0 keeps the base seed; later steps get distinct seeds that
+    /// depend on the base, the same every time.
+    #[test]
+    fn step_seeds_are_distinct_and_reproducible() {
+        let seeds: Vec<u64> = (0..1000).map(|k| step_seed(7, k)).collect();
+        assert_eq!(seeds[0], 7);
+        let unique: std::collections::HashSet<u64> = seeds.iter().copied().collect();
+        assert_eq!(unique.len(), seeds.len());
+        assert_eq!(
+            seeds,
+            (0..1000).map(|k| step_seed(7, k)).collect::<Vec<_>>()
+        );
+        assert_ne!(step_seed(7, 1), step_seed(8, 1));
+    }
 
     /// Fe56 at 294 K from the offline fixture, cross sections loaded.
     fn fe56() -> Material {
