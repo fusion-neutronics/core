@@ -1779,7 +1779,10 @@ impl PyModel {
     ///         ``total_particles`` / ``max_runtime`` must be set (they are the
     ///         per-step stop conditions); a run with neither raises
     ///         ``ValueError``.
-    ///     seed: Base RNG seed for the transport runs (default: 1).
+    ///     seed: Base RNG seed for the transport runs (default: 1). In
+    ///         ``"coupled"`` mode it is the first step's; each later step
+    ///         transports on its own seed derived from it, so the steps'
+    ///         noise is independent and a rerun repeats.
     ///     threads: Optional number of threads for transport. Defaults to all available.
     ///     max_runtime: Optional per-step wall-time budget for each transport
     ///         solve (per timestep in ``"coupled"`` mode; the single solve in
