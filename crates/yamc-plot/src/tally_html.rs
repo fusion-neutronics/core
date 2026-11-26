@@ -57,6 +57,10 @@ pub struct InteractiveTallyParams {
     pub outline_pixels: usize,
     pub title: String,
     pub colorbar_title: String,
+    /// Whether `colorbar_title` was made from the tally rather than given:
+    /// an auto label shows the scaling factor beside the unit, so a scaled
+    /// plot never shows the unscaled unit alone.
+    pub colorbar_auto: bool,
     pub scaling_factor: f64,
     pub font_size: usize,
     pub show_colorbar: bool,
@@ -489,6 +493,7 @@ let state = {{
   scalingFactor: INITIAL_SCALING_FACTOR,
   fontSize: INITIAL_FONT_SIZE,
   colorbarLabel: "{colorbar_title_escaped}",
+  colorbarAuto: {colorbar_auto_js},
   showColorbar: {show_colorbar_js},
   levels: 0,
   vmin: null,
@@ -700,5 +705,10 @@ init();
         },
         title_escaped = escape_js(&params.title),
         colorbar_title_escaped = escape_js(&params.colorbar_title),
+        colorbar_auto_js = if params.colorbar_auto {
+            "true"
+        } else {
+            "false"
+        },
     )
 }

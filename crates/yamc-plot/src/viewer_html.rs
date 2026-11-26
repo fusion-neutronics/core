@@ -618,14 +618,19 @@ fn nice_ticks(min_val: f64, max_val: f64, max_ticks: usize) -> Vec<f64> {
     ticks
 }
 
-/// Unit conversion factor from cm.
-fn unit_scale(axis_units: &str) -> f64 {
-    match axis_units {
-        "mm" => 10.0,
-        "m" => 0.01,
-        "km" => 1e-5,
-        _ => 1.0, // cm
-    }
+/// The length units plot axes can be labelled in, with the factor from cm.
+pub const AXIS_UNITS: [(&str, f64); 4] = [("mm", 10.0), ("cm", 1.0), ("m", 0.01), ("km", 1e-5)];
+
+/// The factor from cm to `axis_units`, refusing a unit plots do not know
+/// rather than labelling cm values with it.
+pub fn axis_unit_scale(axis_units: &str) -> Result<f64, String> {
+    AXIS_UNITS
+        .iter()
+        .find(|(name, _)| *name == axis_units)
+        .map(|(_, scale)| *scale)
+        .ok_or_else(|| {
+            format!("axis_units must be one of 'mm', 'cm', 'm' or 'km', got {axis_units:?}")
+        })
 }
 
 /// Render a full PNG image: plot grid + border + tick marks + axis labels.
@@ -641,8 +646,8 @@ pub fn render_png_rgba(
     basis: &str,
     axis_units: &str,
     font_scale: usize,
-) -> (Vec<u8>, u32, u32) {
-    let uscale = unit_scale(axis_units);
+) -> Result<(Vec<u8>, u32, u32), String> {
+    let uscale = axis_unit_scale(axis_units)?;
     let fs = font_scale.max(1);
     let th = text_height(fs); // scaled glyph height
     let tick_len = 4 + fs; // tick mark length scales slightly
@@ -793,7 +798,7 @@ pub fn render_png_rgba(
         fs,
     );
 
-    (buf, total_w as u32, total_h as u32)
+    Ok((buf, total_w as u32, total_h as u32))
 }
 
 /// Inlined as a JS template literal in the HTML; used by `JsCsgPlotter` to

@@ -1,3 +1,5 @@
+import pytest
+
 import yamc
 
 
@@ -36,8 +38,9 @@ def test_region_plot_returns_interactive():
     assert "<html" in html.lower()
 
 
-def test_region_plot_unknown_axis_units_defaults_to_cm():
+def test_region_plot_refuses_an_unknown_axis_unit():
+    """An unknown unit used to plot cm values labelled with it; now it is
+    refused, naming the units plots know."""
     _, region, _ = _make_cell_and_geometry()
-    # Unknown units silently fall back to cm (no exception)
-    plot = region.plot(axis_units="inch")
-    assert isinstance(plot, yamc.InteractivePlot)
+    with pytest.raises(ValueError, match="'mm', 'cm', 'm' or 'km'"):
+        region.plot(axis_units="inch")

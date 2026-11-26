@@ -650,6 +650,7 @@ impl WasmSimulation {
             outline_pixels: 40_000,
             title: tally.name.clone().unwrap_or_else(|| "tally".to_string()),
             colorbar_title: "value".into(),
+            colorbar_auto: false,
             scaling_factor: 1.0,
             font_size: 18,
             show_colorbar: true,

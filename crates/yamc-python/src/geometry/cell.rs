@@ -511,6 +511,7 @@ impl PyCell {
         contour_kwargs: Option<Bound<'_, PyDict>>,
         py: pyo3::Python<'_>,
     ) -> pyo3::PyResult<crate::ui::PyInteractivePlot> {
+        yamc_plot::axis_unit_scale(axis_units).map_err(pyo3::exceptions::PyValueError::new_err)?;
         use crate::geometry::PyGeometry;
         // Build a single-cell Geometry and delegate. Materialise the cell's
         // PyMaterial into the flat Vec that Geometry::new now expects.

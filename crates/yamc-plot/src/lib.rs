@@ -26,7 +26,7 @@ pub use tally_html::{
     build_interactive_tally_html, EmbeddedSlice, ExtraValueSlices, InteractiveTallyParams, MeshMeta,
 };
 pub use viewer_html::{
-    build_interactive_html, draw_source_overlay, escape_js, parse_hex_color, render_grid_rgba,
-    render_png_rgba, ContourParams, InteractiveViewParams, PresampledGrid, SourceOverlay,
-    SourceParams, DISCRETE_COLORS,
+    axis_unit_scale, build_interactive_html, draw_source_overlay, escape_js, parse_hex_color,
+    render_grid_rgba, render_png_rgba, ContourParams, InteractiveViewParams, PresampledGrid,
+    SourceOverlay, SourceParams, AXIS_UNITS, DISCRETE_COLORS,
 };

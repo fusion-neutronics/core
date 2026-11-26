@@ -310,6 +310,7 @@ fn tally_params() -> InteractiveTallyParams {
         outline_pixels: 40_000,
         title: "test".into(),
         colorbar_title: "flux".into(),
+        colorbar_auto: false,
         scaling_factor: 1.0,
         font_size: 18,
         show_colorbar: true,

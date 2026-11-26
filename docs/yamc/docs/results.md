@@ -174,10 +174,10 @@ plot.to_html("flux_map.html")
 | `log_scale` | bool | `True` | Logarithmic color scale |
 | `outline` | str or None | `"material"` | Outline by ``"material"``, ``"cell"``, or ``None`` |
 | `resolution` | int | 400000 | Total pixel budget for geometry-outline sampling |
-| `axis_units` | str | `"cm"` | Axis units: ``"mm"``, ``"cm"``, ``"m"``, or ``"km"`` |
+| `axis_units` | str | `"cm"` | Axis units: ``"mm"``, ``"cm"``, ``"m"``, or ``"km"``; anything else raises |
 | `contour_kwargs` | dict | None | Outline appearance: ``{"colors": [...], "linewidths": int}`` |
 | `title` | str or None | None | Plot title (auto-generated if None) |
-| `colorbar_title` | str or None | None | Colorbar label (auto-generated if None) |
+| `colorbar_title` | str or None | None | Colorbar label. If None, the tally's name and per-source-particle unit, followed by ``× factor`` whenever the scaling factor is not 1 |
 | `scaling_factor` | float | 1.0 | Multiply all tally values by this factor (unit conversion) |
 | `font_size` | int | 18 | Base font size in pixels for labels and ticks |
 | `show_colorbar` | bool | `True` | Show the colorbar alongside the plot |

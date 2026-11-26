@@ -3,6 +3,8 @@
 import os
 import tempfile
 
+import pytest
+
 import yamc
 
 
@@ -296,3 +298,25 @@ class TestInteractiveTallyPlotEdgeCases:
         tally = yamc.Tally(scores=["flux"], mesh=mesh)
         plot = tally.plot(basis="xy")
         assert "MESH_DIM = [2,4,6]" in plot.html
+
+
+class TestPlotUnits:
+    """axis_units is checked, and labels follow the units and the scaling."""
+
+    def test_an_unknown_axis_unit_is_refused(self):
+        tally = _make_mesh_tally()
+        with pytest.raises(ValueError, match="axis_units must be one of"):
+            tally.plot(axis_units="in")
+        with pytest.raises(ValueError, match="axis_units must be one of"):
+            _make_geometry().plot(axis_units="inch")
+
+    def test_the_title_gives_the_slice_in_axis_units(self):
+        tally = _make_mesh_tally()
+        # The mesh centre, z = 5 cm, is 0.05 m.
+        assert "z = 0.0500 m" in tally.plot(axis_units="m").html
+        assert "z = 5.0000 cm" in tally.plot().html
+
+    def test_an_auto_colorbar_label_carries_the_scaling(self):
+        tally = _make_mesh_tally()
+        assert "colorbarAuto: true" in tally.plot(scaling_factor=1e10).html
+        assert "colorbarAuto: false" in tally.plot(colorbar_title="flux [n/cm2/s]").html
