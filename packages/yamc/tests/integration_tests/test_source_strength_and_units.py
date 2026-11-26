@@ -147,3 +147,26 @@ def test_to_numpy_uses_the_export_field_names(results):
     assert r.to_numpy("count").tolist() == r.total_count
     with pytest.raises(ValueError, match="std_dev"):
         r.to_numpy("standard_deviation")
+
+
+def test_heating_per_mass_and_as_a_dose_rate(results):
+    """A cell's mass is its volume times its material's density (2 g/cm3 here),
+    and a gray is a J/kg, so W/g and Gy/s follow from W/cm3."""
+    heating = results.with_source_strength(5e15)["heating"]
+    w_cm3 = heating.to("W/cm3").mean[0]
+    assert heating.to("W/g").mean[0] == pytest.approx(w_cm3 / 2.0)
+    assert heating.to("W/kg").mean[0] == pytest.approx(1e3 * w_cm3 / 2.0)
+    assert heating.to("Gy/s").mean[0] == pytest.approx(1e3 * w_cm3 / 2.0)
+    assert heating.to("Gy/h").units == ["Gy/h"]
+
+
+def test_a_mesh_has_no_bin_masses(results):
+    with pytest.raises(ValueError, match="mesh element's mass is not known"):
+        results.with_source_strength(1.0)["mesh"].to("W/g")
+
+
+def test_arrow_round_trip_keeps_the_cell_densities(results):
+    back = yamc.TransportResults.from_arrow(results.to_arrow())
+    assert back.with_source_strength(1.0)["heating"].to("W/g").mean == pytest.approx(
+        results.with_source_strength(1.0)["heating"].to("W/g").mean
+    )

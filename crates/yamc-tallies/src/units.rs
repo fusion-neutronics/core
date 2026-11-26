@@ -13,7 +13,7 @@
 use crate::filter::Filter;
 use crate::score::Score;
 use crate::tally::Tally;
-use yamc_units::{describe, parse, Dims, Quantity, LENGTH, PULSE, TIME};
+use yamc_units::{describe, parse, Dims, Quantity, LENGTH, MASS, PULSE, TIME};
 /// How a source strength is counted: source particles per second (steady
 /// state) or per pulse (ICF, one shot).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -142,12 +142,21 @@ pub fn result_units(tally: &Tally, strength: Option<SourceStrength>) -> Vec<Stri
         .collect()
 }
 
-/// What converting a score's results to a unit takes: a factor, and whether
-/// each bin is also divided by its volume (in cm3).
+/// What converting a score's results to a unit takes: a factor, and what each
+/// bin is also divided by.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Conversion {
     pub factor: f64,
-    pub per_volume: bool,
+    pub per: Per,
+}
+
+/// What a bin is divided by to reach a unit: nothing, its volume in cm³, or
+/// its mass in g.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Per {
+    Bin,
+    Volume,
+    Mass,
 }
 
 /// The conversion of `score`'s results, with `strength` applied, to `target`.
@@ -165,10 +174,14 @@ pub fn conversion(
     let to = parse(target)?;
     let mut per_volume_dims = from.dims;
     per_volume_dims[LENGTH] -= 3;
-    let per_volume = if to.dims == from.dims {
-        false
+    let mut per_mass_dims = from.dims;
+    per_mass_dims[MASS] -= 1;
+    let per = if to.dims == from.dims {
+        Per::Bin
     } else if to.dims == per_volume_dims {
-        true
+        Per::Volume
+    } else if to.dims == per_mass_dims {
+        Per::Mass
     } else {
         let have = format!(
             "{}/{}",
@@ -179,7 +192,7 @@ pub fn conversion(
     };
     Ok(Conversion {
         factor: from.factor / to.factor,
-        per_volume,
+        per,
     })
 }
 
@@ -209,7 +222,7 @@ fn mismatch(
             s.per.name()
         ),
         _ => format!(
-                "{head}: the result is {}, the unit is {} (a per-volume unit, such as /cm3, divides by each bin's volume)",
+                "{head}: the result is {}, the unit is {} (a per-volume unit, such as /cm3, divides by each bin's volume, and a per-mass one, such as /g or Gy, by its mass)",
                 describe(from),
                 describe(to)
             ),
@@ -233,6 +246,21 @@ mod tests {
     }
 
     #[test]
+    fn heating_converts_per_mass_and_to_gray() {
+        let t = tally(Score::Heating(HeatingScore));
+        let s = &t.scores[0];
+        let per_s = Some(SourceStrength::new(1.0, StrengthPer::Second).unwrap());
+        let c = conversion(&t, s, per_s, "W/g").unwrap();
+        assert_eq!(c.per, Per::Mass);
+        assert!(close(c.factor, J_PER_EV));
+        // A gray is a J/kg, so eV/s per g is 1.602e-16 Gy/s.
+        let c = conversion(&t, s, per_s, "Gy/s").unwrap();
+        assert_eq!(c.per, Per::Mass);
+        assert!(close(c.factor, J_PER_EV * 1000.0));
+        assert!(conversion(&t, s, None, "Gy").unwrap().per == Per::Mass);
+    }
+
+    #[test]
     fn heating_converts_with_and_without_strength() {
         let t = tally(Score::Heating(HeatingScore));
         let s = &t.scores[0];
@@ -240,8 +268,11 @@ mod tests {
         let per_s = SourceStrength::new(5e15, StrengthPer::Second).unwrap();
         let c = conversion(&t, s, Some(per_s), "W").unwrap();
         assert!(close(c.factor, J_PER_EV));
-        assert!(!c.per_volume);
-        assert!(conversion(&t, s, Some(per_s), "W/cm3").unwrap().per_volume);
+        assert_eq!(c.per, Per::Bin);
+        assert_eq!(
+            conversion(&t, s, Some(per_s), "W/cm3").unwrap().per,
+            Per::Volume
+        );
         let err = conversion(&t, s, None, "W").unwrap_err();
         assert!(err.contains("with_source_strength"), "{err}");
         let per_pulse = SourceStrength::new(1e19, StrengthPer::Pulse).unwrap();
@@ -262,9 +293,9 @@ mod tests {
         let t = tally(Score::Flux(FluxScore));
         let per_s = SourceStrength::new(1.0, StrengthPer::Second).unwrap();
         let c = conversion(&t, &t.scores[0], Some(per_s), "1/(cm2 s)").unwrap();
-        assert!(c.per_volume && close(c.factor, 1.0));
+        assert!(c.per == Per::Volume && close(c.factor, 1.0));
         let c = conversion(&t, &t.scores[0], Some(per_s), "m/s").unwrap();
-        assert!(!c.per_volume && close(c.factor, 0.01));
+        assert!(c.per == Per::Bin && close(c.factor, 0.01));
         let err = conversion(&t, &t.scores[0], Some(per_s), "eV/s").unwrap_err();
         assert!(err.contains("length"), "{err}");
     }
@@ -282,7 +313,7 @@ mod tests {
             )));
         let per_s = SourceStrength::new(1.0, StrengthPer::Second).unwrap();
         let c = conversion(&t, &t.scores[0], Some(per_s), "Sv/h").unwrap();
-        assert!(c.per_volume);
+        assert_eq!(c.per, Per::Volume);
         assert!(close(c.factor, 1e-12 * 3600.0));
         assert_eq!(result_units(&t, Some(per_s)), vec!["pSv·cm²·cm/s"]);
     }
@@ -294,7 +325,7 @@ mod tests {
         let per_s = SourceStrength::new(2.0, StrengthPer::Second).unwrap();
         assert_eq!(result_units(&t, Some(per_s)), vec!["reactions/s"]);
         let c = conversion(&t, &t.scores[0], Some(per_s), "1/(cm3 s)").unwrap();
-        assert!(c.per_volume);
+        assert_eq!(c.per, Per::Volume);
     }
 
     #[test]

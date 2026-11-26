@@ -2,7 +2,7 @@
 //!
 //! [`parse`] turns a unit string such as `"W/m3"`, `"kBq/g"`, `"1/(cm2 s)"` or
 //! `"uSv/h"` into a [`Quantity`]: a factor times powers of the base units cm,
-//! eV, s, Sv, Gy, pulse and g. A small table of symbols, with SI prefixes,
+//! eV, s, Sv, pulse and g. A small table of symbols, with SI prefixes,
 //! covers what transport and inventory results come in: length (`m`), mass
 //! (`g`), energy (`eV`, `J`), power (`W`), activity (`Bq`, `Ci`), time (`s`,
 //! `min`, `h`, `d`, `a` for a year), dose (`Sv`, `Gy`), `pulse`, and counts (`particles`,
@@ -20,28 +20,21 @@ pub const J_PER_EV: f64 = 1.602_176_634e-19;
 pub const BQ_PER_CI: f64 = 3.7e10;
 
 /// How many base dimensions a [`Quantity`] has.
-pub const N_DIMS: usize = 7;
+pub const N_DIMS: usize = 6;
 /// Dimension exponents, in the order of [`DIM_NAMES`].
 pub type Dims = [i8; N_DIMS];
 pub const LENGTH: usize = 0;
 pub const ENERGY: usize = 1;
 pub const TIME: usize = 2;
+/// Dose equivalent (Sv), kept apart from energy per mass because a sievert
+/// is a weighted quantity that does not convert to a gray.
 pub const DOSE: usize = 3;
-pub const ABSORBED_DOSE: usize = 4;
-pub const PULSE: usize = 5;
-pub const MASS: usize = 6;
-pub const DIM_NAMES: [&str; N_DIMS] = [
-    "length",
-    "energy",
-    "time",
-    "dose",
-    "absorbed dose",
-    "pulse",
-    "mass",
-];
+pub const PULSE: usize = 4;
+pub const MASS: usize = 5;
+pub const DIM_NAMES: [&str; N_DIMS] = ["length", "energy", "time", "dose", "pulse", "mass"];
 
-/// A unit as a factor times powers of the base units cm, eV, s, Sv, Gy, pulse
-/// and g: `W` is `6.24e18 eV^1 s^-1`.
+/// A unit as a factor times powers of the base units cm, eV, s, Sv, pulse and
+/// g: `W` is `6.24e18 eV^1 s^-1`, and `Gy` is a J/kg.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Quantity {
     pub factor: f64,
@@ -197,7 +190,10 @@ fn prefixable_symbol(s: &str) -> Option<Quantity> {
         "J" => Quantity::base(1.0 / J_PER_EV, 1),
         "W" => Quantity::base(1.0 / J_PER_EV, 1) * Quantity::base(1.0, TIME).powi(-1),
         "Sv" => Quantity::base(1.0, 3),
-        "Gy" => Quantity::base(1.0, 4),
+        // An absorbed dose is an energy per mass: J/kg.
+        "Gy" => {
+            Quantity::base(1.0 / (J_PER_EV * 1000.0), ENERGY) * Quantity::base(1.0, MASS).powi(-1)
+        }
         "g" => Quantity::base(1.0, MASS),
         "Bq" => Quantity::base(1.0, TIME).powi(-1),
         "Ci" => Quantity::base(1.0 / BQ_PER_CI, TIME).powi(-1),
@@ -402,21 +398,21 @@ mod tests {
     fn parses_common_units() {
         let w = parse("W").unwrap();
         assert!(close(w.factor, 1.0 / J_PER_EV));
-        assert_eq!(w.dims, [0, 1, -1, 0, 0, 0, 0]);
-        assert_eq!(parse("W/cm3").unwrap().dims, [-3, 1, -1, 0, 0, 0, 0]);
+        assert_eq!(w.dims, [0, 1, -1, 0, 0, 0]);
+        assert_eq!(parse("W/cm3").unwrap().dims, [-3, 1, -1, 0, 0, 0]);
         assert_eq!(parse("W/m^3").unwrap().factor, w.factor / 1e6);
         let flux = parse("1/(cm2 s)").unwrap();
-        assert_eq!(flux.dims, [-2, 0, -1, 0, 0, 0, 0]);
+        assert_eq!(flux.dims, [-2, 0, -1, 0, 0, 0]);
         assert_eq!(parse("n/cm2/s").unwrap(), flux);
         assert_eq!(parse("cm^-2 s^-1").unwrap(), flux);
         assert_eq!(parse("cm⁻² s⁻¹").unwrap(), flux);
         assert!(close(parse("pSv·cm²").unwrap().factor, 1e-12));
-        assert_eq!(parse("pSv·cm²").unwrap().dims, [2, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(parse("pSv·cm²").unwrap().dims, [2, 0, 0, 1, 0, 0]);
         assert!(close(parse("Sv/h").unwrap().factor, 1.0 / 3600.0));
         assert!(close(parse("MeV").unwrap().factor, 1e6));
         assert!(close(parse("ms").unwrap().factor, 1e-3));
-        assert_eq!(parse("Gy").unwrap().dims, [0, 0, 0, 0, 1, 0, 0]);
-        assert_eq!(parse("J/pulse").unwrap().dims, [0, 1, 0, 0, 0, -1, 0]);
+        assert_eq!(parse("Gy").unwrap(), parse("J/kg").unwrap());
+        assert_eq!(parse("J/pulse").unwrap().dims, [0, 1, 0, 0, -1, 0]);
         assert_eq!(parse("reactions/source-particle").unwrap(), Quantity::ONE);
     }
 
@@ -428,11 +424,11 @@ mod tests {
         assert!(close(parse("mCi").unwrap().factor, BQ_PER_CI * 1e-3));
         let kg = parse("kg").unwrap();
         assert!(close(kg.factor, 1e3));
-        assert_eq!(kg.dims, [0, 0, 0, 0, 0, 0, 1]);
+        assert_eq!(kg.dims, [0, 0, 0, 0, 0, 1]);
         assert!(close(parse("mg").unwrap().factor, 1e-3));
-        assert_eq!(parse("Bq/kg").unwrap().dims, [0, 0, -1, 0, 0, 0, -1]);
+        assert_eq!(parse("Bq/kg").unwrap().dims, [0, 0, -1, 0, 0, -1]);
         // Gy and y, cm and m, mCi and Ci: the whole symbol wins over a prefix.
-        assert_eq!(parse("Gy").unwrap().dims[ABSORBED_DOSE], 1);
+        assert_eq!(parse("Gy").unwrap().dims[MASS], -1);
         assert!(close(parse("cm").unwrap().factor, 1.0));
     }
 
@@ -480,6 +476,6 @@ mod tests {
         assert!(close(convert("Sv/h", "mSv/h").unwrap(), 1e3));
         assert!(close(convert("Gy/h", "Gy/s").unwrap(), 1.0 / 3600.0));
         let err = convert("Gy/h", "Sv/h").unwrap_err();
-        assert!(err.contains("absorbed dose"), "{err}");
+        assert!(err.contains("dose"), "{err}");
     }
 }

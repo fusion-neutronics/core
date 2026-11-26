@@ -302,13 +302,21 @@ impl TransportResults {
             .and_then(|r| r.normalisation.source_strength)
     }
 
-    /// Record the volume of every cell named by a cell filter, from
-    /// `volume_of(cell_id)`, so results can be converted to per-volume units.
-    pub fn set_cell_volumes(&mut self, volume_of: impl Fn(u32) -> Option<f64>) {
+    /// Record the volume and the material mass density of every cell named
+    /// by a cell filter, from `volume_of(cell_id)` and `density_of(cell_id)`,
+    /// so results can be converted to per-volume and per-mass units.
+    pub fn set_cell_volumes(
+        &mut self,
+        volume_of: impl Fn(u32) -> Option<f64>,
+        density_of: impl Fn(u32) -> Option<f64>,
+    ) {
         for r in &mut self.results {
             if let Some(cf) = r.tally.get_cell_filter() {
                 let volumes = cf.cell_ids.iter().map(|&id| volume_of(id)).collect();
-                Arc::make_mut(r).normalisation.cell_volumes = volumes;
+                let densities = cf.cell_ids.iter().map(|&id| density_of(id)).collect();
+                let n = &mut Arc::make_mut(r).normalisation;
+                n.cell_volumes = volumes;
+                n.cell_densities = densities;
             }
         }
     }

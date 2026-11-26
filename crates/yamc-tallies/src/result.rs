@@ -132,6 +132,11 @@ pub struct Normalisation {
     /// order, `None` for a cell without one. Set from the geometry when the
     /// results are built.
     pub cell_volumes: Vec<Option<f64>>,
+    /// Mass density in g/cm3 of each cell of the tally's cell filter, in
+    /// filter order, `None` for a void cell. Set from the geometry with
+    /// `cell_volumes`, so a per-mass unit can divide by each cell's mass.
+    #[serde(default)]
+    pub cell_densities: Vec<Option<f64>>,
     /// Per-bin factor from the per-source-particle fields to the reported
     /// values: empty for 1, one entry when every bin shares it.
     #[serde(skip)]
@@ -233,13 +238,20 @@ impl TallyResult {
             .zip(&units)
             .map(|(score, unit)| crate::units::conversion(&self.tally, score, strength, unit))
             .collect::<Result<Vec<_>, _>>()?;
-        let per_volume = conversions.iter().any(|c| c.per_volume);
+        use crate::units::Per;
+        let per_volume = conversions.iter().any(|c| c.per == Per::Volume);
+        let per_mass = conversions.iter().any(|c| c.per == Per::Mass);
         let uniform = conversions.windows(2).all(|w| w[0] == w[1]);
-        self.normalisation.scale = if !per_volume && uniform {
+        self.normalisation.scale = if !per_volume && !per_mass && uniform {
             vec![s * conversions.first().map_or(1.0, |c| c.factor)]
         } else {
             let volumes = if per_volume {
                 self.bin_volumes()?
+            } else {
+                Vec::new()
+            };
+            let masses = if per_mass {
+                self.bin_masses()?
             } else {
                 Vec::new()
             };
@@ -248,7 +260,11 @@ impl TallyResult {
             let scale: Vec<f64> = (0..n)
                 .map(|b| {
                     let c = conversions[(b / per_score).min(conversions.len() - 1)];
-                    let v = if c.per_volume { volumes[b] } else { 1.0 };
+                    let v = match c.per {
+                        Per::Bin => 1.0,
+                        Per::Volume => volumes[b],
+                        Per::Mass => masses[b],
+                    };
                     s * c.factor / v
                 })
                 .collect();
@@ -315,6 +331,46 @@ impl TallyResult {
                 "tally {name} has no bin volumes: a per-volume unit needs a mesh filter, or a cell filter on cells with a volume"
             )),
         }
+    }
+
+    /// Mass in g of each bin, flat in the same order as `mean`: the cell's
+    /// volume times its material's mass density, for a cell-filtered tally.
+    /// A mesh element can straddle materials, so its mass is not known.
+    pub fn bin_masses(&self) -> Result<Vec<f64>, String> {
+        let t = &self.tally;
+        let name = t.display_name();
+        let Some(cf) = t.get_cell_filter() else {
+            return Err(format!(
+                "tally {name} has no bin masses: a per-mass unit needs a cell filter on cells \
+                 with a volume and a material (a mesh element's mass is not known)"
+            ));
+        };
+        let volumes = self.bin_volumes()?;
+        let densities = cf
+            .cell_ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                self.normalisation
+                    .cell_densities
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .ok_or_else(|| {
+                        format!(
+                            "tally {name}: cell {id} has no material, so no mass; a per-mass unit needs one"
+                        )
+                    })
+            })
+            .collect::<Result<Vec<f64>, String>>()?;
+        let n = self.num_bins();
+        let stride: usize = match self.dim_labels.iter().position(|d| d == "cell") {
+            Some(p) => self.shape[p + 1..].iter().product(),
+            None => n,
+        };
+        Ok((0..n)
+            .map(|b| volumes[b] * densities[(b / stride.max(1)) % densities.len()])
+            .collect())
     }
 
     /// Per-bin nuclear-data standard deviation of the score, when the run
@@ -1449,6 +1505,31 @@ mod tests {
         assert_eq!(flux.units(), vec!["1/cm2/source-particle"]);
         let err = r.to_units(&["1/(cm2 s)".to_string()]).unwrap_err();
         assert!(err.contains("with_source_strength"), "{err}");
+    }
+
+    /// A per-mass unit divides by each cell's volume times its density; a void
+    /// cell is refused by name.
+    #[test]
+    fn per_mass_units_use_cell_volumes_and_densities() {
+        use crate::filter::Filter;
+        let mut t = scored(Score::Heating(crate::score::HeatingScore));
+        t.filters = vec![Filter::Cell(crate::CellFilter::from_ids(vec![4, 9]))];
+        let mut r = with_mean(t, vec![1.0, 1.0]);
+        r.normalisation.cell_volumes = vec![Some(2.0), Some(5.0)];
+        r.normalisation.cell_densities = vec![Some(8.0), None];
+        let err = r.to_units(&["eV/g".to_string()]).unwrap_err();
+        assert!(err.contains("cell 9 has no material"), "{err}");
+        r.normalisation.cell_densities = vec![Some(8.0), Some(1.0)];
+        let per_g = r.to_units(&["eV/g".to_string()]).unwrap();
+        assert_eq!(per_g.scaled(&per_g.mean), vec![1.0 / 16.0, 1.0 / 5.0]);
+        let gy = r
+            .with_source_strength(strength(1.0))
+            .unwrap()
+            .to_units(&["Gy/s".to_string()])
+            .unwrap();
+        let got = gy.scaled(&gy.mean);
+        assert!((got[0] - 1.602_176_634e-16 / 16.0).abs() < 1e-28, "{got:?}");
+        assert_eq!(gy.units(), vec!["Gy/s"]);
     }
 
     /// One unit per score, each converted on its own; a total over scores of
