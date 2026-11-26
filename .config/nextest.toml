@@ -1,0 +1,26 @@
+# cargo-nextest configuration. CI runs `cargo nextest run --profile ci`.
+#
+# nextest runs every test in its own process and schedules tests from all of
+# the workspace's test binaries together, rather than one binary at a time as
+# `cargo test` does. Tests that relied on sharing a process (a `static` set up
+# once for the binary) set it up once per test instead; the few that write to
+# the shared nuclear-data cache are kept to one at a time below.
+
+[profile.ci]
+# Run everything and report every failure, rather than stopping at the first.
+fail-fast = false
+# Name tests that run longer than a minute, and the slowest at the end, so the
+# next thing to speed up is in the log.
+slow-timeout = { period = "60s" }
+final-status-level = "slow"
+failure-output = "immediate-final"
+
+[test-groups]
+# Tests that download into, or reconfigure, the process-wide nuclear-data
+# cache. Under `cargo test` they never overlapped with another binary's; here
+# they could, so they run one at a time.
+nuclear-data-cache = { max-threads = 1 }
+
+[[profile.ci.overrides]]
+filter = 'binary(ranged_reactions_download) | binary(batched_download) | binary(set_cross_sections_storage_backend) | binary(fixture_cache_is_readable)'
+test-group = 'nuclear-data-cache'

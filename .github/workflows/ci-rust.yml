@@ -77,6 +77,10 @@ jobs:
         with:
           shared-key: ci
           cache-on-failure: true
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
       # The `yamc-python` crate is a pyo3 binding built WITHOUT
       # `extension-module`, so `cargo test --workspace` links its test binary
       # against the full libpython and must find it at RUNTIME. Pin a Python
@@ -146,7 +150,17 @@ jobs:
           # `/home/jon`. crates/yamc/tests/fixture_cache_is_readable.rs is what
           # this switch arms.
           YAMC_REQUIRE_FIXTURES: "1"
-        run: cargo test --workspace --verbose
+        # nextest runs tests from all ~400 test binaries side by side, where
+        # `cargo test` runs the binaries one after another: 247 of them hold
+        # three tests or fewer, so most of the runner sat idle for a third of
+        # the step. Each test runs in its own process, and the slowest are
+        # reported (see .config/nextest.toml).
+        run: cargo nextest run --workspace --profile ci
+      - name: Doc tests
+        # nextest does not run doc tests. The two binding crates set
+        # `doctest = false` (their `///` comments are Python docs, not Rust),
+        # which an explicit `--doc` overrides, so they are left out by name.
+        run: cargo test --workspace --doc --exclude yamc-python --exclude yani-python
       - name: Build Rust docs (public API)
         run: cargo doc --workspace --no-deps
       - name: Test yamc examples

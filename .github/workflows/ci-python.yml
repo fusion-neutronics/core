@@ -882,7 +882,21 @@ jobs:
           # The fixtures were fetched above, so the data-dependent tests must
           # read them rather than self-skip (crates/yamc/tests/fixture_cache_is_readable.rs).
           YAMC_REQUIRE_FIXTURES: "1"
-        run: cargo test -p yamc --features mpi --verbose
+        # On a pull request: the library's own tests, which exercise the MPI
+        # context, and the MPI test files. The rest of the yamc suite runs,
+        # without the mpi feature, in the Rust tests workflow, and running all
+        # of it again here took over 20 minutes on each of two runners.
+        # Everywhere else (pushes to main, releases): the whole yamc suite with
+        # the mpi feature on, so every code path is also checked against the
+        # real MPI calls on a single rank.
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            cargo test -p yamc --features mpi --lib \
+              --test mpi_host_initialised --test mpi_replica_weights --test mpi_weight_windows
+          else
+            cargo test -p yamc --features mpi
+          fi
 
       - name: Run the Rust TBR example with MPI
         run: |

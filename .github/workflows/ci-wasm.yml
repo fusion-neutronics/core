@@ -93,7 +93,11 @@ jobs:
           done
           cd crates/yamc
           wasm-pack build --target web --features wasm
-          cargo test -p yamc --features wasm-test
+          # The library's tests and the wasm test files: the rest of the yamc
+          # suite runs, without the wasm feature, in the Rust tests workflow.
+          cargo test -p yamc --features wasm-test --lib \
+            --test wasm_sample_slice --test wasm_fetch_browser --test wasm_ranged_store \
+            --test wasm_simulation --test wasm_simulation_natural_li
           RUST_BACKTRACE=full wasm-pack test --headless --firefox --features wasm-test
 
   # The browser binding, which the job above does not cover: `yamc` builds for
