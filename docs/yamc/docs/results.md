@@ -351,7 +351,7 @@ result.to("W/m3").to_vtkhdf(
 )
 ```
 
-``length_units`` (``"cm"`` by default, ``"m"`` or ``"mm"``) sets only the coordinates and the unit string sets only the values, so pick them to agree: ``"W/m3"`` with ``"m"``, ``"W/cm3"`` with ``"cm"``. Every ``to_vtkhdf`` (geometry, cells, regions, sources, models, tracks and CAD meshes) takes the same ``length_units``, so files written with the same unit overlay in ParaView:
+``length_units`` (``"cm"`` by default, ``"m"``, ``"mm"`` or ``"km"``, the same units plots take) sets only the coordinates and the unit string sets only the values, so pick them to agree: ``"W/m3"`` with ``"m"``, ``"W/cm3"`` with ``"cm"``. Every ``to_vtkhdf`` (geometry, cells, regions, sources, models, tracks and CAD meshes) takes the same ``length_units``, so files written with the same unit overlay in ParaView. Each file records its unit in a ``length_units`` attribute on the ``VTKHDF`` group (and on each block of a model file), so a reader can tell cm from m:
 
 <!-- doctest: skip -->
 ```python

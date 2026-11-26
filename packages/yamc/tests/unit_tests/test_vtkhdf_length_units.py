@@ -7,7 +7,11 @@ import pytest
 h5py = pytest.importorskip("h5py")
 
 import yamc  # noqa: E402
-from yamc.vtkhdf import mesh_tally_to_vtkhdf, polylines_to_vtkhdf  # noqa: E402
+from yamc.vtkhdf import (  # noqa: E402
+    mesh_tally_to_vtkhdf,
+    polylines_to_vtkhdf,
+    source_to_vtkhdf,
+)
 
 SCALES = [("cm", 1.0), ("m", 0.01), ("mm", 10.0)]
 
@@ -128,3 +132,44 @@ def test_unstructured_mesh_points_are_scaled(tmp_path):
 def test_an_unknown_unit_is_refused_by_name(tmp_path):
     with pytest.raises(ValueError, match="length_units must be one of"):
         mesh_tally_to_vtkhdf(str(tmp_path / "x.vtkhdf"), _MockTally(), length_units="inch")
+
+
+def _units_attr(group):
+    value = group.attrs["length_units"]
+    return value.decode() if isinstance(value, bytes) else value
+
+
+@pytest.mark.parametrize("units", ["cm", "m", "mm", "km"])
+def test_every_file_records_its_length_unit(tmp_path, units):
+    """A reader can tell cm from m without being told."""
+    model, cell, region = _sphere_model()
+    writers = {
+        "tally": lambda p: mesh_tally_to_vtkhdf(p, _MockTally(), length_units=units),
+        "geometry": lambda p: model.geometry.to_vtkhdf(p, resolution=27, length_units=units),
+        "cell": lambda p: cell.to_vtkhdf(p, resolution=27, length_units=units),
+        "region": lambda p: region.to_vtkhdf(p, resolution=27, length_units=units),
+        "source": lambda p: source_to_vtkhdf(p, model.source, samples=3, length_units=units),
+        "polylines": lambda p: polylines_to_vtkhdf(p, [[0, 0, 0], [1, 0, 0]], [0, 2], length_units=units),
+    }
+    for name, write in writers.items():
+        path = str(tmp_path / f"{name}.vtkhdf")
+        write(path)
+        with h5py.File(path) as f:
+            assert _units_attr(f["VTKHDF"]) == units, name
+
+    path = str(tmp_path / "model.vtkhdf")
+    model.to_vtkhdf(path, resolution=27, samples=3, length_units=units)
+    with h5py.File(path) as f:
+        assert _units_attr(f["VTKHDF"]) == units
+        for block in ("geometry", "source"):
+            assert _units_attr(f["VTKHDF"][block]) == units, block
+
+
+def test_an_unstructured_mesh_records_its_length_unit(tmp_path):
+    if not hasattr(yamc, "UnstructuredMesh"):
+        pytest.skip("built without the mesh feature")
+    mesh = yamc.UnstructuredMesh([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], [[0, 1, 2, 3]])
+    mesh.to_vtkhdf(tmp_path / "u.vtkhdf", length_units="km")
+    with h5py.File(tmp_path / "u.vtkhdf") as f:
+        assert _units_attr(f["VTKHDF"]) == "km"
+        np.testing.assert_allclose(f["VTKHDF/Points"][()][1], [1e-5, 0, 0])

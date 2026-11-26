@@ -175,7 +175,7 @@ def unstructured_mesh_to_vtkhdf(self, path, *, length_units="cm") -> None:
     """Write the cells, with each one's ``region_id`` (0-based index into
     ``regions``), to a VTKHDF UnstructuredGrid file for ParaView. Requires
     ``h5py`` (``pip install yamc[viz]``). ``length_units`` is the unit of the
-    written coordinates, ``"cm"`` (default), ``"m"`` or ``"mm"``."""
+    written coordinates, ``"cm"`` (default), ``"m"``, ``"mm"`` or ``"km"``."""
     import os
 
     import numpy as np
@@ -191,4 +191,5 @@ def unstructured_mesh_to_vtkhdf(self, path, *, length_units="cm") -> None:
         np.asarray(self.vertices, dtype="float64") * _length_scale(length_units),
         self.cells,
         cell_data={"region_id": [index[r] for r in self.cell_regions]},
+        length_units=length_units,
     )

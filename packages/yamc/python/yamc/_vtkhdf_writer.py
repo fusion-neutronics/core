@@ -42,7 +42,7 @@ def _write_vtkhdf_header(root, n_points, n_cells, n_connectivity_ids):
     )
 
 
-def surface_to_vtkhdf(filename, vertices, triangles, cell_data=None):
+def surface_to_vtkhdf(filename, vertices, triangles, cell_data=None, length_units="cm"):
     """Write surface triangle mesh to VTKHDF UnstructuredGrid.
 
     Args:
@@ -50,6 +50,7 @@ def surface_to_vtkhdf(filename, vertices, triangles, cell_data=None):
         vertices: Sequence of [x, y, z] triples, shape (N, 3).
         triangles: Sequence of [i, j, k] triples, shape (M, 3).
         cell_data: Optional dict of name -> sequence (one value per triangle).
+        length_units: The unit ``vertices`` are in, recorded on the file.
     """
     try:
         import h5py
@@ -67,6 +68,11 @@ def surface_to_vtkhdf(filename, vertices, triangles, cell_data=None):
 
     with h5py.File(filename, "w") as f:
         root = f.create_group("VTKHDF")
+        root.attrs.create(
+            "length_units",
+            length_units.encode("ascii"),
+            dtype=h5py.string_dtype("ascii", len(length_units)),
+        )
         _write_vtkhdf_header(root, n_points, n_tris, len(connectivity))
         root.create_dataset("Points", data=vertices, dtype="float64")
         root.create_dataset("Connectivity", data=connectivity, dtype="int64")
@@ -79,7 +85,7 @@ def surface_to_vtkhdf(filename, vertices, triangles, cell_data=None):
                 cd.create_dataset(name, data=data)
 
 
-def tet_to_vtkhdf(filename, vertices, tets, cell_data=None):
+def tet_to_vtkhdf(filename, vertices, tets, cell_data=None, length_units="cm"):
     """Write tetrahedral mesh to VTKHDF UnstructuredGrid.
 
     Args:
@@ -87,6 +93,7 @@ def tet_to_vtkhdf(filename, vertices, tets, cell_data=None):
         vertices: Sequence of [x, y, z] triples, shape (N, 3).
         tets: Sequence of [i, j, k, l] quadruples, shape (M, 4).
         cell_data: Optional dict of name -> sequence (one value per tet).
+        length_units: The unit ``vertices`` are in, recorded on the file.
     """
     try:
         import h5py
@@ -104,6 +111,11 @@ def tet_to_vtkhdf(filename, vertices, tets, cell_data=None):
 
     with h5py.File(filename, "w") as f:
         root = f.create_group("VTKHDF")
+        root.attrs.create(
+            "length_units",
+            length_units.encode("ascii"),
+            dtype=h5py.string_dtype("ascii", len(length_units)),
+        )
         _write_vtkhdf_header(root, n_points, n_tets, len(connectivity))
         root.create_dataset("Points", data=vertices, dtype="float64")
         root.create_dataset("Connectivity", data=connectivity, dtype="int64")
@@ -116,7 +128,7 @@ def tet_to_vtkhdf(filename, vertices, tets, cell_data=None):
                 cd.create_dataset(name, data=data)
 
 
-def mixed_to_vtkhdf(filename, vertices, triangles, tets, cell_data=None):
+def mixed_to_vtkhdf(filename, vertices, triangles, tets, cell_data=None, length_units="cm"):
     """Write mixed triangle + tetrahedron mesh to VTKHDF UnstructuredGrid.
 
     Args:
@@ -126,6 +138,7 @@ def mixed_to_vtkhdf(filename, vertices, triangles, tets, cell_data=None):
         tets: Sequence of [i, j, k, l] quadruples, shape (M_tet, 4).
         cell_data: Optional dict of name -> sequence (one value per cell,
             triangles first then tets).
+        length_units: The unit ``vertices`` are in, recorded on the file.
     """
     try:
         import h5py
@@ -153,6 +166,11 @@ def mixed_to_vtkhdf(filename, vertices, triangles, tets, cell_data=None):
 
     with h5py.File(filename, "w") as f:
         root = f.create_group("VTKHDF")
+        root.attrs.create(
+            "length_units",
+            length_units.encode("ascii"),
+            dtype=h5py.string_dtype("ascii", len(length_units)),
+        )
         _write_vtkhdf_header(root, n_points, n_cells, len(connectivity))
         root.create_dataset("Points", data=vertices, dtype="float64")
         root.create_dataset("Connectivity", data=connectivity, dtype="int64")

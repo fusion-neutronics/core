@@ -2976,7 +2976,7 @@ class MeshGeometry:
     def __repr__(self) -> builtins.str: ...
     def add_tets(self, volumes: typing.Optional[typing.Sequence[builtins.str]] = None, target_edge_length: builtins.float | dict[builtins.str, builtins.float] | None = None, *, mesh_threads: builtins.int | typing.Literal["all"] = "all") -> MeshGeometry:
         r"""A copy of this geometry with the named volumes filled with tetrahedra, conformal with the surface and with each other. The geometry itself is unchanged."""
-    def to_vtkhdf(self, path: builtins.str | os.PathLike[builtins.str], *, length_units: typing.Literal["cm", "m", "mm"] = "cm") -> None:
+    def to_vtkhdf(self, path: builtins.str | os.PathLike[builtins.str], *, length_units: typing.Literal["mm", "cm", "m", "km"] = "cm") -> None:
         r"""Write the mesh's triangles and tets, with each cell's volume_id and material_id, to a VTKHDF UnstructuredGrid file for ParaView. Requires h5py (pip install yamc[viz])."""
     def plot(self, *args: typing.Any, **kwargs: typing.Any) -> InteractivePlot:
         r"""Render an interactive plot of this mesh geometry. See the docs for keyword arguments."""
@@ -6282,7 +6282,7 @@ class TallyResult:
         r"""Return one tally field as a labelled xarray.DataArray, its unit in attrs['units']. Requires xarray (pip install yamc[xarray])."""
     def to_dataset(self) -> typing.Any:
         r"""Return mean/std_dev/rel_err as one labelled xarray.Dataset, each with attrs['units']. Requires xarray."""
-    def to_vtkhdf(self, filename: builtins.str, *, scores: typing.Optional[typing.Sequence[builtins.int | builtins.str]] = None, datasets: typing.Sequence[builtins.str] = ("mean", "standard_deviation", "relative_error"), sum_energy: builtins.bool = True, sum_nuclides: builtins.bool = True, length_units: typing.Literal["cm", "m", "mm"] = "cm") -> None:
+    def to_vtkhdf(self, filename: builtins.str, *, scores: typing.Optional[typing.Sequence[builtins.int | builtins.str]] = None, datasets: typing.Sequence[builtins.str] = ("mean", "standard_deviation", "relative_error"), sum_energy: builtins.bool = True, sum_nuclides: builtins.bool = True, length_units: typing.Literal["mm", "cm", "m", "km"] = "cm") -> None:
         r"""Write this mesh tally result to a VTK-HDF file for ParaView, values in this result's units (convert with to() first, e.g. to('W/m3')), each dataset with attrs['units']. Requires h5py (pip install yamc[viz])."""
 
 @typing.final
@@ -6389,7 +6389,7 @@ class Tracks:
         are integer codes indexing ``event_type_names`` and
         ``particle_type_names``.
         """
-    def to_vtkhdf(self, filename: builtins.str, *, length_units: typing.Literal["cm", "m", "mm"] = "cm") -> None:
+    def to_vtkhdf(self, filename: builtins.str, *, length_units: typing.Literal["mm", "cm", "m", "km"] = "cm") -> None:
         r"""Write one polyline per particle track to a VTK-HDF PolyData file for ParaView. Requires h5py (pip install yamc[viz])."""
 
 @typing.final
@@ -8336,7 +8336,7 @@ class UnstructuredMesh:
     def __new__(cls, vertices: typing.Sequence[typing.Sequence[builtins.float]], cells: typing.Sequence[typing.Sequence[builtins.int]], cell_regions: typing.Optional[typing.Sequence[builtins.str]] = None) -> UnstructuredMesh: ...
     def __len__(self) -> builtins.int: ...
     def __repr__(self) -> builtins.str: ...
-    def to_vtkhdf(self, path: builtins.str | os.PathLike[builtins.str], *, length_units: typing.Literal["cm", "m", "mm"] = "cm") -> None:
+    def to_vtkhdf(self, path: builtins.str | os.PathLike[builtins.str], *, length_units: typing.Literal["mm", "cm", "m", "km"] = "cm") -> None:
         r"""Write the cells with each one's region_id to a VTKHDF UnstructuredGrid file for ParaView. Requires h5py (pip install yamc[viz])."""
 
 @typing.final
