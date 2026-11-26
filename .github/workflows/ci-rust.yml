@@ -157,8 +157,10 @@ jobs:
         # reported (see .config/nextest.toml).
         run: cargo nextest run --workspace --profile ci
       - name: Doc tests
-        # nextest does not run doc tests.
-        run: cargo test --workspace --doc
+        # nextest does not run doc tests. The two binding crates set
+        # `doctest = false` (their `///` comments are Python docs, not Rust),
+        # which an explicit `--doc` overrides, so they are left out by name.
+        run: cargo test --workspace --doc --exclude yamc-python --exclude yani-python
       - name: Build Rust docs (public API)
         run: cargo doc --workspace --no-deps
       - name: Test yamc examples
