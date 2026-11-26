@@ -19,6 +19,29 @@ If you would rather not install yet,
 solver in your browser and will write the setup you build there back out as a
 Python script.
 
+### The development version
+
+`pip install yani` gives the latest release. The unreleased changes on the main
+branch build from source, which needs a [Rust toolchain](https://rustup.rs/),
+version 1.99 or newer (`rustup update` brings an existing one up to date):
+
+```bash
+pip install "yani @ git+https://github.com/fusion-neutronics/yamc-and-yani.git#subdirectory=packages/yani"
+```
+
+To work on the code, clone the repository and install it in editable mode.
+Changes to the Python files take effect straight away; after changing Rust
+code, run the install again to rebuild:
+
+```bash
+git clone https://github.com/fusion-neutronics/yamc-and-yani.git
+cd yamc-and-yani
+pip install -e packages/yani
+```
+
+A build from source reports version `0.0.0.dev0`, and `yani.__commit__`
+(above) names the commit it was built from.
+
 ## Point it at nuclear data
 
 Two kinds of data are needed, and they are configured separately.
