@@ -171,20 +171,24 @@ def add_tets(
     return geometry._with_report(report)
 
 
-def unstructured_mesh_to_vtkhdf(self, path) -> None:
+def unstructured_mesh_to_vtkhdf(self, path, *, length_units="cm") -> None:
     """Write the cells, with each one's ``region_id`` (0-based index into
     ``regions``), to a VTKHDF UnstructuredGrid file for ParaView. Requires
-    ``h5py`` (``pip install yamc[viz]``)."""
+    ``h5py`` (``pip install yamc[viz]``). ``length_units`` is the unit of the
+    written coordinates, ``"cm"`` (default), ``"m"`` or ``"mm"``."""
     import os
 
+    import numpy as np
+
     from yamc._vtkhdf_writer import tet_to_vtkhdf
+    from yamc.vtkhdf import _length_scale
 
     path = os.fspath(path)
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     index = {r: i for i, r in enumerate(self.regions)}
     tet_to_vtkhdf(
         path,
-        self.vertices,
+        np.asarray(self.vertices, dtype="float64") * _length_scale(length_units),
         self.cells,
         cell_data={"region_id": [index[r] for r in self.cell_regions]},
     )

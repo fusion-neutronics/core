@@ -280,7 +280,7 @@ Each ``TrackEvent`` includes: ``particle_type``, ``event_type``, ``position``, `
 
 #### Viewing tracks in ParaView
 
-``tracks.to_vtkhdf()`` writes one polyline per particle track to a VTK-HDF file for [ParaView](https://www.paraview.org/) (needs ``h5py``, from ``pip install "yamc[viz]"``). The coordinates are in cm, as in ``model.to_vtkhdf()``, so the tracks overlay the geometry when both files are opened together.
+``tracks.to_vtkhdf()`` writes one polyline per particle track to a VTK-HDF file for [ParaView](https://www.paraview.org/) (needs ``h5py``, from ``pip install "yamc[viz]"``). The coordinates are in cm, as in ``model.to_vtkhdf()``, so the tracks overlay the geometry when both files are opened together; pass the same ``length_units="m"`` to both to write them in metres.
 
 <!-- doctest: skip -->
 ```python
