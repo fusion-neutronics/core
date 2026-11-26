@@ -50,11 +50,21 @@ pip install "yamc[all]"
 
 ### Install the development version
 
-`pip install yamc` gives the latest release. The unreleased changes on the main branch build from source, which needs a [Rust toolchain](https://rustup.rs/):
+`pip install yamc` gives the latest release. The unreleased changes on the main branch build from source, which needs a [Rust toolchain](https://rustup.rs/), version 1.99 or newer (`rustup update` brings an existing one up to date):
 
 ```bash
 pip install "yamc @ git+https://github.com/fusion-neutronics/yamc-and-yani.git#subdirectory=packages/yamc"
 ```
+
+To work on the code, clone the repository and install it in editable mode instead. Changes to the Python files take effect straight away; after changing Rust code, run the install again to rebuild:
+
+```bash
+git clone https://github.com/fusion-neutronics/yamc-and-yani.git
+cd yamc-and-yani
+pip install -e "packages/yamc[all]"
+```
+
+Either way the Rust extension is compiled with full optimisation, which can take a quarter of an hour or more.
 
 ### Check which build is installed
 
