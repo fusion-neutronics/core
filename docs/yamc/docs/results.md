@@ -309,6 +309,14 @@ tally.to_vtkhdf(
 tally.to_vtkhdf("flux_per_energy.vtkhdf", sum_energy=False)
 ```
 
+Coordinates are written in cm by default. ``length_units="m"`` (or ``"mm"``) writes them in metres instead, for engineering workflows, without rescaling the file afterwards. Only the coordinates change: the data arrays are the same, so volume-normalized values stay per cm³. Every ``to_vtkhdf`` (geometry, cells, regions, sources, models, tracks and CAD meshes) takes the same argument, so files written with the same unit overlay in ParaView.
+
+<!-- doctest: skip -->
+```python
+tally.to_vtkhdf("flux.vtkhdf", length_units="m")
+model.to_vtkhdf("model.vtkhdf", length_units="m")
+```
+
 The viewer below is rendered live when these docs are built. It is a neutron radiograph: the word ``YAMC`` is built from boron-10 blocks (a strong thermal-neutron absorber), a thermal point source (orange marker) sits in front of them, and the letters cast a shadow onto a flux screen behind them. Both the flux tally and the geometry are written to VTK-HDF; the grey ``YAMC`` blocks are the geometry (read back from ``geometry.vtkhdf``), and the coloured panel is the flux screen (read back from ``flux.vtkhdf``), where the letters appear as dark shadows. Drag to rotate, scroll to zoom, right-drag to pan. The same files open in [ParaView](https://www.paraview.org/) for further analysis.
 
 ```python exec="1" html="1"

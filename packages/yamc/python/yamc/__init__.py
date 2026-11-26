@@ -156,7 +156,8 @@ def _geometry_to_vtkhdf(self, filename, **kwargs):
     Args:
         filename (str): Output file path (recommended: ``.vtkhdf``).
         **kwargs: Keyword arguments forwarded to
-            ``yamc.vtkhdf.geometry_to_vtkhdf`` (``resolution``, ``datasets``).
+            ``yamc.vtkhdf.geometry_to_vtkhdf`` (``resolution``, ``datasets``,
+            ``length_units``).
     """
     from yamc.vtkhdf import geometry_to_vtkhdf
     geometry_to_vtkhdf(filename, self, **kwargs)
@@ -170,13 +171,14 @@ def _cell_to_vtkhdf(self, filename, **kwargs):
     Args:
         filename (str): Output file path (recommended: ``.vtkhdf``).
         **kwargs: Keyword arguments forwarded to
-            ``yamc.vtkhdf.cell_to_vtkhdf`` (``resolution``, ``datasets``).
+            ``yamc.vtkhdf.cell_to_vtkhdf`` (``resolution``, ``datasets``,
+            ``length_units``).
     """
     from yamc.vtkhdf import cell_to_vtkhdf
     cell_to_vtkhdf(filename, self, **kwargs)
 
 
-def _region_to_vtkhdf(self, filename, *, resolution=10000):
+def _region_to_vtkhdf(self, filename, *, resolution=10000, length_units="cm"):
     """Write region to a VTK-HDF ImageData file.
 
     Requires ``h5py`` (install with ``pip install yamc[viz]``).
@@ -184,9 +186,11 @@ def _region_to_vtkhdf(self, filename, *, resolution=10000):
     Args:
         filename (str): Output file path (recommended: ``.vtkhdf``).
         resolution (int): Approximate total number of voxels (default 10 000).
+        length_units (str): Unit of the written coordinates, ``"cm"``
+            (default), ``"m"`` or ``"mm"``.
     """
     from yamc.vtkhdf import region_to_vtkhdf
-    region_to_vtkhdf(filename, self, resolution=resolution)
+    region_to_vtkhdf(filename, self, resolution=resolution, length_units=length_units)
 
 
 def _model_to_vtkhdf(self, filename, **kwargs):
@@ -203,7 +207,7 @@ def _model_to_vtkhdf(self, filename, **kwargs):
         filename (str): Output file path (recommended: ``.vtkhdf``).
         **kwargs: Keyword arguments forwarded to
             ``yamc.vtkhdf.model_to_vtkhdf`` (``include``, ``resolution``,
-            ``datasets``, ``samples``).
+            ``datasets``, ``samples``, ``length_units``).
     """
     from yamc.vtkhdf import model_to_vtkhdf
     model_to_vtkhdf(filename, self, **kwargs)
@@ -217,7 +221,7 @@ def _source_to_vtkhdf(self, filename, **kwargs):
     Args:
         filename (str): Output file path (recommended extension: ``.vtkhdf``)
         **kwargs: Keyword arguments forwarded to
-            ``yamc.vtkhdf.source_to_vtkhdf`` (``samples``).
+            ``yamc.vtkhdf.source_to_vtkhdf`` (``samples``, ``length_units``).
     """
     from yamc.vtkhdf import source_to_vtkhdf
     source_to_vtkhdf(filename, self, **kwargs)
@@ -233,13 +237,13 @@ def _tally_to_vtkhdf(self, filename, **kwargs):
         **kwargs: Keyword arguments forwarded to
             ``yamc.vtkhdf.mesh_tally_to_vtkhdf`` (``scores``, ``datasets``,
             ``sum_energy``, ``sum_nuclides``, ``volume_normalization``,
-            ``scaling_factor``).
+            ``scaling_factor``, ``length_units``).
     """
     from yamc.vtkhdf import mesh_tally_to_vtkhdf
     mesh_tally_to_vtkhdf(filename, self, **kwargs)
 
 
-def _tracks_to_vtkhdf(self, filename):
+def _tracks_to_vtkhdf(self, filename, *, length_units="cm"):
     """Write particle tracks to a VTK-HDF PolyData file, one polyline per track.
 
     Opens in ParaView alongside ``model.to_vtkhdf(...)`` output. Per-point
@@ -250,12 +254,14 @@ def _tracks_to_vtkhdf(self, filename):
 
     Args:
         filename (str): Output file path (recommended: ``.vtkhdf``).
+        length_units (str): Unit of the written coordinates, ``"cm"``
+            (default), ``"m"`` or ``"mm"``. Use the model's unit to overlay.
     """
     from yamc.vtkhdf import tracks_to_vtkhdf
-    tracks_to_vtkhdf(filename, self)
+    tracks_to_vtkhdf(filename, self, length_units=length_units)
 
 
-def _mesh_geometry_to_vtkhdf(self, path):
+def _mesh_geometry_to_vtkhdf(self, path, *, length_units="cm"):
     """Write the mesh's triangles and tets to a VTKHDF UnstructuredGrid file,
     for ParaView.
 
@@ -268,10 +274,17 @@ def _mesh_geometry_to_vtkhdf(self, path):
 
     Args:
         path (str | os.PathLike): Output file path (e.g. ``"model.vtkhdf"``).
+        length_units (str): Unit of the written coordinates, ``"cm"``
+            (default), ``"m"`` or ``"mm"``.
     """
     import os
 
+    import numpy as np
+
     from yamc._vtkhdf_writer import mixed_to_vtkhdf, surface_to_vtkhdf
+    from yamc.vtkhdf import _length_scale
+
+    vertices = np.asarray(self.vertices, dtype="float64") * _length_scale(length_units)
 
     path = os.fspath(path)
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -287,9 +300,9 @@ def _mesh_geometry_to_vtkhdf(self, path):
     volume_id = [v + 1 if v >= 0 else -1 for v in material_id]
     cell_data = {"volume_id": volume_id, "material_id": material_id}
     if tets:
-        mixed_to_vtkhdf(path, self.vertices, triangles, tets, cell_data=cell_data)
+        mixed_to_vtkhdf(path, vertices, triangles, tets, cell_data=cell_data)
     else:
-        surface_to_vtkhdf(path, self.vertices, triangles, cell_data=cell_data)
+        surface_to_vtkhdf(path, vertices, triangles, cell_data=cell_data)
 
 
 Geometry.to_vtkhdf = _geometry_to_vtkhdf

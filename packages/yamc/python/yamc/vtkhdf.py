@@ -46,6 +46,20 @@ def _require_h5py():
         ) from None
 
 
+_CM_TO = {"mm": 10.0, "cm": 1.0, "m": 0.01}
+
+
+def _length_scale(length_units):
+    """The factor that turns yamc's cm into ``length_units`` for written
+    coordinates. Only positions are scaled; the data arrays are unchanged."""
+    if length_units not in _CM_TO:
+        raise ValueError(
+            f"length_units must be one of {sorted(_CM_TO)}, got {length_units!r}"
+        )
+    return _CM_TO[length_units]
+
+
+
 def _score_name(score):
     """Convert a tally score (int or str) to a dataset-friendly string."""
     if isinstance(score, int):
@@ -53,8 +67,8 @@ def _score_name(score):
     return str(score)
 
 
-def _write_imagedata_header(root, origin, spacing, shape, h5py):
-    """Write VTK-HDF ImageData header attributes."""
+def _write_imagedata_header(root, origin, spacing, shape, h5py, scale):
+    """Write VTK-HDF ImageData header attributes, positions times ``scale``."""
     root.attrs["Version"] = np.array([2, 1], dtype="int64")
     ascii_type = b"ImageData"
     root.attrs.create(
@@ -65,14 +79,14 @@ def _write_imagedata_header(root, origin, spacing, shape, h5py):
     root.attrs["Direction"] = np.array(
         [1, 0, 0, 0, 1, 0, 0, 0, 1], dtype="float64"
     )
-    root.attrs["Origin"] = np.array(origin, dtype="float64")
-    root.attrs["Spacing"] = np.array(spacing, dtype="float64")
+    root.attrs["Origin"] = np.array(origin, dtype="float64") * scale
+    root.attrs["Spacing"] = np.array(spacing, dtype="float64") * scale
     root.attrs["WholeExtent"] = np.array(
         [0, shape[0], 0, shape[1], 0, shape[2]], dtype="int32"
     )
 
 
-def _write_unstructured_header(root, tally, h5py):
+def _write_unstructured_header(root, tally, h5py, scale):
     """Write VTK-HDF UnstructuredGrid header from tally unstructured mesh data."""
     root.attrs["Version"] = np.array([2, 1], dtype="int64")
     ascii_type = b"UnstructuredGrid"
@@ -95,7 +109,7 @@ def _write_unstructured_header(root, tally, h5py):
         "NumberOfConnectivityIds",
         data=np.array([len(connectivity)], dtype="int64"),
     )
-    root.create_dataset("Points", data=vertices)
+    root.create_dataset("Points", data=vertices * scale)
     root.create_dataset("Connectivity", data=connectivity)
 
     offsets = np.arange(0, n_cells * 4 + 1, 4, dtype="int64")
@@ -145,6 +159,7 @@ def mesh_tally_to_vtkhdf(
     sum_nuclides: bool = True,
     volume_normalization: bool = True,
     scaling_factor: float = 1.0,
+    length_units: str = "cm",
 ) -> None:
     """Write mesh tally results to a VTK-HDF file for ParaView visualization.
 
@@ -170,8 +185,12 @@ def mesh_tally_to_vtkhdf(
             standard_deviation values (default 1.0).  Useful for unit
             conversions (e.g. source strength).  Applied after volume
             normalization.
+        length_units: Unit of the written mesh coordinates, ``"cm"``
+            (default), ``"m"`` or ``"mm"``. Only the coordinates are scaled:
+            volume-normalized values stay per cm³ whatever this is.
     """
     _h5py = _require_h5py()
+    scale = _length_scale(length_units)
 
     # --- Discover tally dimensions via properties ----------------------------
     unstructured = tally.has_unstructured_mesh
@@ -337,10 +356,10 @@ def mesh_tally_to_vtkhdf(
         if not unstructured:
             ll = mesh.lower_left
             _write_imagedata_header(
-                root, ll, mesh.width, mesh.shape, _h5py
+                root, ll, mesh.width, mesh.shape, _h5py, scale
             )
         else:
-            _write_unstructured_header(root, tally, _h5py)
+            _write_unstructured_header(root, tally, _h5py, scale)
 
         cd = root.create_group("CellData")
         for name, (data, e_bounds) in cell_data.items():
@@ -388,9 +407,9 @@ def _sample_geometry_grid(geometry, resolution, datasets):
     return ll, [dx, dy, dz], [nx, ny, nz], cell_data
 
 
-def _write_geometry_group(root, ll, spacing, shape, cell_data, h5py):
+def _write_geometry_group(root, ll, spacing, shape, cell_data, h5py, scale):
     """Write a voxelized geometry as ImageData into an open VTKHDF group."""
-    _write_imagedata_header(root, ll, spacing, shape, h5py)
+    _write_imagedata_header(root, ll, spacing, shape, h5py, scale)
     cd = root.create_group("CellData")
     for name, arr in cell_data.items():
         cd.create_dataset(name, data=arr)
@@ -402,6 +421,7 @@ def geometry_to_vtkhdf(
     *,
     resolution: int = 10000,
     datasets: Sequence[str] = ("material_id", "cell_id"),
+    length_units: str = "cm",
 ) -> None:
     """Write geometry to VTK-HDF ImageData with material and cell IDs.
 
@@ -414,14 +434,19 @@ def geometry_to_vtkhdf(
         resolution: Approximate total number of voxels (default 10 000).
         datasets: Which CellData arrays to write.  Any combination of
             ``"material_id"`` and ``"cell_id"``.
+        length_units: Unit of the written coordinates, ``"cm"``
+            (default, yamc's own), ``"m"`` or ``"mm"``. Only positions are
+            scaled, so files written with the same unit overlay in ParaView;
+            data arrays are written exactly as without it.
     """
     _h5py = _require_h5py()
+    scale = _length_scale(length_units)
     ll, spacing, shape, cell_data = _sample_geometry_grid(
         geometry, resolution, datasets
     )
     with _h5py.File(filename, "w") as f:
         root = f.create_group("VTKHDF")
-        _write_geometry_group(root, ll, spacing, shape, cell_data, _h5py)
+        _write_geometry_group(root, ll, spacing, shape, cell_data, _h5py, scale)
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +460,7 @@ def cell_to_vtkhdf(
     *,
     resolution: int = 10000,
     datasets: Sequence[str] = ("material_id", "cell_id"),
+    length_units: str = "cm",
 ) -> None:
     """Write a single cell to VTK-HDF ImageData.
 
@@ -447,8 +473,13 @@ def cell_to_vtkhdf(
         resolution: Approximate total number of voxels (default 10 000).
         datasets: Which CellData arrays to write.  Any combination of
             ``"material_id"`` and ``"cell_id"``.
+        length_units: Unit of the written coordinates, ``"cm"``
+            (default, yamc's own), ``"m"`` or ``"mm"``. Only positions are
+            scaled, so files written with the same unit overlay in ParaView;
+            data arrays are written exactly as without it.
     """
     _h5py = _require_h5py()
+    scale = _length_scale(length_units)
     ds_set = set(datasets)
     _CELL_DATASETS = {"material_id", "cell_id"}
     unknown = ds_set - _CELL_DATASETS
@@ -479,7 +510,7 @@ def cell_to_vtkhdf(
 
     with _h5py.File(filename, "w") as f:
         root = f.create_group("VTKHDF")
-        _write_imagedata_header(root, ll, [dx, dy, dz], [nx, ny, nz], _h5py)
+        _write_imagedata_header(root, ll, [dx, dy, dz], [nx, ny, nz], _h5py, scale)
         cd = root.create_group("CellData")
         if want_mat:
             cd.create_dataset(
@@ -501,6 +532,7 @@ def region_to_vtkhdf(
     region: yamc.Region | yamc.Halfspace,
     *,
     resolution: int = 10000,
+    length_units: str = "cm",
 ) -> None:
     """Write a region to VTK-HDF ImageData.
 
@@ -511,8 +543,13 @@ def region_to_vtkhdf(
         filename: Output ``.vtkhdf`` path.
         region: A :class:`yamc.Region` or halfspace object.
         resolution: Approximate total number of voxels (default 10 000).
+        length_units: Unit of the written coordinates, ``"cm"``
+            (default, yamc's own), ``"m"`` or ``"mm"``. Only positions are
+            scaled, so files written with the same unit overlay in ParaView;
+            data arrays are written exactly as without it.
     """
     _h5py = _require_h5py()
+    scale = _length_scale(length_units)
 
     bb = region.bounding_box()
     ll, ur = _check_finite_bbox(bb, "Region")
@@ -525,7 +562,7 @@ def region_to_vtkhdf(
 
     with _h5py.File(filename, "w") as f:
         root = f.create_group("VTKHDF")
-        _write_imagedata_header(root, ll, [dx, dy, dz], [nx, ny, nz], _h5py)
+        _write_imagedata_header(root, ll, [dx, dy, dz], [nx, ny, nz], _h5py, scale)
         cd = root.create_group("CellData")
         cd.create_dataset("region", data=inside)
 
@@ -560,7 +597,7 @@ def _sample_source_points(sources, samples):
     return points, energies, source_ids
 
 
-def _write_source_group(root, points, energies, source_ids, h5py):
+def _write_source_group(root, points, energies, source_ids, h5py, scale):
     """Write sampled source points as a vertex cloud into an open VTKHDF group."""
     n = len(points)
     root.attrs["Version"] = np.array([2, 1], dtype="int64")
@@ -580,7 +617,7 @@ def _write_source_group(root, points, energies, source_ids, h5py):
     root.create_dataset(
         "NumberOfConnectivityIds", data=np.array([n], dtype="int64")
     )
-    root.create_dataset("Points", data=points)
+    root.create_dataset("Points", data=points * scale)
     root.create_dataset(
         "Connectivity", data=np.arange(n, dtype="int64")
     )
@@ -603,6 +640,7 @@ def source_to_vtkhdf(
     | Sequence[yamc.NeutronSource | yamc.PhotonSource],
     *,
     samples: int = 1000,
+    length_units: str = "cm",
 ) -> None:
     """Write source sample points to a VTK-HDF UnstructuredGrid file.
 
@@ -615,12 +653,17 @@ def source_to_vtkhdf(
         sources: A single :class:`yamc.NeutronSource` (or :class:`yamc.PhotonSource`) or a list of
             them.
         samples: Number of sample points *per source* (default 1 000).
+        length_units: Unit of the written coordinates, ``"cm"``
+            (default, yamc's own), ``"m"`` or ``"mm"``. Only positions are
+            scaled, so files written with the same unit overlay in ParaView;
+            data arrays are written exactly as without it.
     """
     _h5py = _require_h5py()
+    scale = _length_scale(length_units)
     points, energies, source_ids = _sample_source_points(sources, samples)
     with _h5py.File(filename, "w") as f:
         root = f.create_group("VTKHDF")
-        _write_source_group(root, points, energies, source_ids, _h5py)
+        _write_source_group(root, points, energies, source_ids, _h5py, scale)
 
 
 # ---------------------------------------------------------------------------
@@ -636,6 +679,7 @@ def model_to_vtkhdf(
     resolution: int = 10000,
     datasets: Sequence[str] = ("material_id", "cell_id"),
     samples: int = 1000,
+    length_units: str = "cm",
 ) -> None:
     """Write model geometry and/or sampled source points to one VTK-HDF file.
 
@@ -657,8 +701,13 @@ def model_to_vtkhdf(
             ``"material_id"`` and ``"cell_id"``.
         samples: Number of sample points per source for the source block
             (default 1 000).
+        length_units: Unit of the written coordinates, ``"cm"``
+            (default, yamc's own), ``"m"`` or ``"mm"``. Only positions are
+            scaled, so files written with the same unit overlay in ParaView;
+            data arrays are written exactly as without it.
     """
     _h5py = _require_h5py()
+    scale = _length_scale(length_units)
 
     if isinstance(include, str):
         include = (include,)
@@ -675,10 +724,16 @@ def model_to_vtkhdf(
     if len(include) == 1:
         if include[0] == "geometry":
             geometry_to_vtkhdf(
-                filename, model.geometry, resolution=resolution, datasets=datasets
+                filename,
+                model.geometry,
+                resolution=resolution,
+                datasets=datasets,
+                length_units=length_units,
             )
         else:
-            source_to_vtkhdf(filename, model.source, samples=samples)
+            source_to_vtkhdf(
+                filename, model.source, samples=samples, length_units=length_units
+            )
         return
 
     # Sample everything before touching the file so bad inputs fail fast
@@ -704,9 +759,9 @@ def model_to_vtkhdf(
             block = root.create_group(name, track_order=True)
             block.attrs["Index"] = np.int64(idx)
             if name == "geometry":
-                _write_geometry_group(block, *blocks["geometry"], _h5py)
+                _write_geometry_group(block, *blocks["geometry"], _h5py, scale)
             else:
-                _write_source_group(block, *blocks["source"], _h5py)
+                _write_source_group(block, *blocks["source"], _h5py, scale)
 
         assembly = root.create_group("Assembly", track_order=True)
         for name in include:
@@ -725,6 +780,7 @@ def polylines_to_vtkhdf(
     *,
     point_data: dict | None = None,
     cell_data: dict | None = None,
+    length_units: str = "cm",
 ) -> None:
     """Write polylines to a VTK-HDF PolyData file.
 
@@ -737,8 +793,13 @@ def polylines_to_vtkhdf(
             (length = number of lines + 1, first entry 0).
         point_data: Arrays of one value per point, keyed by name.
         cell_data: Arrays of one value per line, keyed by name.
+        length_units: Unit of the written coordinates, ``"cm"``
+            (default, yamc's own), ``"m"`` or ``"mm"``. Only positions are
+            scaled, so files written with the same unit overlay in ParaView;
+            data arrays are written exactly as without it.
     """
     h5py = _require_h5py()
+    scale = _length_scale(length_units)
     points = np.asarray(points, dtype="float64").reshape(-1, 3)
     offsets = np.asarray(offsets, dtype="int64")
     n_points, n_lines = len(points), len(offsets) - 1
@@ -757,7 +818,7 @@ def polylines_to_vtkhdf(
         root.attrs["Version"] = np.array([2, 1], dtype="int64")
         root.attrs.create("Type", b"PolyData", dtype=h5py.string_dtype("ascii", 8))
         root.create_dataset("NumberOfPoints", data=np.array([n_points], dtype="int64"))
-        root.create_dataset("Points", data=points)
+        root.create_dataset("Points", data=points * scale)
         # PolyData requires all four topology groups; only Lines is populated.
         for name in ("Vertices", "Lines", "Polygons", "Strips"):
             lines = name == "Lines"
@@ -776,7 +837,9 @@ def polylines_to_vtkhdf(
                 g.create_dataset(name, data=np.asarray(values))
 
 
-def tracks_to_vtkhdf(filename: str, tracks: yamc.Tracks) -> None:
+def tracks_to_vtkhdf(
+    filename: str, tracks: yamc.Tracks, *, length_units: str = "cm"
+) -> None:
     """Write particle tracks to a VTK-HDF PolyData file, one polyline per track.
 
     Per point (``PointData``): ``energy`` (eV, after the event), ``weight``,
@@ -785,12 +848,16 @@ def tracks_to_vtkhdf(filename: str, tracks: yamc.Tracks) -> None:
     particles), ``generation`` and ``history``. ``event_type`` and
     ``particle_type`` are integer codes (ParaView colours by numbers); their
     names are stored in the root attributes ``event_type_names`` and
-    ``particle_type_names``. Coordinates are in cm, matching
-    ``Model.to_vtkhdf`` output, so the two overlay in ParaView.
+    ``particle_type_names``. Coordinates are in ``length_units``, so tracks
+    overlay ``Model.to_vtkhdf`` output written with the same unit in ParaView.
 
     Args:
         filename: Output ``.vtkhdf`` path.
         tracks: The ``Tracks`` from ``Model.simulate_transport(capture_tracks=...)``.
+        length_units: Unit of the written coordinates, ``"cm"``
+            (default, yamc's own), ``"m"`` or ``"mm"``. Only positions are
+            scaled, so files written with the same unit overlay in ParaView;
+            data arrays are written exactly as without it.
     """
     h5py = _require_h5py()
     p = tracks.polylines()
@@ -802,6 +869,7 @@ def tracks_to_vtkhdf(filename: str, tracks: yamc.Tracks) -> None:
         cell_data={
             k: p[k] for k in ("particle_type", "particle_id", "parent_id", "generation", "history")
         },
+        length_units=length_units,
     )
     with h5py.File(filename, "a") as f:
         for key in ("event_type_names", "particle_type_names"):
