@@ -17,6 +17,7 @@ smallvec = "1"
 yamc-element = { path = "../yamc-element", default-features = false }
 yamc-nuclide = { path = "../yamc-nuclide", default-features = false }
 yamc-rng = { path = "../yamc-rng" }
+yamc-units = { path = "../yamc-units" }
 
 [features]
 default = ["arrow"]

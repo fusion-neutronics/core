@@ -231,18 +231,33 @@ final.get_atoms_per_barn_cm()        # dict[str, float], the solver's own units
 Stable nuclides contribute nothing to activity or decay heat and are omitted from
 the by-nuclide dictionaries.
 
-`per` is the way out of needing a size at all. `per="cm3"` or `per="m3"` gives
-Bq or W per cm³ or m³ and needs neither `volume` nor `density`, and `per="g"`
-or `per="kg"` gives Bq or W per g or kg and needs only `density`. The decay photon spectrum takes the same argument:
+`units=` gives the result in the unit you report in. The default is the total,
+in Bq or W, which needs `volume`. A per-volume unit needs neither `volume` nor
+`density`, and a per-mass unit needs only `density`. SI prefixes work, and
+activity also takes curies:
 
 <!-- doctest: skip -->
 ```python
-final.activity(per="cm3")                  # Bq/cm3, no volume needed
-final.decay_heat(per="g")                  # W/g, needs only density
-final.activity(per="kg")                   # Bq/kg, as handbooks quote it
-final.decay_heat(per="m3")                 # W/m3
-final.decay_photon_spectrum(per="cm3")     # photons/s/cm3
+final.activity(units="Bq/kg")             # per mass, as handbooks quote it
+final.activity(units="kBq/g")              # per mass, needs only density
+final.activity(units="Bq/cm3")             # per volume, no volume needed
+final.activity(units="TBq")                # a total, needs volume
+final.activity(units="Ci")                 # curies
+final.decay_heat(units="W/kg")             # per mass
+final.decay_heat(units="MW/m3")            # per volume
+final.decay_heat(units="MeV/s")            # a total in another energy unit
+final.decay_photon_spectrum(units="1/(s cm3)")  # photons/s/cm3
 ```
+
+| quantity | default | per volume | per mass | other totals |
+| --- | --- | --- | --- | --- |
+| `activity` | `"Bq"` | `"Bq/cm3"`, `"GBq/m3"` | `"Bq/g"`, `"Bq/kg"`, `"kBq/g"` | `"kBq"`, `"TBq"`, `"Ci"`, `"mCi"` |
+| `decay_heat` | `"W"` | `"W/cm3"`, `"MW/m3"` | `"W/g"`, `"W/kg"` | `"kW"`, `"MeV/s"` |
+| `decay_photon_spectrum` | `"1/s"` | `"1/(s cm3)"` | `"1/(s kg)"` | |
+| `decay_photon_continua` | `"1/(s eV)"` | `"1/(s eV cm3)"` | `"1/(s eV kg)"` | |
+
+A unit of the wrong kind, such as `decay_heat(units="Bq/kg")`, raises a
+`ValueError` naming what was expected.
 
 `component=` splits decay heat into the recoverable parts the decay data gives,
 `"beta"`, `"gamma"` or `"alpha"`. The gamma heat is the part that leaves a thin
@@ -268,7 +283,13 @@ contact.
 final.contact_dose()                          # Gy/h, absorbed dose in air
 final.contact_dose(by_nuclide=True)           # dict[str, float], Gy/h per nuclide
 final.contact_dose(dose_quantity="effective") # Sv/h, ICRP-116 effective dose
+final.contact_dose(units="uGy/h")             # the same dose in another rate unit
+final.contact_dose(dose_quantity="effective", units="mSv/h")
 ```
+
+A contact dose is already per unit of something, so `units=` takes only a rate
+of the same kind: Gy for the absorbed dose in air and Sv for the effective
+dose, with any prefix and time unit (`"mGy/h"`, `"uSv/h"`, `"Gy/s"`).
 
 It is a slab estimate rather than a transport result. The material is taken to
 be a half-space, so half the photons emitted at any depth head for the surface,
@@ -324,11 +345,11 @@ photon emission of a nuclide far from stability. `decay_photon_spectrum()` holds
 the lines only, and `decay_photon_continua()` returns the rest, one
 `PhotonContinuum` per nuclide and continuum. Its rates are per eV, so they are
 not line rates and cannot be added to the spectrum above; `emission_rate` is
-their integral. It takes the same `per` argument:
+their integral. It takes `units=` as a density per eV:
 
 <!-- doctest: skip -->
 ```python
-for continuum in final.decay_photon_continua(per="cm3"):
+for continuum in final.decay_photon_continua(units="1/(s eV cm3)"):
     continuum.nuclide          # e.g. "Cf252"
     continuum.energies         # eV, the continuum's own grid
     continuum.rates            # photons/s/eV/cm3 on that grid

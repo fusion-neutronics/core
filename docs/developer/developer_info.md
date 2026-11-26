@@ -388,6 +388,9 @@ core/
                        seeding); mirrored by the GPU #[cube] twin
     yamc-tallies/   -- Tallies (filters, scores, per-history Welford
                        variance, TransportResults, Arrow IO)
+    yamc-units/     -- Unit strings ("W/m3", "kBq/g", "uSv/h"): parsing and
+                       conversion factors, shared by tally results and
+                       yani's material outputs
     yamc-plot/      -- Shared interactive-plot HTML/JS templating used by
                        Python's Model.plot() and the browser editor
     yamc-gpu/       -- GPU compute infra (Vulkan via cubecl, f64 required)

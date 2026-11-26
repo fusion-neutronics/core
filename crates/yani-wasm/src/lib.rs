@@ -356,6 +356,23 @@ impl YaniSession {
         .to_string())
     }
 
+    /// The factor that turns a total for the current material, in `native`
+    /// units (`"Bq"` for activity, `"W"` for decay heat), into `units`:
+    /// scaled (`"TBq"`, `"kW"`), per volume (`"Bq/cm3"`, `"MW/m3"`) or per
+    /// mass (`"Bq/kg"`, `"kBq/g"`). The same conversion as the Python API's
+    /// `units=`, so a page shows what a script would print.
+    ///
+    /// Per mass uses the material as set, not each step's inventory, whose
+    /// density activation moves by parts in 1e8.
+    #[wasm_bindgen(js_name = totalToUnits)]
+    pub fn total_to_units(&self, native: &str, units: &str) -> Result<f64, String> {
+        let material = self.material.as_ref().ok_or("no material set")?;
+        let volume = material
+            .volume
+            .ok_or("material has no volume; a total needs cm^3")?;
+        Ok(material.unit_scale(native, units, native)? / volume)
+    }
+
     // ---- running ---------------------------------------------------------
 
     /// Transmute the current material over a schedule.
@@ -512,6 +529,14 @@ impl YaniSession {
 #[wasm_bindgen(js_name = durationToSeconds)]
 pub fn duration_to_seconds(value: f64, unit: &str) -> Result<f64, String> {
     yani_transmute::duration_to_seconds(value, unit)
+}
+
+/// The factor from `from` to `to`, two units of the same kind: a contact
+/// dose rate from `"Gy/h"` to `"uGy/h"`, say. The same parser as the Python
+/// API's `units=`.
+#[wasm_bindgen(js_name = convertUnits)]
+pub fn convert_units(from: &str, to: &str) -> Result<f64, String> {
+    yamc_units::convert(from, to)
 }
 
 fn parse_spectra(json: &str) -> Result<Vec<MultigroupSpectrum>, String> {

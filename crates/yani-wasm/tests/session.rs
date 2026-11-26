@@ -764,3 +764,35 @@ fn a_continuum_with_a_law_reaches_the_contact_dose() {
     let dose = step["contact_dose_by_nuclide"]["Sm158"].as_f64().unwrap();
     assert!(dose.is_finite() && dose > 0.0, "{dose}");
 }
+
+/// The page's unit conversions are the Python API's: a total in Bq or W for
+/// the session's material, and a dose rate between units of one kind.
+#[test]
+fn totals_convert_to_the_units_the_python_api_takes() {
+    let _exclusive = exclusive();
+    let mut session = YaniSession::new();
+    session
+        .build_material(r#"{"Fe56": 1.0}"#, 7.874, "g/cm3", "atom", 1000.0)
+        .expect("iron builds");
+    let close = |a: f64, b: f64| (a - b).abs() <= 1e-9 * b.abs();
+    let mass_g = 7.874 * 1000.0;
+    assert!(close(session.total_to_units("Bq", "Bq").unwrap(), 1.0));
+    assert!(close(session.total_to_units("Bq", "TBq").unwrap(), 1e-12));
+    assert!(close(session.total_to_units("Bq", "Bq/cm3").unwrap(), 1e-3));
+    assert!(close(session.total_to_units("W", "W/m3").unwrap(), 1e3));
+    assert!(close(
+        session.total_to_units("Bq", "Bq/kg").unwrap(),
+        1e3 / mass_g
+    ));
+    assert!(close(
+        session.total_to_units("W", "W/g").unwrap(),
+        1.0 / mass_g
+    ));
+    assert!(session.total_to_units("W", "Bq/kg").is_err());
+
+    assert!(close(
+        yani_wasm::convert_units("Gy/h", "uGy/h").unwrap(),
+        1e6
+    ));
+    assert!(yani_wasm::convert_units("Gy/h", "Sv/h").is_err());
+}

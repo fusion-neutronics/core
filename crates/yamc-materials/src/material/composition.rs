@@ -217,48 +217,45 @@ impl Material {
         }
     }
 
-    /// The factor that turns a per-cm³ quantity into the one `per` asks for.
+    /// The factor that turns a per-cm³ quantity in `native` units (`"Bq"`,
+    /// `"W"`, `"1/s"`) into `units`.
     ///
     /// Activity, decay heat and the decay photon spectra all count atoms, and
     /// the solve holds atom DENSITIES, so the per-cm³ answer is the one it
-    /// natively has and every other form is that times this factor.
+    /// natively has and every other form is that times this factor:
     ///
-    /// * `None` asks for the total, so the factor is `volume`, which must be set.
-    /// * `"cm3"` is the native form, so the factor is 1 and nothing is required,
-    ///   and `"m3"` is that times the 1e6 cm³ in a m³.
-    /// * `"g"` and `"kg"` divide by the mass density (times 1000 for kg), which
+    /// * `native` itself or a scaled form of it (`"TBq"`, `"MeV/s"`) is the
+    ///   total, so the factor includes `volume`, which must be set.
+    /// * Per volume (`"Bq/cm3"`, `"MW/m3"`) needs nothing.
+    /// * Per mass (`"kBq/g"`, `"W/kg"`) divides by the mass density, which
     ///   needs only `density`. It is the current inventory's density, not the
     ///   input's, since activation moves mass between nuclides.
     ///
     /// `quantity` names the caller in error messages.
-    pub fn per_unit_scale(&self, per: Option<&str>, quantity: &str) -> Result<f64, String> {
-        let per_mass = |grams: f64| -> Result<f64, String> {
-            let density = self.get_mass_density()?;
-            if density.is_nan() || density <= 0.0 {
-                return Err(format!(
-                    "{quantity} with per={:?} needs a positive mass density, got {density}",
-                    per.unwrap_or_default()
-                ));
-            }
-            Ok(grams / density)
-        };
-        match per {
-            None => self.volume.ok_or_else(|| {
+    pub fn unit_scale(&self, native: &str, units: &str, quantity: &str) -> Result<f64, String> {
+        use yamc_units::Normalisation;
+        let conversion =
+            yamc_units::convert_extensive(native, units).map_err(|e| format!("{quantity}: {e}"))?;
+        let base = match conversion.normalisation {
+            Normalisation::Total => self.volume.ok_or_else(|| {
                 format!(
-                    "{quantity} requires material.volume in cm^3 for a total; pass \
-                     per='cm3', per='m3', per='g' or per='kg' for a specific quantity, which \
-                     needs no volume"
+                    "{quantity} in {units:?} is a total, which requires material.volume in cm^3; \
+                     ask for it per volume or per mass instead (e.g. '{native}/cm3' or \
+                     '{native}/kg'), which needs no volume"
                 )
-            }),
-            Some("cm3") => Ok(1.0),
-            Some("m3") => Ok(1e6),
-            Some("g") => per_mass(1.0),
-            Some("kg") => per_mass(1000.0),
-            Some(other) => Err(format!(
-                "unknown per={other:?} for {quantity}; expected None for a total, \
-                 'cm3' or 'm3' for a per-volume quantity, or 'g' or 'kg' for a per-mass one"
-            )),
-        }
+            })?,
+            Normalisation::PerVolume => 1.0,
+            Normalisation::PerMass => {
+                let density = self.get_mass_density()?;
+                if density.is_nan() || density <= 0.0 {
+                    return Err(format!(
+                        "{quantity} in {units:?} needs a positive mass density, got {density}"
+                    ));
+                }
+                1.0 / density
+            }
+        };
+        Ok(base * conversion.factor)
     }
 
     /// Total atom density (atoms/barn-cm), regardless of stored units.
@@ -505,39 +502,45 @@ mod tests {
     }
 
     #[test]
-    fn per_unit_scale_total_is_the_volume() {
+    fn unit_scale_total_is_the_volume() {
         assert_eq!(
-            iron(Some(1000.0)).per_unit_scale(None, "activity"),
+            iron(Some(1000.0)).unit_scale("Bq", "Bq", "activity"),
             Ok(1000.0)
         );
-        let err = iron(None).per_unit_scale(None, "activity").unwrap_err();
+        let tbq = iron(Some(1000.0))
+            .unit_scale("Bq", "TBq", "activity")
+            .unwrap();
+        assert!((tbq - 1e-9).abs() < 1e-21);
+        let err = iron(None).unit_scale("Bq", "Bq", "activity").unwrap_err();
         assert!(err.contains("requires material.volume"), "{err}");
     }
 
     #[test]
-    fn per_unit_scale_cm3_needs_nothing() {
-        assert_eq!(iron(None).per_unit_scale(Some("cm3"), "activity"), Ok(1.0));
+    fn unit_scale_per_volume_needs_nothing() {
+        assert_eq!(iron(None).unit_scale("W", "W/cm3", "decay_heat"), Ok(1.0));
+        let per_m3 = iron(None).unit_scale("W", "W/m3", "decay_heat").unwrap();
+        assert!((per_m3 - 1e6).abs() < 1e-6);
     }
 
     #[test]
-    fn per_unit_scale_m3_is_a_million_cm3() {
-        assert_eq!(iron(None).per_unit_scale(Some("m3"), "activity"), Ok(1e6));
-    }
-
-    #[test]
-    fn per_unit_scale_kg_is_a_thousand_times_g() {
+    fn unit_scale_per_mass_divides_by_density() {
         let mat = iron(None);
-        let per_g = mat.per_unit_scale(Some("g"), "activity").unwrap();
-        let per_kg = mat.per_unit_scale(Some("kg"), "activity").unwrap();
+        let per_g = mat.unit_scale("Bq", "Bq/g", "activity").unwrap();
+        let per_kg = mat.unit_scale("Bq", "Bq/kg", "activity").unwrap();
+        let kbq_per_g = mat.unit_scale("Bq", "kBq/g", "activity").unwrap();
         assert!((per_g - 1.0 / 7.874).abs() < 1e-15);
         assert!((per_kg - 1000.0 * per_g).abs() < 1e-12);
+        assert!((kbq_per_g - per_g / 1000.0).abs() < 1e-18);
     }
 
     #[test]
-    fn per_unit_scale_refuses_an_unknown_unit_by_name() {
+    fn unit_scale_refuses_a_mismatched_unit_by_name() {
         let err = iron(Some(1.0))
-            .per_unit_scale(Some("lb"), "decay_heat")
+            .unit_scale("W", "Bq/kg", "decay_heat")
             .unwrap_err();
-        assert!(err.contains("unknown per=\"lb\" for decay_heat"), "{err}");
+        assert!(
+            err.starts_with("decay_heat: cannot give W in \"Bq/kg\""),
+            "{err}"
+        );
     }
 }

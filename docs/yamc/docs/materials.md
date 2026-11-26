@@ -477,18 +477,21 @@ number to check before trusting a comfortable index.
 #### Activity, decay heat and decay photons
 
 A transmuted material provides the usual decay quantities directly. Each takes
-``per=None`` for the whole material, which needs ``volume``, or ``"cm3"``,
-``"m3"``, ``"g"`` or ``"kg"`` for a density, and the totals also take ``by_nuclide=True``.
+``units=``: the total by default (Bq, W, photons/s), which needs ``volume``, or
+a per-volume (``"Bq/cm3"``, ``"MW/m3"``) or per-mass (``"Bq/kg"``, ``"W/g"``)
+unit, with SI prefixes, and the totals also take ``by_nuclide=True``.
 
 <!-- doctest: skip -->
 ```python
 if final is not None:
-    final.activity(per="g")                           # Bq/g
-    final.activity(per="kg")                          # Bq/kg
-    final.decay_heat(per="cm3")                       # W/cm3
-    final.decay_heat(per="cm3", component="gamma")    # the gamma part alone
-    energies, rates = final.decay_photon_spectrum(per="cm3")   # lines, photons/s/cm3
-    for continuum in final.decay_photon_continua(per="cm3"):
+    final.activity(units="Bq/g")
+    final.activity(units="kBq/kg")
+    final.activity(units="TBq")                       # a total, needs volume
+    final.decay_heat(units="W/cm3")
+    final.decay_heat(units="W/cm3", component="gamma")   # the gamma part alone
+    final.contact_dose(units="uSv/h", dose_quantity="effective")
+    energies, rates = final.decay_photon_spectrum(units="1/(s cm3)")   # photons/s/cm3
+    for continuum in final.decay_photon_continua(units="1/(s eV cm3)"):
         print(continuum.nuclide, continuum.emission_rate)       # photons/s/cm3
 ```
 
