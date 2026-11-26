@@ -304,3 +304,37 @@ def test_the_photon_normalisation_scales_the_tally_and_the_line_shape_is_held(dp
     high = np.array(dose.data_std_dev_correlated)
     assert low.shape == high.shape == std.shape
     assert np.allclose(np.array(dose.total_std_dev_correlated), np.sqrt(std**2 + high**2))
+
+
+# --- units -----------------------------------------------------------------
+
+def test_dose_units_are_the_tally_per_second(dp_result):
+    """A photon flux tally is a track length per source particle; the pulses'
+    rates are particles per second, so the dose is cm/s per bin."""
+    dose = _sched(_dt_source()).time_correct_tally(dp_result)
+    assert dose.units == ["cm/s"]
+    converted = dose.to("m/s")
+    assert converted.units == ["m/s"]
+    np.testing.assert_allclose(converted.mean, np.array(dose.mean) * 0.01, rtol=1e-12)
+    np.testing.assert_allclose(converted.std_dev, np.array(dose.std_dev) * 0.01, rtol=1e-12)
+    for name, values in dose.by_nuclide.items():
+        np.testing.assert_allclose(converted.by_nuclide[name], np.array(values) * 0.01, rtol=1e-12)
+    assert converted.times == dose.times
+    last = _sched(_dt_source()).time_correct_tally(dp_result, steps=-1).to("m/s")
+    np.testing.assert_allclose(last.mean, converted.mean[-1], rtol=1e-12)
+
+
+def test_a_per_volume_unit_needs_the_bin_volumes(dp_result):
+    """The tally's cell has no volume, so a per-volume unit cannot be formed."""
+    dose = _sched(_dt_source()).time_correct_tally(dp_result)
+    with pytest.raises(ValueError, match="volumes of these bins are not known"):
+        dose.to("1/(cm2 s)")
+    with pytest.raises(ValueError, match="cannot give cm/s"):
+        dose.to("Sv/h")
+
+
+def test_a_result_with_a_source_strength_is_refused(dp_result):
+    """The pulses' rates are the strength: a result given one already would be
+    scaled twice."""
+    with pytest.raises(ValueError, match="per source particle"):
+        _sched(_dt_source()).time_correct_tally(dp_result.with_source_strength(1e10))

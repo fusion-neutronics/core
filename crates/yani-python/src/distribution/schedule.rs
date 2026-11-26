@@ -499,6 +499,12 @@ pub fn cooldown_steps(
 /// int) or 2-D (one row per selected step). `by_nuclide` maps each parent
 /// radionuclide to its mean contribution, in the same shape. `times` is the
 /// elapsed time (seconds) at the end of each selected step.
+///
+/// The values are per bin, in ``units``: the tally's unit per source
+/// particle times the pulses' source rate, so ``"cm/s"`` for a photon flux
+/// tally and ``"pSv·cm²·cm/s"`` for one with dose coefficients. ``to()``
+/// converts, dividing by each bin's volume for a per-volume unit:
+/// ``dose.to("uSv/h")``.
 #[gen_stub_pyclass]
 #[pyclass(name = "DoseResult")]
 pub struct PyDoseResult {
@@ -512,17 +518,27 @@ pub struct PyDoseResult {
     total_std_dev: Option<Py<PyAny>>,
     total_std_dev_correlated: Option<Py<PyAny>>,
     data_uncertainty_info: Option<Py<PyAny>>,
+    /// The unit of each score's values, e.g. `"pSv·cm²·cm/s"`.
+    units: Vec<String>,
+    /// The volume in cm³ of each bin of one score, mesh fastest, when known:
+    /// what a per-volume unit divides by.
+    volumes: Option<Vec<f64>>,
+    /// Whether the arrays are one row (1-D) rather than one per step.
+    single: bool,
 }
 
 impl PyDoseResult {
     /// A result with one row per step and no nuclear-data uncertainty, as
-    /// `yamc.simulate_shutdown_dose` returns.
+    /// `yamc.simulate_shutdown_dose` returns. `units` is one per score and
+    /// `volumes` the bin volumes of one score's bins, when known.
     pub fn from_rows(
         py: Python<'_>,
         mean: Vec<Vec<f64>>,
         std_dev: Vec<Vec<f64>>,
         by_nuclide: BTreeMap<String, Vec<Vec<f64>>>,
         times: Vec<f64>,
+        units: Vec<String>,
+        volumes: Option<Vec<f64>>,
     ) -> PyResult<Self> {
         let by_nuc = PyDict::new(py);
         for (name, rows) in by_nuclide {
@@ -539,7 +555,35 @@ impl PyDoseResult {
             total_std_dev: None,
             total_std_dev_correlated: None,
             data_uncertainty_info: None,
+            units,
+            volumes,
+            single: false,
         })
+    }
+
+    /// Each array value times its bin's factor, keeping the shape.
+    fn scaled(&self, py: Python<'_>, obj: &Py<PyAny>, factors: &[f64]) -> PyResult<Py<PyAny>> {
+        let scale = |row: Vec<f64>| -> Vec<f64> {
+            row.into_iter().zip(factors).map(|(v, f)| v * f).collect()
+        };
+        if self.single {
+            let row: Vec<f64> = obj.bind(py).extract()?;
+            Ok(scale(row).into_pyobject(py)?.into_any().unbind())
+        } else {
+            let rows: Vec<Vec<f64>> = obj.bind(py).extract()?;
+            let rows: Vec<Vec<f64>> = rows.into_iter().map(scale).collect();
+            Ok(PyList::new(py, rows)?.into_any().unbind())
+        }
+    }
+
+    /// The number of values in a row.
+    fn row_len(&self, py: Python<'_>) -> PyResult<usize> {
+        if self.single {
+            Ok(self.mean.bind(py).len()?)
+        } else {
+            let rows: Vec<Vec<f64>> = self.mean.bind(py).extract()?;
+            Ok(rows.first().map_or(0, Vec::len))
+        }
     }
 }
 
@@ -638,8 +682,79 @@ impl PyDoseResult {
         self.times.clone_ref(py)
     }
 
+    /// The unit of the values, one per score: the tally's unit per source
+    /// particle times the pulses' source rate (``"cm/s"`` for a photon
+    /// flux, ``"pSv·cm²·cm/s"`` with dose coefficients), until ``to()``
+    /// converts them.
+    #[getter]
+    fn units(&self) -> Vec<String> {
+        self.units.clone()
+    }
+
+    /// This result in ``units``: one unit for every score, or a list with one
+    /// per score. A per-volume unit divides each bin by its volume, which a
+    /// mesh tally's bins have: ``dose.to("uSv/h")`` for a dose tally,
+    /// ``dose.to("1/(cm2 s)")`` for a photon flux. Every array (``mean``,
+    /// ``std_dev``, ``by_nuclide`` and the nuclear-data uncertainties) is
+    /// converted; ``times`` stays in seconds.
+    ///
+    /// Args:
+    ///     units: The unit, e.g. ``"uSv/h"``, ``"mSv/h"``, ``"Sv/s"``.
+    ///
+    /// Returns:
+    ///     DoseResult: A converted copy.
+    fn to(&self, py: Python<'_>, units: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let targets: Vec<String> = match units.extract::<String>() {
+            Ok(u) => vec![u; self.units.len()],
+            Err(_) => units.extract().map_err(|_| {
+                pyo3::exceptions::PyTypeError::new_err("units must be a str or a list of str")
+            })?,
+        };
+        if targets.len() != self.units.len() {
+            return Err(PyValueError::new_err(format!(
+                "{} units given for {} scores",
+                targets.len(),
+                self.units.len()
+            )));
+        }
+        let row_len = self.row_len(py)?;
+        let block = row_len / self.units.len().max(1);
+        let mut factors = Vec::with_capacity(row_len);
+        for (from, to) in self.units.iter().zip(&targets) {
+            factors.extend(
+                yamc_units::per_bin_factors(from, to, block, self.volumes.as_deref())
+                    .map_err(PyValueError::new_err)?,
+            );
+        }
+        let opt = |o: &Option<Py<PyAny>>| -> PyResult<Option<Py<PyAny>>> {
+            o.as_ref().map(|v| self.scaled(py, v, &factors)).transpose()
+        };
+        let by_nuclide = PyDict::new(py);
+        for (name, values) in self.by_nuclide.bind(py).cast::<PyDict>()?.iter() {
+            by_nuclide.set_item(name, self.scaled(py, &values.unbind(), &factors)?)?;
+        }
+        Ok(Self {
+            mean: self.scaled(py, &self.mean, &factors)?,
+            std_dev: self.scaled(py, &self.std_dev, &factors)?,
+            by_nuclide: by_nuclide.into_any().unbind(),
+            times: self.times.clone_ref(py),
+            data_std_dev: opt(&self.data_std_dev)?,
+            data_std_dev_standard_error: opt(&self.data_std_dev_standard_error)?,
+            data_std_dev_correlated: opt(&self.data_std_dev_correlated)?,
+            total_std_dev: opt(&self.total_std_dev)?,
+            total_std_dev_correlated: opt(&self.total_std_dev_correlated)?,
+            data_uncertainty_info: self.data_uncertainty_info.as_ref().map(|v| v.clone_ref(py)),
+            units: targets,
+            volumes: self.volumes.clone(),
+            single: self.single,
+        })
+    }
+
     fn __repr__(&self) -> String {
-        "DoseResult(mean=..., std_dev=..., by_nuclide=..., times=...)".to_string()
+        format!(
+            "DoseResult(mean=..., std_dev=..., by_nuclide=..., times=..., units=[{}])",
+            self.units.join(", ")
+        )
     }
 }
 
@@ -827,6 +942,7 @@ impl PyPulseSchedule {
 
         // Match each distinct source to its transport-run tally result.
         let per_source: Vec<Bound<'_, PyAny>> = self.match_results(py, results, &distinct)?;
+        let (units, volumes) = dose_units(&per_source[0])?;
 
         let timesteps: Vec<f64> = self.schedule.timesteps();
         let n = self.schedule.len();
@@ -1119,6 +1235,9 @@ impl PyPulseSchedule {
             total_std_dev,
             total_std_dev_correlated,
             data_uncertainty_info,
+            units,
+            volumes,
+            single,
         })
     }
 }
@@ -1363,6 +1482,43 @@ fn histogram_spectrum(
              gives the flux magnitude [n/cm^2/s]",
         )),
     }
+}
+
+#[cfg(feature = "transport")]
+/// The dose's units, one per score, and the volumes of one score's bins when
+/// the tally result knows them.
+///
+/// The pulses' rates are the source strength, so the result must still be per
+/// source particle: one given a strength already would be scaled twice. The
+/// dose is the tally's unit with the strength of one particle per second,
+/// which the result itself names. Bins run score -> parent -> energy*mesh, so
+/// the first `bins / (scores * parents)` volumes cover a row's score block.
+fn dose_units(tr: &Bound<'_, PyAny>) -> PyResult<(Vec<String>, Option<Vec<f64>>)> {
+    if !tr.getattr("source_strength")?.is_none() {
+        return Err(PyValueError::new_err(
+            "time_correct_tally takes the tally result per source particle: the schedule's \
+             pulse rates are the source strength, so a result given one with \
+             with_source_strength would be scaled twice; pass results[tally] as it comes",
+        ));
+    }
+    let units: Vec<String> = tr
+        .call_method1("with_source_strength", (1.0,))?
+        .getattr("units")?
+        .extract()?;
+    let n_parents = tr
+        .getattr("tally")?
+        .getattr("parent_nuclides")?
+        .extract::<Option<Vec<String>>>()?
+        .map_or(1, |p| p.len().max(1));
+    let volumes = tr
+        .getattr("bin_volumes")
+        .and_then(|v| v.extract::<Vec<f64>>())
+        .ok()
+        .map(|mut v| {
+            v.truncate(v.len() / (units.len().max(1) * n_parents));
+            v
+        });
+    Ok((units, volumes))
 }
 
 #[cfg(feature = "transport")]

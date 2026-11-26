@@ -60,10 +60,44 @@ schedule = yamc.PulseSchedule([
 #    steps; an int selects one (negative counts from the end). There is no
 #    pre-irradiation baseline row to slice off.
 dose = schedule.time_correct_tally(results[dose_tally], steps=-1)  # end of cooling
-print(f"Dose rate at end of cooling: {dose.mean}")   # one value per mesh cell
-print(dose.std_dev)                                  # matching uncertainty
-print(dose.by_nuclide)                               # per-emitter breakdown
+print(dose.units)      # ['cm/s']: the tally's unit per source particle, times the pulses' rate
+print(dose.mean)       # one value per mesh cell
+print(dose.std_dev)    # matching uncertainty
+print(dose.by_nuclide) # per-emitter breakdown
 ```
+
+### Units
+
+A ``DoseResult`` is per bin, in ``dose.units``: the tally's unit per source
+particle times the pulses' rate in particles per second. A photon flux tally
+gives ``"cm/s"`` (a track length), and one with dose coefficients gives
+``"pSv·cm²·cm/s"``. ``to()`` converts, dividing each bin by its volume for a
+per-volume unit, and converts every array (``mean``, ``std_dev``,
+``by_nuclide`` and the nuclear-data uncertainties):
+
+<!-- doctest: skip -->
+```python
+dose_tally = yamc.Tally(
+    scores=["flux"],
+    particle="photon",
+    parent_nuclides=radionuclides,
+    mesh=mesh,
+    dose_coefficients=("photon", "AP"),
+)
+# ... transport as above ...
+dose = schedule.time_correct_tally(results[dose_tally], steps=-1)
+dose.to("uSv/h").mean     # dose rate per mesh cell, in microsieverts per hour
+dose.to("mSv/h").mean
+flux = schedule.time_correct_tally(results[flux_tally], steps=-1)  # a plain photon flux tally
+flux.to("1/(cm2 s)").mean  # photon flux per mesh cell
+```
+
+A per-volume unit needs the bin volumes: a mesh tally's, or, with
+``time_correct_tally``, a cell tally's whose cells were given a ``volume``. Pass the tally result as it
+comes: the schedule's pulse rates are the source strength, so a result already
+given one with ``with_source_strength`` is refused rather than scaled twice.
+``yamc.simulate_shutdown_dose`` returns the same ``DoseResult``, so
+``dose["dose"].to("uSv/h")`` works there too.
 
 ``radionuclides()`` names an emitter a reaction makes directly as itself
 (``"Co60"``), and one made through a decaying parent by its decay path

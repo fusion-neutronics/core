@@ -309,3 +309,37 @@ def test_model_getters():
     pulse = yamc.Pulse(model=model, rate=1.0, duration=1.0)
     assert pulse.model is model and pulse.source is None and pulse.moves == {}
     assert yamc.Cooldown(duration=1.0).model is None
+
+
+# --- units -------------------------------------------------------------------
+
+def test_a_mesh_dose_converts_per_volume():
+    """The dose is per bin, in the tally's unit per second; a per-volume unit
+    divides by the mesh element, here 20 x 20 x 20 cm."""
+    model = _model()
+    flux = _tally()
+    dose_rate = yamc.Tally(scores=["flux"], name="dose_rate", mesh=MESH, particle="photon",
+                           dose_coefficients=("photon", "AP"))
+    results = yamc.simulate_shutdown_dose(
+        yamc.PulseSchedule([
+            yamc.Pulse(model=model, rate=1e12, duration=(1, "h")),
+            yamc.Cooldown(duration=(1, "h")),
+        ]),
+        tallies=[flux, dose_rate], total_particles=PARTICLES, seed=3,
+    )
+    volume = 20.0 ** 3
+
+    flux_dose = results["dose"]
+    assert flux_dose.units == ["cm/s"]
+    np.testing.assert_allclose(
+        flux_dose.to("1/(cm2 s)").mean, np.array(flux_dose.mean) / volume, rtol=1e-12
+    )
+
+    sv = results["dose_rate"]
+    assert sv.units == ["pSv·cm²·cm/s"]
+    usv_h = sv.to("uSv/h")
+    assert usv_h.units == ["uSv/h"]
+    np.testing.assert_allclose(
+        usv_h.mean, np.array(sv.mean) * 1e-12 * 3600 * 1e6 / volume, rtol=1e-12
+    )
+    assert np.array(usv_h.mean)[0].sum() > 0.0

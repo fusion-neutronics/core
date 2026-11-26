@@ -153,6 +153,39 @@ pub fn convert_extensive(from: &str, to: &str) -> Result<ExtensiveConversion, St
     })
 }
 
+/// Factors that turn values held per bin, in `from`, into `to`: one per bin,
+/// for `n_bins` bins. `to` has the dimensions of `from` (a scaled unit), or
+/// those per volume, which divides each bin by its volume in cm³:
+/// `volumes[b % volumes.len()]`, so a mesh's element volumes serve every
+/// score and filter bin in front of the mesh, which varies fastest. A
+/// per-volume unit without `volumes` is an error naming why, and so is a
+/// per-mass one: a bin has no mass.
+pub fn per_bin_factors(
+    from: &str,
+    to: &str,
+    n_bins: usize,
+    volumes: Option<&[f64]>,
+) -> Result<Vec<f64>, String> {
+    let conversion = convert_extensive(from, to)?;
+    match conversion.normalisation {
+        Normalisation::Total => Ok(vec![conversion.factor; n_bins]),
+        Normalisation::PerVolume => {
+            let volumes = volumes.filter(|v| !v.is_empty()).ok_or_else(|| {
+                format!(
+                    "cannot give {from} in {to:?}: a per-volume unit divides each bin by its \
+                     volume, and the volumes of these bins are not known (only a mesh tally's are)"
+                )
+            })?;
+            Ok((0..n_bins)
+                .map(|b| conversion.factor / volumes[b % volumes.len()])
+                .collect())
+        }
+        Normalisation::PerMass => Err(format!(
+            "cannot give {from} in {to:?}: a bin has a volume but no mass"
+        )),
+    }
+}
+
 /// The factor from `from` to `to`, which must have the same dimensions: for
 /// a quantity that is already per unit of something, such as a dose rate.
 pub fn convert(from: &str, to: &str) -> Result<f64, String> {
@@ -472,6 +505,21 @@ mod tests {
         let err = convert_extensive("W", "eV").unwrap_err();
         assert!(err.contains("cannot give W in \"eV\""), "{err}");
         assert!(convert_extensive("Bq", "Bq/cm2").is_err());
+    }
+
+    #[test]
+    fn per_bin_factors_divide_by_volume() {
+        let f = per_bin_factors("pSv cm3/s", "Sv/h", 4, Some(&[2.0, 4.0])).unwrap();
+        let expect = 1e-12 * 3600.0;
+        for (b, v) in [2.0, 4.0, 2.0, 4.0].iter().enumerate() {
+            assert!(close(f[b], expect / v), "{f:?}");
+        }
+        let same = per_bin_factors("cm/s", "m/s", 3, None).unwrap();
+        assert_eq!(same.len(), 3);
+        assert!(close(same[0], 0.01));
+        let err = per_bin_factors("cm/s", "1/(cm2 s)", 3, None).unwrap_err();
+        assert!(err.contains("volumes of these bins are not known"), "{err}");
+        assert!(per_bin_factors("cm/s", "cm/(s g)", 3, Some(&[1.0])).is_err());
     }
 
     #[test]
