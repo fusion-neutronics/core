@@ -237,7 +237,9 @@ def _tally_to_vtkhdf(self, filename, **kwargs):
         **kwargs: Keyword arguments forwarded to
             ``yamc.vtkhdf.mesh_tally_to_vtkhdf`` (``scores``, ``datasets``,
             ``sum_energy``, ``sum_nuclides``, ``volume_normalization``,
-            ``scaling_factor``, ``length_units``).
+            ``scaling_factor``, ``length_units``). Values are per source
+            particle; for physical units such as W/m3, export the result
+            instead: ``results.with_source_strength(s)[tally].to("W/m3").to_vtkhdf(...)``.
     """
     from yamc.vtkhdf import mesh_tally_to_vtkhdf
     mesh_tally_to_vtkhdf(filename, self, **kwargs)
@@ -456,8 +458,27 @@ def _tallyresult_to_dataset(self):
     return _with_score_units(xr.Dataset(data_vars=data_vars, coords=coords, attrs=attrs), self)
 
 
+def _tallyresult_to_vtkhdf(self, filename, **kwargs):
+    """Write this mesh tally result to a VTK-HDF file for ParaView.
+
+    Values are written in this result's units, so convert first for physical
+    ones: ``results.with_source_strength(1e20)[tally].to("W/m3")``. Each mean
+    and standard deviation dataset carries ``attrs["units"]``. Requires
+    ``h5py`` (install with ``pip install yamc[viz]``).
+
+    Args:
+        filename (str): Output file path (recommended: ``.vtkhdf``).
+        **kwargs: Keyword arguments forwarded to
+            ``yamc.vtkhdf.tally_result_to_vtkhdf`` (``scores``, ``datasets``,
+            ``sum_energy``, ``sum_nuclides``, ``length_units``).
+    """
+    from yamc.vtkhdf import tally_result_to_vtkhdf
+    tally_result_to_vtkhdf(filename, self, **kwargs)
+
+
 _TallyResult.to_xarray = _tallyresult_to_xarray
 _TallyResult.to_dataset = _tallyresult_to_dataset
+_TallyResult.to_vtkhdf = _tallyresult_to_vtkhdf
 
 
 # ---------------------------------------------------------------------------

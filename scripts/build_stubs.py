@@ -133,17 +133,17 @@ INJECTED_METHODS: dict[str, list[tuple[str, str]]] = {
     "MeshGeometry": [("add_tets", _m(
         'add_tets(self, volumes: typing.Optional[typing.Sequence[builtins.str]] = None, target_edge_length: builtins.float | dict[builtins.str, builtins.float] | None = None, *, mesh_threads: builtins.int | typing.Literal["all"] = "all") -> MeshGeometry',
         "A copy of this geometry with the named volumes filled with tetrahedra, conformal with the surface and with each other. The geometry itself is unchanged.")), ("to_vtkhdf", _m(
-        "to_vtkhdf(self, path: builtins.str | os.PathLike[builtins.str]) -> None",
+        'to_vtkhdf(self, path: builtins.str | os.PathLike[builtins.str], *, length_units: typing.Literal["cm", "m", "mm"] = "cm") -> None',
         "Write the mesh's triangles and tets, with each cell's volume_id and material_id, to a VTKHDF UnstructuredGrid file for ParaView. Requires h5py (pip install yamc[viz]).")), ("plot", _m(
         "plot(self, *args: typing.Any, **kwargs: typing.Any) -> InteractivePlot",
         "Render an interactive plot of this mesh geometry. See the docs for keyword arguments."))],
     "UnstructuredMesh": [("to_vtkhdf", _m(
-        "to_vtkhdf(self, path: builtins.str | os.PathLike[builtins.str]) -> None",
+        'to_vtkhdf(self, path: builtins.str | os.PathLike[builtins.str], *, length_units: typing.Literal["cm", "m", "mm"] = "cm") -> None',
         "Write the cells with each one's region_id to a VTKHDF UnstructuredGrid file for ParaView. Requires h5py (pip install yamc[viz])."))],
     "NeutronSource": [_VTKHDF],
     "PhotonSource": [_VTKHDF],
     "Tracks": [("to_vtkhdf", _m(
-        "to_vtkhdf(self, filename: builtins.str) -> None",
+        'to_vtkhdf(self, filename: builtins.str, *, length_units: typing.Literal["cm", "m", "mm"] = "cm") -> None',
         "Write one polyline per particle track to a VTK-HDF PolyData file for ParaView. Requires h5py (pip install yamc[viz])."))],
     "Tally": [_VTKHDF, ("interactive_plot", _m(
         "interactive_plot(self, *args: typing.Any, **kwargs: typing.Any) -> InteractiveTallyPlot",
@@ -166,6 +166,9 @@ INJECTED_METHODS: dict[str, list[tuple[str, str]]] = {
         ("to_dataset", _m(
             "to_dataset(self) -> typing.Any",
             "Return mean/std_dev/rel_err as one labelled xarray.Dataset, each with attrs['units']. Requires xarray.")),
+        ("to_vtkhdf", _m(
+            'to_vtkhdf(self, filename: builtins.str, *, scores: typing.Optional[typing.Sequence[builtins.int | builtins.str]] = None, datasets: typing.Sequence[builtins.str] = ("mean", "standard_deviation", "relative_error"), sum_energy: builtins.bool = True, sum_nuclides: builtins.bool = True, length_units: typing.Literal["cm", "m", "mm"] = "cm") -> None',
+            "Write this mesh tally result to a VTK-HDF file for ParaView, values in this result's units (convert with to() first, e.g. to('W/m3')), each dataset with attrs['units']. Requires h5py (pip install yamc[viz]).")),
     ],
 }
 
