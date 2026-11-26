@@ -231,14 +231,16 @@ final.get_atoms_per_barn_cm()        # dict[str, float], the solver's own units
 Stable nuclides contribute nothing to activity or decay heat and are omitted from
 the by-nuclide dictionaries.
 
-`per` is the way out of needing a size at all. `per="cm3"` gives Bq/cm³ or W/cm³
-and needs neither `volume` nor `density`, and `per="g"` gives Bq/g or W/g and
-needs only `density`. The decay photon spectrum takes the same argument:
+`per` is the way out of needing a size at all. `per="cm3"` or `per="m3"` gives
+Bq or W per cm³ or m³ and needs neither `volume` nor `density`, and `per="g"`
+or `per="kg"` gives Bq or W per g or kg and needs only `density`. The decay photon spectrum takes the same argument:
 
 <!-- doctest: skip -->
 ```python
 final.activity(per="cm3")                  # Bq/cm3, no volume needed
 final.decay_heat(per="g")                  # W/g, needs only density
+final.activity(per="kg")                   # Bq/kg, as handbooks quote it
+final.decay_heat(per="m3")                 # W/m3
 final.decay_photon_spectrum(per="cm3")     # photons/s/cm3
 ```
 

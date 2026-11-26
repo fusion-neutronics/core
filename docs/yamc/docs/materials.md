@@ -477,13 +477,14 @@ number to check before trusting a comfortable index.
 #### Activity, decay heat and decay photons
 
 A transmuted material provides the usual decay quantities directly. Each takes
-``per=None`` for the whole material, which needs ``volume``, or ``"cm3"`` or
-``"g"`` for a density, and the totals also take ``by_nuclide=True``.
+``per=None`` for the whole material, which needs ``volume``, or ``"cm3"``,
+``"m3"``, ``"g"`` or ``"kg"`` for a density, and the totals also take ``by_nuclide=True``.
 
 <!-- doctest: skip -->
 ```python
 if final is not None:
     final.activity(per="g")                           # Bq/g
+    final.activity(per="kg")                          # Bq/kg
     final.decay_heat(per="cm3")                       # W/cm3
     final.decay_heat(per="cm3", component="gamma")    # the gamma part alone
     energies, rates = final.decay_photon_spectrum(per="cm3")   # lines, photons/s/cm3

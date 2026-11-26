@@ -110,6 +110,25 @@ def test_per_g_divides_by_the_mass_density(with_volume, quantity):
 
 
 @pytest.mark.parametrize("quantity", ["activity", "decay_heat"])
+def test_per_kg_is_a_thousand_times_per_g(with_volume, quantity):
+    """Bq/kg and W/kg are what handbooks and waste limits quote."""
+    per_g = getattr(with_volume, quantity)(per="g")
+    per_kg = getattr(with_volume, quantity)(per="kg")
+    assert per_kg == pytest.approx(1e3 * per_g, rel=1e-12)
+
+
+@pytest.mark.parametrize("quantity", ["activity", "decay_heat"])
+def test_per_m3_is_a_million_times_per_cm3(with_volume, quantity):
+    per_cm3 = getattr(with_volume, quantity)(per="cm3")
+    per_m3 = getattr(with_volume, quantity)(per="m3")
+    assert per_m3 == pytest.approx(1e6 * per_cm3, rel=1e-12)
+
+
+def test_per_kg_needs_no_volume(without_volume):
+    assert without_volume.activity(per="kg") > 0.0
+
+
+@pytest.mark.parametrize("quantity", ["activity", "decay_heat"])
 def test_by_nuclide_carries_the_same_unit(with_volume, quantity):
     """`per` and `by_nuclide` compose: the dict's values scale the same way."""
     totals = getattr(with_volume, quantity)(by_nuclide=True)
@@ -126,7 +145,7 @@ def test_by_nuclide_carries_the_same_unit(with_volume, quantity):
 def test_an_unknown_per_is_refused_by_name(with_volume, quantity):
     """Not silently treated as the default, which would be a wrong unit."""
     with pytest.raises(ValueError, match="unknown per="):
-        getattr(with_volume, quantity)(per="kg")
+        getattr(with_volume, quantity)(per="lb")
 
 
 def test_contact_dose_takes_no_per(with_volume):
