@@ -217,6 +217,50 @@ impl Material {
         }
     }
 
+    /// The factor that turns a per-cm³ quantity into the one `per` asks for.
+    ///
+    /// Activity, decay heat and the decay photon spectra all count atoms, and
+    /// the solve holds atom DENSITIES, so the per-cm³ answer is the one it
+    /// natively has and every other form is that times this factor.
+    ///
+    /// * `None` asks for the total, so the factor is `volume`, which must be set.
+    /// * `"cm3"` is the native form, so the factor is 1 and nothing is required,
+    ///   and `"m3"` is that times the 1e6 cm³ in a m³.
+    /// * `"g"` and `"kg"` divide by the mass density (times 1000 for kg), which
+    ///   needs only `density`. It is the current inventory's density, not the
+    ///   input's, since activation moves mass between nuclides.
+    ///
+    /// `quantity` names the caller in error messages.
+    pub fn per_unit_scale(&self, per: Option<&str>, quantity: &str) -> Result<f64, String> {
+        let per_mass = |grams: f64| -> Result<f64, String> {
+            let density = self.get_mass_density()?;
+            if density.is_nan() || density <= 0.0 {
+                return Err(format!(
+                    "{quantity} with per={:?} needs a positive mass density, got {density}",
+                    per.unwrap_or_default()
+                ));
+            }
+            Ok(grams / density)
+        };
+        match per {
+            None => self.volume.ok_or_else(|| {
+                format!(
+                    "{quantity} requires material.volume in cm^3 for a total; pass \
+                     per='cm3', per='m3', per='g' or per='kg' for a specific quantity, which \
+                     needs no volume"
+                )
+            }),
+            Some("cm3") => Ok(1.0),
+            Some("m3") => Ok(1e6),
+            Some("g") => per_mass(1.0),
+            Some("kg") => per_mass(1000.0),
+            Some(other) => Err(format!(
+                "unknown per={other:?} for {quantity}; expected None for a total, \
+                 'cm3' or 'm3' for a per-volume quantity, or 'g' or 'kg' for a per-mass one"
+            )),
+        }
+    }
+
     /// Total atom density (atoms/barn-cm), regardless of stored units.
     ///
     /// For `"atom/barn-cm"` this is the stored density value; for `"sum"` it is
@@ -450,5 +494,50 @@ mod tests {
 
         assert!(result.is_err(), "mass + sum should return Err");
         assert!(result.unwrap_err().contains("fraction_type='mass'"));
+    }
+
+    fn iron(volume: Option<f64>) -> Material {
+        let nuclides = HashMap::from([("Fe56".to_string(), 1.0)]);
+        Material {
+            volume,
+            ..Material::new(nuclides, "atom", "g/cm3", Some(7.874)).unwrap()
+        }
+    }
+
+    #[test]
+    fn per_unit_scale_total_is_the_volume() {
+        assert_eq!(
+            iron(Some(1000.0)).per_unit_scale(None, "activity"),
+            Ok(1000.0)
+        );
+        let err = iron(None).per_unit_scale(None, "activity").unwrap_err();
+        assert!(err.contains("requires material.volume"), "{err}");
+    }
+
+    #[test]
+    fn per_unit_scale_cm3_needs_nothing() {
+        assert_eq!(iron(None).per_unit_scale(Some("cm3"), "activity"), Ok(1.0));
+    }
+
+    #[test]
+    fn per_unit_scale_m3_is_a_million_cm3() {
+        assert_eq!(iron(None).per_unit_scale(Some("m3"), "activity"), Ok(1e6));
+    }
+
+    #[test]
+    fn per_unit_scale_kg_is_a_thousand_times_g() {
+        let mat = iron(None);
+        let per_g = mat.per_unit_scale(Some("g"), "activity").unwrap();
+        let per_kg = mat.per_unit_scale(Some("kg"), "activity").unwrap();
+        assert!((per_g - 1.0 / 7.874).abs() < 1e-15);
+        assert!((per_kg - 1000.0 * per_g).abs() < 1e-12);
+    }
+
+    #[test]
+    fn per_unit_scale_refuses_an_unknown_unit_by_name() {
+        let err = iron(Some(1.0))
+            .per_unit_scale(Some("lb"), "decay_heat")
+            .unwrap_err();
+        assert!(err.contains("unknown per=\"lb\" for decay_heat"), "{err}");
     }
 }

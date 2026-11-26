@@ -2076,13 +2076,14 @@ class Material:
             by_nuclide (bool): Return a ``dict[str, float]`` by nuclide instead
                 of the total.
             per (str | None): ``None`` (default) for the total, which needs
-                ``volume``; ``"cm3"`` for Bq/cm³, which needs nothing; ``"g"``
-                for Bq/g, which needs only ``density``.
+                ``volume``; ``"cm3"`` or ``"m3"`` for Bq/cm³ or Bq/m³, which
+                need nothing; ``"g"`` or ``"kg"`` for Bq/g or Bq/kg, which need
+                only ``density``.
         
         Returns:
             float | dict[str, float]: Activity, in Bq when ``per`` is ``None``,
-            Bq/cm³ when it is ``"cm3"`` and Bq/g when it is ``"g"``. The unit of
-            a ``by_nuclide`` dict's values is the same.
+            otherwise Bq per the unit ``per`` names. The unit of a ``by_nuclide``
+            dict's values is the same.
         """
     def decay_heat(self, *, by_nuclide: builtins.bool = False, per: typing.Optional[builtins.str] = None, component: typing.Optional[builtins.str] = None) -> typing.Any:
         r"""
@@ -2097,8 +2098,9 @@ class Material:
             by_nuclide (bool): Return a ``dict[str, float]`` by nuclide instead
                 of the total.
             per (str | None): ``None`` (default) for the total, which needs
-                ``volume``; ``"cm3"`` for W/cm³, which needs nothing; ``"g"``
-                for W/g, which needs only ``density``.
+                ``volume``; ``"cm3"`` or ``"m3"`` for W/cm³ or W/m³, which need
+                nothing; ``"g"`` or ``"kg"`` for W/g or W/kg, which need only
+                ``density``.
             component (str | None): ``None`` (default) for the whole decay heat;
                 ``"beta"``, ``"gamma"`` or ``"alpha"`` for one recoverable-heat
                 component alone (the ENDF MT=457 light-particle, electromagnetic
@@ -2110,8 +2112,8 @@ class Material:
         
         Returns:
             float | dict[str, float]: Decay heat, in W when ``per`` is ``None``,
-            W/cm³ when it is ``"cm3"`` and W/g when it is ``"g"``. The unit of a
-            ``by_nuclide`` dict's values is the same.
+            otherwise W per the unit ``per`` names. The unit of a ``by_nuclide``
+            dict's values is the same.
         """
     def decay_photon_spectrum(self, *, per: typing.Optional[builtins.str] = None) -> tuple[builtins.list[builtins.float], builtins.list[builtins.float]]:
         r"""
@@ -2161,7 +2163,7 @@ class Material:
         
         Args:
             per (str | None): None for the whole material, which needs a
-                ``volume``, or ``'cm3'`` or ``'g'``, as for
+                ``volume``, or ``'cm3'``, ``'m3'``, ``'g'`` or ``'kg'``, as for
                 ``decay_photon_spectrum()``.
         
         Returns:

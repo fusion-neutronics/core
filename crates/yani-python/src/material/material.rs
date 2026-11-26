@@ -160,53 +160,6 @@ impl PyMaterial {
             .ensure_nuclides_loaded()
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
-
-    /// The factor that turns a per-cm3 quantity into the one `per` asks for.
-    ///
-    /// Activity, decay heat and the photon spectrum all count atoms, and the
-    /// solve holds atom DENSITIES, so the intensive answer is the one it
-    /// natively has and `volume` is only ever the multiplier that makes it
-    /// extensive (`atoms = density * BARN_PER_CM_SQ * volume`). Every one of
-    /// them is therefore linear in this factor, which is what lets one helper
-    /// serve all three.
-    ///
-    /// * `None` (the default) asks for the total, so the factor is the volume
-    ///   and the error when it is unset is the same one as before.
-    /// * `"cm3"` asks for the intensive form the solve already has, so the
-    ///   factor is 1 and nothing is required.
-    /// * `"g"` divides by the mass density, which needs only `density`, and
-    ///   `density` is already mandatory.
-    ///
-    /// The unit is therefore a function of what the caller wrote, never of what
-    /// happens to be set on the material: a caller who does not pass `per`
-    /// cannot tell this exists.
-    fn scale_for(&self, per: Option<&str>, quantity: &str) -> PyResult<f64> {
-        match per {
-            None => self.internal.volume.ok_or_else(|| {
-                PyValueError::new_err(format!(
-                    "{quantity} requires material.volume in cm^3 for a total; \
-                     pass per='cm3' or per='g' for a specific quantity, which needs no volume"
-                ))
-            }),
-            Some("cm3") => Ok(1.0),
-            Some("g") => {
-                let density = self
-                    .internal
-                    .get_mass_density()
-                    .map_err(PyValueError::new_err)?;
-                if density.is_nan() || density <= 0.0 {
-                    return Err(PyValueError::new_err(format!(
-                        "{quantity} with per='g' needs a positive mass density, got {density}"
-                    )));
-                }
-                Ok(1.0 / density)
-            }
-            Some(other) => Err(PyValueError::new_err(format!(
-                "unknown per={other:?} for {quantity}; expected None for a total, \
-                 'cm3' for a per-volume quantity, or 'g' for a per-mass one"
-            ))),
-        }
-    }
 }
 
 #[gen_stub_pymethods]
@@ -882,16 +835,20 @@ impl PyMaterial {
     ///     by_nuclide (bool): Return a ``dict[str, float]`` by nuclide instead
     ///         of the total.
     ///     per (str | None): ``None`` (default) for the total, which needs
-    ///         ``volume``; ``"cm3"`` for Bq/cm³, which needs nothing; ``"g"``
-    ///         for Bq/g, which needs only ``density``.
+    ///         ``volume``; ``"cm3"`` or ``"m3"`` for Bq/cm³ or Bq/m³, which
+    ///         need nothing; ``"g"`` or ``"kg"`` for Bq/g or Bq/kg, which need
+    ///         only ``density``.
     ///
     /// Returns:
     ///     float | dict[str, float]: Activity, in Bq when ``per`` is ``None``,
-    ///     Bq/cm³ when it is ``"cm3"`` and Bq/g when it is ``"g"``. The unit of
-    ///     a ``by_nuclide`` dict's values is the same.
+    ///     otherwise Bq per the unit ``per`` names. The unit of a ``by_nuclide``
+    ///     dict's values is the same.
     #[pyo3(signature = (*, by_nuclide=false, per=None))]
     fn activity(&self, py: Python<'_>, by_nuclide: bool, per: Option<&str>) -> PyResult<Py<PyAny>> {
-        let volume = self.scale_for(per, "activity")?;
+        let volume = self
+            .internal
+            .per_unit_scale(per, "activity")
+            .map_err(PyValueError::new_err)?;
         let atom_densities = self
             .internal
             .get_atoms_per_barn_cm()
@@ -923,8 +880,9 @@ impl PyMaterial {
     ///     by_nuclide (bool): Return a ``dict[str, float]`` by nuclide instead
     ///         of the total.
     ///     per (str | None): ``None`` (default) for the total, which needs
-    ///         ``volume``; ``"cm3"`` for W/cm³, which needs nothing; ``"g"``
-    ///         for W/g, which needs only ``density``.
+    ///         ``volume``; ``"cm3"`` or ``"m3"`` for W/cm³ or W/m³, which need
+    ///         nothing; ``"g"`` or ``"kg"`` for W/g or W/kg, which need only
+    ///         ``density``.
     ///     component (str | None): ``None`` (default) for the whole decay heat;
     ///         ``"beta"``, ``"gamma"`` or ``"alpha"`` for one recoverable-heat
     ///         component alone (the ENDF MT=457 light-particle, electromagnetic
@@ -936,8 +894,8 @@ impl PyMaterial {
     ///
     /// Returns:
     ///     float | dict[str, float]: Decay heat, in W when ``per`` is ``None``,
-    ///     W/cm³ when it is ``"cm3"`` and W/g when it is ``"g"``. The unit of a
-    ///     ``by_nuclide`` dict's values is the same.
+    ///     otherwise W per the unit ``per`` names. The unit of a ``by_nuclide``
+    ///     dict's values is the same.
     #[pyo3(signature = (*, by_nuclide=false, per=None, component=None))]
     fn decay_heat(
         &self,
@@ -946,7 +904,10 @@ impl PyMaterial {
         per: Option<&str>,
         component: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        let volume = self.scale_for(per, "decay_heat")?;
+        let volume = self
+            .internal
+            .per_unit_scale(per, "decay_heat")
+            .map_err(PyValueError::new_err)?;
         let atom_densities = self
             .internal
             .get_atoms_per_barn_cm()
@@ -1029,7 +990,10 @@ impl PyMaterial {
     ///     emission rates (photons/s).
     #[pyo3(signature = (*, per=None))]
     fn decay_photon_spectrum(&self, per: Option<&str>) -> PyResult<(Vec<f64>, Vec<f64>)> {
-        let volume = self.scale_for(per, "decay_photon_spectrum")?;
+        let volume = self
+            .internal
+            .per_unit_scale(per, "decay_photon_spectrum")
+            .map_err(PyValueError::new_err)?;
         let atom_densities = self
             .internal
             .get_atoms_per_barn_cm()
@@ -1051,7 +1015,7 @@ impl PyMaterial {
     ///
     /// Args:
     ///     per (str | None): None for the whole material, which needs a
-    ///         ``volume``, or ``'cm3'`` or ``'g'``, as for
+    ///         ``volume``, or ``'cm3'``, ``'m3'``, ``'g'`` or ``'kg'``, as for
     ///         ``decay_photon_spectrum()``.
     ///
     /// Returns:
@@ -1066,7 +1030,10 @@ impl PyMaterial {
         &self,
         per: Option<&str>,
     ) -> PyResult<Vec<super::photon_continuum::PyPhotonContinuum>> {
-        let volume = self.scale_for(per, "decay_photon_continua")?;
+        let volume = self
+            .internal
+            .per_unit_scale(per, "decay_photon_continua")
+            .map_err(PyValueError::new_err)?;
         let atom_densities = self
             .internal
             .get_atoms_per_barn_cm()
