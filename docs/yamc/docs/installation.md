@@ -64,8 +64,6 @@ cd yamc-and-yani
 pip install -e "packages/yamc[all]"
 ```
 
-Either way the Rust extension is compiled with full optimisation, which can take a quarter of an hour or more.
-
 ### Check which build is installed
 
 `yamc.__version__` is the installed `yamc` version. `yamc.__commit__` is the full git hash of the core commit the extension was built from, and `yamc.__commit_dirty__` is `True` if tracked files differed from that commit when it was built. Both are `None` for a build made outside a git checkout.

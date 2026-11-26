@@ -39,9 +39,8 @@ cd yamc-and-yani
 pip install -e packages/yani
 ```
 
-Either way the Rust extension is compiled with full optimisation, which can
-take a quarter of an hour or more. A build from source reports version
-`0.0.0.dev0`, and `yani.__commit__` (above) names the commit it was built from.
+A build from source reports version `0.0.0.dev0`, and `yani.__commit__`
+(above) names the commit it was built from.
 
 ## Point it at nuclear data
 
