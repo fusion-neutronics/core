@@ -97,6 +97,10 @@ impl PyTallyResult {
     ///
     /// Energies convert between eV, keV, MeV and J (W per second once a
     /// strength per second is set, J per pulse for a strength per pulse).
+    /// Times are ``s`` (with SI prefixes), ``min``, ``h``, ``d`` and ``a`` for
+    /// a year (annum, 365.25 days), so a dose rate is ``"uSv/h"`` or
+    /// ``"mSv/a"``.
+    ///
     /// A per-volume unit (``"W/cm3"``, ``"1/(cm2 s)"``) divides each bin by
     /// its volume: the mesh element, or the cell when the cell has a
     /// ``volume``. A unit that needs a source strength the result does not

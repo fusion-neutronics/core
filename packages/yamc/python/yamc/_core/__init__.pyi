@@ -638,7 +638,8 @@ class Cooldown:
         
         Args:
             duration: A number of seconds, or a ``(value, unit)`` tuple such as
-                ``(7, "d")``. Units: s, min, h, d, a (year).
+                ``(7, "d")``. Units: s, min, h, d, and a for a year (annum,
+                365.25 days).
             model: The yamc ``Model`` the machine is in while it cools, for
                 ``yamc.simulate_shutdown_dose``: the decay photons of every
                 earlier irradiation are transported through its geometry. It
@@ -3473,7 +3474,8 @@ class Model:
             threads: CPU worker threads (default: all cores).
             max_runtime: Optional wall-time budget PER PASS. A float (seconds)
                 or a ``(value, unit)`` tuple with unit ``'s'``, ``'min'``,
-                ``'h'``, ``'d'``, or ``'a'`` (year), e.g. ``(5, 'min')``.
+                ``'h'``, ``'d'``, or ``'a'`` for a year (annum),
+                e.g. ``(5, 'min')``.
             relative_error: Per-pass convergence target (default 0.1): a pass
                 stops once 95% of the window-mesh voxels that have scored, in
                 every energy group and particle field, reach this relative
@@ -3599,7 +3601,8 @@ class Model:
                 then finalizes tallies normally, so the returned ``TallyResult``s
                 carry valid statistics and figure of merit. Accepts a float
                 (seconds) or a ``(value, unit)`` tuple with unit ``'s'``,
-                ``'min'``, ``'h'``, ``'d'``, or ``'a'`` (year), e.g.
+                ``'min'``, ``'h'``, ``'d'``, or ``'a'`` for a year (annum),
+                e.g.
                 ``(5, 'min')``. Composes with the other stop conditions: the run
                 ends at the first of {``total_particles`` exhausted, all
                 ``convergence_targets`` met, ``max_runtime`` elapsed}. Supported
@@ -3793,7 +3796,8 @@ class Model:
                 checkpoint where its elapsed time reaches the budget, then
                 finalizes normally. Accepts a float (seconds) or a
                 ``(value, unit)`` tuple with unit ``'s'``, ``'min'``, ``'h'``,
-                ``'d'``, or ``'a'`` (year), e.g. ``(30, 's')``. Composes with
+                ``'d'``, or ``'a'`` for a year (annum), e.g.
+                ``(30, 's')``. Composes with
                 ``total_particles``: a solve ends at the first of the two.
                 Because the budget is applied afresh to each timestep, a
                 time-bounded transmutation is non-deterministic in history count.
@@ -4814,7 +4818,8 @@ class Pulse:
                 flux magnitude [n/cm^2/s] (the source's ``Histogram`` energy gives
                 the spectrum shape).
             duration: A number of seconds, or a ``(value, unit)`` tuple such as
-                ``(1, "a")`` or ``(30, "d")``. Units: s, min, h, d, a (year).
+                ``(1, "a")`` or ``(30, "d")``. Units: s, min, h, d, and a for a
+                year (annum, 365.25 days).
             source: The NeutronSource for this campaign. Defaults to ``None``,
                 which ``Model.simulate_transmutation`` accepts (transport uses the
                 model's source); ``Material.transmute`` requires a source whose
@@ -6262,6 +6267,10 @@ class TallyResult:
         
         Energies convert between eV, keV, MeV and J (W per second once a
         strength per second is set, J per pulse for a strength per pulse).
+        Times are ``s`` (with SI prefixes), ``min``, ``h``, ``d`` and ``a`` for
+        a year (annum, 365.25 days), so a dose rate is ``"uSv/h"`` or
+        ``"mSv/a"``.
+        
         A per-volume unit (``"W/cm3"``, ``"1/(cm2 s)"``) divides each bin by
         its volume: the mesh element, or the cell when the cell has a
         ``volume``. A unit that needs a source strength the result does not
@@ -10162,7 +10171,7 @@ def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | t
     Examples:
         >>> schedules = [
         ...     yani.PulseSchedule([
-        ...         yani.Pulse(rate=flux[i], duration=(1, "y"), source=spectra[i]),
+        ...         yani.Pulse(rate=flux[i], duration=(1, "a"), source=spectra[i]),
         ...         yani.Cooldown(duration=(1, "d")),
         ...     ])
         ...     for i in range(len(cells))

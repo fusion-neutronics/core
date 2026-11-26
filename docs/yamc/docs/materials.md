@@ -550,7 +550,7 @@ cells = [
 cell_fluxes = [1e14, 5e13, 1e13]   # each cell's flux magnitude [n/cm^2/s]
 schedules = [
     yamc.PulseSchedule([
-        yamc.Pulse(rate=flux, duration=(1, "y"), source=spectrum),
+        yamc.Pulse(rate=flux, duration=(1, "a"), source=spectrum),
         yamc.Cooldown(duration=(1, "d")),
     ])
     for flux in cell_fluxes

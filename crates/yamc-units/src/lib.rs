@@ -5,7 +5,7 @@
 //! eV, s, Sv, Gy, pulse and g. A small table of symbols, with SI prefixes,
 //! covers what transport and inventory results come in: length (`m`), mass
 //! (`g`), energy (`eV`, `J`), power (`W`), activity (`Bq`, `Ci`), time (`s`,
-//! `min`, `h`, `d`, `y`), dose (`Sv`, `Gy`), `pulse`, and counts (`particles`,
+//! `min`, `h`, `d`, `a` for a year), dose (`Sv`, `Gy`), `pulse`, and counts (`particles`,
 //! `reactions`, `n`, ...), which carry no dimension. No unit library is
 //! needed, so this works in WASM and Pyodide.
 //!
@@ -178,7 +178,8 @@ fn plain_symbol(s: &str) -> Option<Quantity> {
         "min" => Quantity::base(60.0, TIME),
         "h" | "hr" => Quantity::base(3600.0, TIME),
         "d" | "day" => Quantity::base(86_400.0, TIME),
-        "y" | "yr" | "year" => Quantity::base(365.25 * 86_400.0, TIME),
+        // A Julian year, 365.25 days, written `a` (annum) and only `a`.
+        "a" => Quantity::base(365.25 * 86_400.0, TIME),
         "pulse" | "pulses" | "shot" | "shots" => Quantity::base(1.0, PULSE),
         "particle" | "particles" | "source" | "source-particle" | "source-particles" | "n"
         | "neutron" | "neutrons" | "photon" | "photons" | "reaction" | "reactions" | "atom"
@@ -219,6 +220,12 @@ fn prefix(c: char) -> Option<f64> {
     })
 }
 
+/// The hint for a year written another way than `a`: "yr", "year", ...
+pub fn year_hint(s: &str) -> Option<&'static str> {
+    matches!(s, "y" | "yr" | "yrs" | "year" | "years")
+        .then_some("a year is written \"a\" (annum), e.g. \"mSv/a\" or (1, \"a\")")
+}
+
 fn symbol(s: &str) -> Result<Quantity, String> {
     if let Some(q) = plain_symbol(s).or_else(|| prefixable_symbol(s)) {
         return Ok(q);
@@ -232,8 +239,11 @@ fn symbol(s: &str) -> Result<Quantity, String> {
             ..q
         });
     }
+    if let Some(hint) = year_hint(s) {
+        return Err(format!("unknown unit {s:?}: {hint}"));
+    }
     Err(format!(
-        "unknown unit {s:?}; known units are m, g, s, min, h, d, y, eV, J, W, Bq, Ci, Sv, Gy (with SI prefixes such as c, m, k, M), pulse, and counts such as particles or reactions"
+        "unknown unit {s:?}; known units are m, g, s, min, h, d, a (year), eV, J, W, Bq, Ci, Sv, Gy (with SI prefixes such as c, m, k, M), pulse, and counts such as particles or reactions"
     ))
 }
 
@@ -424,6 +434,15 @@ mod tests {
         // Gy and y, cm and m, mCi and Ci: the whole symbol wins over a prefix.
         assert_eq!(parse("Gy").unwrap().dims[ABSORBED_DOSE], 1);
         assert!(close(parse("cm").unwrap().factor, 1.0));
+    }
+
+    #[test]
+    fn a_year_is_a_alone() {
+        assert!(close(parse("a").unwrap().factor, 365.25 * 86_400.0));
+        for other in ["y", "yr", "year", "years"] {
+            let err = parse(&format!("mSv/{other}")).unwrap_err();
+            assert!(err.contains("a year is written \"a\""), "{other}: {err}");
+        }
     }
 
     #[test]

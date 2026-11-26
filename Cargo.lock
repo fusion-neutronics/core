@@ -7609,6 +7609,7 @@ dependencies = [
  "yamc-nuclide",
  "yamc-rng",
  "yamc-test-cache",
+ "yamc-units",
  "yani",
  "yani-convert",
  "yani-decay",

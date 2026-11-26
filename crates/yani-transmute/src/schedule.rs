@@ -10,8 +10,9 @@
 
 /// Convert a duration of `value` in `unit` to seconds.
 ///
-/// Units: `s`, `min`, `h`, `d`, `a` (Julian year, 365.25 days), plus their
-/// spelled-out aliases. `value` must be non-negative.
+/// Units: `s`, `min`, `h`, `d`, and `a` for a year (annum: a Julian year,
+/// 365.25 days), plus the spelled-out aliases of all but the year, which is
+/// `a` alone. `value` must be non-negative.
 pub fn duration_to_seconds(value: f64, unit: &str) -> Result<f64, String> {
     if !value.is_finite() || value < 0.0 {
         return Err("duration value must be a finite, non-negative number".to_string());
@@ -21,11 +22,14 @@ pub fn duration_to_seconds(value: f64, unit: &str) -> Result<f64, String> {
         "min" | "minute" | "minutes" => 60.0,
         "h" | "hr" | "hour" | "hours" => 3600.0,
         "d" | "day" | "days" => 86400.0,
-        "a" | "y" | "yr" | "year" | "years" => 365.25 * 86400.0,
+        "a" => 365.25 * 86400.0,
         other => {
-            return Err(format!(
-                "unknown duration unit {other:?}; use one of: s, min, h, d, a (year)"
-            ));
+            return Err(match yamc_units::year_hint(other) {
+                Some(hint) => format!("unknown duration unit {other:?}: {hint}"),
+                None => format!(
+                    "unknown duration unit {other:?}; use one of: s, min, h, d, or a for a year"
+                ),
+            });
         }
     };
     Ok(value * per_unit)
