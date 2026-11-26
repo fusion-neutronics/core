@@ -43,8 +43,8 @@ cell when the cell has a ``volume``. For a pulsed source use
 | dose (flux with dose coefficients) | ``"Sv/h"``, ``"uSv/h"``, ``"mSv/h"`` |
 
 Units take SI prefixes (``p n u m c k M G T``) on ``m``, ``s``, ``eV``,
-``J``, ``W``, ``Sv`` and ``Gy``, and time as ``s``, ``min``, ``h``, ``d`` or
-``y``. A unit that does not match the score, or that needs a source strength
+``J``, ``W``, ``Sv`` and ``Gy``, and time as ``s``, ``min``, ``h``, ``d``, and
+``a`` for a year (annum), so a dose rate is ``"uSv/h"`` or ``"mSv/a"``. A unit that does not match the score, or that needs a source strength
 the result does not have, raises a ``ValueError`` saying why.
 
 The converted result is what ``to_xarray()``, ``to_dataset()`` and
