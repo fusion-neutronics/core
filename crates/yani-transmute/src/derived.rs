@@ -88,7 +88,32 @@ pub struct Estimate {
     pub replicas: usize,
 }
 
+/// A unit to give an extensive quantity in: its own unit, the one asked for,
+/// and the quantity's name for an error message.
+#[derive(Clone, Copy)]
+struct PerUnit<'a> {
+    native: &'static str,
+    units: &'a str,
+    quantity: &'static str,
+}
+
 impl Estimate {
+    /// This estimate with every value multiplied by `k`, as a change of unit
+    /// does: the nominal, the mean and every spread. The replica count stays.
+    pub fn scaled(&self, k: f64) -> Self {
+        let s = |v: Option<f64>| v.map(|v| v * k.abs());
+        Self {
+            nominal: self.nominal * k,
+            mean: self.mean.map(|m| m * k),
+            std_dev: s(self.std_dev),
+            std_dev_correlated: s(self.std_dev_correlated),
+            std_dev_standard_error: s(self.std_dev_standard_error),
+            replica_spread: s(self.replica_spread),
+            noise: s(self.noise),
+            replicas: self.replicas,
+        }
+    }
+
     /// The standard deviation as a fraction of the nominal value.
     ///
     /// `None` when there is no spread to report, or when the nominal value is
@@ -565,6 +590,16 @@ impl Quantity {
         !matches!(self, Quantity::Activity)
     }
 
+    /// The unit a total of this quantity comes in, for one that scales with
+    /// the amount of material; `None` for the contact dose, which does not.
+    fn native_units(self) -> Option<&'static str> {
+        match self {
+            Quantity::Activity => Some("Bq"),
+            Quantity::DecayHeat => Some("W"),
+            Quantity::ContactDose { .. } => None,
+        }
+    }
+
     /// The name this quantity goes by in an error message.
     fn name(self) -> &'static str {
         match self {
@@ -620,6 +655,7 @@ impl TransmutationResults {
         step: usize,
         chain: &HashMap<String, ChainNuclide>,
         reads_photons: bool,
+        per_unit: Option<PerUnit<'_>>,
         evaluate: impl Fn(
             &HashMap<String, f64>,
             Option<f64>,
@@ -636,7 +672,13 @@ impl TransmutationResults {
             .get_material(material_id, step)
             .ok_or_else(|| format!("no material {material_id} at step {step}"))?;
         let densities = material.get_atoms_per_barn_cm()?;
-        let volume = material.volume;
+        // A unit asked for scales every evaluation the same way the volume
+        // does (it is the volume for a total), so replicas and nominal stay
+        // in exact proportion.
+        let volume = match per_unit {
+            None => material.volume,
+            Some(p) => Some(material.unit_scale(p.native, p.units, p.quantity)?),
+        };
         let nominal = evaluate(&densities, volume, chain)?;
 
         // Step 0 is the initial composition: an input rather than a result,
@@ -726,19 +768,29 @@ impl TransmutationResults {
         }))
     }
 
-    /// Shared body of the per-nuclide accessors.
+    /// Shared body of the per-nuclide accessors. `units`, for activity and
+    /// decay heat, is the unit to give them in; `None` is the total in Bq or W.
     fn derived(
         &self,
         material_id: u32,
         step: usize,
         chain: &HashMap<String, ChainNuclide>,
         quantity: Quantity,
+        units: Option<&str>,
     ) -> Result<Option<Evaluated>, String> {
+        let per_unit = units.and_then(|units| {
+            quantity.native_units().map(|native| PerUnit {
+                native,
+                units,
+                quantity: quantity.name(),
+            })
+        });
         self.fold_replicas(
             material_id,
             step,
             chain,
             quantity.reads_photons(),
+            per_unit,
             |densities, volume, chain| quantity.by_nuclide(densities, volume, chain),
         )
     }
@@ -755,8 +807,9 @@ impl TransmutationResults {
         step: usize,
         chain: &HashMap<String, ChainNuclide>,
         quantity: Quantity,
+        units: Option<&str>,
     ) -> Result<Option<Estimate>, String> {
-        let Some(folded) = self.derived(material_id, step, chain, quantity)? else {
+        let Some(folded) = self.derived(material_id, step, chain, quantity, units)? else {
             return Ok(None);
         };
         let totals = |replicas: &[HashMap<String, f64>]| -> Vec<f64> {
@@ -800,7 +853,7 @@ impl TransmutationResults {
         step: usize,
         chain: &HashMap<String, ChainNuclide>,
     ) -> Result<Option<Estimate>, String> {
-        self.derived_total(material_id, step, chain, Quantity::Activity)
+        self.derived_total(material_id, step, chain, Quantity::Activity, None)
     }
 
     /// Decay heat of a material at `step` [W], with the ensemble's spread.
@@ -816,7 +869,7 @@ impl TransmutationResults {
         step: usize,
         chain: &HashMap<String, ChainNuclide>,
     ) -> Result<Option<Estimate>, String> {
-        self.derived_total(material_id, step, chain, Quantity::DecayHeat)
+        self.derived_total(material_id, step, chain, Quantity::DecayHeat, None)
     }
 
     /// Activity at `step` broken down by nuclide [Bq], each with its spread.
@@ -830,7 +883,7 @@ impl TransmutationResults {
         chain: &HashMap<String, ChainNuclide>,
     ) -> Result<Option<HashMap<String, Estimate>>, String> {
         Ok(self
-            .derived(material_id, step, chain, Quantity::Activity)?
+            .derived(material_id, step, chain, Quantity::Activity, None)?
             .map(|f| estimate_by_nuclide(&f)))
     }
 
@@ -844,7 +897,7 @@ impl TransmutationResults {
         chain: &HashMap<String, ChainNuclide>,
     ) -> Result<Option<HashMap<String, Estimate>>, String> {
         Ok(self
-            .derived(material_id, step, chain, Quantity::DecayHeat)?
+            .derived(material_id, step, chain, Quantity::DecayHeat, None)?
             .map(|f| estimate_by_nuclide(&f)))
     }
 
@@ -874,12 +927,97 @@ impl TransmutationResults {
                 step,
                 chain,
                 true,
+                None,
                 |densities, volume, drawn| {
                     let volume = require_volume(volume, "decay_photon_spectrum")?;
                     Ok(traced_photon_lines(densities, volume, chain, drawn))
                 },
             )?
             .map(|f| estimate_lines(&f)))
+    }
+
+    /// [`Self::photon_spectrum_uncertainty`] with the emission rates in
+    /// `units`: `"1/s"` (the total, which needs the material's volume), per
+    /// volume (`"1/(s cm3)"`) or per mass (`"1/(s kg)"`).
+    pub fn photon_spectrum_uncertainty_in(
+        &self,
+        material_id: u32,
+        step: usize,
+        chain: &HashMap<String, ChainNuclide>,
+        units: &str,
+    ) -> Result<Option<Vec<LineEstimate>>, String> {
+        let per_unit = PerUnit {
+            native: "1/s",
+            units,
+            quantity: "decay_photon_spectrum",
+        };
+        Ok(self
+            .fold_replicas(
+                material_id,
+                step,
+                chain,
+                true,
+                Some(per_unit),
+                |densities, scale, drawn| {
+                    let scale = require_volume(scale, "decay_photon_spectrum")?;
+                    Ok(traced_photon_lines(densities, scale, chain, drawn))
+                },
+            )?
+            .map(|f| estimate_lines(&f)))
+    }
+
+    /// [`Self::activity_uncertainty`] in `units`: a total (`"Bq"`, `"TBq"`,
+    /// `"Ci"`), which needs the material's volume, or per volume
+    /// (`"Bq/cm3"`) or per mass (`"Bq/kg"`), which do not.
+    pub fn activity_uncertainty_in(
+        &self,
+        material_id: u32,
+        step: usize,
+        chain: &HashMap<String, ChainNuclide>,
+        units: &str,
+    ) -> Result<Option<Estimate>, String> {
+        self.derived_total(material_id, step, chain, Quantity::Activity, Some(units))
+    }
+
+    /// [`Self::activity_uncertainty_by_nuclide`] in `units`, as
+    /// [`Self::activity_uncertainty_in`].
+    pub fn activity_uncertainty_by_nuclide_in(
+        &self,
+        material_id: u32,
+        step: usize,
+        chain: &HashMap<String, ChainNuclide>,
+        units: &str,
+    ) -> Result<Option<HashMap<String, Estimate>>, String> {
+        Ok(self
+            .derived(material_id, step, chain, Quantity::Activity, Some(units))?
+            .map(|f| estimate_by_nuclide(&f)))
+    }
+
+    /// [`Self::decay_heat_uncertainty`] in `units`: a total (`"W"`, `"kW"`,
+    /// `"MeV/s"`), which needs the material's volume, or per volume
+    /// (`"W/cm3"`) or per mass (`"W/kg"`), which do not.
+    pub fn decay_heat_uncertainty_in(
+        &self,
+        material_id: u32,
+        step: usize,
+        chain: &HashMap<String, ChainNuclide>,
+        units: &str,
+    ) -> Result<Option<Estimate>, String> {
+        self.derived_total(material_id, step, chain, Quantity::DecayHeat, Some(units))
+    }
+
+    /// [`Self::decay_heat_uncertainty_by_nuclide`] in `units`, as
+    /// [`Self::decay_heat_uncertainty_in`].
+    pub fn decay_heat_uncertainty_by_nuclide_in(
+        &self,
+        material_id: u32,
+        step: usize,
+        chain: &HashMap<String, ChainNuclide>,
+        units: &str,
+    ) -> Result<Option<HashMap<String, Estimate>>, String> {
+        Ok(self
+            .derived(material_id, step, chain, Quantity::DecayHeat, Some(units))?
+            .map(|f| estimate_by_nuclide(&f)))
     }
 
     /// Contact dose rate at `step` [Gy/h or Sv/h], with the ensemble's spread.
@@ -919,6 +1057,7 @@ impl TransmutationResults {
             step,
             chain,
             Quantity::ContactDose { quantity, build_up },
+            None,
         )
     }
 
@@ -941,6 +1080,7 @@ impl TransmutationResults {
                 step,
                 chain,
                 Quantity::ContactDose { quantity, build_up },
+                None,
             )?
             .map(|f| estimate_by_nuclide(&f)))
     }

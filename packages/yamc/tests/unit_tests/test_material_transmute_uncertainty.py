@@ -981,3 +981,45 @@ def test_with_no_rate_drawn_the_repair_report_is_empty():
     assert info["sigma_at_least_one"] == {}
     assert info["sigma_at_least_ten"] == {}
     assert info["sigma_at_least_one_outside_bound"] == {}
+
+
+def _assert_scaled(value, reference, factor):
+    """A spread scales with its unit; one not reported stays unreported."""
+    if reference is None:
+        assert value is None
+    else:
+        assert value == pytest.approx(reference * factor, rel=1e-9)
+
+
+def test_the_uncertainty_accessors_take_units_as_the_material_does():
+    """The nominal in any unit is what Material.activity (and friends) give in
+    it, and every spread scales with it."""
+    results, mid = _uncertain_results()
+    material = results.get_material(mid, 1)
+    bq = results.get_activity_uncertainty(mid, 1)
+    per_kg = results.get_activity_uncertainty(mid, 1, units="Bq/kg")
+    assert per_kg.nominal == pytest.approx(material.activity(units="Bq/kg"), rel=1e-12)
+    _assert_scaled(per_kg.std_dev, bq.std_dev, per_kg.nominal / bq.nominal)
+
+    heat = results.get_decay_heat_uncertainty(mid, 1, units="W/cm3")
+    assert heat.nominal == pytest.approx(material.decay_heat(units="W/cm3"), rel=1e-12)
+
+    dose = results.get_contact_dose_uncertainty(mid, 1, units="uGy/h")
+    gy_h = results.get_contact_dose_uncertainty(mid, 1)
+    assert dose.nominal == pytest.approx(1e6 * gy_h.nominal, rel=1e-12)
+    _assert_scaled(dose.std_dev, gy_h.std_dev, 1e6)
+
+    lines = results.get_decay_photon_spectrum_uncertainty(mid, 1, units="1/(s cm3)")
+    totals = results.get_decay_photon_spectrum_uncertainty(mid, 1)
+    volume = material.volume
+    assert [line.nominal for line in lines] == pytest.approx(
+        [line.nominal / volume for line in totals], rel=1e-12
+    )
+
+
+def test_a_per_volume_unit_needs_no_volume():
+    results, mid = _no_volume_results()
+    assert results.get_activity_uncertainty(mid, 1, units="Bq/cm3") is not None
+    assert results.get_decay_heat_uncertainty(mid, 1, units="W/kg") is not None
+    with pytest.raises(ValueError, match="activity"):
+        results.get_activity_uncertainty(mid, 1, units="W")

@@ -2377,7 +2377,8 @@ class Material:
                 there is just one, else 294 K.
         
         Returns:
-            Tuple[List[float], List[float]]: (cross_section_values, energy_grid)
+            Tuple[List[float], List[float]]: (cross_section_values, energy_grid):
+            the macroscopic cross section in 1/cm, on the energy grid in eV.
         """
     def transmute(self, schedule: typing.Any, data_uncertainty: typing.Optional[DataUncertainty] = None, self_shielding_chord: typing.Optional[builtins.float] = None, self_shielding_shape: typing.Optional[typing.Any] = None, displacement_damage: builtins.bool = False, displacement_energies: typing.Optional[typing.Mapping[builtins.str, builtins.float]] = None, product_threshold: builtins.float = 1e-12) -> TransmutationResults:
         r"""
@@ -6901,7 +6902,7 @@ class TransmutationResults:
             List of ``{nuclide: density}`` dicts, one per replica, or None if the
             transmutation was run without ``data_uncertainty``.
         """
-    def get_activity_uncertainty(self, material_id: builtins.int, step: builtins.int, *, by_nuclide: builtins.bool = False) -> typing.Any:
+    def get_activity_uncertainty(self, material_id: builtins.int, step: builtins.int, *, by_nuclide: builtins.bool = False, units: builtins.str = 'Bq') -> typing.Any:
         r"""
         Activity at one timestep [Bq], with the nuclear-data spread on it.
         
@@ -6929,11 +6930,16 @@ class TransmutationResults:
             Estimate | dict[str, Estimate] | None: None if the transmutation
             was run without ``data_uncertainty``.
         
+            units (str): As ``Material.activity`` takes it: the total, ``"Bq"``
+                (the default) or a scaled one such as ``"TBq"``, needs the
+                material's ``volume``; per volume (``"Bq/cm3"``) or per mass
+                (``"Bq/kg"``) does not.
+        
         Raises:
-            ValueError: if the material has no ``volume`` in cm^3, which a
-                quantity in becquerel needs.
+            ValueError: if a total is asked for and the material has no
+                ``volume`` in cm^3, or ``units`` is not an activity.
         """
-    def get_decay_heat_uncertainty(self, material_id: builtins.int, step: builtins.int, *, by_nuclide: builtins.bool = False) -> typing.Any:
+    def get_decay_heat_uncertainty(self, material_id: builtins.int, step: builtins.int, *, by_nuclide: builtins.bool = False, units: builtins.str = 'W') -> typing.Any:
         r"""
         Decay heat at one timestep [W], with the nuclear-data spread on it.
         
@@ -6968,10 +6974,16 @@ class TransmutationResults:
             Estimate | dict[str, Estimate] | None: None if the transmutation
             was run without ``data_uncertainty``.
         
+            units (str): As ``Material.decay_heat`` takes it: the total,
+                ``"W"`` (the default) or a scaled one such as ``"kW"``, needs the
+                material's ``volume``; per volume (``"W/cm3"``) or per mass
+                (``"W/kg"``) does not.
+        
         Raises:
-            ValueError: if the material has no ``volume`` in cm^3.
+            ValueError: if a total is asked for and the material has no
+                ``volume`` in cm^3, or ``units`` is not a power.
         """
-    def get_contact_dose_uncertainty(self, material_id: builtins.int, step: builtins.int, *, dose_quantity: builtins.str = 'absorbed-air', build_up: builtins.float = 2.0, by_nuclide: builtins.bool = False) -> typing.Any:
+    def get_contact_dose_uncertainty(self, material_id: builtins.int, step: builtins.int, *, dose_quantity: builtins.str = 'absorbed-air', build_up: builtins.float = 2.0, by_nuclide: builtins.bool = False, units: typing.Optional[builtins.str] = None) -> typing.Any:
         r"""
         Contact dose rate at one timestep, with the nuclear-data spread on it.
         
@@ -7014,12 +7026,15 @@ class TransmutationResults:
             build_up (float): Build-up factor, a plain multiplier on the answer.
             by_nuclide (bool): Return a ``dict[str, Estimate]`` instead of one
                 ``Estimate`` for the total.
+            units (str | None): As ``Material.contact_dose`` takes it: ``None``
+                for Gy/h or Sv/h, or a rate of the same kind such as ``"uGy/h"``
+                or ``"mSv/h"``.
         
         Returns:
             Estimate | dict[str, Estimate] | None: None if the transmutation
             was run without ``data_uncertainty``.
         """
-    def get_decay_photon_spectrum_uncertainty(self, material_id: builtins.int, step: builtins.int) -> typing.Optional[builtins.list[LineEstimate]]:
+    def get_decay_photon_spectrum_uncertainty(self, material_id: builtins.int, step: builtins.int, *, units: builtins.str = '1/s') -> typing.Optional[builtins.list[LineEstimate]]:
         r"""
         The decay-photon spectrum at one timestep, line by line, with the
         nuclear-data spread on each emission rate.
@@ -7052,12 +7067,18 @@ class TransmutationResults:
                 ``get_activity_uncertainty``, step 0 has a spread whenever the
                 ``"half_life"`` or ``"decay_photon_lines"`` source is sampled.
         
+            units (str): The unit of the emission rates, as
+                ``Material.decay_photon_spectrum`` takes it: ``"1/s"`` (the
+                total, the default), per volume (``"1/(s cm3)"``) or per mass
+                (``"1/(s kg)"``). Energies stay in eV.
+        
         Returns:
             list[LineEstimate] | None: None if the transmutation was run without
             ``data_uncertainty``.
         
         Raises:
-            ValueError: if the material has no ``volume`` in cm^3.
+            ValueError: if a total is asked for and the material has no
+                ``volume`` in cm^3.
         """
     def get_gas_production(self, material_id: builtins.int, *, produced: builtins.bool = True) -> typing.Optional[builtins.dict[builtins.str, builtins.list[builtins.float]]]:
         r"""

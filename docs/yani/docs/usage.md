@@ -289,7 +289,8 @@ final.contact_dose(dose_quantity="effective", units="mSv/h")
 
 A contact dose is already per unit of something, so `units=` takes only a rate
 of the same kind: Gy for the absorbed dose in air and Sv for the effective
-dose, with any prefix and time unit (`"mGy/h"`, `"uSv/h"`, `"Gy/s"`).
+dose, with any prefix and time unit (`"mGy/h"`, `"uSv/h"`, `"mSv/a"` for a
+year, `"Gy/s"`).
 
 It is a slab estimate rather than a transport result. The material is taken to
 be a half-space, so half the photons emitted at any depth head for the surface,

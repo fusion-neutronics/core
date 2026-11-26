@@ -385,6 +385,12 @@ fn a_spliced_stream_transmutes_to_the_same_answer_as_the_whole_file() {
         activity(&from_whole) > 0.0,
         "the whole-file run must activate, or this compares two zeroes",
     );
+    // Each step says what its numbers are in.
+    let units = &from_whole[0]["units"];
+    assert_eq!(units["activity"], "Bq");
+    assert_eq!(units["decay_heat"], "W");
+    assert_eq!(units["contact_dose"], "Gy/h");
+    assert_eq!(units["time"], "s");
     let (a, b) = (activity(&from_spliced), activity(&from_whole));
     assert!(
         (a - b).abs() <= 1e-12 * b.abs(),
