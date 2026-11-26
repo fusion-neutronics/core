@@ -188,8 +188,8 @@ impl PyPulse {
     ///         flux magnitude [n/cm^2/s] (the source's ``Histogram`` energy gives
     ///         the spectrum shape).
     ///     duration: A number of seconds, or a ``(value, unit)`` tuple such as
-    ///         ``(1, "a")`` or ``(30, "d")``. Units: s, min, h, d, and a for a
-    ///         year (annum, 365.25 days).
+    ///         ``(1, "a")`` or ``(30, "d")``. Units: s (and ms, us, ns), min, h,
+    ///         d, and a for a year (annum, 365.25 days).
     ///     source: The NeutronSource for this campaign. Defaults to ``None``,
     ///         which ``Model.simulate_transmutation`` accepts (transport uses the
     ///         model's source); ``Material.transmute`` requires a source whose
@@ -365,8 +365,8 @@ impl PyCooldown {
     ///
     /// Args:
     ///     duration: A number of seconds, or a ``(value, unit)`` tuple such as
-    ///         ``(7, "d")``. Units: s, min, h, d, and a for a year (annum,
-    ///         365.25 days).
+    ///         ``(7, "d")``. Units: s (and ms, us, ns), min, h, d, and a for a
+    ///         year (annum, 365.25 days).
     ///     model: The yamc ``Model`` the machine is in while it cools, for
     ///         ``yamc.simulate_shutdown_dose``: the decay photons of every
     ///         earlier irradiation are transported through its geometry. It

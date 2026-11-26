@@ -78,9 +78,26 @@ def test_duration_units():
     assert yamc.Cooldown(duration=7200.0).duration == 7200.0
 
 
+def test_durations_share_the_unit_parser():
+    """Sub-second pulses, through the SI prefixes on s."""
+    s = _dt_source()
+    assert yamc.Pulse(source=s, rate=1.0, duration=(5, "ms")).duration == pytest.approx(5e-3)
+    assert yamc.Pulse(source=s, rate=1.0, duration=(20, "ns")).duration == pytest.approx(2e-8)
+
+
+@pytest.mark.parametrize("other, symbol", [("hours", "h"), ("days", "d"), ("year", "a")])
+def test_one_symbol_per_time_unit(other, symbol):
+    """Another spelling is refused, and the error names the symbol to use."""
+    with pytest.raises(ValueError, match=f'written "{symbol}"'):
+        yamc.Cooldown(duration=(1, other))
+
+
 def test_unknown_unit_rejected():
     with pytest.raises(ValueError, match="unknown duration unit"):
         yamc.Cooldown(duration=(1, "fortnight"))
+    # A length is not a duration, even though the parser knows it.
+    with pytest.raises(ValueError, match="unknown duration unit"):
+        yamc.Cooldown(duration=(1, "m"))
 
 
 def test_pulse_rejects_non_neutron_source():

@@ -175,10 +175,12 @@ pub fn convert(from: &str, to: &str) -> Result<f64, String> {
 /// Symbols that are not prefixed.
 fn plain_symbol(s: &str) -> Option<Quantity> {
     Some(match s {
+        // Time, one symbol each: `min`, `h`, `d` and `a` for a year (annum,
+        // a Julian year of 365.25 days). `s` takes SI prefixes (ms, us, ns),
+        // so it is in the table below.
         "min" => Quantity::base(60.0, TIME),
-        "h" | "hr" => Quantity::base(3600.0, TIME),
-        "d" | "day" => Quantity::base(86_400.0, TIME),
-        // A Julian year, 365.25 days, written `a` (annum) and only `a`.
+        "h" => Quantity::base(3600.0, TIME),
+        "d" => Quantity::base(86_400.0, TIME),
         "a" => Quantity::base(365.25 * 86_400.0, TIME),
         "pulse" | "pulses" | "shot" | "shots" => Quantity::base(1.0, PULSE),
         "particle" | "particles" | "source" | "source-particle" | "source-particles" | "n"
@@ -220,10 +222,20 @@ fn prefix(c: char) -> Option<f64> {
     })
 }
 
-/// The hint for a year written another way than `a`: "yr", "year", ...
-pub fn year_hint(s: &str) -> Option<&'static str> {
-    matches!(s, "y" | "yr" | "yrs" | "year" | "years")
-        .then_some("a year is written \"a\" (annum), e.g. \"mSv/a\" or (1, \"a\")")
+/// The hint for a time written another way than its one symbol: "hours"
+/// for `h`, "year" for `a`, and so on.
+pub fn time_hint(s: &str) -> Option<&'static str> {
+    Some(match s {
+        "sec" | "secs" | "second" | "seconds" => "a second is written \"s\"",
+        "minute" | "minutes" | "mins" => "a minute is written \"min\"",
+        "hr" | "hrs" | "hour" | "hours" => "an hour is written \"h\"",
+        "day" | "days" => "a day is written \"d\"",
+        "wk" | "week" | "weeks" => "a week is written as days, \"d\" (7 d)",
+        "y" | "yr" | "yrs" | "year" | "years" => {
+            "a year is written \"a\" (annum), e.g. \"mSv/a\" or (1, \"a\")"
+        }
+        _ => return None,
+    })
 }
 
 fn symbol(s: &str) -> Result<Quantity, String> {
@@ -239,7 +251,7 @@ fn symbol(s: &str) -> Result<Quantity, String> {
             ..q
         });
     }
-    if let Some(hint) = year_hint(s) {
+    if let Some(hint) = time_hint(s) {
         return Err(format!("unknown unit {s:?}: {hint}"));
     }
     Err(format!(
@@ -437,11 +449,33 @@ mod tests {
     }
 
     #[test]
-    fn a_year_is_a_alone() {
-        assert!(close(parse("a").unwrap().factor, 365.25 * 86_400.0));
-        for other in ["y", "yr", "year", "years"] {
+    fn time_has_one_symbol_per_unit() {
+        for (unit, seconds) in [
+            ("s", 1.0),
+            ("ms", 1e-3),
+            ("us", 1e-6),
+            ("ns", 1e-9),
+            ("min", 60.0),
+            ("h", 3600.0),
+            ("d", 86_400.0),
+            ("a", 365.25 * 86_400.0),
+        ] {
+            let q = parse(unit).unwrap();
+            assert_eq!(q.dims[TIME], 1, "{unit}");
+            assert!(close(q.factor, seconds), "{unit}: {}", q.factor);
+        }
+        // Other spellings are refused, pointing at the symbol.
+        for (other, symbol) in [
+            ("hours", "\"h\""),
+            ("hr", "\"h\""),
+            ("days", "\"d\""),
+            ("minutes", "\"min\""),
+            ("sec", "\"s\""),
+            ("year", "\"a\""),
+            ("yr", "\"a\""),
+        ] {
             let err = parse(&format!("mSv/{other}")).unwrap_err();
-            assert!(err.contains("a year is written \"a\""), "{other}: {err}");
+            assert!(err.contains(symbol), "{other}: {err}");
         }
     }
 

@@ -25,7 +25,7 @@ yani-decay = { path = "../yani-decay" }
 # leaf, so the uncertainty sampler costs nothing to reach and gives the same
 # answer on every platform.
 yamc-rng = { path = "../yamc-rng" }
-# Unit strings: the duration error points a misspelt year at "a".
+# Unit strings: schedule durations share the tally and material parser.
 yamc-units = { path = "../yamc-units" }
 yamc-materials = { path = "../yamc-materials", default-features = false }
 # The displacement threshold energies and the NRT conversion, shared with the
