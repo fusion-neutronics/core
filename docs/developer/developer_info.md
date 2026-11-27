@@ -675,12 +675,14 @@ vv run --release-check yamc-cpu@<commit> yamc-gpu@<commit>
 ```
 
 It builds yamc at that commit from this checkout (`../yamc-and-yani`, or
-`$YAMC_CORE_ROOT`), runs every model on ENDF/B-VIII.1, and lists every result
-that dropped a grading band, failed, or went missing against the last published
-V&V run, plus what improved. A full check can take hours, and it needs the
-nuclear data the V&V repository describes. The check only reports: review what
-it flags and decide whether to release. Once the release is out, publish a V&V
-run of it (`vv publish`), so the next release is checked against this one.
+`$YAMC_CORE_ROOT`), runs every model on ENDF/B-VIII.1 on every stable isotope,
+and lists every result that dropped a grading band, failed, or went missing
+against the last published V&V run, plus what improved. It is about 6,000 yamc
+results, which takes days rather than hours, so start it well before the
+release; it needs the nuclear data the V&V repository describes. The check only
+reports: review what it flags and decide whether to release. Once the release
+is out, publish a V&V run of it (`vv publish`), so the next release is checked
+against this one.
 
 ### The Pyodide wheels
 
