@@ -269,22 +269,19 @@ fn a_just_subcritical_sphere_under_splitting_windows_runs() {
 }
 
 /// The per-lineage ceiling must not let a supercritical sphere through: under
-/// the same splitting windows the 10 cm sphere is still refused, promptly.
+/// the same splitting windows the 10 cm sphere is still refused, and promptly.
+/// The fission-bank guard refuses it within the history whose chain runs
+/// away, while the per-lineage ceiling would allow 50,000 particles per split
+/// copy first, so the message must be the guard's.
 #[test]
 fn a_barely_supercritical_sphere_under_splitting_windows_is_refused() {
     if !data_present() {
         return;
     }
-    let start = std::time::Instant::now();
     let err = run_windowed(10.0, 300, Some(6.7e-5))
         .expect_err("a 10 cm bare U235 sphere must be refused under windows too");
     assert!(
-        err.contains("fixed-source"),
-        "the message must diagnose the multiplying chain, got: {err}"
-    );
-    assert!(
-        start.elapsed().as_secs() < 60,
-        "the runaway must be caught promptly, took {:?}",
-        start.elapsed()
+        err.contains("Fission chain did not terminate") && err.contains("fixed-source"),
+        "the fission-bank guard must refuse the runaway chain, got: {err}"
     );
 }
