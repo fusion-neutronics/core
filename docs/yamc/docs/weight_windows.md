@@ -143,9 +143,10 @@ reloaded or transmutation-step results:
 <!-- doctest: skip -->
 ```python
 s = results.weight_window_stats
-s["split_copies"] / s["histories"]  # split copies per source history
-s["histories_at_split_budget"]  # histories whose split budget ran out
-s["no_window"] / (s["checks"] + s["no_window"])  # collisions with no window
+if s is not None:
+    print(s["split_copies"] / s["histories"])  # split copies per source history
+    print(s["histories_at_split_budget"])  # histories whose split budget ran out
+    print(s["no_window"] / (s["checks"] + s["no_window"]))  # collisions with no window
 ```
 
 The keys are ``histories``, ``particles`` and ``max_particles_per_history``;
