@@ -3,7 +3,7 @@
 Nuclear data evaluations are published as ENDF files, and yamc reads Arrow. This
 example takes one evaluation, aluminium-27 from TENDL-2025, converts it to Arrow
 on your own machine and uses it in a transport simulation: a sphere of
-aluminium one mean free path in radius, with a 14.06 MeV point source at its
+aluminium three mean free paths in radius, with a 14.06 MeV point source at its
 centre, tallying the spectrum of the neutrons that leak out of it. Finally the same model is run on
 yamc's published TENDL-2025 data, so you can check the conversion against it.
 
@@ -61,10 +61,12 @@ nuclide's name comes from the evaluation itself, not from the file name.
 Point yamc at the folder of converted data. Any nuclide the model uses is then
 read from `<folder>/<Nuclide>.arrow`.
 
-The sphere is sized from the material itself: one mean free path at the source
-energy, rounded up to a whole centimetre. About a third of the source neutrons
-then cross it without a collision and the rest scatter, so the leakage spectrum
-shows both, and the same recipe gives a sensible sphere for any nuclide.
+The sphere is sized from the material itself: three mean free paths at the
+source energy, rounded up to a whole centimetre. That is thick enough that most
+neutrons collide before they get out, so the leakage spectrum runs from the
+14 MeV source peak down through the slowing-down range and tests elastic and
+inelastic scattering, (n,2n) and the other exit channels, and the same recipe
+gives a comparable sphere for any nuclide.
 
 ```python
 import math
@@ -72,10 +74,15 @@ import math
 yamc.neutron_cross_section_data = "my_data/neutron"
 
 aluminium = yamc.Material(composition={"Al27": 1.0}, density=2.7)
-radius = math.ceil(aluminium.mean_free_path_neutron(14.06e6))  # 9.48 cm -> 10 cm
+radius = math.ceil(3 * aluminium.mean_free_path_neutron(14.06e6))  # 3 x 9.48 cm -> 29 cm
 sphere = yamc.Sphere(radius=radius, boundary="vacuum")
 geometry = yamc.Geometry([yamc.Cell(region=sphere.below, material=aluminium)])
 
+# The leakage spectrum rather than the flux in the sphere: it is what sphere
+# benchmark experiments measure, it depends on the angles secondaries are
+# emitted at as well as their energies, and its total per source neutron
+# checks the multiplying reactions such as (n,2n). The cell flux converges
+# only slightly faster and tests less.
 leakage = yamc.Tally(
     scores=["current-above"],
     surfaces=sphere,
@@ -89,7 +96,7 @@ converted = model.simulate_transport(total_particles=1_000_000)
 `current-above` on the outer sphere counts every neutron crossing it outwards,
 and with a vacuum boundary nothing comes back in, so this is the leakage.
 
-One million neutrons take about a second, and leave every bin that holds more
+One million neutrons take a few seconds, and leave every bin that holds more
 than 0.1% of the leakage with a relative error under 4%. The run is given a
 particle count rather than left to stop on its own: with no stop condition,
 `simulate_transport` runs until every scored bin passes the statistical checks,
@@ -127,8 +134,8 @@ ax.legend()
 fig.savefig("leakage_spectrum.png", dpi=150)
 ```
 
-On the published data about 0.89 neutrons leak per source neutron. The peak at
-14 MeV is the neutrons that crossed the sphere without a collision; below it
-are those that scattered on the way out. If your own conversion differs from
+On the published data about 0.79 neutrons leak per source neutron, and about
+half of them below 1 MeV. The peak at 14 MeV is the neutrons that crossed the
+sphere without a collision; below it are those that scattered on the way out. If your own conversion differs from
 the published one by more than the Monte Carlo noise, the two were processed
 differently, for example at another temperature.
