@@ -150,8 +150,8 @@ impl LoadScope {
     /// Transport at a material's temperature, which is the bulk of every
     /// transport download: the published libraries carry six or seven
     /// temperatures, and a material reads one (or the two that bracket it).
-    /// An activation load ranges by MT instead, at every temperature, so the
-    /// two never apply to the same load.
+    /// An activation load at named temperatures ranges by MT and temperature
+    /// together, which the download plans separately (`Ranged::MtsAt`).
     pub fn ranges_temperatures(&self) -> bool {
         self.wants_transport_sections() && self.temperatures.is_some()
     }

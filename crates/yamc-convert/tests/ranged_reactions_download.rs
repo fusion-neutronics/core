@@ -670,6 +670,86 @@ fn transport_at_one_temperature_fetches_only_that_temperature() {
     assert_eq!(origin.energy_bytes.load(Ordering::Relaxed), energy);
 }
 
+/// An activation load at a material's temperature, which is what
+/// `Material.transmute` asks for, fetches its MTs at that temperature alone and
+/// that temperature's energy grid, and loads exactly what the whole files
+/// give. At a temperature between two published ones it fetches both, which
+/// the loader blends, again matching the whole files.
+#[test]
+fn an_activation_load_at_a_temperature_fetches_only_that_temperature() {
+    let _guard = exclusive();
+    let Some(dir) = fixture() else {
+        eprintln!("skip: Fe56.arrow not present");
+        return;
+    };
+    let served = Served::new("activation-at-equiv", &dir, true);
+    for (label, temperature) in [("exact", "294"), ("bracketed", "450")] {
+        let scope = activation_scope().with_temperatures(Some([temperature.to_string()].into()));
+
+        let (whole, whole_reactions, whole_energy) = {
+            let _cache = Cache::new(&format!("activation-at-whole-{label}"));
+            let origin = Origin::start(served.dir.clone(), Ranges::All);
+            let path = yamc_nuclide::url_cache::download_and_cache(
+                &origin.url(),
+                &origin.url(),
+                "Fe56",
+                yamc_nuclide::url_cache::DataKind::Neutron,
+                &LoadScope::full(),
+            )
+            .expect("whole download");
+            let nuclide = yamc_nuclide::nuclide::load_nuclide(&path, &scope).expect("load");
+            (
+                tables(&nuclide),
+                origin.reactions_bytes.load(Ordering::Relaxed),
+                origin.energy_bytes.load(Ordering::Relaxed),
+            )
+        };
+        // What the activation load fetched before it ranged by temperature: its
+        // MTs at every temperature, and the energy grids whole.
+        let every_temperature = {
+            let _cache = Cache::new(&format!("activation-at-every-{label}"));
+            let origin = Origin::start(served.dir.clone(), Ranges::All);
+            download_and_load(&origin, &activation_scope()).expect("activation download");
+            origin.reactions_bytes.load(Ordering::Relaxed)
+        };
+
+        let cache = Cache::new(&format!("activation-at-ranged-{label}"));
+        let origin = Origin::start(served.dir.clone(), Ranges::All);
+        let nuclide = download_and_load(&origin, &scope).expect("ranged download");
+        let reactions = origin.reactions_bytes.load(Ordering::Relaxed);
+        let energy = origin.energy_bytes.load(Ordering::Relaxed);
+
+        assert_eq!(
+            tables(&nuclide),
+            whole,
+            "{label}: same tables as the whole files"
+        );
+        assert!(
+            reactions * 2 < every_temperature,
+            "{label}: reactions {reactions} bytes against {every_temperature} at every temperature",
+        );
+        assert!(
+            energy * 2 < whole_energy,
+            "{label}: energy {energy} bytes against {whole_energy} for the whole file",
+        );
+        assert!(reactions * 4 < whole_reactions);
+
+        let cached = cache.nuclide_dir();
+        assert!(cached.join("subset/reactions.arrow").exists());
+        assert!(cached.join("subset/temperatures.json").exists());
+        assert!(cached.join("temperatures/energy.arrow").exists());
+        assert!(
+            !cached.join("reactions.arrow").exists() && !cached.join("energy.arrow").exists(),
+            "a partial must never be written under the canonical name",
+        );
+
+        // Loading again at the same temperature fetches nothing.
+        download_and_load(&origin, &scope).expect("second load");
+        assert_eq!(origin.reactions_bytes.load(Ordering::Relaxed), reactions);
+        assert_eq!(origin.energy_bytes.load(Ordering::Relaxed), energy);
+    }
+}
+
 /// A temperature between two published ones fetches both neighbours, which the
 /// loader blends, and comes out the same as a blend from the whole files.
 #[test]

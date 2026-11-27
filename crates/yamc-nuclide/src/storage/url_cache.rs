@@ -912,6 +912,10 @@ const SUBSET_DIR: &str = "subset";
 const SUBSET_MTS: &str = "subset/mts.json";
 #[cfg(feature = "download")]
 const SUBSET_REACTIONS: &str = "subset/reactions.arrow";
+/// The temperature labels a cached subset holds. Absent (a subset written
+/// before the record existed) means every temperature the nuclide publishes.
+#[cfg(feature = "download")]
+const SUBSET_TEMPERATURES: &str = "subset/temperatures.json";
 
 /// The section of union energy grids, one batch per temperature, which a
 /// temperature-ranged load fetches a few byte ranges at a time.
@@ -948,8 +952,17 @@ pub(super) enum Ranged<'a> {
     /// Every section whole.
     Whole,
     /// These MTs of `reactions.arrow`, at every temperature. An activation
-    /// load, cached under `subset/`.
+    /// load with no temperature, cached under `subset/`.
     Mts(&'a HashSet<i32>),
+    /// These MTs of `reactions.arrow` at these temperatures, and the energy
+    /// grids at the same temperatures. An activation load at a material's
+    /// temperature: the reactions cached under `subset/` with a record of the
+    /// labels they hold, the grids under `temperatures/` as a transport load
+    /// at the same temperatures caches them.
+    MtsAt {
+        mts: &'a HashSet<i32>,
+        temperatures: &'a HashSet<String>,
+    },
     /// Every MT of `reactions.arrow`, and the energy grids, at these
     /// temperatures. A transport load for materials with a temperature,
     /// cached under `temperatures/`.
@@ -969,7 +982,11 @@ pub(super) fn ranged(kind: DataKind, scope: &crate::load_scope::LoadScope) -> Ra
             .as_ref()
             .map_or(Ranged::Whole, Ranged::Temperatures),
         DataKind::Neutron if !scope.wants_transport_sections() => {
-            scope.mts.as_ref().map_or(Ranged::Whole, Ranged::Mts)
+            match (scope.mts.as_ref(), scope.temperatures.as_ref()) {
+                (Some(mts), Some(temperatures)) => Ranged::MtsAt { mts, temperatures },
+                (Some(mts), None) => Ranged::Mts(mts),
+                (None, _) => Ranged::Whole,
+            }
         }
         DataKind::Thermal => scope
             .temperatures
@@ -1090,16 +1107,31 @@ fn cached_subset_mts(dir: &std::path::Path) -> Option<HashSet<i32>> {
         .map(|v| v.into_iter().collect())
 }
 
-/// Whether `dir` already holds the reactions data a `wanted` MT set needs.
+/// The temperature labels a cached subset holds, as recorded beside it, or
+/// `None` for a subset written before the record existed, which holds every
+/// temperature.
+#[cfg(feature = "download")]
+fn cached_subset_labels(dir: &std::path::Path) -> Option<BTreeSet<String>> {
+    let text = fs::read_to_string(dir.join(SUBSET_TEMPERATURES)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Whether `dir` already holds the reactions data a `wanted` MT set needs, at
+/// `temperatures` or, for `None`, at every temperature.
 ///
 /// The whole object covers everything. Otherwise a cached subset covers this
 /// request when it holds every MT of `wanted` that this nuclide actually
 /// publishes, which is why both sides are narrowed through the index rather
 /// than compared as asked-for sets: an MT the chain names and the nuclide has
 /// no channel for would otherwise look uncovered on every load and refetch
-/// forever.
+/// forever. And it holds every temperature label the request resolves to:
+/// the labels `temperatures` reads, or the whole ladder for `None`.
 #[cfg(feature = "download")]
-fn reactions_covered(dir: &std::path::Path, wanted: &HashSet<i32>) -> bool {
+fn reactions_covered(
+    dir: &std::path::Path,
+    wanted: &HashSet<i32>,
+    temperatures: Option<&HashSet<String>>,
+) -> bool {
     if dir.join(REACTIONS).exists() {
         return true;
     }
@@ -1111,10 +1143,18 @@ fn reactions_covered(dir: &std::path::Path, wanted: &HashSet<i32>) -> bool {
     let Some(index) = cached_index(dir) else {
         return false;
     };
-    index
+    let mts_held = index
         .present(|mt| wanted.contains(&mt))
         .into_iter()
-        .all(|mt| held.contains(&mt))
+        .all(|mt| held.contains(&mt));
+    let labels_held = match cached_subset_labels(dir) {
+        None => true,
+        Some(held) => match temperatures {
+            None => held.is_superset(&published_labels(&index)),
+            Some(requested) => labels_for(&index, requested).is_ok_and(|w| w.is_subset(&held)),
+        },
+    };
+    mts_held && labels_held
 }
 
 /// Suffix marking an optional section that the origin answered 404 for.
@@ -1137,7 +1177,13 @@ fn section_is_resolved(dir: &std::path::Path, section: &str) -> bool {
 #[cfg(feature = "download")]
 pub(super) fn section_covered(dir: &std::path::Path, section: &str, wanted: Ranged<'_>) -> bool {
     match wanted {
-        Ranged::Mts(mts) if section == REACTIONS => reactions_covered(dir, mts),
+        Ranged::Mts(mts) if section == REACTIONS => reactions_covered(dir, mts, None),
+        Ranged::MtsAt { mts, temperatures } if section == REACTIONS => {
+            reactions_covered(dir, mts, Some(temperatures))
+        }
+        Ranged::MtsAt { temperatures, .. } if section == ENERGY => {
+            temperatures_covered(dir, section, temperatures)
+        }
         Ranged::Temperatures(temperatures)
             if section == REACTIONS || section == ENERGY || is_thermal_ranged(section) =>
         {
@@ -1479,8 +1525,12 @@ impl RangedFetch {
 /// What the ranged copy of a section records beside it.
 #[cfg(feature = "download")]
 enum Holds {
-    /// The MTs a `subset/reactions.arrow` holds.
-    Mts(Vec<i32>),
+    /// The MTs a `subset/reactions.arrow` holds, and the temperature labels it
+    /// holds them at.
+    Subset {
+        mts: Vec<i32>,
+        labels: BTreeSet<String>,
+    },
     /// The temperature labels a `temperatures/<section>` holds.
     Labels(BTreeSet<String>),
 }
@@ -1573,10 +1623,41 @@ pub(super) fn plan_ranges(
                 // The MTs the nuclide actually published, not the ones asked
                 // for. Recording the request would leave any MT this nuclide
                 // has no channel for looking uncovered on every later load.
-                holds: Holds::Mts(index.present(wants)),
+                holds: Holds::Subset {
+                    mts: index.present(wants),
+                    labels: published_labels(&index),
+                },
                 hashes: index.sha256,
             }));
         }
+        Ranged::MtsAt {
+            mts: wanted,
+            temperatures,
+        } if section == REACTIONS => {
+            // The labels this temperature reads, and those the cached subset
+            // already holds, so the rewritten file still serves the loads that
+            // wrote it (as for a temperature-ranged section).
+            let mut labels =
+                labels_for(&index, temperatures).map_err(|e| format!("{nuclide_name}: {e}"))?;
+            if target_dir.join(SUBSET_REACTIONS).exists() {
+                labels.extend(cached_subset_labels(target_dir).unwrap_or_default());
+            }
+            let ladder = published_labels(&index);
+            if labels.is_superset(&ladder) {
+                labels = ladder;
+            }
+            let wants = |mt: i32, label: &str| wanted.contains(&mt) && labels.contains(label);
+            return Ok(Some(RangePlan {
+                spans: index.spans_where(wants),
+                pieces: index.pieces_where(wants),
+                holds: Holds::Subset {
+                    mts: index.present(|mt| wanted.contains(&mt)),
+                    labels: labels.clone(),
+                },
+                hashes: index.sha256,
+            }));
+        }
+        Ranged::MtsAt { temperatures, .. } => temperatures,
         Ranged::Temperatures(requested) => requested,
         Ranged::Whole => return Ok(None),
     };
@@ -1693,16 +1774,17 @@ pub(super) fn fetch_ranged(
         }
     };
 
-    let (file, record, held) = match &plan.holds {
-        Holds::Mts(mts) => (
+    let (file, records) = match &plan.holds {
+        Holds::Subset { mts, labels } => (
             SUBSET_REACTIONS.to_string(),
-            SUBSET_MTS.to_string(),
-            serde_json::to_vec(mts)?,
+            vec![
+                (SUBSET_MTS.to_string(), serde_json::to_vec(mts)?),
+                (SUBSET_TEMPERATURES.to_string(), serde_json::to_vec(labels)?),
+            ],
         ),
         Holds::Labels(labels) => (
             ranged_section(section),
-            ranged_labels_file(section),
-            serde_json::to_vec(labels)?,
+            vec![(ranged_labels_file(section), serde_json::to_vec(labels)?)],
         ),
     };
     let bytes = bodies.iter().map(|b| b.len() as u64).sum();
@@ -1710,11 +1792,15 @@ pub(super) fn fetch_ranged(
         fs::create_dir_all(parent)?;
     }
     fs::write(staging.join(&file), splice_spans(&bodies))?;
-    fs::write(staging.join(&record), held)?;
-    // The section before its record, so a publish interrupted between the two
-    // renames leaves a record naming no more than the file holds.
+    let mut staged = vec![file];
+    for (record, held) in records {
+        fs::write(staging.join(&record), held)?;
+        staged.push(record);
+    }
+    // The section before its records, so a publish interrupted between the
+    // renames leaves records naming no more than the file holds.
     Ok(Some(RangedFetch {
-        staged: vec![file, record],
+        staged,
         spans: plan.spans.len(),
         bytes,
     }))
@@ -1725,6 +1811,7 @@ pub(super) fn fetch_ranged(
 pub(super) fn ranges_section(section: &str, ranging: Ranged<'_>) -> bool {
     match ranging {
         Ranged::Mts(_) => section == REACTIONS,
+        Ranged::MtsAt { .. } => section == REACTIONS || section == ENERGY,
         Ranged::Temperatures(_) => {
             section == REACTIONS || section == ENERGY || is_thermal_ranged(section)
         }
@@ -2367,7 +2454,7 @@ mod tests {
     fn the_whole_reactions_object_covers_every_subset() {
         let dir = TempDir::new("covers-whole");
         dir.touch(REACTIONS);
-        assert!(reactions_covered(&dir.0, &mts(&[16, 102, 999])));
+        assert!(reactions_covered(&dir.0, &mts(&[16, 102, 999]), None));
     }
 
     /// A subset covers a request when it holds every wanted MT the nuclide
@@ -2379,15 +2466,15 @@ mod tests {
         write_subset(&dir.0, &[16, 102]);
 
         assert!(
-            reactions_covered(&dir.0, &mts(&[16])),
+            reactions_covered(&dir.0, &mts(&[16]), None),
             "a narrower request is covered"
         );
         assert!(
-            reactions_covered(&dir.0, &mts(&[16, 102])),
+            reactions_covered(&dir.0, &mts(&[16, 102]), None),
             "the exact request is covered"
         );
         assert!(
-            !reactions_covered(&dir.0, &mts(&[16, 102, 103])),
+            !reactions_covered(&dir.0, &mts(&[16, 102, 103]), None),
             "103 is published but not held, so this needs a fetch"
         );
     }
@@ -2401,7 +2488,7 @@ mod tests {
         write_index(&dir.0, &[16, 102]);
         write_subset(&dir.0, &[16, 102]);
         assert!(
-            reactions_covered(&dir.0, &mts(&[16, 102, 107, 111])),
+            reactions_covered(&dir.0, &mts(&[16, 102, 107, 111]), None),
             "107 and 111 are not in this nuclide's index, so nothing is missing"
         );
     }
@@ -2413,7 +2500,7 @@ mod tests {
         let dir = TempDir::new("covers-noindex");
         fs::write(dir.0.join("version.json"), r#"{"data_version": "1"}"#).expect("write");
         write_subset(&dir.0, &[16, 102]);
-        assert!(!reactions_covered(&dir.0, &mts(&[16])));
+        assert!(!reactions_covered(&dir.0, &mts(&[16]), None));
     }
 
     /// The gate a transport load goes through is untouched by a cached subset:
