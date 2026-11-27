@@ -187,7 +187,7 @@ def _region_to_vtkhdf(self, filename, *, resolution=10000, length_units="cm"):
         filename (str): Output file path (recommended: ``.vtkhdf``).
         resolution (int): Approximate total number of voxels (default 10 000).
         length_units (str): Unit of the written coordinates, ``"cm"``
-            (default), ``"m"`` or ``"mm"``.
+            (default), ``"m"``, ``"mm"`` or ``"km"``.
     """
     from yamc.vtkhdf import region_to_vtkhdf
     region_to_vtkhdf(filename, self, resolution=resolution, length_units=length_units)
@@ -257,7 +257,7 @@ def _tracks_to_vtkhdf(self, filename, *, length_units="cm"):
     Args:
         filename (str): Output file path (recommended: ``.vtkhdf``).
         length_units (str): Unit of the written coordinates, ``"cm"``
-            (default), ``"m"`` or ``"mm"``. Use the model's unit to overlay.
+            (default), ``"m"``, ``"mm"`` or ``"km"``. Use the model's unit to overlay.
     """
     from yamc.vtkhdf import tracks_to_vtkhdf
     tracks_to_vtkhdf(filename, self, length_units=length_units)
@@ -277,7 +277,7 @@ def _mesh_geometry_to_vtkhdf(self, path, *, length_units="cm"):
     Args:
         path (str | os.PathLike): Output file path (e.g. ``"model.vtkhdf"``).
         length_units (str): Unit of the written coordinates, ``"cm"``
-            (default), ``"m"`` or ``"mm"``.
+            (default), ``"m"``, ``"mm"`` or ``"km"``.
     """
     import os
 
@@ -302,9 +302,13 @@ def _mesh_geometry_to_vtkhdf(self, path, *, length_units="cm"):
     volume_id = [v + 1 if v >= 0 else -1 for v in material_id]
     cell_data = {"volume_id": volume_id, "material_id": material_id}
     if tets:
-        mixed_to_vtkhdf(path, vertices, triangles, tets, cell_data=cell_data)
+        mixed_to_vtkhdf(
+            path, vertices, triangles, tets, cell_data=cell_data, length_units=length_units
+        )
     else:
-        surface_to_vtkhdf(path, vertices, triangles, cell_data=cell_data)
+        surface_to_vtkhdf(
+            path, vertices, triangles, cell_data=cell_data, length_units=length_units
+        )
 
 
 Geometry.to_vtkhdf = _geometry_to_vtkhdf

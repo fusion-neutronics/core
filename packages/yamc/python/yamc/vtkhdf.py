@@ -49,7 +49,8 @@ def _require_h5py():
         ) from None
 
 
-_CM_TO = {"mm": 10.0, "cm": 1.0, "m": 0.01}
+# The same units, and factors, as the plots' axis_units.
+_CM_TO = {"mm": 10.0, "cm": 1.0, "m": 0.01, "km": 1e-5}
 
 
 def _length_scale(length_units):
@@ -61,6 +62,24 @@ def _length_scale(length_units):
         )
     return _CM_TO[length_units]
 
+
+
+def _root(f, length_units, **kwargs):
+    """Create the VTKHDF root group, recording the unit of its coordinates
+    as a ``length_units`` attribute so a reader can tell cm from m."""
+    root = f.create_group("VTKHDF", **kwargs)
+    _set_length_units(root, length_units)
+    return root
+
+
+def _set_length_units(group, length_units):
+    """Record ``length_units`` on an open VTKHDF group."""
+    h5py = _require_h5py()
+    group.attrs.create(
+        "length_units",
+        length_units.encode("ascii"),
+        dtype=h5py.string_dtype("ascii", len(length_units)),
+    )
 
 
 def _score_name(score):
@@ -189,7 +208,7 @@ def mesh_tally_to_vtkhdf(
             conversions (e.g. source strength).  Applied after volume
             normalization.
         length_units: Unit of the written mesh coordinates, ``"cm"``
-            (default), ``"m"`` or ``"mm"``. Only the coordinates are scaled:
+            (default), ``"m"``, ``"mm"`` or ``"km"``. Only the coordinates are scaled:
             volume-normalized values stay per cm³ whatever this is.
 
     The values are per source particle. For physical units (``"W/m3"``,
@@ -246,7 +265,7 @@ def tally_result_to_vtkhdf(
         sum_energy: If *True* (default), sum over energy bins.
         sum_nuclides: If *True* (default), sum over parent nuclide bins.
         length_units: Unit of the written mesh coordinates, ``"cm"``
-            (default), ``"m"`` or ``"mm"``.
+            (default), ``"m"``, ``"mm"`` or ``"km"``.
     """
     _write_mesh_tally(
         filename,
@@ -448,7 +467,7 @@ def _write_mesh_tally(
 
     # --- Write HDF5 file ----------------------------------------------------
     with _h5py.File(filename, "w") as f:
-        root = f.create_group("VTKHDF")
+        root = _root(f, length_units)
 
         if not unstructured:
             ll = mesh.lower_left
@@ -531,7 +550,7 @@ def geometry_to_vtkhdf(
         datasets: Which CellData arrays to write.  Any combination of
             ``"material_id"`` and ``"cell_id"``.
         length_units: Unit of the written coordinates, ``"cm"``
-            (default, yamc's own), ``"m"`` or ``"mm"``. Only positions are
+            (default, yamc's own), ``"m"``, ``"mm"`` or ``"km"``. Only positions are
             scaled, so files written with the same unit overlay in ParaView;
             data arrays are written exactly as without it.
     """
@@ -541,7 +560,7 @@ def geometry_to_vtkhdf(
         geometry, resolution, datasets
     )
     with _h5py.File(filename, "w") as f:
-        root = f.create_group("VTKHDF")
+        root = _root(f, length_units)
         _write_geometry_group(root, ll, spacing, shape, cell_data, _h5py, scale)
 
 
@@ -570,7 +589,7 @@ def cell_to_vtkhdf(
         datasets: Which CellData arrays to write.  Any combination of
             ``"material_id"`` and ``"cell_id"``.
         length_units: Unit of the written coordinates, ``"cm"``
-            (default, yamc's own), ``"m"`` or ``"mm"``. Only positions are
+            (default, yamc's own), ``"m"``, ``"mm"`` or ``"km"``. Only positions are
             scaled, so files written with the same unit overlay in ParaView;
             data arrays are written exactly as without it.
     """
@@ -605,7 +624,7 @@ def cell_to_vtkhdf(
     ).reshape(nz, ny, nx)
 
     with _h5py.File(filename, "w") as f:
-        root = f.create_group("VTKHDF")
+        root = _root(f, length_units)
         _write_imagedata_header(root, ll, [dx, dy, dz], [nx, ny, nz], _h5py, scale)
         cd = root.create_group("CellData")
         if want_mat:
@@ -640,7 +659,7 @@ def region_to_vtkhdf(
         region: A :class:`yamc.Region` or halfspace object.
         resolution: Approximate total number of voxels (default 10 000).
         length_units: Unit of the written coordinates, ``"cm"``
-            (default, yamc's own), ``"m"`` or ``"mm"``. Only positions are
+            (default, yamc's own), ``"m"``, ``"mm"`` or ``"km"``. Only positions are
             scaled, so files written with the same unit overlay in ParaView;
             data arrays are written exactly as without it.
     """
@@ -657,7 +676,7 @@ def region_to_vtkhdf(
     ).reshape(nz, ny, nx)
 
     with _h5py.File(filename, "w") as f:
-        root = f.create_group("VTKHDF")
+        root = _root(f, length_units)
         _write_imagedata_header(root, ll, [dx, dy, dz], [nx, ny, nz], _h5py, scale)
         cd = root.create_group("CellData")
         cd.create_dataset("region", data=inside)
@@ -750,7 +769,7 @@ def source_to_vtkhdf(
             them.
         samples: Number of sample points *per source* (default 1 000).
         length_units: Unit of the written coordinates, ``"cm"``
-            (default, yamc's own), ``"m"`` or ``"mm"``. Only positions are
+            (default, yamc's own), ``"m"``, ``"mm"`` or ``"km"``. Only positions are
             scaled, so files written with the same unit overlay in ParaView;
             data arrays are written exactly as without it.
     """
@@ -758,7 +777,7 @@ def source_to_vtkhdf(
     scale = _length_scale(length_units)
     points, energies, source_ids = _sample_source_points(sources, samples)
     with _h5py.File(filename, "w") as f:
-        root = f.create_group("VTKHDF")
+        root = _root(f, length_units)
         _write_source_group(root, points, energies, source_ids, _h5py, scale)
 
 
@@ -798,7 +817,7 @@ def model_to_vtkhdf(
         samples: Number of sample points per source for the source block
             (default 1 000).
         length_units: Unit of the written coordinates, ``"cm"``
-            (default, yamc's own), ``"m"`` or ``"mm"``. Only positions are
+            (default, yamc's own), ``"m"``, ``"mm"`` or ``"km"``. Only positions are
             scaled, so files written with the same unit overlay in ParaView;
             data arrays are written exactly as without it.
     """
@@ -842,7 +861,7 @@ def model_to_vtkhdf(
     with _h5py.File(filename, "w") as f:
         # The spec requires creation-order tracking on the VTKHDF group,
         # the Assembly group, and its children.
-        root = f.create_group("VTKHDF", track_order=True)
+        root = _root(f, length_units, track_order=True)
         root.attrs["Version"] = np.array([2, 2], dtype="int64")
         ascii_type = b"PartitionedDataSetCollection"
         root.attrs.create(
@@ -853,6 +872,7 @@ def model_to_vtkhdf(
 
         for idx, name in enumerate(include):
             block = root.create_group(name, track_order=True)
+            _set_length_units(block, length_units)
             block.attrs["Index"] = np.int64(idx)
             if name == "geometry":
                 _write_geometry_group(block, *blocks["geometry"], _h5py, scale)
@@ -890,7 +910,7 @@ def polylines_to_vtkhdf(
         point_data: Arrays of one value per point, keyed by name.
         cell_data: Arrays of one value per line, keyed by name.
         length_units: Unit of the written coordinates, ``"cm"``
-            (default, yamc's own), ``"m"`` or ``"mm"``. Only positions are
+            (default, yamc's own), ``"m"``, ``"mm"`` or ``"km"``. Only positions are
             scaled, so files written with the same unit overlay in ParaView;
             data arrays are written exactly as without it.
     """
@@ -910,7 +930,7 @@ def polylines_to_vtkhdf(
                 raise ValueError(f"{kind}_data[{name!r}] has {len(values)} values, expected {n}")
 
     with h5py.File(filename, "w") as f:
-        root = f.create_group("VTKHDF")
+        root = _root(f, length_units)
         root.attrs["Version"] = np.array([2, 1], dtype="int64")
         root.attrs.create("Type", b"PolyData", dtype=h5py.string_dtype("ascii", 8))
         root.create_dataset("NumberOfPoints", data=np.array([n_points], dtype="int64"))
@@ -951,7 +971,7 @@ def tracks_to_vtkhdf(
         filename: Output ``.vtkhdf`` path.
         tracks: The ``Tracks`` from ``Model.simulate_transport(capture_tracks=...)``.
         length_units: Unit of the written coordinates, ``"cm"``
-            (default, yamc's own), ``"m"`` or ``"mm"``. Only positions are
+            (default, yamc's own), ``"m"``, ``"mm"`` or ``"km"``. Only positions are
             scaled, so files written with the same unit overlay in ParaView;
             data arrays are written exactly as without it.
     """
