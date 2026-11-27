@@ -124,6 +124,8 @@ fn collapse_mts(activation: &HashSet<i32>, shielding: Option<&Shielding>) -> Has
 /// irradiation step references one of `spectra` (the spectrum shape) and a
 /// `rate` (the total flux magnitude); reaction rates are collapsed once per
 /// distinct spectrum from the initial material and scaled by `rate` per step.
+/// A self-shielded step after the first collapses again at the composition it
+/// starts from, since the shielding depends on it.
 /// Decay-only steps (`irradiation = None`) just let the material decay.
 ///
 /// # Arguments
@@ -408,7 +410,8 @@ pub fn transmute_materials(
 
     // Collapse once per distinct combination, at unit total flux (masses are
     // normalized, so this is the rate per n/cm^2/s). Each step then scales its
-    // spectrum's rates by its `rate`.
+    // spectrum's rates by its `rate`. A shielded step after the first
+    // collapses again at its own starting composition (`solve_case`).
     //
     // When an isomeric-branching overlay is supplied, fold it against the same
     // spectrum shape here (rate-compute time): this injects the `(n,n')`
@@ -521,20 +524,27 @@ pub fn transmute_materials(
     // they get this material's own spectra, in its own indexing.
     let solve = |c: usize| {
         let replicas = uncertainty.map(|request| Replicas {
-            spectra: &cases[c].spectra,
-            steps: &cases[c].steps,
+            spectra: cases[c].spectra.clone(),
+            steps: cases[c].steps.clone(),
             per_spectrum: case_shared[c]
                 .iter()
                 .map(|&g| per_spectrum[g].clone())
                 .collect(),
             // One collapse per spectrum, so each is its own.
             draw_spectrum: (0..cases[c].spectra.len()).collect(),
+            composition: vec![None; cases[c].spectra.len()],
             request,
             shielding: cases[c].shielding.as_ref(),
             lists: &lists,
             cross: &cross,
             isomer: isomer.as_ref(),
-            damage: replica_damage[c].as_ref(),
+            damage: replica_damage[c].clone(),
+        });
+        let recollapse = cases[c].shielding.as_ref().map(|shielding| Recollapse {
+            spectra: &shared_spectra,
+            lists: &lists,
+            activation: &activation,
+            shielding,
         });
         solve_case(
             &initial[c],
@@ -543,6 +553,7 @@ pub fn transmute_materials(
             &chain,
             parts,
             replicas,
+            recollapse.as_ref(),
             true,
         )
         .map_err(|e| {
@@ -597,8 +608,11 @@ pub fn transmute_materials(
             .transmutation_decay_data
             .clone(),
     );
+    // Per material, the composition each step collapsed at when it
+    // re-collapsed, for what reads the collapse after the solve.
+    let mut step_compositions: Vec<Vec<Option<Material>>> = Vec::with_capacity(cases.len());
     for (c, outcome) in outcomes.into_iter().enumerate() {
-        let outcome = outcome?;
+        let mut outcome = outcome?;
         let id = ids[c];
         let case = &cases[c];
         results.add_initial(
@@ -613,16 +627,30 @@ pub fn transmute_materials(
             results.add_step_rates(id, rates);
             results.add_step(id, state);
         }
-        // One report per step, the one its spectrum's fold produced; a
+        // One report per step, the one its collapse's fold produced; a
         // decay-only step splits nothing and reports nothing.
         results.branching_report.insert(
             id,
             case_steps[c]
                 .iter()
-                .map(|st| match st.irradiation {
-                    Some((g, _)) => Arc::clone(&shared_reports[g]),
-                    None => Arc::new(BranchingReport::default()),
+                .enumerate()
+                .map(|(k, st)| match (st.irradiation, outcome.collapses.get(k)) {
+                    (Some(_), Some(Some(own))) => Arc::clone(&own.report),
+                    (Some((g, _)), _) => Arc::clone(&shared_reports[g]),
+                    (None, _) => Arc::new(BranchingReport::default()),
                 })
+                .collect(),
+        );
+        // What the shielding did over the whole timeline, every step's
+        // collapse included.
+        let mut info = case_info[c].clone();
+        for own in outcome.collapses.iter().flatten() {
+            info.merge(own.info.clone());
+        }
+        step_compositions.push(
+            std::mem::take(&mut outcome.collapses)
+                .into_iter()
+                .map(|o| o.map(|o| o.composition))
                 .collect(),
         );
         if let Some((ensemble, info)) = outcome.uncertainty {
@@ -635,7 +663,7 @@ pub fn transmute_materials(
         // Recorded whether or not shielding ran: "not shielded" and "shielded
         // and nothing moved" are different claims, and a dilute run that
         // should have been shielded is the case the report exists for.
-        results.shielding_info.insert(id, case_info[c].clone());
+        results.shielding_info.insert(id, info);
         // The spectra it collapsed against, for re-deriving an energy-resolved
         // view of a rate afterwards: a few KB of stored spectrum rather than
         // the tens of MB the whole breakdown would be.
@@ -694,11 +722,23 @@ pub fn transmute_materials(
             // The composition the collapse read, with the widened data.
             let mut folded = initial[c].clone();
             folded.nuclide_data = case.material.nuclide_data.clone();
+            // And each re-collapsed step's composition, with the same data.
+            let at: Vec<Option<Material>> = step_compositions[c]
+                .iter()
+                .map(|m| {
+                    m.as_ref().map(|m| {
+                        let mut m = m.clone();
+                        m.nuclide_data = case.material.nuclide_data.clone();
+                        m
+                    })
+                })
+                .collect();
             let damage = crate::damage::displacement_damage(
                 &folded,
                 states,
                 &case.spectra,
                 &case.steps,
+                &at,
                 case.shielding.as_ref(),
                 request,
                 results.uncertainty.get(&ids[c]),
@@ -1025,6 +1065,9 @@ struct CaseOutcome {
     rates: Vec<yani::EdgeRates>,
     /// The perturbed ensemble and its report, when uncertainty was asked for.
     uncertainty: Option<(Ensemble, Info)>,
+    /// Per step, its own collapse when the step re-collapsed: a shielded
+    /// step that starts from a composition the schedule has changed.
+    collapses: Vec<Option<StepCollapse>>,
 }
 
 /// One spectrum's stated flux error and the per-group terms it perturbs: the
@@ -1037,12 +1080,15 @@ struct FluxTerms {
 
 /// One material's inputs to the uncertainty replicas, in its own indexing.
 struct Replicas<'a> {
-    spectra: &'a [MultigroupSpectrum],
-    steps: &'a [TransmuteStep],
+    spectra: Vec<MultigroupSpectrum>,
+    steps: Vec<TransmuteStep>,
     per_spectrum: Vec<PerSpectrum>,
     /// The spectrum each of `per_spectrum` was collapsed from, which keys
     /// that spectrum's own random draws.
     draw_spectrum: Vec<usize>,
+    /// The composition each of `per_spectrum` was shielded at, `None` for
+    /// the starting composition.
+    composition: Vec<Option<Material>>,
     request: &'a DataUncertainty,
     shielding: Option<&'a Shielding>,
     /// The branching lists the nominal fold applied, which a flux replica
@@ -1054,7 +1100,27 @@ struct Replicas<'a> {
     isomer: Option<&'a IsomerCovariance>,
     /// What moves the material's damage energy, when displacement damage
     /// was asked for.
-    damage: Option<&'a crate::damage::ReplicaDamage<'a>>,
+    damage: Option<crate::damage::ReplicaDamage<'a>>,
+}
+
+/// What a shielded case needs to collapse a step at the composition the step
+/// starts from: the shielding mixture, and so every shielded rate, moves as
+/// the irradiation changes the composition.
+struct Recollapse<'a> {
+    /// The spectra, indexed as the shared collapses.
+    spectra: &'a [MultigroupSpectrum],
+    lists: &'a Lists<'a>,
+    activation: &'a HashSet<i32>,
+    shielding: &'a Shielding,
+}
+
+/// A step's own collapse, at the composition it started from.
+struct StepCollapse {
+    collapse: PerSpectrum,
+    info: ShieldingInfo,
+    report: Arc<BranchingReport>,
+    /// The composition, with the material's data.
+    composition: Material,
 }
 
 /// One material's timeline, stepped from `initial` with steps whose spectrum
@@ -1062,6 +1128,7 @@ struct Replicas<'a> {
 ///
 /// `edges` asks for each step's per-edge rates; the screening reads only the
 /// states, so it does not pay for them.
+#[allow(clippy::too_many_arguments)]
 fn solve_case(
     initial: &Material,
     steps: &[TransmuteStep],
@@ -1069,6 +1136,7 @@ fn solve_case(
     chain: &Arc<HashMap<String, ChainNuclide>>,
     parts: yani::ChainParts,
     replicas: Option<Replicas<'_>>,
+    recollapse: Option<&Recollapse<'_>>,
     edges: bool,
 ) -> Result<CaseOutcome, Box<dyn std::error::Error>> {
     let stepper = ForwardEulerStepper;
@@ -1076,18 +1144,50 @@ fn solve_case(
     let mut current_material = initial.clone();
     let mut states = Vec::with_capacity(steps.len());
     let mut edge_rates = Vec::with_capacity(steps.len());
-    for st in steps {
+    let mut collapses: Vec<Option<StepCollapse>> = Vec::with_capacity(steps.len());
+    for (k, st) in steps.iter().enumerate() {
+        // A shielded step after the first starts from a composition the
+        // schedule has changed, and the shielding mixture with it, so it
+        // collapses at that composition. The memo holds one composition's
+        // collapses, so none is shared here.
+        let own = match (recollapse, st.irradiation) {
+            (Some(r), Some((idx, _))) if k > 0 => {
+                let mut at = current_material.clone();
+                at.nuclide_data = initial.nuclide_data.clone();
+                let (collapse, info, report) = collapse_one(
+                    &at,
+                    &r.spectra[idx],
+                    chain,
+                    r.lists,
+                    r.activation,
+                    Some(r.shielding),
+                    None,
+                )?;
+                Some(StepCollapse {
+                    collapse,
+                    info,
+                    report: Arc::new(report),
+                    composition: at,
+                })
+            }
+            _ => None,
+        };
         // The fission-yield weights are a normalized shape, so `scale_rates`
         // (which carries the magnitude) leaves them correct as they are.
-        let (step_rates, step_weights, step_chain) = match st.irradiation {
-            Some((idx, rate)) => (
+        let (step_rates, step_weights, step_chain) = match (st.irradiation, &own) {
+            (Some((_, rate)), Some(o)) => (
+                scale_rates(&o.collapse.0, rate),
+                &o.collapse.1,
+                &o.collapse.2,
+            ),
+            (Some((idx, rate)), None) => (
                 scale_rates(&per_spectrum[idx].0, rate),
                 &per_spectrum[idx].1,
                 &per_spectrum[idx].2,
             ),
             // Decay-only step: no reaction rates, so the base chain suffices
             // and no fission rate can demand a fold.
-            None => (HashMap::new(), &no_fission, chain),
+            (None, _) => (HashMap::new(), &no_fission, chain),
         };
         current_material = stepper.step(
             &current_material,
@@ -1105,15 +1205,44 @@ fn solve_case(
             edge_rates.push(per_edge_rates(step_chain, &step_rates));
         }
         states.push(current_material.clone());
+        collapses.push(own);
     }
 
+    // A re-collapsed step's replicas perturb its own collapse: appended in
+    // step order, under the spectrum it was collapsed from, at the
+    // composition it was collapsed at.
+    let replicas = replicas.map(|mut r| {
+        for (k, own) in collapses.iter().enumerate() {
+            let (Some(own), Some((i, rate))) = (own, r.steps[k].irradiation) else {
+                continue;
+            };
+            let spectrum = r.spectra[i].clone();
+            if let Some(d) = r.damage.as_mut() {
+                d.per_group.extend(crate::damage::per_group_rates(
+                    &own.composition,
+                    std::slice::from_ref(&spectrum),
+                    r.shielding,
+                ));
+            }
+            r.steps[k].irradiation = Some((r.per_spectrum.len(), rate));
+            r.per_spectrum.push(own.collapse.clone());
+            r.spectra.push(spectrum);
+            r.draw_spectrum.push(r.draw_spectrum[i]);
+            r.composition.push(Some(own.composition.clone()));
+        }
+        r
+    });
     let uncertainty = match replicas {
         Some(r) => Some(run_replicas(
             initial,
-            r.spectra,
-            r.steps,
+            &r.spectra,
+            &r.steps,
             &r.per_spectrum,
             &r.draw_spectrum,
+            &r.composition
+                .iter()
+                .map(|m| m.as_ref().unwrap_or(initial))
+                .collect::<Vec<_>>(),
             chain,
             parts,
             &stepper,
@@ -1124,7 +1253,7 @@ fn solve_case(
             None,
             None,
             r.cross,
-            r.damage,
+            r.damage.as_ref(),
         )?),
         None => None,
     };
@@ -1132,6 +1261,7 @@ fn solve_case(
         states,
         rates: edge_rates,
         uncertainty,
+        collapses,
     })
 }
 
@@ -1163,6 +1293,7 @@ fn solve_processed(
             states: Vec::new(),
             rates: Vec::new(),
             uncertainty: None,
+            collapses: Vec::new(),
         })
         .collect();
     let mut receiver_states: Vec<Vec<Material>> = receivers.iter().map(|_| Vec::new()).collect();
@@ -1612,7 +1743,10 @@ fn screen_case(
                         .map(|c| c.0)
                 })
                 .collect::<Result<_, _>>()?;
-            let outcome = solve_case(&work, steps, &per_spectrum, chain, parts, None, false)?;
+            // The screening only decides which products to load, against a
+            // threshold with a wide margin, so it steps on the starting
+            // composition's collapse.
+            let outcome = solve_case(&work, steps, &per_spectrum, chain, parts, None, None, false)?;
             let mut states = Vec::with_capacity(outcome.states.len() + 1);
             states.push(work.get_atoms_per_barn_cm()?);
             for state in &outcome.states {
@@ -1936,6 +2070,7 @@ pub fn transport_replicas(
         &steps,
         &per_spectrum,
         &[0],
+        &[&initial],
         chain,
         parts,
         &ForwardEulerStepper,
@@ -2257,7 +2392,11 @@ pub(crate) fn decay_photon_candidates(
 /// `spectra`, `per_spectrum` and the steps' indices are per collapse, and
 /// `draw_spectrum` names the spectrum each collapse belongs to. A spectrum's
 /// own random draws (its flux error) are keyed on that spectrum, so collapses
-/// of one spectrum at different compositions draw it alike.
+/// of one spectrum at different compositions draw it alike, and what the run
+/// reports per spectrum is reported under it. `composition` is the material
+/// each collapse was shielded at: everything shaped by the shielded flux (the
+/// covariance folds and fields, the resonance weights, the flux terms) is
+/// shaped at it, and everything else reads `initial`.
 #[allow(clippy::too_many_arguments)]
 fn run_replicas(
     initial: &Material,
@@ -2265,6 +2404,7 @@ fn run_replicas(
     steps: &[TransmuteStep],
     per_spectrum: &[PerSpectrum],
     draw_spectrum: &[usize],
+    composition: &[&Material],
     chain: &Arc<HashMap<String, ChainNuclide>>,
     parts: yani::ChainParts,
     stepper: &ForwardEulerStepper,
@@ -2279,6 +2419,14 @@ fn run_replicas(
 ) -> Result<(Ensemble, Info), Box<dyn std::error::Error>> {
     check_convergence(request.convergence)?;
     debug_assert_eq!(draw_spectrum.len(), per_spectrum.len());
+    debug_assert_eq!(composition.len(), per_spectrum.len());
+    // A spectrum's first collapse speaks for it in what is counted per
+    // spectrum; its later collapses read the same nuclides and channels.
+    let first_of_spectrum: Vec<bool> = (0..draw_spectrum.len())
+        .map(|a| !draw_spectrum[..a].contains(&draw_spectrum[a]))
+        .collect();
+    // Shielded at the material itself unless a collapse was made elsewhere.
+    let shaped_at = |a: usize| (!std::ptr::eq(composition[a], initial)).then_some(composition[a]);
     let no_inputs = crate::covariance_fold::DamageInputs::new();
     let damage_inputs = damage.map_or(&no_inputs, |d| d.inputs);
     // The two paths each have one source the other lacks. A transport run has
@@ -2369,11 +2517,13 @@ fn run_replicas(
     let fold_spectra: Vec<FoldSpectrum> = per_spectrum
         .iter()
         .zip(spectra)
-        .map(|(p, s)| FoldSpectrum {
+        .enumerate()
+        .map(|(a, (p, s))| FoldSpectrum {
             chain: &p.2,
             rates: &p.0,
             multigroup_flux: &s.masses,
             group_boundaries: &s.boundaries,
+            composition: shaped_at(a),
         })
         .collect();
     let (fields, partners) = if cross_sections {
@@ -2408,7 +2558,7 @@ fn run_replicas(
         let folded = if cross_sections {
             let spectrum = &spectra[idx];
             let (folded, spectrum_coverage) = fold_rate_covariance(
-                initial,
+                composition[idx],
                 folded_chain,
                 rates,
                 &spectrum.masses,
@@ -2416,7 +2566,9 @@ fn run_replicas(
                 shielding,
                 &applied,
             );
-            merge_coverage(&mut coverage, spectrum_coverage);
+            if first_of_spectrum[idx] {
+                merge_coverage(&mut coverage, spectrum_coverage);
+            }
             folded
         } else {
             std::collections::BTreeMap::new()
@@ -2426,6 +2578,15 @@ fn run_replicas(
     let sampler = Sampler::coupled(&fields, &folds, cross, &partners);
     for (idx, (rates, _, _)) in per_spectrum.iter().enumerate() {
         sigmas.add(idx, &sampler, rates, fluence[idx], &densities, &populated);
+    }
+    // A repair is named under the spectrum the schedule names, once: a
+    // spectrum's later collapses fold the same matrix.
+    if draw_spectrum.iter().enumerate().any(|(a, &d)| a != d) {
+        let mut seen = HashSet::new();
+        sigmas.repairs.retain_mut(|r| {
+            r.spectrum = draw_spectrum[r.spectrum];
+            seen.insert((r.nuclide.clone(), r.spectrum))
+        });
     }
 
     // Resonance parameters, where a nuclide's folder carries them: drawn per
@@ -2438,10 +2599,12 @@ fn run_replicas(
         let weight_spectra: Vec<crate::resonance_rates::WeightSpectrum> = per_spectrum
             .iter()
             .zip(spectra)
-            .map(|(p, s)| crate::resonance_rates::WeightSpectrum {
+            .enumerate()
+            .map(|(a, (p, s))| crate::resonance_rates::WeightSpectrum {
                 rates: &p.0,
                 masses: &s.masses,
                 boundaries: &s.boundaries,
+                composition: shaped_at(a),
             })
             .collect();
         Some(crate::resonance_rates::ResonanceRun::new(
@@ -2477,6 +2640,7 @@ fn run_replicas(
                 rates,
                 multigroup_flux: f.multigroup_flux,
                 group_boundaries: f.group_boundaries,
+                composition: f.composition,
             })
             .collect();
         let mut draw_fields: std::collections::BTreeMap<_, _> = fields
@@ -2511,9 +2675,11 @@ fn run_replicas(
     for (idx, spectrum) in spectra.iter().enumerate() {
         match spectrum.flux_error.as_ref().filter(|_| want_flux) {
             Some(relative) => {
-                flux_coverage.spectra_with_sigma += 1;
+                if first_of_spectrum[idx] {
+                    flux_coverage.spectra_with_sigma += 1;
+                }
                 let rates = crate::multigroup::per_group_reaction_rates(
-                    initial,
+                    composition[idx],
                     &per_spectrum[idx].2,
                     &spectrum.masses,
                     &spectrum.boundaries,
@@ -2523,7 +2689,7 @@ fn run_replicas(
                 // lists, not group averages, so they get terms of their own
                 // and each replica re-folds them.
                 let lists_terms = crate::multigroup::per_group_list_rates(
-                    initial,
+                    composition[idx],
                     chain,
                     lists,
                     &spectrum.masses,
@@ -2546,7 +2712,7 @@ fn run_replicas(
                 }));
             }
             None => {
-                if want_flux {
+                if want_flux && first_of_spectrum[idx] {
                     flux_coverage.spectra_without_sigma += 1;
                 }
                 per_group.push(None);
@@ -2585,9 +2751,10 @@ fn run_replicas(
             Some(_) => Vec::new(),
             None => spectra
                 .iter()
-                .map(|s| {
+                .enumerate()
+                .map(|(a, s)| {
                     crate::multigroup::per_group_list_rates(
-                        initial,
+                        composition[a],
                         chain,
                         lists,
                         &s.masses,
@@ -3108,12 +3275,18 @@ fn run_replicas(
                 _ => (rates, folded_chain, None, None),
             };
             let delta = per_group[idx].as_ref().map(|terms| {
+                // The same draw as the spectrum's first collapse, counted once.
+                let mut repeat = crate::flux_uncertainty::FluxCoverage::default();
                 crate::flux_uncertainty::flux_deviates(
                     &terms.error,
                     request.seed,
                     replica,
                     draw_spectrum[idx],
-                    &mut flux_coverage,
+                    if first_of_spectrum[idx] {
+                        &mut flux_coverage
+                    } else {
+                        &mut repeat
+                    },
                 )
             });
             // The damage energy moves as the rates do: the flux first, on its
@@ -3423,6 +3596,7 @@ fn run_replicas(
                     steps,
                     per_spectrum,
                     draw_spectrum,
+                    composition,
                     chain,
                     parts,
                     stepper,

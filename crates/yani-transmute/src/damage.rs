@@ -220,6 +220,7 @@ pub struct DamageReplicas {
 }
 
 /// What a material's uncertainty replicas need to move its damage energy.
+#[derive(Clone)]
 pub(crate) struct ReplicaDamage<'a> {
     /// Every material's widened nuclides, shared so a nuclide is drawn alike
     /// in each ([`damage_inputs`]).
@@ -481,17 +482,35 @@ pub(crate) fn ensure_damage_data_loaded(
 /// `states` are the solve's states, initial first, one more than `steps`.
 /// With `ensemble`, the material's uncertainty replicas, every replica's
 /// series too ([`DisplacementDamage::replicas`]).
+///
+/// `step_compositions` names, per step, the composition a step that
+/// re-collapsed was collapsed at (empty or `None` where it used its
+/// spectrum's collapse at `material`). Such a step's damage energy is
+/// collapsed there too, appended after the spectra in step order, the order
+/// the uncertainty replicas index their damage factors in.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn displacement_damage(
     material: &Material,
     states: &[Material],
     spectra: &[MultigroupSpectrum],
     steps: &[TransmuteStep],
+    step_compositions: &[Option<Material>],
     shielding: Option<&Shielding>,
     request: &DamageRequest,
     ensemble: Option<&crate::uncertainty::Ensemble>,
 ) -> Result<DisplacementDamage, Box<dyn std::error::Error>> {
-    // Per spectrum, every nuclide present at either end of a step it drives.
-    let mut wanted: Vec<HashSet<String>> = vec![HashSet::new(); spectra.len()];
+    // One collapse per spectrum at `material`, then one per re-collapsed step.
+    let mut collapses: Vec<(&MultigroupSpectrum, &Material)> =
+        spectra.iter().map(|s| (s, material)).collect();
+    let mut steps: Vec<TransmuteStep> = steps.to_vec();
+    for (st, at) in steps.iter_mut().zip(step_compositions) {
+        if let (Some((s, rate)), Some(at)) = (st.irradiation, at) {
+            st.irradiation = Some((collapses.len(), rate));
+            collapses.push((&spectra[s], at));
+        }
+    }
+    // Per collapse, every nuclide present at either end of a step it drives.
+    let mut wanted: Vec<HashSet<String>> = vec![HashSet::new(); collapses.len()];
     for (i, st) in steps.iter().enumerate() {
         if let Some((s, _)) = st.irradiation {
             for state in &states[i..=i + 1] {
@@ -505,14 +524,14 @@ pub(crate) fn displacement_damage(
             }
         }
     }
-    let per_spectrum: Vec<HashMap<String, Option<f64>>> = spectra
+    let per_spectrum: Vec<HashMap<String, Option<f64>>> = collapses
         .iter()
         .zip(wanted)
-        .map(|(s, names)| {
+        .map(|((s, at), names)| {
             let mut names: Vec<String> = names.into_iter().collect();
             names.sort();
             crate::multigroup::damage_energy_rates(
-                material,
+                at,
                 &s.masses,
                 &s.boundaries,
                 1.0,

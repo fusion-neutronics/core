@@ -2701,6 +2701,10 @@ pub struct FoldSpectrum<'a> {
     pub rates: &'a ReactionRates,
     pub multigroup_flux: &'a [f64],
     pub group_boundaries: &'a [f64],
+    /// The composition the collapse was shielded at, when it is not the
+    /// material the fields are read for: a step's collapse at the composition
+    /// it started from. `None` shields at that material.
+    pub composition: Option<&'a Material>,
 }
 
 /// One cell of a nuclide's cross-section field: reaction `mt` over
@@ -2897,7 +2901,12 @@ pub fn cell_fields_with_damage(
             let valid = !s.multigroup_flux.is_empty()
                 && s.group_boundaries.len() == s.multigroup_flux.len() + 1;
             if valid {
-                CollapseShapes::new(material, s.multigroup_flux, s.group_boundaries, shielding)
+                CollapseShapes::new(
+                    s.composition.unwrap_or(material),
+                    s.multigroup_flux,
+                    s.group_boundaries,
+                    shielding,
+                )
             } else {
                 None
             }

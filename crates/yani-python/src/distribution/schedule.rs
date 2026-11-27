@@ -1263,8 +1263,10 @@ impl PyPulseSchedule {
     /// Each irradiation `Pulse` must carry a `NeutronSource` whose energy is a
     /// `Histogram` (the spectrum); its `rate` is the total flux magnitude
     /// [n/cm^2/s]. Distinct sources (by Python identity) become distinct
-    /// spectra, collapsed once each. A `Cooldown` is a decay-only step. A
-    /// sourceless `Pulse` is rejected (irradiation needs a spectrum source).
+    /// spectra, collapsed once each (and again at every later step's
+    /// starting composition when self-shielded). A `Cooldown` is a decay-only
+    /// step. A sourceless `Pulse` is rejected (irradiation needs a spectrum
+    /// source).
     /// The source's position/direction are unused here (no transport runs).
     pub fn transmute_plan(
         &self,
