@@ -45,6 +45,7 @@ from yamc._core import (  # noqa: F811
     Region as Region,
     Tally as Tally,
     Tracks as Tracks,
+    WeightWindowBounds as WeightWindowBounds,
     get_transmutation_decay_data as _get_transmutation_decay_data,
     get_transmutation_reactions as _get_transmutation_reactions,
     get_transmutation_fission_yields as _get_transmutation_fission_yields,
@@ -263,6 +264,22 @@ def _tracks_to_vtkhdf(self, filename, *, length_units="cm"):
     tracks_to_vtkhdf(filename, self, length_units=length_units)
 
 
+def _weight_windows_to_vtkhdf(self, filename, *, length_units="cm"):
+    """Write the lower and upper bounds to a VTK-HDF ImageData file for
+    ParaView, one pair of arrays per energy group, NaN where a voxel has no
+    window.
+
+    Requires ``h5py`` (install with ``pip install yamc[viz]``).
+
+    Args:
+        filename (str): Output file path (recommended: ``.vtkhdf``).
+        length_units (str): Unit of the written coordinates, ``"cm"``
+            (default), ``"m"``, ``"mm"`` or ``"km"``.
+    """
+    from yamc.vtkhdf import weight_windows_to_vtkhdf
+    weight_windows_to_vtkhdf(filename, self, length_units=length_units)
+
+
 def _mesh_geometry_to_vtkhdf(self, path, *, length_units="cm"):
     """Write the mesh's triangles and tets to a VTKHDF UnstructuredGrid file,
     for ParaView.
@@ -319,6 +336,7 @@ Model.to_vtkhdf = _model_to_vtkhdf
 NeutronSource.to_vtkhdf = _source_to_vtkhdf
 PhotonSource.to_vtkhdf = _source_to_vtkhdf
 Tally.to_vtkhdf = _tally_to_vtkhdf
+WeightWindowBounds.to_vtkhdf = _weight_windows_to_vtkhdf
 # The Pyodide wheel is built without the mesh feature, so has no MeshGeometry.
 if "MeshGeometry" in globals():
     from yamc._tets import add_tets as _add_tets  # noqa: E402

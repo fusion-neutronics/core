@@ -224,13 +224,16 @@ impl PyWeightWindowBounds {
         Ok(Self { inner })
     }
 
-    /// Lower window bounds, flat over (group, voxel).
+    /// Lower window bounds, flat over (group, voxel): index
+    /// ``group * mesh.num_bins + voxel``, with ``voxel = (iz * ny + iy) * nx +
+    /// ix``, so ``numpy.reshape(lower_bounds, (n_groups, nz, ny, nx))`` lays
+    /// them out on the mesh. A negative bound marks a voxel without a window.
     #[getter]
     pub fn lower_bounds(&self) -> Vec<f64> {
         self.inner.lower_bounds.clone()
     }
 
-    /// Upper window bounds, flat over (group, voxel).
+    /// Upper window bounds, laid out as ``lower_bounds``.
     #[getter]
     pub fn upper_bounds(&self) -> Vec<f64> {
         self.inner.upper_bounds.clone()
@@ -261,6 +264,32 @@ impl PyWeightWindowBounds {
     #[getter]
     pub fn weight_floor(&self) -> f64 {
         self.inner.weight_floor
+    }
+
+    /// The mesh the windows are defined on.
+    #[getter]
+    pub fn mesh(&self) -> PyRegularRectangularMesh {
+        PyRegularRectangularMesh {
+            internal: self.inner.mesh.clone(),
+        }
+    }
+
+    /// Energy group edges in eV, or ``None`` for one group spanning all
+    /// energies.
+    #[getter]
+    pub fn energy_bins(&self) -> Option<Vec<f64>> {
+        self.inner.energy_bins.clone()
+    }
+
+    /// The window a particle at ``position`` with ``energy`` gets, as
+    /// ``(lower, upper)``, or ``None`` where it gets none: outside the mesh or
+    /// the energy bins, or in a voxel without a window.
+    ///
+    /// Args:
+    ///     position: ``(x, y, z)`` in cm.
+    ///     energy: Energy in eV.
+    pub fn window(&self, position: [f64; 3], energy: f64) -> Option<(f64, f64)> {
+        self.inner.window(position, energy)
     }
 
     pub fn __repr__(&self) -> String {
