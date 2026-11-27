@@ -293,7 +293,9 @@ pub(crate) fn walk_group(
 
     // Each point is evaluated once and carried into the next segment.
     let xs_at = |e: f64| reaction.cross_section_at(e).unwrap_or(0.0);
-    let phi_at = |e: f64| shape.map_or(0.0, |s| s.at(e));
+    // The group's points rise, so the shape is read by walking up it.
+    let mut rising = shape.map(|s| s.rising());
+    let mut phi_at = |e: f64| rising.as_mut().map_or(0.0, |s| s.at(e));
     let mut prev_e = e_lo;
     let mut prev_xs = xs_at(e_lo);
     let mut prev_phi = phi_at(e_lo);
@@ -471,7 +473,8 @@ pub(crate) fn walk_list_group(
         Some(_) => e_hi.min(grid.last().copied().unwrap_or(e_lo)),
         None => e_hi,
     };
-    let phi_at = |e: f64| shape.map_or(0.0, |s| s.at(e));
+    let mut rising = shape.map(|s| s.rising());
+    let mut phi_at = |e: f64| rising.as_mut().map_or(0.0, |s| s.at(e));
 
     // Numerators under each weight, and the denominators the weight needs.
     let mut flat = vec![0.0; n];

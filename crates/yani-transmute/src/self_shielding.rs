@@ -323,6 +323,76 @@ impl FluxShape {
     }
 }
 
+impl FluxShape {
+    /// [`FluxShape::at`] for a walk up in energy, as a group's points are.
+    pub(crate) fn rising(&self) -> RisingShape<'_> {
+        RisingShape {
+            shape: self,
+            bracket: None,
+        }
+    }
+}
+
+/// [`FluxShape::at`] at energies that rise, the same value in the same bits.
+///
+/// The shape's energies strictly fall, so the pair bracketing `e` (the last
+/// point at or above it and the next one) is unique, and it is the pair the
+/// search in [`FluxShape::at`] settles on. It is found once and then moved,
+/// rather than searched for at every point, and the logarithms of its ends,
+/// which depend only on the pair, are kept with it.
+pub(crate) struct RisingShape<'a> {
+    shape: &'a FluxShape,
+    /// The bracket's lower index and `ln` of its two energies.
+    bracket: Option<(usize, f64, f64)>,
+}
+
+impl RisingShape<'_> {
+    pub(crate) fn at(&mut self, e: f64) -> f64 {
+        let (energy, phi) = (&self.shape.energy, &self.shape.phi);
+        let n = energy.len();
+        // The ends, as `FluxShape::at` answers them.
+        if n == 0 || e >= energy[0] || e <= energy[n - 1] || e.is_nan() {
+            return self.shape.at(e);
+        }
+        let mut lo = match self.bracket {
+            Some((lo, _, _)) => lo,
+            None => {
+                // The search `FluxShape::at` makes, once.
+                let (mut lo, mut hi) = (0usize, n - 1);
+                while hi - lo > 1 {
+                    let mid = (lo + hi) / 2;
+                    if energy[mid] >= e {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                lo
+            }
+        };
+        // The last point at or above `e`: up while this one is below it, then
+        // down while the next one is not.
+        while energy[lo] < e {
+            lo -= 1;
+        }
+        while energy[lo + 1] >= e {
+            lo += 1;
+        }
+        let (e0, e1) = (energy[lo], energy[lo + 1]);
+        let (p0, p1) = (phi[lo], phi[lo + 1]);
+        if e0 <= e1 {
+            return p0;
+        }
+        let (ln0, ln1) = match self.bracket {
+            Some((b, ln0, ln1)) if b == lo => (ln0, ln1),
+            _ => (e0.ln(), e1.ln()),
+        };
+        self.bracket = Some((lo, ln0, ln1));
+        let t = (ln0 - e.ln()) / (ln0 - ln1);
+        p0 + t * (p1 - p0)
+    }
+}
+
 #[cfg(test)]
 impl FluxShape {
     /// A shape stated point by point, `energy` descending, for tests that need
@@ -345,11 +415,99 @@ pub struct MixtureTotal<'a> {
 
 impl<'a> MixtureTotal<'a> {
     /// Macroscopic total at `e`, in 1/cm, with densities in atoms/barn-cm.
+    ///
+    /// The definition [`DescendingMixture::at`] must match bit for bit, kept
+    /// for the test that holds it to it; the solve walks the grid instead.
+    #[cfg(test)]
     fn at(&self, e: f64) -> f64 {
         self.entries
             .iter()
             .map(|(density, reaction)| density * reaction.cross_section_at(e).unwrap_or(0.0))
             .sum()
+    }
+}
+
+impl MixtureTotal<'_> {
+    /// [`MixtureTotal::at`] for a walk down in energy: each entry keeps its
+    /// place on its grid between calls, so a step costs a move of a point or
+    /// two rather than a search of the whole grid.
+    fn descending(&self) -> DescendingMixture<'_> {
+        DescendingMixture {
+            entries: self
+                .entries
+                .iter()
+                .map(|(density, reaction)| (*density, Descending::new(reaction)))
+                .collect(),
+        }
+    }
+}
+
+/// [`MixtureTotal::at`] at energies that only fall, the same sum in the same
+/// order of the same values.
+struct DescendingMixture<'a> {
+    entries: Vec<(f64, Descending<'a>)>,
+}
+
+impl DescendingMixture<'_> {
+    fn at(&mut self, e: f64) -> f64 {
+        self.entries
+            .iter_mut()
+            .map(|(density, reaction)| *density * reaction.at(e))
+            .sum()
+    }
+}
+
+/// `reaction.cross_section_at(e).unwrap_or(0.0)` for energies that only fall.
+///
+/// The bracketing pair the search finds is the last grid point below `e` and
+/// the first above it, and that pair only moves down as `e` does, so it is
+/// tracked rather than searched for, and the same interpolation is applied to
+/// it. Whatever the search handles that is not a strict interior point (the
+/// grid's ends, an energy exactly on a grid point, where a repeated energy
+/// leaves the search free to return either copy, and a NaN) is handed to the
+/// search itself, so the value is the same bits either way.
+struct Descending<'a> {
+    reaction: &'a Reaction,
+    /// The first grid index whose energy lies above the last `e` asked for.
+    above: usize,
+}
+
+impl<'a> Descending<'a> {
+    fn new(reaction: &'a Reaction) -> Self {
+        Self {
+            reaction,
+            above: reaction.energy.len().saturating_sub(1),
+        }
+    }
+
+    fn at(&mut self, e: f64) -> f64 {
+        let energy = &self.reaction.energy;
+        let n = energy.len();
+        let interior =
+            n >= 2 && self.reaction.cross_section.len() == n && e > energy[0] && e < energy[n - 1];
+        if !interior {
+            return self.reaction.cross_section_at(e).unwrap_or(0.0);
+        }
+        let mut above = self.above.min(n - 1);
+        if energy[above] <= e {
+            // Energies are meant to fall; one that did not is still answered
+            // exactly, and the walk starts again from the top.
+            above = n - 1;
+        }
+        while energy[above - 1] > e {
+            above -= 1;
+        }
+        if energy[above - 1] == e {
+            return self.reaction.cross_section_at(e).unwrap_or(0.0);
+        }
+        self.above = above;
+        let (e0, e1) = (energy[above - 1], energy[above]);
+        let (xs0, xs1) = (
+            self.reaction.cross_section[above - 1],
+            self.reaction.cross_section[above],
+        );
+        let t = (e - e0) / (e1 - e0);
+        xs0 + t * (xs1 - xs0)
     }
 }
 
@@ -423,13 +581,15 @@ pub fn flux_shape(
             let mut energy = Vec::with_capacity(n);
             let mut total = Vec::with_capacity(n);
             let mut scatter = Vec::with_capacity(n);
+            // The grid falls in energy, so every lookup walks down its data
+            // rather than searching it: the same values, a fraction of the time.
+            let mut mixture_down = mixture.descending();
+            let mut elastic_down = elastic.map(Descending::new);
             for i in 0..n {
                 let e = TOP_ENERGY_EV * (-(i as f64) * step).exp();
                 energy.push(e);
-                total.push(mixture.at(e) + escape);
-                scatter.push(
-                    elastic_density * elastic.and_then(|r| r.cross_section_at(e)).unwrap_or(0.0),
-                );
+                total.push(mixture_down.at(e) + escape);
+                scatter.push(elastic_density * elastic_down.as_mut().map_or(0.0, |r| r.at(e)));
             }
 
             let width = STEPS_PER_WINDOW;
@@ -582,6 +742,85 @@ mod tests {
             // The far end is a trapezoid end, as the near end is.
             let ratio = kernel[STEPS_PER_WINDOW - 1] / kernel[STEPS_PER_WINDOW - 2];
             assert!((ratio - 0.5 * (-step).exp()).abs() < 1e-12, "A = {mass}");
+        }
+    }
+
+    /// A grid with what real evaluations carry: a step discontinuity spelled
+    /// as a repeated energy, a threshold, and uneven spacing.
+    fn stepped(threshold_idx: usize) -> Reaction {
+        Reaction {
+            cross_section: vec![0.0, 2.0, 5.0, 9.0, 3.0, 3.5, 1.0, 7.0].into(),
+            threshold_idx,
+            energy: vec![1.0e-3, 0.5, 2.0, 2.0, 30.0, 1.0e3, 2.5e5, 1.0e7].into(),
+            mt_number: MT_TOTAL,
+            q_value: 0.0,
+            products: vec![].into(),
+            scatter_in_cm: false,
+            redundant: false,
+        }
+    }
+
+    /// Falling energies, the grid points themselves among them, both ends,
+    /// beyond both ends, a repeat and a NaN.
+    fn falling_energies() -> Vec<f64> {
+        let mut out: Vec<f64> = (0..4000)
+            .map(|i| 2.0e7 * (-(i as f64) * 0.0075).exp())
+            .collect();
+        out.extend([1.0e7, 1.0e3, 30.0, 30.0, 2.0, 2.0, 1.5, 0.5, 1.0e-3, 1.0e-4]);
+        out.sort_by(|a, b| b.total_cmp(a));
+        out.push(f64::NAN);
+        out.push(5.0);
+        out.push(1.0e6);
+        out
+    }
+
+    #[test]
+    fn a_descending_lookup_is_the_search_bit_for_bit() {
+        for threshold in [0, 1] {
+            let reaction = stepped(threshold);
+            let mut down = Descending::new(&reaction);
+            for e in falling_energies() {
+                let expected = reaction.cross_section_at(e).unwrap_or(0.0);
+                let got = down.at(e);
+                assert_eq!(
+                    got.to_bits(),
+                    expected.to_bits(),
+                    "e = {e}: {got} vs {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_descending_mixture_is_the_mixture_bit_for_bit() {
+        let (a, b) = (stepped(0), stepped(1));
+        let mixture = MixtureTotal {
+            entries: vec![(0.03, &a), (1.7e-5, &b)],
+        };
+        let mut down = mixture.descending();
+        for e in falling_energies() {
+            assert_eq!(down.at(e).to_bits(), mixture.at(e).to_bits(), "e = {e}");
+        }
+    }
+
+    #[test]
+    fn a_rising_shape_is_the_shape_bit_for_bit() {
+        let energy: Vec<f64> = (0..3000)
+            .map(|i| 2.0e7 * (-(i as f64) * 0.01).exp())
+            .collect();
+        let phi: Vec<f64> = (0..3000)
+            .map(|i| 1.0 + 0.5 * (i as f64 * 0.37).sin())
+            .collect();
+        let shape = FluxShape::from_points(energy.clone(), phi);
+        let mut queries: Vec<f64> = energy.clone();
+        queries.extend((0..5000).map(|i| 1.0e-6 * (i as f64 * 0.0065).exp()));
+        queries.extend([3.0e7, 1.0e-9]);
+        queries.sort_by(|a, b| a.total_cmp(b));
+        // Rising, as a group's points are, then a few out of order.
+        queries.extend([1.0e5, 1.0, 2.0e7, f64::NAN, 3.3e3]);
+        let mut rising = shape.rising();
+        for e in queries {
+            assert_eq!(rising.at(e).to_bits(), shape.at(e).to_bits(), "e = {e}");
         }
     }
 
