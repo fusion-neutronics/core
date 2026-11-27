@@ -625,7 +625,7 @@ impl Geometry {
     /// * `basis` - The plane to slice: "xy", "xz", or "yz"
     ///
     /// # Returns
-    /// A tuple of (cell_ids, material_ids) where each is a Vec<Vec<i32>>.
+    /// A tuple of (cell_ids, material_ids) where each is a `Vec<Vec<i32>>`.
     /// - The outer Vec corresponds to the vertical axis (y for "xy", z for "xz"/"yz")
     /// - The inner Vec corresponds to the horizontal axis (x for "xy"/"xz", y for "yz")
     /// - A value of -1 indicates no cell was found at that location

@@ -221,9 +221,9 @@ def test_degvr_auto_density_reduction():
     gen = yamc.WeightWindowGeneratorDeGVR(mesh=mesh, particle="neutron")
     assert gen.density_reduction is None
 
-    # the auto ray-trace returns a positive N (clamped >= 2) and optical depth
+    # the auto ray-trace returns N (floored at 5) and a positive optical depth
     n, tau = model.estimate_density_reduction(gen)
-    assert n >= 2.0
+    assert n >= 5.0
     assert tau > 0.0
 
     # generation runs in auto mode and yields valid, depth-decreasing bounds
@@ -453,6 +453,11 @@ def test_coupled_neutron_photon_weight_windows_one_call():
     # One call, list particle -> a list of two windows in [neutron, photon] order.
     gen = yamc.WeightWindowGeneratorDeGVR(mesh=mesh, particle=["neutron", "photon"])
     assert gen.particle == ["neutron", "photon"]
+    # The auto N and its tau come from the deepest species, in either order.
+    swapped = yamc.WeightWindowGeneratorDeGVR(mesh=mesh, particle=["photon", "neutron"])
+    assert model().estimate_density_reduction(gen) == model().estimate_density_reduction(
+        swapped
+    )
     windows = model().generate_weight_windows(gen, total_particles=200_000, seed=1)
     assert isinstance(windows, list) and len(windows) == 2
     assert windows[0].particle == "neutron"

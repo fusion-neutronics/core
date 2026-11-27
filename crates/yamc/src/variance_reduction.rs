@@ -94,20 +94,38 @@ fn default_ratio() -> f64 {
     5.0
 }
 
-/// DeGVR auto-N target reduced optical depth (mean free paths): when
-/// `density_reduction` is left unset, `N` is chosen so the reduced-density
-/// fiducial pass is roughly this many mfp thick (`N = tau / target`, continuous).
+/// DeGVR auto-N slope (mean free paths): above the floor [`DEGVR_N_MIN`],
+/// `N = tau / DEGVR_TAU_TARGET` (continuous), so the reduced-density fiducial
+/// pass is at most this many mean free paths thick at the source energy.
 ///
-/// Empirical sweet spot ~7 mfp from the concrete-sphere sweep in
-/// `examples/python/degvr_autoN_sweep.py` (fits best-N within +/-1 over
-/// tau = 14..32). Larger than the naive ~1-2 mfp: an aggressive (large-N)
-/// extrapolation `G = F*(H/F)^(N-1)` accumulates systematic error over a wide
-/// density span, so a thicker fiducial with a gentler extrapolation wins; the
-/// sweep also showed this optimum is generation-budget-independent (the limit
-/// is extrapolation bias, not statistical noise).
+/// `N` trades generation cost against window quality. The histories the
+/// fiducial pass needs grow as about `exp(1.2 * span)`, `span` being the
+/// e-folds its flux falls across the mesh at density / `N`, so a smaller `N`
+/// costs steeply more generation. A larger `N` multiplies the two passes'
+/// errors by `N - 2` and `N - 1` in the extrapolated window and makes it
+/// shallower at depth; production slows, and in thick concrete it stopped
+/// reaching the deep region from about `N = tau / 3`.
 pub(crate) const DEGVR_TAU_TARGET: f64 = 7.0;
-/// Minimum auto-N (the fiducial is always at least a 2x density reduction).
-pub(crate) const DEGVR_N_MIN: f64 = 2.0;
+/// Floor of the auto `N`.
+///
+/// `examples/python/degvr_density_reduction_study.py` costed generation plus a
+/// production run to a 5% geometric-mean error over the lowest-flux quarter of
+/// the mesh, in analog-history equivalents, for ten 1D shield cases (six
+/// materials, neutron and photon sources, optical depths 10 to 33) and five 3D
+/// models. The best `N` was 4 to 5.66 in 22 of the 30 models it could score and
+/// did not grow with depth as `tau / 7` does. `max(5, tau / 7)` cost 1.18 times
+/// the best `N` of each model on average (1.7 at worst) and `max(2, tau / 7)`
+/// 1.39 (3.0). The gain came from the 3D models and the slabs at optical depths
+/// of 10.5 and 21.5, where the earlier rule gave `N` of 2 to 3.2; at 32.5 the
+/// new rule cost 8% more. A floor of 4 did as well in the slabs but worse in
+/// 3D (1.41 against 1.19).
+///
+/// The floor assumes the default per-pass relative error of 10%, which the
+/// extrapolation multiplies by up to `N - 1`. Part of the small-`N` production
+/// penalty in 3D is splitting within each history, so revisit the floor if the
+/// split control changes. The slope sets `N` above an optical depth of 35,
+/// deeper than the study went.
+pub(crate) const DEGVR_N_MIN: f64 = 5.0;
 
 /// Default per-pass stop for DeGVR generation: each pass runs until 95% of the
 /// window mesh's scored voxels (per energy group) reach this relative error.
@@ -333,7 +351,7 @@ pub struct WeightWindowGeneratorDeGVR {
     /// Representative photon energy (eV) for the auto-N optical-depth ray-trace
     /// of a photon window. `None` (the default) means auto: the source energy
     /// when photons are emitted directly by a photon source, else a typical
-    /// secondary / decay gamma energy ([`DEGVR_PHOTON_REP_ENERGY_EV`]). Only
+    /// secondary / decay gamma energy (1 MeV). Only
     /// affects the auto `density_reduction` estimate, never bias; ignored when
     /// `density_reduction` is set or no photon window is requested.
     #[serde(default)]
@@ -372,11 +390,11 @@ impl WeightWindowGeneratorDeGVR {
     }
 
     /// Auto density-reduction factor from an estimated optical depth `tau`:
-    /// `N = tau / DEGVR_TAU_TARGET`, clamped to at least `DEGVR_N_MIN`. `N` is
-    /// continuous: the density scaling (`density / N`, `density / (N/2)`) and the
-    /// extrapolation exponent (`N - 1`) are all smooth in `N`, so there is no
-    /// reason to round to an integer. The `>= 2` clamp is physical (it keeps the
-    /// asymptotic pass at or below the true density).
+    /// `N = max(DEGVR_N_MIN, tau / DEGVR_TAU_TARGET)`. `N` is continuous: the
+    /// density scaling (`density / N`, `density / (N/2)`) and the extrapolation
+    /// exponent (`N - 1`) are all smooth in `N`, so there is no reason to round
+    /// to an integer. An explicit `density_reduction` may go down to 2, which
+    /// puts the asymptotic pass at full density.
     pub fn n_from_tau(tau: f64) -> f64 {
         (tau / DEGVR_TAU_TARGET).max(DEGVR_N_MIN)
     }
@@ -490,7 +508,7 @@ impl WeightWindowGeneratorDeGVR {
     /// (density / N) and asymptotic field `H` (density / (N / 2)), per bin:
     /// `G = F * (H / F)^(N - 1)`, evaluated in log space. A bin with
     /// non-positive/non-finite `F`, `H`, or result is set to 0 (which yields a
-    /// sentinel window in [`build_bounds`], so the region is skipped rather
+    /// sentinel window in [`Self::build_bounds`], so the region is skipped rather
     /// than triggering a degenerate zero-width window).
     pub fn extrapolate(&self, fiducial: &[f64], asymptotic: &[f64], n: f64) -> Vec<f64> {
         fiducial
@@ -713,22 +731,21 @@ mod tests {
 
     #[test]
     fn degvr_n_from_tau_scales_and_clamps() {
-        use super::{WeightWindowGeneratorDeGVR, DEGVR_TAU_TARGET};
-        // N = round(tau / target), so a tau of 3*target rounds to 3.
-        assert_eq!(
-            WeightWindowGeneratorDeGVR::n_from_tau(3.0 * DEGVR_TAU_TARGET),
-            3.0
-        );
-        // Deep problem scales up.
+        use super::{WeightWindowGeneratorDeGVR, DEGVR_N_MIN, DEGVR_TAU_TARGET};
+        // A deep problem scales with tau.
         assert_eq!(
             WeightWindowGeneratorDeGVR::n_from_tau(20.0 * DEGVR_TAU_TARGET),
             20.0
         );
-        // Shallow problem clamps to the 2x-reduction floor.
-        assert_eq!(WeightWindowGeneratorDeGVR::n_from_tau(0.1), 2.0);
+        // Shallower problems sit on the floor.
+        assert_eq!(
+            WeightWindowGeneratorDeGVR::n_from_tau(3.0 * DEGVR_TAU_TARGET),
+            DEGVR_N_MIN
+        );
+        assert_eq!(WeightWindowGeneratorDeGVR::n_from_tau(0.1), DEGVR_N_MIN);
         // N is continuous, not rounded: a fractional multiple stays fractional.
         assert!(
-            (WeightWindowGeneratorDeGVR::n_from_tau(4.5 * DEGVR_TAU_TARGET) - 4.5).abs() < 1e-12
+            (WeightWindowGeneratorDeGVR::n_from_tau(9.5 * DEGVR_TAU_TARGET) - 9.5).abs() < 1e-12
         );
     }
 

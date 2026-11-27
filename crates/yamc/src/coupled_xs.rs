@@ -10,7 +10,7 @@
 //! Nothing is linearised: the replica is a coupled run on a perturbed library.
 //!
 //! The draw is the one the replica weights make for independent mode
-//! ([`crate::transport::replica`]): each nuclide's MF=33 covariance cells as a
+//! (`transport::replica`): each nuclide's MF=33 covariance cells as a
 //! field, drawn under `(seed, replica, nuclide)` with the cross-material
 //! blocks drawn jointly, and its resolved resonance parameters sampled and
 //! the cross sections rebuilt where the transport can place them, applied by
