@@ -333,7 +333,7 @@ pub struct WeightWindowGeneratorDeGVR {
     /// Representative photon energy (eV) for the auto-N optical-depth ray-trace
     /// of a photon window. `None` (the default) means auto: the source energy
     /// when photons are emitted directly by a photon source, else a typical
-    /// secondary / decay gamma energy ([`DEGVR_PHOTON_REP_ENERGY_EV`]). Only
+    /// secondary / decay gamma energy (1 MeV). Only
     /// affects the auto `density_reduction` estimate, never bias; ignored when
     /// `density_reduction` is set or no photon window is requested.
     #[serde(default)]
@@ -490,7 +490,7 @@ impl WeightWindowGeneratorDeGVR {
     /// (density / N) and asymptotic field `H` (density / (N / 2)), per bin:
     /// `G = F * (H / F)^(N - 1)`, evaluated in log space. A bin with
     /// non-positive/non-finite `F`, `H`, or result is set to 0 (which yields a
-    /// sentinel window in [`build_bounds`], so the region is skipped rather
+    /// sentinel window in [`Self::build_bounds`], so the region is skipped rather
     /// than triggering a degenerate zero-width window).
     pub fn extrapolate(&self, fiducial: &[f64], asymptotic: &[f64], n: f64) -> Vec<f64> {
         fiducial

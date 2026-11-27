@@ -437,7 +437,7 @@ pub struct Model {
     ///
     /// A cap that binds is an error, not a warning: a GPU launch in which
     /// any history was still transporting at the cap fails the run with
-    /// [`GpuDispatchError::HistoriesTruncated`](crate::gpu::GpuDispatchError),
+    /// `GpuDispatchError::HistoriesTruncated` (with the `gpu` feature),
     /// because the under-counted flux it would return is not a valid
     /// answer. Raise the cap or run on the CPU.
     pub gpu_max_steps_per_particle: u32,
@@ -459,7 +459,7 @@ pub struct Model {
     /// Variance-reduction techniques applied during transport. Empty (the
     /// default) is fully analog. Techniques compose; multiplicity rules
     /// are validated at run start (at most one
-    /// [`SurvivalBiasing`](crate::variance_reduction::SurvivalBiasing)
+    /// [`SurvivalBiasing`]
     /// entry). See [`crate::variance_reduction`].
     #[serde(default)]
     pub variance_reduction: Vec<VarianceReduction>,
@@ -771,10 +771,10 @@ impl Model {
     ///
     /// A mesh with a vacuum boundary (a `graveyard_offset` box or a
     /// `boundary:vacuum` group) keeps it and reports its bounding box. One
-    /// without is closed at run start by a vacuum box
-    /// [`DEFAULT_GRAVEYARD_OFFSET`](crate::geometry::mesh::DEFAULT_GRAVEYARD_OFFSET)
-    /// cm outside its bounding box, which is reported here before it is
-    /// added. That needs a void implicit complement: with a material there,
+    /// without is closed at run start by a vacuum box 10 cm
+    /// (`geometry::mesh::DEFAULT_GRAVEYARD_OFFSET`) outside its bounding box,
+    /// which is reported here before it is added. That needs a void implicit
+    /// complement: with a material there,
     /// where the box sits decides how much of that material surrounds the
     /// model, so the run is refused with an `Err` asking for an explicit
     /// `graveyard_offset`.

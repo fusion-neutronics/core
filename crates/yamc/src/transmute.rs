@@ -201,8 +201,8 @@ impl Model {
     /// # Arguments
     /// * `method` - `"coupled"` (transport every step) or `"independent"` (transport once,
     ///   scale rates per step). Independent mode is faster for low-burnup / fusion scenarios.
-    /// * `timesteps` - Time intervals [s] for each transmutation step
-    /// * `source_rates` - Total source strength [n/s] for each step (0 = cooling)
+    /// * `timesteps` - Time intervals (s) for each transmutation step
+    /// * `source_rates` - Total source strength (n/s) for each step (0 = cooling)
     /// * `chain` - Parsed transmutation chain data
     /// * `parts` - Which optional subsections `chain` was built from
     /// * `settings` - Per-run transport settings (particle count, seed,
