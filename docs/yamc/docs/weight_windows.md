@@ -288,7 +288,9 @@ activation path runs twice at reduced density).
 
 - With or without windows the tally means agree within statistics;
   only the variance (and the run cost) differ. Judge the benefit by coverage and
-  the per-tally relative error in the deep region, or the per-tally FOM.
+  the per-bin relative error or ``figure_of_merit`` in the deep region. The
+  ``aggregate_figure_of_merit`` measures the tally total, which the bins near
+  the source dominate.
 - Windows help most under exponential attenuation (thick shields, many decades
   of flux drop), where analog cannot reach at all. For pure void streaming (an air duct),
   analog already fills the domain and the gain is smaller.
