@@ -158,6 +158,7 @@ fn the_field_reproduces_the_fold_under_every_spectrum() {
             .iter()
             .zip(&rates)
             .map(|((g, f), r)| FoldSpectrum {
+                composition: None,
                 chain: &chain,
                 rates: r,
                 multigroup_flux: f,
@@ -247,6 +248,7 @@ fn every_spectrum_reads_one_draw_of_the_cross_sections() {
             .iter()
             .zip(&rates)
             .map(|(f, r)| FoldSpectrum {
+                composition: None,
                 chain: &chain,
                 rates: r,
                 multigroup_flux: f,
@@ -386,6 +388,7 @@ fn w186_n3n_is_sampled_at_its_evaluated_sigma() {
     )
     .0;
     let spectrum = FoldSpectrum {
+        composition: None,
         chain: &chain,
         rates: &rates,
         multigroup_flux: &flux,

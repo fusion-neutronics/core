@@ -413,6 +413,9 @@ pub(crate) struct WeightSpectrum<'a> {
     pub rates: &'a ReactionRates,
     pub masses: &'a [f64],
     pub boundaries: &'a [f64],
+    /// The composition the collapse was shielded at, when it is not the
+    /// material the run is for. `None` shields at that material.
+    pub composition: Option<&'a Material>,
 }
 
 impl ResonanceRun {
@@ -439,7 +442,14 @@ impl ResonanceRun {
             .map(|s| {
                 let valid = !s.masses.is_empty() && s.boundaries.len() == s.masses.len() + 1;
                 valid
-                    .then(|| CollapseShapes::new(material, s.masses, s.boundaries, shielding))
+                    .then(|| {
+                        CollapseShapes::new(
+                            s.composition.unwrap_or(material),
+                            s.masses,
+                            s.boundaries,
+                            shielding,
+                        )
+                    })
                     .flatten()
             })
             .collect();

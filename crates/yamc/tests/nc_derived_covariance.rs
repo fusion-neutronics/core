@@ -280,6 +280,7 @@ fn be9_activation_and_transport_move_the_same_rates_by_the_same_amount() {
         HashMap::from([("(n,p)".to_string(), 1.0), ("(n,t)".to_string(), 1.0)]),
     )]);
     let spectrum = FoldSpectrum {
+        composition: None,
         chain: &chain,
         rates: &rates,
         multigroup_flux: &flux,

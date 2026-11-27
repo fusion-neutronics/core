@@ -1888,11 +1888,18 @@ estimated sigma is settled, not a confidence interval on the physical value.
 
 ## Limits worth knowing
 
-- **A step is exact at any length, for a fixed spectrum.** The burnup matrix is
-  built from decay constants and `sigma*phi` rates and does not depend on the
-  composition, so it is constant over a step and the matrix exponential is
-  solved exactly. One year in a single step and one year in 365 agree to
-  round-off. Shortening steps to chase accuracy buys nothing here.
+- **Without self-shielding, a step is exact at any length, for a fixed
+  spectrum.** The burnup matrix is built from decay constants and `sigma*phi`
+  rates and does not depend on the composition, so it is constant over a step
+  and the matrix exponential is solved exactly. One year in a single step and
+  one year in 365 agree to round-off. Shortening steps to chase accuracy buys
+  nothing here.
+
+  **With self-shielding, the rates follow the composition step by step.** The
+  flux depression depends on what the material is made of, so each step is
+  collapsed at the composition it starts from and its rates are held over the
+  step. Shorter steps then follow the burnup more closely, converging at first
+  order, and each shielded step costs one collapse.
 
   What a long step **does** miss is the spectrum changing as the composition does,
   which `transmute()` cannot see because the flux is your input rather than

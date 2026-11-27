@@ -585,10 +585,21 @@ impl TransmutationResults {
         let spectrum = (*inputs.step_spectrum.get(step)?)?;
         let (boundaries, flux) = inputs.spectra.get(spectrum)?;
         let source_rate = self.get_source_rates(material_id)?.get(step).copied()?;
-        // The collapse is done once from the initial composition and scaled per
-        // step, so this is the material it read, and `source_rate` is the
-        // scaling the step applied.
-        let material = self.get_material(material_id, 0)?;
+        // A dilute collapse is done once from the initial composition and
+        // scaled per step, so that is the material it read. A shielded step
+        // after the first collapsed at the composition it started from, which
+        // is the state before it, read with the material's data.
+        let initial = self.get_material(material_id, 0)?;
+        let at_step;
+        let material = match (&inputs.shielding, step) {
+            (Some(_), k) if k > 0 => {
+                let mut m = self.get_material(material_id, k)?.clone();
+                m.nuclide_data = initial.nuclide_data.clone();
+                at_step = m;
+                &at_step
+            }
+            _ => initial,
+        };
         let rates = crate::multigroup::reaction_rate_spectrum(
             material,
             flux,

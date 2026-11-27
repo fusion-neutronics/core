@@ -36,8 +36,17 @@ evaluated by CRAM at order 48 following [Pusa 2010][pusa2010] and
 
 $A$ is built from decay constants and $\sigma\phi$ rates and does not depend on
 the composition, so it is constant over a step and the exponential is solved
-exactly. Step length therefore does not affect accuracy for a fixed spectrum:
-one year in a single step and one year in 365 steps agree to round-off.
+exactly. Without self-shielding, step length therefore does not affect accuracy
+for a fixed spectrum: one year in a single step and one year in 365 steps agree
+to round-off.
+
+With self-shielding the rates do depend on the composition, through the flux
+depression the material's own resonances cause. Each step's rates are collapsed
+at the composition the step starts from and held over the step, so the step
+length sets how closely the rates follow the burnup, and refining the schedule
+converges at first order. On a natural tungsten first wall over five full-power
+years, ten steps put Re within 0.05% and Os within 0.25% of a converged
+schedule.
 
 What a long step does not capture is a change in the spectrum caused by the
 changing composition. `transmute()` takes the flux as an input and does not
@@ -252,9 +261,11 @@ generates them.
 On `Material.transmute`, rates are calculated once for each distinct spectrum.
 The collapse gives each reaction rate per unit flux from the shape of the
 spectrum, and each pulse multiplies these by its own `rate`. Pulses that share
-a `source` share one collapse. With self-shielding on, the flux depression is
-calculated from the starting composition. Within one spectrum, rates do not
-change as the composition changes.
+a `source` share one collapse. With self-shielding on, the flux depression
+depends on what the material is made of, so every irradiation step after the
+first collapses again at the composition it starts from; the first step uses
+the starting composition's collapse. Without self-shielding the rates do not
+depend on the composition and each spectrum is collapsed once.
 
 ### Coupled to transport
 
@@ -892,7 +903,8 @@ raises it when the term is negative.
     ENDF/B-VIII.1 Ca40 gives its `(n,p)` and `(n,a)` only on MT=600 and 800, so
     Ca40 is listed under `perturbed` through its capture alone.
 - **Self-shielding.** With a shape or a chord, every replica uses the flux
-  depression calculated from the evaluated cross sections. Holding it fixed
+  depression calculated from the evaluated cross sections, at the composition
+  each step starts from in the nominal run. Holding it fixed
   drops two effects with opposite signs. A larger capture cross section would
   deepen its own dip, which narrows the spread, and this is not included. The
   elastic and total covariance does not reach the correction either, which
