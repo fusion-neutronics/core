@@ -159,12 +159,17 @@ impl Model {
             run,
         )?;
         let cells = self.geometry.cells();
-        results.set_cell_volumes(|id| {
-            cells
-                .iter()
-                .find(|c| c.cell_id == Some(id))
-                .and_then(|c| c.volume)
-        });
+        let materials = self.geometry.materials();
+        let cell = |id| cells.iter().find(|c| c.cell_id == Some(id));
+        results.set_cell_volumes(
+            |id| cell(id).and_then(|c| c.volume),
+            |id| {
+                cell(id)
+                    .and_then(|c| c.material_idx)
+                    .and_then(|m| materials.get(m as usize))
+                    .and_then(|m| m.get_mass_density().ok())
+            },
+        );
         Ok(results)
     }
 

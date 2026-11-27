@@ -103,11 +103,14 @@ impl PyTallyResult {
     ///
     /// A per-volume unit (``"W/cm3"``, ``"1/(cm2 s)"``) divides each bin by
     /// its volume: the mesh element, or the cell when the cell has a
-    /// ``volume``. A unit that needs a source strength the result does not
-    /// have raises ``ValueError`` saying so.
+    /// ``volume``. A per-mass unit (``"W/g"``, ``"Gy/s"``: a gray is a J/kg)
+    /// divides each bin by its mass, which a cell with a ``volume`` and a
+    /// material has; a mesh element can straddle materials, so has none. A
+    /// unit that needs a source strength the result does not have raises
+    /// ``ValueError`` saying so.
     ///
     /// Args:
-    ///     units: The unit, e.g. ``"W/cm3"``, ``"MeV"``, ``"Sv/h"``.
+    ///     units: The unit, e.g. ``"W/cm3"``, ``"MeV"``, ``"Sv/h"``, ``"Gy/s"``.
     ///
     /// Examples:
     ///     >>> heating = results.with_source_strength(5e15)[tally]
