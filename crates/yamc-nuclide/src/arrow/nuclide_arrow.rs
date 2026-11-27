@@ -205,12 +205,15 @@ fn reactions_path(dir: &Path, scope: &LoadScope) -> std::path::PathBuf {
 /// `storage/url_cache.rs`). Beside it, `temperatures/<section stem>.json`
 /// names the labels it holds, which [`check_ranged_labels`] holds the load to.
 ///
-/// No other scope reads the ranged copy: a load with no temperature reads
-/// every temperature, and an activation load ranges by MT instead, so for
-/// either the copy may lack something it wants.
+/// An activation load at named temperatures reads the ranged energy grids
+/// too: they hold every grid at those temperatures, which is all of
+/// `energy.arrow` it reads. Its reactions it reads from `subset/` instead (see
+/// [`reactions_path`]). A load with no temperature reads every temperature, so
+/// a ranged copy may lack something it wants.
 fn temperature_section_path(dir: &Path, section: &str, scope: &LoadScope) -> std::path::PathBuf {
     let whole = dir.join(section);
-    if scope.ranges_temperatures() && !crate::storage::exists(&whole) {
+    let ranged_energy = section == "energy.arrow" && scope.temperatures.is_some();
+    if (scope.ranges_temperatures() || ranged_energy) && !crate::storage::exists(&whole) {
         let ranged = dir.join("temperatures").join(section);
         if crate::storage::exists(&ranged) {
             return ranged;
@@ -227,15 +230,29 @@ fn temperature_section_path(dir: &Path, section: &str, scope: &LoadScope) -> std
 /// taken offline, or a cache shared with an older build. Without it the
 /// missing temperature would have no reactions and no energy grid, and the
 /// failure would surface far from here as a cross section of zero.
+///
+/// A `subset/reactions.arrow` is held to `subset/temperatures.json` the same
+/// way. A subset with no such record was written before it existed, when a
+/// subset always held every temperature.
 fn check_ranged_labels(path: &Path, loaded_temps: &[String]) -> Result<(), Box<dyn Error>> {
-    let Some(parent) = path.parent().filter(|p| p.ends_with("temperatures")) else {
+    let Some(parent) = path.parent() else {
         return Ok(());
     };
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default();
-    let record = parent.join(format!("{stem}.json"));
+    let record = if parent.ends_with("temperatures") {
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        parent.join(format!("{stem}.json"))
+    } else if parent.ends_with("subset") {
+        let record = parent.join("temperatures.json");
+        if !crate::storage::exists(&record) {
+            return Ok(());
+        }
+        record
+    } else {
+        return Ok(());
+    };
     let held: Vec<String> = serde_json::from_str(&crate::storage::read_to_string(&record)?)?;
     let missing: Vec<&String> = loaded_temps
         .iter()

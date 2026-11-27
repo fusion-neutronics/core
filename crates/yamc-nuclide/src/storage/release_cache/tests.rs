@@ -1300,6 +1300,103 @@ fn an_activation_load_fetches_its_mts_verified() {
     );
 }
 
+/// An activation load at a material's temperature ranges by MT and
+/// temperature together: its MTs at that temperature alone, and that
+/// temperature's energy grid (with the 0 K grid every load keeps), not every
+/// temperature of either. A load at another temperature tops the subset up,
+/// keeping the one it held.
+#[test]
+fn an_activation_load_at_a_temperature_fetches_only_that_temperature() {
+    let origin = Origin::start();
+    publish_indexed(&origin, "2026-10-01", "Fe56", true);
+    let root = Scratch::new("ranged-mts-at");
+    let at = |label: &str| {
+        LoadScope::activation([102, 16].into()).with_temperatures(Some([label.to_string()].into()))
+    };
+    let dir = fetch_scoped(&registry(&origin.url, &root), "Fe56", &at("294")).expect("subset");
+
+    let reactions = published(&origin, &format!("{FE56}/reactions.arrow"));
+    let energy = published(&origin, &format!("{FE56}/energy.arrow"));
+    let version: serde_json::Value =
+        serde_json::from_slice(&published(&origin, &format!("{FE56}/version.json"))).unwrap();
+    let index = ReactionRanges::from_version_json(&version).unwrap();
+    let grids = EnergyRanges::from_version_json(&version).unwrap();
+    assert_eq!(
+        fs::read(dir.join("subset/reactions.arrow")).unwrap(),
+        spliced(&reactions, &[index.schema, index.mts[&102]["294K"]]),
+        "MT 102 at 294K after the schema; MT 16 is not published"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("subset/mts.json")).unwrap(),
+        "[102]"
+    );
+    let labels: Vec<String> =
+        serde_json::from_slice(&fs::read(dir.join("subset/temperatures.json")).unwrap()).unwrap();
+    assert_eq!(labels, ["294K"]);
+    assert_eq!(
+        fs::read(dir.join("temperatures/energy.arrow")).unwrap(),
+        spliced(
+            &energy,
+            &[
+                grids.schema,
+                grids.temperatures["0K"],
+                grids.temperatures["294K"]
+            ]
+        ),
+    );
+    assert!(!dir.join("reactions.arrow").exists() && !dir.join("energy.arrow").exists());
+    let bytes = |section: &str| -> usize {
+        origin
+            .served(&format!("Fe56.arrow/{section}"))
+            .iter()
+            .map(|s| s.bytes)
+            .sum()
+    };
+    assert_eq!(
+        bytes("reactions.arrow"),
+        64 + BATCH,
+        "one batch of {}",
+        reactions.len()
+    );
+    assert_eq!(
+        bytes("energy.arrow"),
+        64 + 2 * BATCH,
+        "two grids of {}",
+        energy.len()
+    );
+
+    // The same load again is a cache hit.
+    let before = origin.hits().len();
+    fetch_scoped(&registry(&origin.url, &root), "Fe56", &at("294")).expect("cache hit");
+    assert_eq!(
+        masked(&origin.hits()[before..]),
+        ["endf-b8.1/latest.json?release-check=*"]
+    );
+
+    // At 600 K the subset is refetched holding both temperatures.
+    let dir = fetch_scoped(&registry(&origin.url, &root), "Fe56", &at("600")).expect("top up");
+    let labels: Vec<String> =
+        serde_json::from_slice(&fs::read(dir.join("subset/temperatures.json")).unwrap()).unwrap();
+    assert_eq!(labels, ["294K", "600K"]);
+    assert_eq!(
+        fs::read(dir.join("subset/reactions.arrow")).unwrap(),
+        spliced(
+            &reactions,
+            &[
+                index.schema,
+                index.mts[&102]["294K"],
+                index.mts[&102]["600K"]
+            ]
+        ),
+    );
+    let before = origin.hits().len();
+    fetch_scoped(&registry(&origin.url, &root), "Fe56", &at("294")).expect("still covered");
+    assert_eq!(
+        masked(&origin.hits()[before..]),
+        ["endf-b8.1/latest.json?release-check=*"]
+    );
+}
+
 /// A batch the origin serves wrong is refused, naming the nuclide, the file,
 /// the cross section and both hashes. It is not asked for again and nothing
 /// of the section is cached.
