@@ -2368,15 +2368,20 @@ class Material:
             >>> [name for name, r in results.items() if r.clearable]
             ['Fetter', 'NRC_long', ...]
         """
-    def mean_free_path_neutron(self, energy: builtins.float) -> typing.Optional[builtins.float]:
+    def mean_free_path_neutron(self, energy: builtins.float) -> builtins.float:
         r"""
         Compute neutron mean free path at a given energy.
+        
+        Loads the material's neutron data if it is not loaded yet.
         
         Args:
             energy (float): Neutron energy in eV.
         
         Returns:
-            Optional[float]: Mean free path (cm) or None if total XS unavailable.
+            float: Mean free path in cm.
+        
+        Raises:
+            ValueError: If the loaded data has no total cross section.
         """
     def sample_interacting_nuclide(self, energy: builtins.float, seed: typing.Optional[builtins.int] = None) -> builtins.str:
         r"""

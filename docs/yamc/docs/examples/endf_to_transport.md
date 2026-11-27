@@ -2,9 +2,9 @@
 
 Nuclear data evaluations are published as ENDF files, and yamc reads Arrow. This
 example takes one evaluation, aluminium-27 from TENDL-2025, converts it to Arrow
-on your own machine and uses it in a transport simulation: a 10 cm radius
-sphere of aluminium with a 14.06 MeV point source at its centre, tallying the
-spectrum of the neutrons that leak out of it. Finally the same model is run on
+on your own machine and uses it in a transport simulation: a sphere of
+aluminium one mean free path in radius, with a 14.06 MeV point source at its
+centre, tallying the spectrum of the neutrons that leak out of it. Finally the same model is run on
 yamc's published TENDL-2025 data, so you can check the conversion against it.
 
 The same steps work for any neutron evaluation: one from another library, a
@@ -61,17 +61,25 @@ nuclide's name comes from the evaluation itself, not from the file name.
 Point yamc at the folder of converted data. Any nuclide the model uses is then
 read from `<folder>/<Nuclide>.arrow`.
 
+The sphere is sized from the material itself: one mean free path at the source
+energy, rounded up to a whole centimetre. About a third of the source neutrons
+then cross it without a collision and the rest scatter, so the leakage spectrum
+shows both, and the same recipe gives a sensible sphere for any nuclide.
+
 ```python
+import math
+
 yamc.neutron_cross_section_data = "my_data/neutron"
 
-sphere = yamc.Sphere(radius=10.0, boundary="vacuum")
 aluminium = yamc.Material(composition={"Al27": 1.0}, density=2.7)
+radius = math.ceil(aluminium.mean_free_path_neutron(14.06e6))  # 9.48 cm -> 10 cm
+sphere = yamc.Sphere(radius=radius, boundary="vacuum")
 geometry = yamc.Geometry([yamc.Cell(region=sphere.below, material=aluminium)])
 
 leakage = yamc.Tally(
     scores=["current-above"],
     surfaces=sphere,
-    energy_group_structure="VITAMIN-J-175",
+    energy_group_structure="CCFE-709",
 )
 
 model = yamc.Model(geometry=geometry, tallies=[leakage], source=yamc.NeutronSource())
@@ -79,8 +87,14 @@ converted = model.simulate_transport(total_particles=1_000_000)
 ```
 
 `current-above` on the outer sphere counts every neutron crossing it outwards,
-and with a vacuum boundary nothing comes back in, so this is the leakage. One
-million neutrons take about a second.
+and with a vacuum boundary nothing comes back in, so this is the leakage.
+
+One million neutrons take about a second, and leave every bin that holds more
+than 0.1% of the leakage with a relative error under 4%. The run is given a
+particle count rather than left to stop on its own: with no stop condition,
+`simulate_transport` runs until every scored bin passes the statistical checks,
+and of the 709 groups the few at eV and keV energies that a neutron reaches
+only now and then would keep it going for hours.
 
 ## Compare with the published data
 
