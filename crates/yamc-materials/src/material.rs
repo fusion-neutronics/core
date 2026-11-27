@@ -307,6 +307,16 @@ pub struct Material {
     pub density_units: DensityUnits,
     /// Volume of the material in cm³
     pub volume: Option<f64>,
+    /// The mass density (g/cm³) that per-mass units such as `"Bq/kg"` divide
+    /// by, where that is not this material's own.
+    ///
+    /// Set on the materials derived from another one (transmutation steps,
+    /// [`Material::to_sum_mode`]) to the mass density of the material they
+    /// started from. Per kg is then per kg of that starting material at every
+    /// step, a fixed amount as `volume` is for per cm³, and a per-kg series
+    /// keeps the shape of the total. `None` means this material's own
+    /// [`Material::get_mass_density`].
+    pub reference_mass_density: Option<f64>,
     /// Temperature label, the key that selects a cross-section set (e.g. `"294"`).
     ///
     /// Private, and `temperature_k` with it, because the two must agree: a
@@ -595,6 +605,8 @@ pub struct MaterialSerde {
     pub transmutable: bool,
     #[serde(default)]
     pub s_alpha_beta: Vec<(String, f64)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_mass_density: Option<f64>,
 }
 
 impl From<Material> for MaterialSerde {
@@ -611,6 +623,7 @@ impl From<Material> for MaterialSerde {
             temperature: m.temperature,
             transmutable: m.transmutable,
             s_alpha_beta: m.s_alpha_beta,
+            reference_mass_density: m.reference_mass_density,
         }
     }
 }
@@ -630,6 +643,7 @@ impl TryFrom<MaterialSerde> for Material {
         }
         m.nuclide_input_order = spec.nuclide_input_order;
         m.volume = spec.volume;
+        m.reference_mass_density = spec.reference_mass_density;
         m.set_temperature(&spec.temperature);
         m.transmutable = spec.transmutable;
         m.set_s_alpha_beta(spec.s_alpha_beta)?;
@@ -710,6 +724,7 @@ impl Material {
             density,
             density_units,
             volume: None,
+            reference_mass_density: None,
             temperature: String::new(),
             temperature_k: yamc_nuclide::temperature::DEFAULT_TEMPERATURE_K,
             nuclide_data: HashMap::new(),
@@ -779,6 +794,14 @@ impl Material {
             density: None,
             density_units: DensityUnits::Sum,
             volume: template.volume,
+            // Kept from the first material in a chain of derivations, so a
+            // transmutation's steps all divide by the mass they started from.
+            reference_mass_density: template.reference_mass_density.or_else(|| {
+                template
+                    .get_mass_density()
+                    .ok()
+                    .filter(|d| d.is_finite() && *d > 0.0)
+            }),
             temperature: template.temperature.clone(),
             temperature_k: template.temperature_k,
             nuclide_data,
@@ -2358,6 +2381,7 @@ mod tests {
             temperature: String::new(),
             transmutable: false,
             s_alpha_beta: Vec::new(),
+            reference_mass_density: None,
         };
         assert!(Material::try_from(bad).is_err());
     }
@@ -2848,11 +2872,30 @@ mod tests {
         let back: Material = wire.try_into().expect("round trip");
 
         assert_eq!(back.temperature(), "900");
+        assert_eq!(back.reference_mass_density, None);
         assert_eq!(
             back.temperature_k(),
             900.0,
             "temperature_k must be rebuilt from the label on deserialize"
         );
+    }
+
+    /// A transmutation step saved and loaded again still divides per mass by
+    /// the material it started from.
+    #[test]
+    fn reference_mass_density_survives_serde() {
+        let start = Material::new(
+            HashMap::from([("Fe56".to_string(), 1.0)]),
+            "atom",
+            "g/cm3",
+            Some(7.874),
+        )
+        .unwrap();
+        let step = start.to_sum_mode().unwrap();
+        assert_eq!(step.reference_mass_density, Some(7.874));
+        let wire: MaterialSerde = step.into();
+        let back: Material = wire.try_into().expect("round trip");
+        assert_eq!(back.reference_mass_density, Some(7.874));
     }
 
     /// `from_nuclide_densities` copies the label from its template, so it has to

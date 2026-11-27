@@ -93,22 +93,26 @@ def test_per_m3_is_a_million_times_per_cm3(with_volume, quantity):
 
 
 @pytest.mark.parametrize("quantity", ["activity", "decay_heat"])
-def test_per_g_divides_by_the_mass_density(with_volume, quantity):
-    """Per mass divides by the material's OWN mass density, not the 7.874 it
-    was built with. Activation moves mass between nuclides of different atomic
-    mass, so the irradiated inventory here comes out at 7.873999643 g/cm3,
-    4.5e-8 below the input: small, but far above the 1e-9 this asserts to."""
-    density = with_volume.get_mass_density()
-    assert density != pytest.approx(DENSITY_G_CM3, rel=1e-12), (
+def test_per_g_divides_by_the_starting_mass_density(with_volume, quantity):
+    """Per mass divides by the 7.874 the material was built with, not by the
+    irradiated inventory's own mass density. Activation moves mass between
+    nuclides of different atomic mass, so the inventory here comes out at
+    7.873999643 g/cm3, 4.5e-8 below the input: small, but far above the 1e-12
+    this asserts to. Per kg of the starting material keeps the divisor fixed
+    across steps, as the volume is for a total."""
+    assert with_volume.get_mass_density() != pytest.approx(DENSITY_G_CM3, rel=1e-12), (
         "the point of this test is that the two differ; if activation stopped "
-        "moving the density, assert against the input instead"
+        "moving the density, this no longer tells them apart"
     )
     unit = NATIVE[quantity]
     per_cm3 = getattr(with_volume, quantity)(units=f"{unit}/cm3")
     per_g = getattr(with_volume, quantity)(units=f"{unit}/g")
-    assert per_g == pytest.approx(per_cm3 / density, rel=1e-9)
+    assert per_g == pytest.approx(per_cm3 / DENSITY_G_CM3, rel=1e-12)
     per_kg = getattr(with_volume, quantity)(units=f"{unit}/kg")
     assert per_kg == pytest.approx(1e3 * per_g, rel=1e-12)
+    total = getattr(with_volume, quantity)()
+    mass_kg = VOLUME_CM3 * DENSITY_G_CM3 / 1e3
+    assert per_kg == pytest.approx(total / mass_kg, rel=1e-12)
 
 
 def test_per_mass_needs_no_volume(without_volume):
@@ -129,8 +133,7 @@ def test_per_mass_needs_no_volume(without_volume):
 def test_prefixed_and_other_units(with_volume, quantity, units, scale):
     total = getattr(with_volume, quantity)()
     value = getattr(with_volume, quantity)(units=units)
-    # Per mass uses the inventory's own density, 4.5e-8 off the input's.
-    assert value == pytest.approx(total * scale, rel=1e-7)
+    assert value == pytest.approx(total * scale, rel=1e-12)
 
 
 @pytest.mark.parametrize("quantity", ["activity", "decay_heat"])
@@ -138,9 +141,9 @@ def test_by_nuclide_carries_the_same_unit(with_volume, quantity):
     totals = getattr(with_volume, quantity)(by_nuclide=True)
     per_g = getattr(with_volume, quantity)(by_nuclide=True, units=f"{NATIVE[quantity]}/g")
     assert set(totals) == set(per_g)
-    scale = VOLUME_CM3 * with_volume.get_mass_density()
+    scale = VOLUME_CM3 * DENSITY_G_CM3
     for nuclide, value in totals.items():
-        assert per_g[nuclide] == pytest.approx(value / scale, rel=1e-9)
+        assert per_g[nuclide] == pytest.approx(value / scale, rel=1e-12)
 
 
 @pytest.mark.parametrize(

@@ -362,8 +362,8 @@ impl YaniSession {
     /// mass (`"Bq/kg"`, `"kBq/g"`). The same conversion as the Python API's
     /// `units=`, so a page shows what a script would print.
     ///
-    /// Per mass uses the material as set, not each step's inventory, whose
-    /// density activation moves by parts in 1e8.
+    /// Per mass is per kg of the material as set, as the Python API's is for
+    /// every step of a transmutation.
     #[wasm_bindgen(js_name = totalToUnits)]
     pub fn total_to_units(&self, native: &str, units: &str) -> Result<f64, String> {
         let material = self.material.as_ref().ok_or("no material set")?;
