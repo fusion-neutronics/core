@@ -227,9 +227,11 @@ impl Material {
     /// * `native` itself or a scaled form of it (`"TBq"`, `"MeV/s"`) is the
     ///   total, so the factor includes `volume`, which must be set.
     /// * Per volume (`"Bq/cm3"`, `"MW/m3"`) needs nothing.
-    /// * Per mass (`"kBq/g"`, `"W/kg"`) divides by the mass density, which
-    ///   needs only `density`. It is the current inventory's density, not the
-    ///   input's, since activation moves mass between nuclides.
+    /// * Per mass (`"kBq/g"`, `"W/kg"`) divides by the mass density of the
+    ///   material as specified: `reference_mass_density` on a material derived
+    ///   from another (a transmutation step), else its own. Activation moves
+    ///   the inventory's own density by parts in 1e6; per kg of the starting
+    ///   material keeps the divisor fixed across steps, as `volume` is.
     ///
     /// `quantity` names the caller in error messages.
     pub fn unit_scale(&self, native: &str, units: &str, quantity: &str) -> Result<f64, String> {
@@ -246,7 +248,10 @@ impl Material {
             })?,
             Normalisation::PerVolume => 1.0,
             Normalisation::PerMass => {
-                let density = self.get_mass_density()?;
+                let density = match self.reference_mass_density {
+                    Some(density) => density,
+                    None => self.get_mass_density()?,
+                };
                 if density.is_nan() || density <= 0.0 {
                     return Err(format!(
                         "{quantity} in {units:?} needs a positive mass density, got {density}"
@@ -531,6 +536,31 @@ mod tests {
         assert!((per_g - 1.0 / 7.874).abs() < 1e-15);
         assert!((per_kg - 1000.0 * per_g).abs() < 1e-12);
         assert!((kbq_per_g - per_g / 1000.0).abs() < 1e-18);
+    }
+
+    /// A derived material (a transmutation step, here a different inventory
+    /// built from the iron) divides per mass by the iron's density, not by the
+    /// density of its own atoms, and so does anything derived from it.
+    #[test]
+    fn unit_scale_per_mass_is_per_mass_of_the_starting_material() {
+        let start = iron(None);
+        let mut atoms = start.get_atoms_per_barn_cm().unwrap();
+        // Move a tenth of the iron to a lighter nuclide: its own density drops.
+        let fe56 = atoms["Fe56"];
+        atoms.insert("Fe56".to_string(), 0.9 * fe56);
+        atoms.insert("Mn55".to_string(), 0.1 * fe56);
+        let step = Material::from_nuclide_densities_without_data(atoms.clone(), &start);
+        let next = Material::from_nuclide_densities_without_data(atoms, &step);
+        assert!(step.get_mass_density().unwrap() < 7.87);
+        for m in [&step, &next] {
+            assert_eq!(m.reference_mass_density, Some(7.874));
+            assert_eq!(
+                m.unit_scale("Bq", "Bq/g", "activity"),
+                start.unit_scale("Bq", "Bq/g", "activity")
+            );
+        }
+        // A material made from scratch has none, and uses its own.
+        assert_eq!(start.reference_mass_density, None);
     }
 
     #[test]

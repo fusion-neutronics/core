@@ -233,8 +233,10 @@ the by-nuclide dictionaries.
 
 `units=` gives the result in the unit you report in. The default is the total,
 in Bq or W, which needs `volume`. A per-volume unit needs neither `volume` nor
-`density`, and a per-mass unit needs only `density`. SI prefixes work, and
-activity also takes curies:
+`density`, and a per-mass unit needs only `density`. Per mass is per kg of the
+material you started from at every step, not of that step's inventory, so a
+per-kg series has the same shape as the total. SI prefixes work, and activity
+also takes curies:
 
 <!-- doctest: skip -->
 ```python
