@@ -43,7 +43,9 @@ def test_no_stop_condition_runs_until_checks_pass():
     # (relative error and variance of the variance) at two checkpoints in a
     # row.
     model = _build_model()
-    r = model.simulate_transport()["tbr"]
+    results = model.simulate_transport()
+    assert results.stop_reason == "statistical_checks"
+    r = results["tbr"]
     assert r.statistical_checks.passed
     assert r.relative_error[0] < 0.10
     assert r.aggregate_variance_of_variance < 0.10
@@ -100,8 +102,9 @@ def test_total_particles_zero_raises():
 
 def test_total_particles_only_runs_exactly_that_many():
     model = _build_model()
-    r = model.simulate_transport(total_particles=3000, seed=1)["tbr"]
-    assert r.n_histories == 3000
+    results = model.simulate_transport(total_particles=3000, seed=1)
+    assert results.stop_reason == "total_particles"
+    assert results["tbr"].n_histories == 3000
 
 
 def test_max_runtime_only_is_not_capped_at_1000():
@@ -111,7 +114,9 @@ def test_max_runtime_only_is_not_capped_at_1000():
     # uncapped chunk ramp checkpoints at 100 then 1100 histories, so even a
     # slow machine clears 1000 long before a 2 s budget elapses.)
     model = _build_model()
-    r = model.simulate_transport(max_runtime=(2, "s"), seed=1)["tbr"]
+    results = model.simulate_transport(max_runtime=(2, "s"), seed=1)
+    assert results.stop_reason == "max_runtime"
+    r = results["tbr"]
     assert r.n_histories > 1000
     assert r.aggregate_mean > 0.0
 
@@ -123,7 +128,9 @@ def test_uncapped_run_stops_on_convergence():
     model.convergence_targets = [
         yamc.ConvergenceTarget("relative_error", 0.10, tally="tbr")
     ]
-    r = model.simulate_transport(seed=1)["tbr"]
+    results = model.simulate_transport(seed=1)
+    assert results.stop_reason == "convergence_targets"
+    r = results["tbr"]
     assert r.n_histories > 0
     assert r.aggregate_relative_error <= 0.12
 

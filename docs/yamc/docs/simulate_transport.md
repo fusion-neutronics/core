@@ -10,7 +10,7 @@ results = model.simulate_transport()
 
 ``simulate_transport()`` returns a ``TransportResults`` object containing a ``TallyResult`` for every tally attached to the model, plus run metadata (``elapsed``, ``transport_time``, ``particles_per_second``, and ``runs``: per run the seed, ``n_histories``, the data libraries and the published release of each, ``data_releases``).
 
-A run stops on a particle budget (``total_particles``), a wall-time budget (``max_runtime``), or convergence targets on the model. They are OR-combined, so the run ends at the first one satisfied. ``total_particles`` defaults to ``None`` (no particle cap).
+A run stops on a particle budget (``total_particles``), a wall-time budget (``max_runtime``), or convergence targets on the model. They are OR-combined, so the run ends at the first one satisfied. ``total_particles`` defaults to ``None`` (no particle cap). ``results.stop_reason`` names the one that ended the run: ``"total_particles"``, ``"max_runtime"``, ``"convergence_targets"``, or ``"statistical_checks"`` when none was set (``None`` for GPU runs).
 
 With none of them set, the run goes on until it has converged (see [Running until converged](#running-until-converged)):
 
