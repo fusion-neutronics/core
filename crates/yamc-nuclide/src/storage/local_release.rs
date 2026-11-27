@@ -113,6 +113,8 @@ pub(crate) fn open(dir: &Path) -> Result<Option<Arc<LocalRelease>>, String> {
             converters: release.manifest.converters.clone(),
             locally_processed: false,
             library: String::new(),
+            citations: super::credits::citations(&release.manifest.keyword),
+            terms: super::credits::terms(&release.manifest.keyword),
         };
         Arc::new(LocalRelease {
             root: root.clone(),
@@ -236,6 +238,7 @@ fn processed_record(root: &Path, listing: &Listing) -> Result<DataRelease, Strin
         None => 0,
     };
     let converter = text("converter");
+    let library = text("library");
     Ok(DataRelease {
         release: text("data_version"),
         manifest_sha256: hash.finish().1,
@@ -247,7 +250,9 @@ fn processed_record(root: &Path, listing: &Listing) -> Result<DataRelease, Strin
             vec![converter]
         },
         locally_processed: true,
-        library: text("library"),
+        citations: super::credits::citations(&library),
+        terms: super::credits::terms(&library),
+        library,
     })
 }
 

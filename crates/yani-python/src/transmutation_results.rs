@@ -601,6 +601,12 @@ impl PyTransmutationResults {
     /// True, ``library`` and ``release`` the library and ``data_version`` its
     /// converter recorded, and ``manifest_sha256`` the sha256 of its files.
     /// For a release ``locally_processed`` is False and ``library`` empty.
+    /// ``citations`` is what to cite for the library's data, a list of dicts
+    /// with ``reference`` and ``doi`` (the references its makers ask for), and
+    /// ``terms`` what its data is redistributed under; both are empty for a
+    /// library converted under a name of its own. Cite every library a
+    /// calculation read: see "Cite the nuclear data you use" on the nuclear
+    /// data libraries page.
     #[getter]
     fn data_releases<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let out = PyDict::new(py);
@@ -613,6 +619,15 @@ impl PyTransmutationResults {
             d.set_item("converters", &release.converters)?;
             d.set_item("locally_processed", release.locally_processed)?;
             d.set_item("library", &release.library)?;
+            let citations = pyo3::types::PyList::empty(py);
+            for c in &release.citations {
+                let entry = PyDict::new(py);
+                entry.set_item("reference", &c.reference)?;
+                entry.set_item("doi", &c.doi)?;
+                citations.append(entry)?;
+            }
+            d.set_item("citations", citations)?;
+            d.set_item("terms", &release.terms)?;
             out.set_item(keyword, d)?;
         }
         Ok(out)
