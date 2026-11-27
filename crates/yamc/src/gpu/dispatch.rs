@@ -656,6 +656,8 @@ pub fn run_on_gpu_with_device(
     device: Option<&str>,
     settings: &crate::model::TransportSettings,
 ) -> Result<GpuRunResult, GpuDispatchError> {
+    // The GPU runs no weight windows, so no earlier CPU run's counts carry over.
+    model.last_weight_window_counts = None;
     let result = run_on_gpu_dispatch(model, device, settings);
     match result {
         Ok(mut run) => {

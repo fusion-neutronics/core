@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use yamc_nuclide::config::ChainUse;
 use yamc_physics::gpu::flat::inelastic_flat::InelasticFlatCache;
-use yamc_physics::util::bank::ParticleBank;
+use yamc_physics::util::bank::{ParticleBank, WeightWindowCounts};
 use yamc_source::distribution::mesh::{SourceDomain, DOMAIN_CHECK_TRIES, MAX_DOMAIN_TRIES};
 use yamc_source::source::{ParticleSource, SourceSelector, SourceSpatialDistribution};
 use yamc_tallies::tally::Tally;
@@ -476,6 +476,9 @@ pub struct Model {
     pub last_data_load_secs: Option<f64>,
     #[serde(skip)]
     pub last_transport_secs: Option<f64>,
+    /// What the weight windows did in the last run; `None` when it had none.
+    #[serde(skip)]
+    pub last_weight_window_counts: Option<WeightWindowCounts>,
     #[serde(skip)]
     pub lost_particles: Vec<crate::util::lost_particle::LostParticle>,
     /// Precision-based stopping criteria. When non-empty, the transport loop
@@ -729,6 +732,7 @@ impl Model {
             last_particles_per_second: None,
             last_data_load_secs: None,
             last_transport_secs: None,
+            last_weight_window_counts: None,
             lost_particles: Vec::new(),
             convergence_targets: Vec::new(),
         }
@@ -760,6 +764,7 @@ impl Model {
             last_particles_per_second: None,
             last_data_load_secs: None,
             last_transport_secs: None,
+            last_weight_window_counts: None,
             lost_particles: Vec::new(),
             convergence_targets: Vec::new(),
         }
@@ -2160,6 +2165,8 @@ impl Model {
         staged: Option<crate::shutdown_dose::StagedRun<'_>>,
     ) -> Result<TrackStorage, String> {
         use crate::shutdown_dose::{Captured, RawBirth, ReplayStats, StagedRun};
+        // A run that fails must not leave the previous run's counts behind.
+        self.last_weight_window_counts = None;
         let (mut capture_out, replay, mut replay_out, cell_source) = match staged {
             None => (None, None, None, None),
             Some(StagedRun::Capture(out)) => (Some(out), None, None, None),
@@ -2482,6 +2489,8 @@ impl Model {
 
         // Collect tracks from all batches
         let all_tracks: Mutex<Vec<TrackStorage>> = Mutex::new(Vec::new());
+        // What the weight windows did, summed over this rank's batches.
+        let mut ww_counts = WeightWindowCounts::default();
         // Which histories to capture (only consulted by RealTracker; the
         // NoOpTracker ignores it). `None` means "no explicit selection" -- the
         // tracker type alone decides whether anything is captured.
@@ -3163,6 +3172,15 @@ impl Model {
                                         } else {
                                             String::new()
                                         };
+                                        let copies = particle_bank.ww_splits();
+                                        let diagnosis = if copies > 0 {
+                                            format!(
+                                                "{diagnosis} The weight windows made {copies} \
+                                                 split copies in this history."
+                                            )
+                                        } else {
+                                            diagnosis
+                                        };
                                         panic!(
                                             "Source history {global_particle_index} did not \
                                              drain: {MAX_PARTICLES_PER_HISTORY} particles \
@@ -3282,6 +3300,7 @@ impl Model {
 
                                 // Finish tracking this history
                                 tracker.finish_history();
+                                particle_bank.finish_history(particles_processed as u64);
                                 // No-op when no tally uses per-history Welford
                                 // (zero-sized scratch ⇒ touched_bins empty).
                                 welford_worker.finish_history();
@@ -3296,19 +3315,24 @@ impl Model {
                                 (particle_bank, thread_rng, thread_tracker, thread_neighbors)
                             },
                         )
-                        .map(|(_, _, tracker, _)| tracker.into_storage())
-                        .reduce(TrackStorage::new, |mut a, b| {
-                            a.tracks.extend(b.tracks);
-                            a
-                        })
+                        .map(|(bank, _, tracker, _)| (tracker.into_storage(), bank.ww_counts()))
+                        .reduce(
+                            || (TrackStorage::new(), WeightWindowCounts::default()),
+                            |(mut a, mut wa), (b, wb)| {
+                                a.tracks.extend(b.tracks);
+                                wa.merge(&wb);
+                                (a, wa)
+                            },
+                        )
                 };
 
                 // Execute the parallel batch either within the local pool (if provided) or default pool
-                let batch_storage = if let Some(pool) = &local_pool {
+                let (batch_storage, batch_ww) = if let Some(pool) = &local_pool {
                     pool.install(parallel_batch)
                 } else {
                     parallel_batch()
                 };
+                ww_counts.merge(&batch_ww);
 
                 // Collect tracking results from this batch
                 all_tracks
@@ -3881,6 +3905,12 @@ impl Model {
         self.last_particles_per_second = Some(particles_per_second);
         self.last_data_load_secs = Some(data_load_secs);
         self.last_transport_secs = Some(transport_secs);
+        // What the weight windows did, summed over ranks so every rank holds
+        // the run's totals.
+        let mut ww_counts = sum_weight_window_counts(&mpi_ctx, &ww_counts);
+        ww_counts.split_budget = crate::transport::WW_SPLIT_BUDGET_PER_HISTORY as u64;
+        let windowed = !self.weight_windows().is_empty();
+        self.last_weight_window_counts = windowed.then_some(ww_counts);
 
         // Only root rank prints the summary (or all ranks if single process),
         // and only when the `summary` verbose flag is set.
@@ -3892,6 +3922,9 @@ impl Model {
                 total_particles,
                 particles_per_second,
             );
+        }
+        if is_root && windowed {
+            self.report_weight_windows(&ww_counts);
         }
 
         // Collect lost particles into the model
@@ -3934,6 +3967,70 @@ impl Model {
         }
 
         Ok(merged)
+    }
+
+    /// The weight-window line of the run summary (with `verbose.summary`), and
+    /// warnings at every verbosity when the windows misbehaved: the split
+    /// budget reached in a noticeable share of histories, the weight floor
+    /// killing particles, or windows that never acted. The causes they name are
+    /// in the windows, which the user controls; the limits themselves are not
+    /// settings.
+    fn report_weight_windows(&self, c: &WeightWindowCounts) {
+        let budget = c.split_budget;
+        if self.verbose.summary {
+            println!(
+                "Weight windows: {} splits ({} copies, {} capped at max_split), {} of {} \
+                 roulettes lost, {} weight-floor kills; split budget reached in {} of {} \
+                 histories ({} copies refused); no window at {} of {} collisions; at most {} \
+                 particles in one history",
+                c.split_events,
+                c.split_copies,
+                c.splits_capped_at_max_split,
+                c.roulette_kills,
+                c.roulette_kills + c.roulette_survivals,
+                c.weight_floor_kills,
+                c.histories_at_split_budget,
+                c.histories,
+                c.splits_cut_short,
+                c.no_window,
+                c.checks + c.no_window,
+                c.max_particles_per_history,
+            );
+        }
+        if c.histories > 0
+            && c.histories_at_split_budget as f64 >= SPLIT_BUDGET_WARN_SHARE * c.histories as f64
+        {
+            eprintln!(
+                "WARNING: {} of {} histories ({:.1}%) reached the weight-window split budget of \
+                 {budget} copies, which refused {} more. Tallies stay unbiased, but what these \
+                 histories reach last gets fewer, heavier particles, and this many histories at \
+                 the budget usually means the windows split far more than the flux falls: they \
+                 drop faster than the flux from voxel to voxel, or sit far below the source \
+                 weight.",
+                c.histories_at_split_budget,
+                c.histories,
+                100.0 * c.histories_at_split_budget as f64 / c.histories as f64,
+                c.splits_cut_short,
+            );
+        }
+        if c.weight_floor_kills > 0 {
+            eprintln!(
+                "WARNING: the weight floor killed {} particles, carrying {:.3e} of weight per \
+                 source particle. A kill at the floor is not a roulette, so the tallies these \
+                 particles would have reached are biased low. Set weight_floor below every \
+                 window's lower bound.",
+                c.weight_floor_kills,
+                c.weight_floor_weight / c.histories.max(1) as f64,
+            );
+        }
+        if c.checks == 0 && c.no_window > 0 {
+            eprintln!(
+                "WARNING: the weight windows acted at none of the {} collisions of their particle \
+                 types: every one was outside the window mesh or energy bins, or in a voxel \
+                 without a window, so the windows did nothing.",
+                c.no_window,
+            );
+        }
     }
 
     /// Print the end-of-run summary on the root rank: timing / throughput
@@ -4221,6 +4318,106 @@ pub(crate) fn derive_chunk_size(total_particles: usize, n_chunks: usize, batch: 
         base + 1
     } else {
         base
+    }
+}
+
+/// Share of histories that may reach the weight-window split budget before
+/// the run warns. With DeGVR windows on 3D concrete, steel and air models, up
+/// to 1.5% of histories reached it. Lifting the budget a hundredfold there cut
+/// the deepest tally's error per history by up to a quarter, but transported
+/// up to about 80% more particles, so the run was no more efficient: below this
+/// share there is nothing to change. A large share usually means windows that
+/// split far more than the flux falls.
+const SPLIT_BUDGET_WARN_SHARE: f64 = 0.05;
+
+/// Sum `counts` over MPI ranks (the per-history maxima take the largest), so
+/// every rank holds the run's totals. Without MPI, or on one rank, a copy.
+fn sum_weight_window_counts(
+    mpi_ctx: &crate::mpi_context::MpiContext,
+    counts: &WeightWindowCounts,
+) -> WeightWindowCounts {
+    if mpi_ctx.size() <= 1 {
+        return *counts;
+    }
+    let c = counts;
+    let local = [
+        c.histories,
+        c.particles,
+        c.max_particles_per_history,
+        c.checks,
+        c.no_window,
+        c.split_events,
+        c.split_copies,
+        c.max_split_copies_per_history,
+        c.splits_capped_at_max_split,
+        c.histories_at_split_budget,
+        c.splits_cut_short,
+        c.roulette_kills,
+        c.roulette_survivals,
+        c.weight_floor_kills,
+        c.weight_floor_weight.to_bits(),
+    ];
+    let k = local.len();
+    let mut out = local;
+    if let Some(all) = mpi_ctx.gather_u64(&local, 0) {
+        let mut total = WeightWindowCounts::default();
+        for rank in all.chunks_exact(k) {
+            total.merge(&WeightWindowCounts {
+                histories: rank[0],
+                particles: rank[1],
+                max_particles_per_history: rank[2],
+                checks: rank[3],
+                no_window: rank[4],
+                split_events: rank[5],
+                split_copies: rank[6],
+                max_split_copies_per_history: rank[7],
+                splits_capped_at_max_split: rank[8],
+                histories_at_split_budget: rank[9],
+                splits_cut_short: rank[10],
+                roulette_kills: rank[11],
+                roulette_survivals: rank[12],
+                weight_floor_kills: rank[13],
+                weight_floor_weight: f64::from_bits(rank[14]),
+                split_budget: 0,
+            });
+        }
+        let t = total;
+        out = [
+            t.histories,
+            t.particles,
+            t.max_particles_per_history,
+            t.checks,
+            t.no_window,
+            t.split_events,
+            t.split_copies,
+            t.max_split_copies_per_history,
+            t.splits_capped_at_max_split,
+            t.histories_at_split_budget,
+            t.splits_cut_short,
+            t.roulette_kills,
+            t.roulette_survivals,
+            t.weight_floor_kills,
+            t.weight_floor_weight.to_bits(),
+        ];
+    }
+    mpi_ctx.broadcast_u64(&mut out, 0);
+    WeightWindowCounts {
+        histories: out[0],
+        particles: out[1],
+        max_particles_per_history: out[2],
+        checks: out[3],
+        no_window: out[4],
+        split_events: out[5],
+        split_copies: out[6],
+        max_split_copies_per_history: out[7],
+        splits_capped_at_max_split: out[8],
+        histories_at_split_budget: out[9],
+        splits_cut_short: out[10],
+        roulette_kills: out[11],
+        roulette_survivals: out[12],
+        weight_floor_kills: out[13],
+        weight_floor_weight: f64::from_bits(out[14]),
+        split_budget: counts.split_budget,
     }
 }
 

@@ -157,6 +157,52 @@ windows = yamc.WeightWindowBounds(
 )
 ```
 
+## What the windows did
+
+A run with windows reports what they did: how often they split, rouletted and
+killed, and whether they acted at all. ``results.weight_window_stats`` is a
+dict of counts, or ``None`` for a run without windows and for combined,
+reloaded or transmutation-step results:
+
+<!-- doctest: skip -->
+```python
+s = results.weight_window_stats
+if s is not None:
+    print(s["split_copies"] / s["histories"])  # split copies per source history
+    print(s["histories_at_split_budget"])  # histories whose split budget ran out
+    print(s["no_window"] / (s["checks"] + s["no_window"]))  # collisions with no window
+```
+
+The keys are ``histories``, ``particles`` and ``max_particles_per_history``;
+``checks`` (collisions at which a window was checked) and ``no_window``
+(collisions outside the window mesh or energy bins, or in a voxel without a
+window, where the windows do nothing); ``split_events``, ``split_copies``,
+``max_split_copies_per_history`` and ``splits_capped_at_max_split`` (splits
+that needed more than ``max_split`` copies); ``split_budget``,
+``histories_at_split_budget`` and ``splits_cut_short``; ``roulette_kills`` and
+``roulette_survivals``; ``weight_floor_kills`` and ``weight_floor_weight``.
+The run summary prints most of them on one line.
+
+Three things also print a warning, whatever the ``verbose`` setting:
+
+- **The split budget.** A history stops splitting once it has made 10,000
+  split copies. The tallies stay unbiased, but what the history reaches last
+  gets fewer, heavier particles. A few such histories is normal and there is
+  nothing to change: with DeGVR windows on 3D concrete, steel and air models,
+  up to 1.5% of histories reached the budget, and a budget a hundred times
+  larger cut the deepest tally's error per history by up to a quarter but
+  transported up to about 80% more particles, so the run was no more
+  efficient. The run warns when 5% of histories reach it, which usually means
+  the windows split far more than the flux falls: they drop faster than the
+  flux from voxel to voxel, or sit far below the source weight.
+- **The weight floor.** A particle below ``weight_floor`` is killed, not
+  rouletted, so any kill biases low the tallies it would have reached. Keep
+  ``weight_floor`` below every lower bound, as the default (1e-38) is.
+- **No window acting at any collision**, for example energy bins that miss
+  the source: the windows then do nothing.
+
+The split budget is not a setting: the warnings point at the windows instead.
+
 ## Photon sources
 
 Weight windows are per particle type: set ``particle=`` on both the

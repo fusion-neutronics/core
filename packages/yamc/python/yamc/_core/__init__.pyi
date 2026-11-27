@@ -8226,6 +8226,33 @@ class TransportResults:
         ``None`` for combined / reloaded results.
         """
     @property
+    def weight_window_stats(self) -> typing.Optional[dict]:
+        r"""
+        What the weight windows did in this run, as a dict of counts, or
+        ``None`` when the run had no windows and for combined, reloaded or
+        transmutation-step results. Window counts cover collisions of the
+        particle types that have a window:
+        
+        - ``histories``, ``particles`` (sources, secondaries and split copies)
+          and ``max_particles_per_history``.
+        - ``checks``: collisions at which a window was checked. ``no_window``:
+          collisions outside the window mesh or energy bins, or in a voxel
+          without a window, where the windows do nothing.
+        - ``split_events``, ``split_copies`` and
+          ``max_split_copies_per_history``. ``splits_capped_at_max_split``:
+          splits that needed more than ``max_split`` copies, which leave the
+          copies above their window.
+        - ``split_budget``, ``histories_at_split_budget`` and
+          ``splits_cut_short``: the per-history budget of split copies, the
+          histories that reached it and the copies it refused. Tallies stay
+          unbiased, but what those histories reach last gets fewer, heavier
+          particles.
+        - ``roulette_kills`` and ``roulette_survivals``.
+        - ``weight_floor_kills`` and ``weight_floor_weight``: particles killed
+          below ``weight_floor`` and the weight they carried, summed over the
+          run. A kill at the floor is not a roulette, so any biases tallies low.
+        """
+    @property
     def runs(self) -> list:
         r"""
         Provenance of the run(s) behind these results: a list of dicts

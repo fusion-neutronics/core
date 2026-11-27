@@ -10,6 +10,72 @@ use yamc_rng::secondary_seed;
 /// (`MAX_PARTICLES_PER_HISTORY` in model.rs).
 pub const DEFAULT_CAPACITY: usize = 1000;
 
+/// What the weight windows did over a run: summed over histories by
+/// [`ParticleBank::finish_history`] and over threads (and MPI ranks) by
+/// [`WeightWindowCounts::merge`]. Window counts cover collisions of particle
+/// types that have a window.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct WeightWindowCounts {
+    /// Source histories.
+    pub histories: u64,
+    /// Particles transported: sources, secondaries and split copies.
+    pub particles: u64,
+    /// The most particles one history transported.
+    pub max_particles_per_history: u64,
+    /// Collisions at which a window was checked.
+    pub checks: u64,
+    /// Collisions outside the window's mesh or energy bins, or in a voxel
+    /// without a window, where the windows do nothing.
+    pub no_window: u64,
+    /// Splits, and the copies they added.
+    pub split_events: u64,
+    pub split_copies: u64,
+    /// The most split copies one history made.
+    pub max_split_copies_per_history: u64,
+    /// Splits that needed more than `max_split` copies, which leave the
+    /// copies above their window: a window that drops steeply between
+    /// neighbouring voxels, or one set far below the source weight.
+    pub splits_capped_at_max_split: u64,
+    /// The per-history split budget the run used (split copies per history).
+    pub split_budget: u64,
+    /// Histories in which the per-history split budget refused copies, and
+    /// the copies it refused.
+    pub histories_at_split_budget: u64,
+    pub splits_cut_short: u64,
+    /// Roulette games lost and won.
+    pub roulette_kills: u64,
+    pub roulette_survivals: u64,
+    /// Particles killed below the weight floor, and the weight they carried.
+    pub weight_floor_kills: u64,
+    pub weight_floor_weight: f64,
+}
+
+impl WeightWindowCounts {
+    /// Add another run, thread or rank's counts to these.
+    pub fn merge(&mut self, other: &Self) {
+        self.histories += other.histories;
+        self.particles += other.particles;
+        self.max_particles_per_history = self
+            .max_particles_per_history
+            .max(other.max_particles_per_history);
+        self.checks += other.checks;
+        self.no_window += other.no_window;
+        self.split_events += other.split_events;
+        self.split_copies += other.split_copies;
+        self.max_split_copies_per_history = self
+            .max_split_copies_per_history
+            .max(other.max_split_copies_per_history);
+        self.splits_capped_at_max_split += other.splits_capped_at_max_split;
+        self.split_budget = self.split_budget.max(other.split_budget);
+        self.histories_at_split_budget += other.histories_at_split_budget;
+        self.splits_cut_short += other.splits_cut_short;
+        self.roulette_kills += other.roulette_kills;
+        self.roulette_survivals += other.roulette_survivals;
+        self.weight_floor_kills += other.weight_floor_kills;
+        self.weight_floor_weight += other.weight_floor_weight;
+    }
+}
+
 /// Per-history bank of secondary particles produced during transport
 /// (e.g. from (n,2n)/(n,3n) and secondary-photon production).
 ///
@@ -56,6 +122,13 @@ pub struct ParticleBank {
     /// that guard, or the drain ceiling behind it, fires. Reset by
     /// [`ParticleBank::clear`].
     fission_progeny: usize,
+    /// Split copies the per-history budget refused during the current history.
+    /// Reset by [`ParticleBank::clear`].
+    ww_cut: usize,
+    /// Weight-window counts of the finished histories this bank has run. Not
+    /// reset by [`ParticleBank::clear`]: the bank is reused across a thread's
+    /// histories, and these are read once, at the end of the batch.
+    ww_counts: WeightWindowCounts,
 }
 
 /// The push / pop / seed accessors are `#[inline]`: they sit on the
@@ -79,6 +152,8 @@ impl ParticleBank {
             walk_secondaries: 0,
             ww_splits: 0,
             fission_progeny: 0,
+            ww_cut: 0,
+            ww_counts: WeightWindowCounts::default(),
         }
     }
 
@@ -87,9 +162,73 @@ impl ParticleBank {
         self.ww_splits
     }
 
-    /// Record that `n` weight-window split copies were created this history.
-    pub fn record_ww_splits(&mut self, n: usize) {
-        self.ww_splits += n;
+    /// Record a weight-window check that split a particle into `copies` extra
+    /// copies, that the split budget refused `refused` more, and whether the
+    /// split needed more copies than `max_split` allows (counted only when it
+    /// made copies).
+    #[inline]
+    pub fn record_ww_split(&mut self, copies: usize, refused: usize, capped: bool) {
+        self.ww_counts.checks += 1;
+        if copies > 0 {
+            self.ww_splits += copies;
+            self.ww_counts.split_events += 1;
+            self.ww_counts.split_copies += copies as u64;
+            if capped {
+                self.ww_counts.splits_capped_at_max_split += 1;
+            }
+        }
+        self.ww_cut += refused;
+        self.ww_counts.splits_cut_short += refused as u64;
+    }
+
+    /// Record a weight-window check that played roulette.
+    #[inline]
+    pub fn record_ww_roulette(&mut self, survived: bool) {
+        self.ww_counts.checks += 1;
+        if survived {
+            self.ww_counts.roulette_survivals += 1;
+        } else {
+            self.ww_counts.roulette_kills += 1;
+        }
+    }
+
+    /// Record a weight-window check that killed a particle of weight `weight`
+    /// below the weight floor.
+    #[inline]
+    pub fn record_ww_floor_kill(&mut self, weight: f64) {
+        self.ww_counts.checks += 1;
+        self.ww_counts.weight_floor_kills += 1;
+        self.ww_counts.weight_floor_weight += weight;
+    }
+
+    /// Record a weight-window check that left the particle alone.
+    #[inline]
+    pub fn record_ww_in_window(&mut self) {
+        self.ww_counts.checks += 1;
+    }
+
+    /// Record a collision of a windowed particle type where no window applies.
+    #[inline]
+    pub fn record_ww_no_window(&mut self) {
+        self.ww_counts.no_window += 1;
+    }
+
+    /// Close the current history, which transported `particles` particles, into
+    /// [`ww_counts`](Self::ww_counts).
+    pub fn finish_history(&mut self, particles: u64) {
+        let c = &mut self.ww_counts;
+        c.histories += 1;
+        c.particles += particles;
+        c.max_particles_per_history = c.max_particles_per_history.max(particles);
+        c.max_split_copies_per_history = c.max_split_copies_per_history.max(self.ww_splits as u64);
+        if self.ww_cut > 0 {
+            c.histories_at_split_budget += 1;
+        }
+    }
+
+    /// Weight-window counts of the histories this bank has finished.
+    pub fn ww_counts(&self) -> WeightWindowCounts {
+        self.ww_counts
     }
 
     /// Record that a fission event produced `n` neutrons this history, and
@@ -194,13 +333,15 @@ impl ParticleBank {
     }
 
     /// Clear all particles from the bank and reset the per-history split and
-    /// fission-progeny counts and the secondary-seed bookkeeping.
+    /// fission-progeny counts and the secondary-seed bookkeeping. The run's
+    /// weight-window counts are kept.
     pub fn clear(&mut self) {
         self.stack.clear();
         self.seeds.clear();
         self.walk_seed = 0;
         self.walk_secondaries = 0;
         self.ww_splits = 0;
+        self.ww_cut = 0;
         self.fission_progeny = 0;
     }
 
