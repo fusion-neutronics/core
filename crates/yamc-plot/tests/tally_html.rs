@@ -71,6 +71,7 @@ fn make_params() -> InteractiveTallyParams {
         outline_pixels: 40_000,
         title: "test".into(),
         colorbar_title: "flux".into(),
+        colorbar_auto: false,
         scaling_factor: 1.0,
         font_size: 18,
         show_colorbar: true,
@@ -154,4 +155,37 @@ fn surface_table_none_emits_empty_array() {
         None,
     );
     assert!(html.contains("const SURFACE_TABLE = []"));
+}
+
+#[test]
+fn axis_units_are_checked_against_one_table() {
+    use yamc_plot::axis_unit_scale;
+    assert_eq!(axis_unit_scale("cm"), Ok(1.0));
+    assert_eq!(axis_unit_scale("m"), Ok(0.01));
+    assert_eq!(axis_unit_scale("mm"), Ok(10.0));
+    assert_eq!(axis_unit_scale("km"), Ok(1e-5));
+    let err = axis_unit_scale("in").unwrap_err();
+    assert!(err.contains("axis_units must be one of"), "{err}");
+}
+
+#[test]
+fn an_auto_colorbar_label_follows_the_scaling_factor() {
+    let mesh = make_mesh();
+    let slices = vec![make_slice()];
+    let mut params = make_params();
+    params.colorbar_auto = true;
+    let html = build_interactive_tally_html(
+        None,
+        None,
+        &mesh,
+        &slices,
+        &[],
+        &params,
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    );
+    assert!(html.contains("colorbarAuto: true"));
+    assert!(html.contains("function colorbarText()"));
 }

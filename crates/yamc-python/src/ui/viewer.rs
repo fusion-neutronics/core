@@ -199,7 +199,7 @@ impl PyInteractivePlot {
         outline_color: &str,
         outline_thickness: usize,
         source: Option<&SourceOverlay>,
-    ) -> Self {
+    ) -> PyResult<Self> {
         let mut grid_rgba = render_grid_rgba(
             presampled,
             color_by,
@@ -220,14 +220,15 @@ impl PyInteractivePlot {
             basis,
             axis_units,
             font_size,
-        );
-        PyInteractivePlot {
+        )
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        Ok(PyInteractivePlot {
             html,
             png_rgba,
             png_w,
             png_h,
             ph: presampled.ph,
             pv: presampled.pv,
-        }
+        })
     }
 }

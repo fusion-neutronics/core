@@ -561,6 +561,7 @@ impl PyGeometry {
         contour_kwargs: Option<Bound<'_, PyDict>>,
         py: pyo3::Python<'_>,
     ) -> pyo3::PyResult<crate::ui::PyInteractivePlot> {
+        yamc_plot::axis_unit_scale(axis_units).map_err(pyo3::exceptions::PyValueError::new_err)?;
         use crate::id_map_helper::parse_sample_slice_params;
         use crate::ui::parse_colors_ids_cells_materials;
         use crate::ui::{
@@ -657,7 +658,7 @@ impl PyGeometry {
             Some(&surface_table),
         );
 
-        Ok(PyInteractivePlot::new(
+        PyInteractivePlot::new(
             html,
             &presampled,
             color_by,
@@ -671,6 +672,6 @@ impl PyGeometry {
             &contour.colors,
             contour.linewidths,
             None,
-        ))
+        )
     }
 }

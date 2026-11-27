@@ -1009,6 +1009,7 @@ impl PyMeshGeometry {
         contour_kwargs: Option<pyo3::prelude::Bound<'_, pyo3::types::PyDict>>,
         py: pyo3::Python<'_>,
     ) -> PyResult<crate::ui::PyInteractivePlot> {
+        yamc_plot::axis_unit_scale(axis_units).map_err(pyo3::exceptions::PyValueError::new_err)?;
         use crate::ui::{
             build_interactive_html, parse_contour_kwargs, InteractiveViewParams, PyInteractivePlot,
             SourceParams,
@@ -1082,7 +1083,7 @@ impl PyMeshGeometry {
             None,
         );
 
-        Ok(PyInteractivePlot::new(
+        PyInteractivePlot::new(
             html,
             &presampled,
             color_by,
@@ -1096,7 +1097,7 @@ impl PyMeshGeometry {
             &contour.colors,
             contour.linewidths,
             None,
-        ))
+        )
     }
 
     fn __repr__(&self) -> String {

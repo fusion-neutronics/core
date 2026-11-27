@@ -1435,6 +1435,8 @@ impl PyTally {
                 "basis must be 'xy', 'xz', or 'yz'",
             ));
         }
+        let length_scale = yamc_plot::axis_unit_scale(axis_units)
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
 
         // Get mesh info
         let mesh_filter = self.inner.get_mesh_filter().ok_or_else(|| {
@@ -1681,11 +1683,12 @@ impl PyTally {
         };
         let slice_pos = slice_coord.unwrap_or((ll[fixed_axis] + ur[fixed_axis]) / 2.0);
         let auto_title = format!(
-            "Tally {} ({} plane at {} = {:.4} cm)",
+            "Tally {} ({} plane at {} = {:.4} {})",
             display_value,
             basis.to_uppercase(),
             fixed_label,
-            slice_pos
+            slice_pos * length_scale,
+            axis_units
         );
         let title = title.unwrap_or(&auto_title).to_string();
 
@@ -1702,6 +1705,7 @@ impl PyTally {
                 .unwrap_or_else(|| "Tally".to_string()),
             score_unit
         );
+        let colorbar_auto = colorbar_title.is_none();
         let colorbar_title = colorbar_title.unwrap_or(&auto_cb_title).to_string();
 
         let mesh_meta = MeshMeta {
@@ -1764,6 +1768,7 @@ impl PyTally {
             outline_pixels: resolution.unwrap_or(400000),
             title,
             colorbar_title,
+            colorbar_auto,
             scaling_factor,
             font_size,
             show_colorbar,

@@ -406,7 +406,7 @@ function renderColorbar() {
 
   // Label
   const label = document.getElementById('colorbar-label');
-  label.textContent = state.colorbarLabel;
+  label.textContent = colorbarText();
   label.style.fontSize = state.fontSize + 'px';
   label.style.right = '2px';
   label.style.top = (canvasTop + cbH / 2) + 'px';
@@ -844,6 +844,14 @@ document.getElementById('vmax-input').addEventListener('change', () => {
   renderFrame();
 });
 
+// The colorbar label as shown: an auto label (made from the tally's unit)
+// carries the scaling factor, so scaled values never sit under the unscaled
+// unit alone. A label the user typed is shown as typed.
+function colorbarText() {
+  const sf = state.scalingFactor;
+  return state.colorbarAuto && sf !== 1 ? `${state.colorbarLabel} × ${sf}` : state.colorbarLabel;
+}
+
 // Scaling factor
 document.getElementById('scaling-factor').addEventListener('change', () => {
   const v = +document.getElementById('scaling-factor').value;
@@ -904,6 +912,7 @@ document.getElementById('font-size').addEventListener('change', () => {
 // Colorbar label
 document.getElementById('colorbar-label-input').addEventListener('change', () => {
   state.colorbarLabel = document.getElementById('colorbar-label-input').value;
+  state.colorbarAuto = false;
   renderColorbar();
 });
 
@@ -1140,7 +1149,7 @@ document.getElementById('download-btn').addEventListener('click', () => {
   oc.save();
   oc.translate(cbX + cbW + 70, padT + cbH / 2);
   oc.rotate(-Math.PI / 2);
-  oc.fillText(state.colorbarLabel, 0, 0);
+  oc.fillText(colorbarText(), 0, 0);
   oc.restore();
 
   const link = document.createElement('a');

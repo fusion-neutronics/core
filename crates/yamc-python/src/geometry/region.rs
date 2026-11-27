@@ -248,6 +248,7 @@ impl PyRegion {
         contour_kwargs: Option<Bound<'_, PyDict>>,
         py: pyo3::Python<'_>,
     ) -> pyo3::PyResult<crate::ui::PyInteractivePlot> {
+        yamc_plot::axis_unit_scale(axis_units).map_err(pyo3::exceptions::PyValueError::new_err)?;
         use crate::geometry::PyGeometry;
         // Build a temporary Cell + Geometry and delegate
         let rust_cell = yamc::geometry::cell::Cell::new(Some(1), self.region.clone(), None, None);

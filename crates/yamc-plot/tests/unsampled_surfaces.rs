@@ -200,6 +200,7 @@ fn tally_viewer_answers_nan_and_does_not_resample_outlines() {
         outline_pixels: 40_000,
         title: "test".into(),
         colorbar_title: "flux".into(),
+        colorbar_auto: false,
         scaling_factor: 1.0,
         font_size: 18,
         show_colorbar: true,
