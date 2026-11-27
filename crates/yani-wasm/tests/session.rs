@@ -899,11 +899,11 @@ fn fetching_what_the_screening_asks_for_gives_the_whole_closure_answer() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../yamc/tests");
     for entry in std::fs::read_dir(dir).unwrap() {
         let name = entry.unwrap().file_name().into_string().unwrap();
-        if let Some(nuclide) = name.strip_suffix(".arrow") {
-            if nuclide.chars().any(|c| c.is_ascii_digit()) && !nuclide.starts_with("transmutation")
-            {
-                upload(&session, nuclide);
-            }
+        if let Some(nuclide) = name.strip_suffix(".arrow")
+            && nuclide.chars().any(|c| c.is_ascii_digit())
+            && !nuclide.starts_with("transmutation")
+        {
+            upload(&session, nuclide);
         }
     }
     let mut session = session;
