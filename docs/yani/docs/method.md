@@ -319,9 +319,10 @@ no component split in its data, an error is raised. Some decay records contain
 $Q/3$ placeholder energies instead of evaluated ones; see
 [Some decay records are placeholders](libraries.md#some-decay-records-are-placeholders).
 
-**Specific values** replace $V$: `per="cm3"` sets it to 1, `per="m3"` to
-$10^6$, `per="g"` to $1/\rho$ and `per="kg"` to $1000/\rho$, so none needs the
-material volume.
+**Specific values** replace $V$: a per-volume unit sets it to 1 (times
+$10^6$ for /m³), and a per-mass unit to $1/\rho$ (times 1000 for /kg), so
+neither needs the material volume. Any other factor in the unit, an SI prefix
+or a curie, is a constant multiplier on top.
 
 **Decay photon lines** come from the MF=8 discrete spectra of the gamma and
 X-ray radiation types. Each line's emission rate per atom is $\lambda_i$ times

@@ -904,7 +904,8 @@ impl PyModel {
     ///     threads: CPU worker threads (default: all cores).
     ///     max_runtime: Optional wall-time budget PER PASS. A float (seconds)
     ///         or a ``(value, unit)`` tuple with unit ``'s'``, ``'min'``,
-    ///         ``'h'``, ``'d'``, or ``'a'`` (year), e.g. ``(5, 'min')``.
+    ///         ``'h'``, ``'d'``, or ``'a'`` for a year (annum),
+    ///         e.g. ``(5, 'min')``.
     ///     relative_error: Per-pass convergence target (default 0.1): a pass
     ///         stops once 95% of the window-mesh voxels that have scored, in
     ///         every energy group and particle field, reach this relative
@@ -1159,7 +1160,8 @@ impl PyModel {
     ///         then finalizes tallies normally, so the returned ``TallyResult``s
     ///         carry valid statistics and figure of merit. Accepts a float
     ///         (seconds) or a ``(value, unit)`` tuple with unit ``'s'``,
-    ///         ``'min'``, ``'h'``, ``'d'``, or ``'a'`` (year), e.g.
+    ///         ``'min'``, ``'h'``, ``'d'``, or ``'a'`` for a year (annum),
+    ///         e.g.
     ///         ``(5, 'min')``. Composes with the other stop conditions: the run
     ///         ends at the first of {``total_particles`` exhausted, all
     ///         ``convergence_targets`` met, ``max_runtime`` elapsed}. Supported
@@ -1790,7 +1792,8 @@ impl PyModel {
     ///         checkpoint where its elapsed time reaches the budget, then
     ///         finalizes normally. Accepts a float (seconds) or a
     ///         ``(value, unit)`` tuple with unit ``'s'``, ``'min'``, ``'h'``,
-    ///         ``'d'``, or ``'a'`` (year), e.g. ``(30, 's')``. Composes with
+    ///         ``'d'``, or ``'a'`` for a year (annum), e.g.
+    ///         ``(30, 's')``. Composes with
     ///         ``total_particles``: a solve ends at the first of the two.
     ///         Because the budget is applied afresh to each timestep, a
     ///         time-bounded transmutation is non-deterministic in history count.

@@ -84,7 +84,7 @@ use yamc_nuclide::config::ChainUse;
 /// Examples:
 ///     >>> schedules = [
 ///     ...     yani.PulseSchedule([
-///     ...         yani.Pulse(rate=flux[i], duration=(1, "y"), source=spectra[i]),
+///     ...         yani.Pulse(rate=flux[i], duration=(1, "a"), source=spectra[i]),
 ///     ...         yani.Cooldown(duration=(1, "d")),
 ///     ...     ])
 ///     ...     for i in range(len(cells))

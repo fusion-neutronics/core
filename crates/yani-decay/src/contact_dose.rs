@@ -93,6 +93,19 @@ impl DoseQuantity {
             DoseQuantity::Effective => "Sv/h",
         }
     }
+
+    /// The factor from this quantity's own unit to `units` (`"uSv/h"`,
+    /// `"mGy/h"`, `"Gy/s"`), or 1 for `None`. A dose rate is already per unit
+    /// of something, so `units` must be a dose rate of the same kind: Gy for
+    /// the absorbed dose in air, Sv for the effective dose.
+    pub fn unit_factor(&self, units: Option<&str>) -> Result<f64, String> {
+        match units {
+            None => Ok(1.0),
+            Some(u) => {
+                yamc_units::convert(self.units(), u).map_err(|e| format!("contact_dose: {e}"))
+            }
+        }
+    }
 }
 
 /// The linear attenuation coefficient of a material, evaluated per element

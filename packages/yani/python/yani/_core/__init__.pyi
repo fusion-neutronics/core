@@ -262,7 +262,8 @@ class Cooldown:
         
         Args:
             duration: A number of seconds, or a ``(value, unit)`` tuple such as
-                ``(7, "d")``. Units: s, min, h, d, a (year).
+                ``(7, "d")``. Units: s, min, h, d, and a for a year (annum,
+                365.25 days).
             model: The yani ``Model`` the machine is in while it cools, for
                 ``yamc.simulate_shutdown_dose``: the decay photons of every
                 earlier irradiation are transported through its geometry. It
@@ -1394,12 +1395,13 @@ class Material:
         Returns:
             Dict[str, float]: nuclide -> atoms / b-cm
         """
-    def activity(self, *, by_nuclide: builtins.bool = False, per: typing.Optional[builtins.str] = None) -> typing.Any:
+    def activity(self, *, by_nuclide: builtins.bool = False, units: builtins.str = 'Bq') -> typing.Any:
         r"""
         Calculate the radioactive activity of the current material inventory.
         
-        The material must have a ``volume`` in cm³. Atom densities are converted
-        to total atoms using ``atoms/barn-cm * 1e24 * volume``. The decay data
+        A total (the default, Bq) needs the material's ``volume`` in cm³: atom
+        densities are converted to total atoms using
+        ``atoms/barn-cm * 1e24 * volume``. The decay data
         (``transmutation_decay_data``, which has no default) provides
         half-lives; each nuclide's activity is ``N * ln(2) / half_life``.
         Stable nuclides are omitted.
@@ -1407,32 +1409,38 @@ class Material:
         Args:
             by_nuclide (bool): Return a ``dict[str, float]`` by nuclide instead
                 of the total.
-            per (str | None): ``None`` (default) for the total, which needs
-                ``volume``; ``"cm3"`` or ``"m3"`` for Bq/cm³ or Bq/m³, which
-                need nothing; ``"g"`` or ``"kg"`` for Bq/g or Bq/kg, which need
-                only ``density``.
+            units (str): The unit of the result. A total, ``"Bq"`` (the
+                default) or a scaled one such as ``"TBq"`` or ``"Ci"``, needs
+                ``volume``. Per volume, such as ``"Bq/cm3"`` or ``"GBq/m3"``,
+                needs nothing. Per mass, such as ``"Bq/kg"`` or ``"kBq/g"``,
+                needs only ``density``.
         
         Returns:
-            float | dict[str, float]: Activity, in Bq when ``per`` is ``None``,
-            otherwise Bq per the unit ``per`` names. The unit of a ``by_nuclide``
-            dict's values is the same.
+            float | dict[str, float]: Activity in ``units``. The unit of a
+            ``by_nuclide`` dict's values is the same.
+        
+        Examples:
+            >>> activated.activity(units="Bq/kg")
+            >>> activated.activity(units="TBq")
         """
-    def decay_heat(self, *, by_nuclide: builtins.bool = False, per: typing.Optional[builtins.str] = None, component: typing.Optional[builtins.str] = None) -> typing.Any:
+    def decay_heat(self, *, by_nuclide: builtins.bool = False, units: builtins.str = 'W', component: typing.Optional[builtins.str] = None) -> typing.Any:
         r"""
         Calculate decay heat from the current material inventory.
         
-        The material must have a ``volume`` in cm³. Atom densities are converted
-        to total atoms using ``atoms/barn-cm * 1e24 * volume``. The decay data
+        A total (the default, W) needs the material's ``volume`` in cm³: atom
+        densities are converted to total atoms using
+        ``atoms/barn-cm * 1e24 * volume``. The decay data
         (``transmutation_decay_data``, which has no default) provides
         half-lives and mean decay energies.
         
         Args:
             by_nuclide (bool): Return a ``dict[str, float]`` by nuclide instead
                 of the total.
-            per (str | None): ``None`` (default) for the total, which needs
-                ``volume``; ``"cm3"`` or ``"m3"`` for W/cm³ or W/m³, which need
-                nothing; ``"g"`` or ``"kg"`` for W/g or W/kg, which need only
-                ``density``.
+            units (str): The unit of the result. A total, ``"W"`` (the
+                default) or a scaled one such as ``"kW"`` or ``"MeV/s"``, needs
+                ``volume``. Per volume, such as ``"W/cm3"`` or ``"MW/m3"``,
+                needs nothing. Per mass, such as ``"W/kg"`` or ``"mW/g"``,
+                needs only ``density``.
             component (str | None): ``None`` (default) for the whole decay heat;
                 ``"beta"``, ``"gamma"`` or ``"alpha"`` for one recoverable-heat
                 component alone (the ENDF MT=457 light-particle, electromagnetic
@@ -1443,15 +1451,15 @@ class Material:
                 the component by its share.
         
         Returns:
-            float | dict[str, float]: Decay heat, in W when ``per`` is ``None``,
-            otherwise W per the unit ``per`` names. The unit of a ``by_nuclide``
-            dict's values is the same.
+            float | dict[str, float]: Decay heat in ``units``. The unit of a
+            ``by_nuclide`` dict's values is the same.
         """
-    def decay_photon_spectrum(self, *, per: typing.Optional[builtins.str] = None) -> tuple[builtins.list[builtins.float], builtins.list[builtins.float]]:
+    def decay_photon_spectrum(self, *, units: builtins.str = '1/s') -> tuple[builtins.list[builtins.float], builtins.list[builtins.float]]:
         r"""
         The decay photon line spectrum of the current inventory.
         
-        The material must have a ``volume`` in cm³. Each nuclide's atom count
+        A total (the default) needs the material's ``volume`` in cm³. Each
+        nuclide's atom count
         multiplies the line intensities the transmutation chain records for it,
         which are per atom per second (the emission probability already times
         the decay constant), so the values are photons per second rather than
@@ -1477,11 +1485,17 @@ class Material:
         more. No ``sources`` distribution yet holds a linear-linear continuum
         exactly, so a transport source cannot yet carry every continuum.
         
+        Args:
+            units (str): The unit of the emission rates. A total, ``"1/s"``
+                (photons/s, the default), needs ``volume``. Per volume, such as
+                ``"1/(s cm3)"``, needs nothing. Per mass, such as
+                ``"1/(s kg)"``, needs only ``density``. Energies are always eV.
+        
         Returns:
             tuple[list[float], list[float]]: Line energies (eV) and their
-            emission rates (photons/s).
+            emission rates in ``units``.
         """
-    def decay_photon_continua(self, *, per: typing.Optional[builtins.str] = None) -> builtins.list[PhotonContinuum]:
+    def decay_photon_continua(self, *, units: builtins.str = '1/(s eV)') -> builtins.list[PhotonContinuum]:
         r"""
         The decay photon continua of the current inventory, one per nuclide
         and continuum, in nuclide-name order.
@@ -1489,14 +1503,17 @@ class Material:
         The part of a decay spectrum ENDF gives as a density over energy rather
         than as lines, which ``decay_photon_spectrum()`` does not include. Each
         continuum keeps its own energy grid and interpolation law, and its
-        rates are photons/s/eV (or per cm³ or per g, following ``per``), so
-        they are not line rates; ``emission_rate`` is the integral. A material
-        whose nuclides have no continuum returns an empty list.
+        rates are photons/s/eV (or per volume or per mass, following
+        ``units``), so they are not line rates; ``emission_rate`` is the
+        integral, in ``units`` times eV. A material whose nuclides have no
+        continuum returns an empty list.
         
         Args:
-            per (str | None): None for the whole material, which needs a
-                ``volume``, or ``'cm3'``, ``'m3'``, ``'g'`` or ``'kg'``, as for
-                ``decay_photon_spectrum()``.
+            units (str): The unit of the rates, a density per eV. A total,
+                ``"1/(s eV)"`` (the default), needs ``volume``. Per volume,
+                such as ``"1/(s eV cm3)"``, needs nothing. Per mass, such as
+                ``"1/(s eV kg)"``, needs only ``density``. Energies are always
+                eV, so the energy in ``units`` must be too.
         
         Returns:
             list[PhotonContinuum]: The continua, each with its nuclide,
@@ -1506,7 +1523,7 @@ class Material:
             >>> for continuum in activated.decay_photon_continua():
             ...     print(continuum.nuclide, continuum.emission_rate)
         """
-    def contact_dose(self, *, dose_quantity: builtins.str = 'absorbed-air', build_up: builtins.float = 2.0, by_nuclide: builtins.bool = False) -> typing.Any:
+    def contact_dose(self, *, dose_quantity: builtins.str = 'absorbed-air', build_up: builtins.float = 2.0, by_nuclide: builtins.bool = False, units: typing.Optional[builtins.str] = None) -> typing.Any:
         r"""
         Contact dose rate from the material's own decay photons.
         
@@ -1547,10 +1564,14 @@ class Material:
                 FISPACT-II manual suggests.
             by_nuclide (bool): Return a ``dict[str, float]`` by nuclide instead
                 of the total. Nuclides that contribute nothing are left out.
+            units (str | None): The unit of the dose rate. ``None`` (the
+                default) gives Gy/h for ``'absorbed-air'`` and Sv/h for
+                ``'effective'``; any rate of the same kind is accepted, such as
+                ``"uGy/h"`` or ``"mGy/h"`` for the absorbed dose and
+                ``"uSv/h"`` or ``"mSv/h"`` for the effective dose.
         
         Returns:
-            float | dict[str, float]: Contact dose rate in Gy/h
-            (``'absorbed-air'``) or Sv/h (``'effective'``).
+            float | dict[str, float]: Contact dose rate in ``units``.
         
         Raises:
             ValueError: If a nuclide in the material has a photon continuum
@@ -1570,6 +1591,8 @@ class Material:
             {'Co60': 380.088...}
             >>> activated.contact_dose(dose_quantity='effective')
             380.728...
+            >>> activated.contact_dose(dose_quantity='effective', units='mSv/h')
+            380728.0...
         """
     def clearance_index(self, limit_set: builtins.str, *, metal: builtins.bool = False, apply_default_limit: builtins.bool = True, exclude_daughters: builtins.bool = True) -> ClearanceResult:
         r"""
@@ -2470,8 +2493,9 @@ class PhotonContinuum:
     photon emission of a nuclide far from stability, whose lines were never
     measured. The values are a rate per eV, so they are not line rates and
     cannot be added to ``decay_photon_spectrum()``'s. Their rate is the
-    integral, which ``emission_rate`` gives. Both follow the ``per`` argument
-    of ``decay_photon_continua()``: for the whole material, or per cm³ or per g.
+    integral, which ``emission_rate`` gives. Both follow the ``units`` argument
+    of ``decay_photon_continua()``: for the whole material, or per volume or
+    per mass.
     """
     @property
     def nuclide(self) -> builtins.str:
@@ -2486,9 +2510,9 @@ class PhotonContinuum:
     @property
     def rates(self) -> builtins.list[builtins.float]:
         r"""
-        The emission-rate density at each energy: photons/s/eV for the whole
-        material, or per cm³ or per g following the ``per`` argument the
-        continuum was requested with.
+        The emission-rate density at each energy, in the ``units`` the
+        continuum was requested with: photons/s/eV for the whole material by
+        default.
         """
     @property
     def interpolation(self) -> typing.Optional[builtins.str]:
@@ -2501,8 +2525,8 @@ class PhotonContinuum:
     def emission_rate(self) -> builtins.float:
         r"""
         The emission rate over the whole continuum, its integral read under its
-        law: photons/s for the whole material, or per cm³ or per g following
-        the ``per`` argument the continuum was requested with.
+        law, over ``energies`` in eV: photons/s for the whole material by
+        default, and in general the requested ``units`` times eV.
         
         Raises:
             ValueError: If the law is not stated, or is one this build does not
@@ -2747,7 +2771,8 @@ class Pulse:
                 flux magnitude [n/cm^2/s] (the source's ``Histogram`` energy gives
                 the spectrum shape).
             duration: A number of seconds, or a ``(value, unit)`` tuple such as
-                ``(1, "a")`` or ``(30, "d")``. Units: s, min, h, d, a (year).
+                ``(1, "a")`` or ``(30, "d")``. Units: s, min, h, d, and a for a
+                year (annum, 365.25 days).
             source: The NeutronSource for this campaign. Defaults to ``None``,
                 which ``Model.simulate_transmutation`` accepts (transport uses the
                 model's source); ``Material.transmute`` requires a source whose
@@ -6170,7 +6195,7 @@ def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | t
     Examples:
         >>> schedules = [
         ...     yani.PulseSchedule([
-        ...         yani.Pulse(rate=flux[i], duration=(1, "y"), source=spectra[i]),
+        ...         yani.Pulse(rate=flux[i], duration=(1, "a"), source=spectra[i]),
         ...         yani.Cooldown(duration=(1, "d")),
         ...     ])
         ...     for i in range(len(cells))

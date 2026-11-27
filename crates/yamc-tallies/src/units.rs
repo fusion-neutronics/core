@@ -8,64 +8,12 @@
 //! result's own unit to a unit string such as `"W/cm3"`, dividing by each
 //! bin's volume when the target is per volume.
 //!
-//! A small table of symbols, with SI prefixes, covers what tallies produce:
-//! length (`m`), energy (`eV`, `J`), power (`W`), time (`s`, `min`, `h`, `d`,
-//! `y`), dose (`Sv`, `Gy`), `pulse`, and counts (`particles`, `reactions`,
-//! `n`, ...), which carry no dimension. No unit library is needed, so this
-//! works in WASM and Pyodide.
+//! Unit strings are parsed by `yamc-units`, which yani's material outputs
+//! share.
 use crate::filter::Filter;
 use crate::score::Score;
 use crate::tally::Tally;
-
-/// Joules per electronvolt (exact, SI 2019).
-const J_PER_EV: f64 = 1.602_176_634e-19;
-
-/// Dimension exponents, in the order of [`DIM_NAMES`].
-type Dims = [i8; 6];
-const LENGTH: usize = 0;
-const TIME: usize = 2;
-const PULSE: usize = 5;
-const DIM_NAMES: [&str; 6] = ["length", "energy", "time", "dose", "absorbed dose", "pulse"];
-
-/// A unit as a factor times powers of the base units cm, eV, s, Sv, Gy and
-/// pulse: `W` is `6.24e18 eV^1 s^-1`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Quantity {
-    factor: f64,
-    dims: Dims,
-}
-
-impl Quantity {
-    const ONE: Self = Self {
-        factor: 1.0,
-        dims: [0; 6],
-    };
-
-    fn base(factor: f64, dim: usize) -> Self {
-        let mut dims = [0; 6];
-        dims[dim] = 1;
-        Self { factor, dims }
-    }
-
-    fn mul(self, other: Self) -> Self {
-        let mut dims = self.dims;
-        for (d, o) in dims.iter_mut().zip(other.dims) {
-            *d += o;
-        }
-        Self {
-            factor: self.factor * other.factor,
-            dims,
-        }
-    }
-
-    fn powi(self, n: i8) -> Self {
-        Self {
-            factor: self.factor.powi(n as i32),
-            dims: self.dims.map(|d| d * n),
-        }
-    }
-}
-
+use yamc_units::{describe, parse, Dims, Quantity, LENGTH, PULSE, TIME};
 /// How a source strength is counted: source particles per second (steady
 /// state) or per pulse (ICF, one shot).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -176,7 +124,7 @@ fn score_unit(tally: &Tally, score: &Score) -> ScoreUnit {
         Some(Some(u)) => ScoreUnit {
             text: format!("{u}·{base}"),
             quantity: parse(&u)
-                .map(|q| q.mul(base_quantity))
+                .map(|q| q * base_quantity)
                 .map_err(|e| format!("energy_function units {u:?}: {e}")),
         },
     }
@@ -212,7 +160,7 @@ pub fn conversion(
     let unit = score_unit(tally, score);
     let mut from = unit.quantity?;
     if let Some(s) = strength {
-        from = from.mul(s.quantity());
+        from = from * s.quantity();
     }
     let to = parse(target)?;
     let mut per_volume_dims = from.dims;
@@ -260,276 +208,22 @@ fn mismatch(
             s.per.name(),
             s.per.name()
         ),
-        _ => {
-            let describe = |d: Dims| {
-                let parts: Vec<String> = d
-                    .iter()
-                    .zip(DIM_NAMES)
-                    .filter(|(e, _)| **e != 0)
-                    .map(|(e, n)| if *e == 1 { n.to_string() } else { format!("{n}^{e}") })
-                    .collect();
-                if parts.is_empty() {
-                    "a count".to_string()
-                } else {
-                    parts.join(" ")
-                }
-            };
-            format!(
+        _ => format!(
                 "{head}: the result is {}, the unit is {} (a per-volume unit, such as /cm3, divides by each bin's volume)",
                 describe(from),
                 describe(to)
-            )
-        }
+            ),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Parsing
-// ---------------------------------------------------------------------------
-
-/// Symbols that are not prefixed.
-fn plain_symbol(s: &str) -> Option<Quantity> {
-    Some(match s {
-        "min" => Quantity::base(60.0, TIME),
-        "h" | "hr" => Quantity::base(3600.0, TIME),
-        "d" | "day" => Quantity::base(86_400.0, TIME),
-        "y" | "yr" | "year" => Quantity::base(365.25 * 86_400.0, TIME),
-        "pulse" | "pulses" | "shot" | "shots" => Quantity::base(1.0, PULSE),
-        "particle" | "particles" | "source" | "source-particle" | "source-particles" | "n"
-        | "neutron" | "neutrons" | "photon" | "photons" | "reaction" | "reactions" | "atom"
-        | "atoms" => Quantity::ONE,
-        _ => return None,
-    })
-}
-
-/// Symbols that take an SI prefix.
-fn prefixable_symbol(s: &str) -> Option<Quantity> {
-    Some(match s {
-        "m" => Quantity::base(100.0, LENGTH),
-        "s" => Quantity::base(1.0, TIME),
-        "eV" => Quantity::base(1.0, 1),
-        "J" => Quantity::base(1.0 / J_PER_EV, 1),
-        "W" => Quantity::base(1.0 / J_PER_EV, 1).mul(Quantity::base(1.0, TIME).powi(-1)),
-        "Sv" => Quantity::base(1.0, 3),
-        "Gy" => Quantity::base(1.0, 4),
-        _ => return None,
-    })
-}
-
-fn prefix(c: char) -> Option<f64> {
-    Some(match c {
-        'p' => 1e-12,
-        'n' => 1e-9,
-        'u' | 'µ' | 'μ' => 1e-6,
-        'm' => 1e-3,
-        'c' => 1e-2,
-        'k' => 1e3,
-        'M' => 1e6,
-        'G' => 1e9,
-        'T' => 1e12,
-        _ => return None,
-    })
-}
-
-fn symbol(s: &str) -> Result<Quantity, String> {
-    if let Some(q) = plain_symbol(s).or_else(|| prefixable_symbol(s)) {
-        return Ok(q);
-    }
-    let mut chars = s.chars();
-    if let (Some(p), rest) = (chars.next().and_then(prefix), chars.as_str())
-        && let Some(q) = prefixable_symbol(rest)
-    {
-        return Ok(Quantity {
-            factor: q.factor * p,
-            ..q
-        });
-    }
-    Err(format!(
-        "unknown unit {s:?}; known units are m, s, min, h, d, y, eV, J, W, Sv, Gy (with SI prefixes such as c, m, k, M), pulse, and counts such as particles or reactions"
-    ))
-}
-
-fn superscript_digit(c: char) -> Option<i8> {
-    "⁰¹²³⁴⁵⁶⁷⁸⁹".chars().position(|d| d == c).map(|p| p as i8)
-}
-
-struct Parser<'a> {
-    chars: Vec<char>,
-    pos: usize,
-    text: &'a str,
-}
-
-impl Parser<'_> {
-    fn peek(&self) -> Option<char> {
-        self.chars.get(self.pos).copied()
-    }
-
-    fn skip_separators(&mut self) -> bool {
-        let start = self.pos;
-        while matches!(self.peek(), Some(c) if c.is_whitespace() || matches!(c, '*' | '·' | '⋅'))
-        {
-            self.pos += 1;
-        }
-        self.pos > start
-    }
-
-    fn error(&self, what: &str) -> String {
-        format!("unit {:?}: {what} at position {}", self.text, self.pos)
-    }
-
-    /// `factor (sep factor | '/' factor)*`
-    fn product(&mut self) -> Result<Quantity, String> {
-        self.skip_separators();
-        let mut q = self.factor()?;
-        loop {
-            self.skip_separators();
-            match self.peek() {
-                None | Some(')') => return Ok(q),
-                Some('/') => {
-                    self.pos += 1;
-                    self.skip_separators();
-                    q = q.mul(self.factor()?.powi(-1));
-                }
-                Some(_) => q = q.mul(self.factor()?),
-            }
-        }
-    }
-
-    /// `'(' product ')' exponent? | number | symbol exponent?`
-    fn factor(&mut self) -> Result<Quantity, String> {
-        match self.peek() {
-            Some('(') => {
-                self.pos += 1;
-                let q = self.product()?;
-                if self.peek() != Some(')') {
-                    return Err(self.error("missing ')'"));
-                }
-                self.pos += 1;
-                Ok(q.powi(self.exponent()?))
-            }
-            Some(c) if c.is_ascii_digit() => {
-                let start = self.pos;
-                while matches!(self.peek(), Some(c) if c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E'))
-                {
-                    self.pos += 1;
-                }
-                let s: String = self.chars[start..self.pos].iter().collect();
-                let factor = s.parse::<f64>().map_err(|_| self.error("bad number"))?;
-                Ok(Quantity {
-                    factor,
-                    dims: [0; 6],
-                })
-            }
-            Some(c) if c.is_alphabetic() => {
-                let start = self.pos;
-                while let Some(c) = self.peek() {
-                    let hyphen_word = c == '-'
-                        && self
-                            .chars
-                            .get(self.pos + 1)
-                            .is_some_and(|n| n.is_alphabetic());
-                    if c.is_alphabetic() || hyphen_word {
-                        self.pos += 1;
-                    } else {
-                        break;
-                    }
-                }
-                let s: String = self.chars[start..self.pos].iter().collect();
-                Ok(symbol(&s)?.powi(self.exponent()?))
-            }
-            _ => Err(self.error("expected a unit")),
-        }
-    }
-
-    /// `('^'? '-'? digits) | superscripts`, default 1.
-    fn exponent(&mut self) -> Result<i8, String> {
-        if self.peek() == Some('^') {
-            self.pos += 1;
-        }
-        let mut sign = 1;
-        if matches!(self.peek(), Some('-' | '⁻')) {
-            sign = -1;
-            self.pos += 1;
-        }
-        let mut digits = String::new();
-        let mut value: Option<i8> = None;
-        while let Some(c) = self.peek() {
-            if c.is_ascii_digit() {
-                digits.push(c);
-            } else if let Some(d) = superscript_digit(c) {
-                value = Some(value.unwrap_or(0) * 10 + d);
-            } else {
-                break;
-            }
-            self.pos += 1;
-        }
-        let n = match (digits.is_empty(), value) {
-            (true, None) if sign == -1 => return Err(self.error("'-' without an exponent")),
-            (true, None) => 1,
-            (true, Some(v)) => v,
-            (false, None) => digits
-                .parse::<i8>()
-                .map_err(|_| self.error("bad exponent"))?,
-            (false, Some(_)) => return Err(self.error("mixed exponent digits")),
-        };
-        Ok(sign * n)
-    }
-}
-
-fn parse(text: &str) -> Result<Quantity, String> {
-    let mut p = Parser {
-        chars: text.chars().collect(),
-        pos: 0,
-        text,
-    };
-    if p.chars.iter().all(|c| c.is_whitespace()) {
-        return Err("empty unit".into());
-    }
-    let q = p.product()?;
-    if p.pos != p.chars.len() {
-        return Err(p.error("unexpected ')'"));
-    }
-    Ok(q)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::score::{FluxScore, HeatingScore, ReactionRateScore};
+    use yamc_units::J_PER_EV;
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() <= 1e-12 * a.abs().max(b.abs())
-    }
-
-    #[test]
-    fn parses_common_units() {
-        let w = parse("W").unwrap();
-        assert!(close(w.factor, 1.0 / J_PER_EV));
-        assert_eq!(w.dims, [0, 1, -1, 0, 0, 0]);
-        assert_eq!(parse("W/cm3").unwrap().dims, [-3, 1, -1, 0, 0, 0]);
-        assert_eq!(parse("W/m^3").unwrap().factor, w.factor / 1e6);
-        let flux = parse("1/(cm2 s)").unwrap();
-        assert_eq!(flux.dims, [-2, 0, -1, 0, 0, 0]);
-        assert_eq!(parse("n/cm2/s").unwrap(), flux);
-        assert_eq!(parse("cm^-2 s^-1").unwrap(), flux);
-        assert_eq!(parse("cm⁻² s⁻¹").unwrap(), flux);
-        assert!(close(parse("pSv·cm²").unwrap().factor, 1e-12));
-        assert_eq!(parse("pSv·cm²").unwrap().dims, [2, 0, 0, 1, 0, 0]);
-        assert!(close(parse("Sv/h").unwrap().factor, 1.0 / 3600.0));
-        assert!(close(parse("MeV").unwrap().factor, 1e6));
-        assert!(close(parse("ms").unwrap().factor, 1e-3));
-        assert_eq!(parse("Gy").unwrap().dims, [0, 0, 0, 0, 1, 0]);
-        assert_eq!(parse("J/pulse").unwrap().dims, [0, 1, 0, 0, 0, -1]);
-        assert_eq!(parse("reactions/source-particle").unwrap(), Quantity::ONE);
-    }
-
-    #[test]
-    fn rejects_bad_units() {
-        assert!(parse("").is_err());
-        assert!(parse("furlong").unwrap_err().contains("unknown unit"));
-        assert!(parse("(cm").is_err());
-        assert!(parse("cm)").is_err());
-        assert!(parse("cm^-").is_err());
     }
 
     fn tally(score: Score) -> Tally {

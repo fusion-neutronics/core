@@ -71,9 +71,9 @@ def test_the_continuum_comes_back_apart_from_the_lines(cf252):
 
 
 def test_the_continuum_scales_per_unit(cf252):
-    """``per`` scales the densities exactly as it scales the line rates."""
+    """``units`` scales the densities exactly as it scales the line rates."""
     whole = cf252.decay_photon_continua()[0]
-    per_cm3 = cf252.decay_photon_continua(per="cm3")[0]
+    per_cm3 = cf252.decay_photon_continua(units="1/(s eV cm3)")[0]
     assert per_cm3.emission_rate == pytest.approx(whole.emission_rate / 2.0, rel=1e-12)
 
 

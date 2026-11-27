@@ -12,8 +12,9 @@ use yani_decay::PhotonContinuum;
 /// photon emission of a nuclide far from stability, whose lines were never
 /// measured. The values are a rate per eV, so they are not line rates and
 /// cannot be added to ``decay_photon_spectrum()``'s. Their rate is the
-/// integral, which ``emission_rate`` gives. Both follow the ``per`` argument
-/// of ``decay_photon_continua()``: for the whole material, or per cm³ or per g.
+/// integral, which ``emission_rate`` gives. Both follow the ``units`` argument
+/// of ``decay_photon_continua()``: for the whole material, or per volume or
+/// per mass.
 #[gen_stub_pyclass]
 #[pyclass(name = "PhotonContinuum", frozen, skip_from_py_object)]
 #[derive(Clone)]
@@ -36,9 +37,9 @@ impl PyPhotonContinuum {
         self.inner.energies.clone()
     }
 
-    /// The emission-rate density at each energy: photons/s/eV for the whole
-    /// material, or per cm³ or per g following the ``per`` argument the
-    /// continuum was requested with.
+    /// The emission-rate density at each energy, in the ``units`` the
+    /// continuum was requested with: photons/s/eV for the whole material by
+    /// default.
     #[getter]
     fn rates(&self) -> Vec<f64> {
         self.inner.rates.clone()
@@ -53,8 +54,8 @@ impl PyPhotonContinuum {
     }
 
     /// The emission rate over the whole continuum, its integral read under its
-    /// law: photons/s for the whole material, or per cm³ or per g following
-    /// the ``per`` argument the continuum was requested with.
+    /// law, over ``energies`` in eV: photons/s for the whole material by
+    /// default, and in general the requested ``units`` times eV.
     ///
     /// Raises:
     ///     ValueError: If the law is not stated, or is one this build does not

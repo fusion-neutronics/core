@@ -825,8 +825,9 @@ impl PyMaterial {
 
     /// Calculate the radioactive activity of the current material inventory.
     ///
-    /// The material must have a ``volume`` in cm³. Atom densities are converted
-    /// to total atoms using ``atoms/barn-cm * 1e24 * volume``. The decay data
+    /// A total (the default, Bq) needs the material's ``volume`` in cm³: atom
+    /// densities are converted to total atoms using
+    /// ``atoms/barn-cm * 1e24 * volume``. The decay data
     /// (``transmutation_decay_data``, which has no default) provides
     /// half-lives; each nuclide's activity is ``N * ln(2) / half_life``.
     /// Stable nuclides are omitted.
@@ -834,20 +835,24 @@ impl PyMaterial {
     /// Args:
     ///     by_nuclide (bool): Return a ``dict[str, float]`` by nuclide instead
     ///         of the total.
-    ///     per (str | None): ``None`` (default) for the total, which needs
-    ///         ``volume``; ``"cm3"`` or ``"m3"`` for Bq/cm³ or Bq/m³, which
-    ///         need nothing; ``"g"`` or ``"kg"`` for Bq/g or Bq/kg, which need
-    ///         only ``density``.
+    ///     units (str): The unit of the result. A total, ``"Bq"`` (the
+    ///         default) or a scaled one such as ``"TBq"`` or ``"Ci"``, needs
+    ///         ``volume``. Per volume, such as ``"Bq/cm3"`` or ``"GBq/m3"``,
+    ///         needs nothing. Per mass, such as ``"Bq/kg"`` or ``"kBq/g"``,
+    ///         needs only ``density``.
     ///
     /// Returns:
-    ///     float | dict[str, float]: Activity, in Bq when ``per`` is ``None``,
-    ///     otherwise Bq per the unit ``per`` names. The unit of a ``by_nuclide``
-    ///     dict's values is the same.
-    #[pyo3(signature = (*, by_nuclide=false, per=None))]
-    fn activity(&self, py: Python<'_>, by_nuclide: bool, per: Option<&str>) -> PyResult<Py<PyAny>> {
+    ///     float | dict[str, float]: Activity in ``units``. The unit of a
+    ///     ``by_nuclide`` dict's values is the same.
+    ///
+    /// Examples:
+    ///     >>> activated.activity(units="Bq/kg")
+    ///     >>> activated.activity(units="TBq")
+    #[pyo3(signature = (*, by_nuclide=false, units="Bq"))]
+    fn activity(&self, py: Python<'_>, by_nuclide: bool, units: &str) -> PyResult<Py<PyAny>> {
         let volume = self
             .internal
-            .per_unit_scale(per, "activity")
+            .unit_scale("Bq", units, "activity")
             .map_err(PyValueError::new_err)?;
         let atom_densities = self
             .internal
@@ -871,18 +876,20 @@ impl PyMaterial {
 
     /// Calculate decay heat from the current material inventory.
     ///
-    /// The material must have a ``volume`` in cm³. Atom densities are converted
-    /// to total atoms using ``atoms/barn-cm * 1e24 * volume``. The decay data
+    /// A total (the default, W) needs the material's ``volume`` in cm³: atom
+    /// densities are converted to total atoms using
+    /// ``atoms/barn-cm * 1e24 * volume``. The decay data
     /// (``transmutation_decay_data``, which has no default) provides
     /// half-lives and mean decay energies.
     ///
     /// Args:
     ///     by_nuclide (bool): Return a ``dict[str, float]`` by nuclide instead
     ///         of the total.
-    ///     per (str | None): ``None`` (default) for the total, which needs
-    ///         ``volume``; ``"cm3"`` or ``"m3"`` for W/cm³ or W/m³, which need
-    ///         nothing; ``"g"`` or ``"kg"`` for W/g or W/kg, which need only
-    ///         ``density``.
+    ///     units (str): The unit of the result. A total, ``"W"`` (the
+    ///         default) or a scaled one such as ``"kW"`` or ``"MeV/s"``, needs
+    ///         ``volume``. Per volume, such as ``"W/cm3"`` or ``"MW/m3"``,
+    ///         needs nothing. Per mass, such as ``"W/kg"`` or ``"mW/g"``,
+    ///         needs only ``density``.
     ///     component (str | None): ``None`` (default) for the whole decay heat;
     ///         ``"beta"``, ``"gamma"`` or ``"alpha"`` for one recoverable-heat
     ///         component alone (the ENDF MT=457 light-particle, electromagnetic
@@ -893,20 +900,19 @@ impl PyMaterial {
     ///         the component by its share.
     ///
     /// Returns:
-    ///     float | dict[str, float]: Decay heat, in W when ``per`` is ``None``,
-    ///     otherwise W per the unit ``per`` names. The unit of a ``by_nuclide``
-    ///     dict's values is the same.
-    #[pyo3(signature = (*, by_nuclide=false, per=None, component=None))]
+    ///     float | dict[str, float]: Decay heat in ``units``. The unit of a
+    ///     ``by_nuclide`` dict's values is the same.
+    #[pyo3(signature = (*, by_nuclide=false, units="W", component=None))]
     fn decay_heat(
         &self,
         py: Python<'_>,
         by_nuclide: bool,
-        per: Option<&str>,
+        units: &str,
         component: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         let volume = self
             .internal
-            .per_unit_scale(per, "decay_heat")
+            .unit_scale("W", units, "decay_heat")
             .map_err(PyValueError::new_err)?;
         let atom_densities = self
             .internal
@@ -959,7 +965,8 @@ impl PyMaterial {
 
     /// The decay photon line spectrum of the current inventory.
     ///
-    /// The material must have a ``volume`` in cm³. Each nuclide's atom count
+    /// A total (the default) needs the material's ``volume`` in cm³. Each
+    /// nuclide's atom count
     /// multiplies the line intensities the transmutation chain records for it,
     /// which are per atom per second (the emission probability already times
     /// the decay constant), so the values are photons per second rather than
@@ -985,14 +992,20 @@ impl PyMaterial {
     /// more. No ``sources`` distribution yet holds a linear-linear continuum
     /// exactly, so a transport source cannot yet carry every continuum.
     ///
+    /// Args:
+    ///     units (str): The unit of the emission rates. A total, ``"1/s"``
+    ///         (photons/s, the default), needs ``volume``. Per volume, such as
+    ///         ``"1/(s cm3)"``, needs nothing. Per mass, such as
+    ///         ``"1/(s kg)"``, needs only ``density``. Energies are always eV.
+    ///
     /// Returns:
     ///     tuple[list[float], list[float]]: Line energies (eV) and their
-    ///     emission rates (photons/s).
-    #[pyo3(signature = (*, per=None))]
-    fn decay_photon_spectrum(&self, per: Option<&str>) -> PyResult<(Vec<f64>, Vec<f64>)> {
+    ///     emission rates in ``units``.
+    #[pyo3(signature = (*, units="1/s"))]
+    fn decay_photon_spectrum(&self, units: &str) -> PyResult<(Vec<f64>, Vec<f64>)> {
         let volume = self
             .internal
-            .per_unit_scale(per, "decay_photon_spectrum")
+            .unit_scale("1/s", units, "decay_photon_spectrum")
             .map_err(PyValueError::new_err)?;
         let atom_densities = self
             .internal
@@ -1009,14 +1022,17 @@ impl PyMaterial {
     /// The part of a decay spectrum ENDF gives as a density over energy rather
     /// than as lines, which ``decay_photon_spectrum()`` does not include. Each
     /// continuum keeps its own energy grid and interpolation law, and its
-    /// rates are photons/s/eV (or per cm³ or per g, following ``per``), so
-    /// they are not line rates; ``emission_rate`` is the integral. A material
-    /// whose nuclides have no continuum returns an empty list.
+    /// rates are photons/s/eV (or per volume or per mass, following
+    /// ``units``), so they are not line rates; ``emission_rate`` is the
+    /// integral, in ``units`` times eV. A material whose nuclides have no
+    /// continuum returns an empty list.
     ///
     /// Args:
-    ///     per (str | None): None for the whole material, which needs a
-    ///         ``volume``, or ``'cm3'``, ``'m3'``, ``'g'`` or ``'kg'``, as for
-    ///         ``decay_photon_spectrum()``.
+    ///     units (str): The unit of the rates, a density per eV. A total,
+    ///         ``"1/(s eV)"`` (the default), needs ``volume``. Per volume,
+    ///         such as ``"1/(s eV cm3)"``, needs nothing. Per mass, such as
+    ///         ``"1/(s eV kg)"``, needs only ``density``. Energies are always
+    ///         eV, so the energy in ``units`` must be too.
     ///
     /// Returns:
     ///     list[PhotonContinuum]: The continua, each with its nuclide,
@@ -1025,14 +1041,14 @@ impl PyMaterial {
     /// Examples:
     ///     >>> for continuum in activated.decay_photon_continua():
     ///     ...     print(continuum.nuclide, continuum.emission_rate)
-    #[pyo3(signature = (*, per=None))]
+    #[pyo3(signature = (*, units="1/(s eV)"))]
     fn decay_photon_continua(
         &self,
-        per: Option<&str>,
+        units: &str,
     ) -> PyResult<Vec<super::photon_continuum::PyPhotonContinuum>> {
         let volume = self
             .internal
-            .per_unit_scale(per, "decay_photon_continua")
+            .unit_scale("1/(s eV)", units, "decay_photon_continua")
             .map_err(PyValueError::new_err)?;
         let atom_densities = self
             .internal
@@ -1086,10 +1102,14 @@ impl PyMaterial {
     ///         FISPACT-II manual suggests.
     ///     by_nuclide (bool): Return a ``dict[str, float]`` by nuclide instead
     ///         of the total. Nuclides that contribute nothing are left out.
+    ///     units (str | None): The unit of the dose rate. ``None`` (the
+    ///         default) gives Gy/h for ``'absorbed-air'`` and Sv/h for
+    ///         ``'effective'``; any rate of the same kind is accepted, such as
+    ///         ``"uGy/h"`` or ``"mGy/h"`` for the absorbed dose and
+    ///         ``"uSv/h"`` or ``"mSv/h"`` for the effective dose.
     ///
     /// Returns:
-    ///     float | dict[str, float]: Contact dose rate in Gy/h
-    ///     (``'absorbed-air'``) or Sv/h (``'effective'``).
+    ///     float | dict[str, float]: Contact dose rate in ``units``.
     ///
     /// Raises:
     ///     ValueError: If a nuclide in the material has a photon continuum
@@ -1109,13 +1129,16 @@ impl PyMaterial {
     ///     {'Co60': 380.088...}
     ///     >>> activated.contact_dose(dose_quantity='effective')
     ///     380.728...
-    #[pyo3(signature = (*, dose_quantity="absorbed-air", build_up=2.0, by_nuclide=false))]
+    ///     >>> activated.contact_dose(dose_quantity='effective', units='mSv/h')
+    ///     380728.0...
+    #[pyo3(signature = (*, dose_quantity="absorbed-air", build_up=2.0, by_nuclide=false, units=None))]
     fn contact_dose(
         &self,
         py: Python<'_>,
         dose_quantity: &str,
         build_up: f64,
         by_nuclide: bool,
+        units: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         let quantity = match dose_quantity {
             "absorbed-air" => yani_decay::DoseQuantity::AbsorbedAir,
@@ -1126,6 +1149,7 @@ impl PyMaterial {
                 )));
             }
         };
+        let factor = quantity.unit_factor(units).map_err(PyValueError::new_err)?;
         let atom_densities = self
             .internal
             .get_atoms_per_barn_cm()
@@ -1138,13 +1162,13 @@ impl PyMaterial {
                     .map_err(PyValueError::new_err)?;
             let breakdown = PyDict::new(py);
             for (nuclide, dose) in &doses {
-                breakdown.set_item(nuclide, dose)?;
+                breakdown.set_item(nuclide, dose * factor)?;
             }
             Ok(breakdown.into())
         } else {
             let total = yani_decay::contact_dose_total(&atom_densities, &chain, quantity, build_up)
                 .map_err(PyValueError::new_err)?;
-            Ok(total.into_pyobject(py)?.into_any().unbind())
+            Ok((total * factor).into_pyobject(py)?.into_any().unbind())
         }
     }
 

@@ -337,7 +337,7 @@ def test_clearance_index_uses_the_chain_half_lives():
     """The ratio comes from the same chain half-life activity() uses."""
     mat = Material.from_atom_densities(_ACTIVATED_IRON)
     result = mat.clearance_index("UK_EPR16_out_of_scope")
-    bq_per_g = mat.activity(per="g", by_nuclide=True)["Co60"]
+    bq_per_g = mat.activity(units="Bq/g", by_nuclide=True)["Co60"]
 
     assert result.limits_used["Co60"] == 0.1
     assert result.by_nuclide["Co60"] == pytest.approx(bq_per_g / 0.1, rel=1e-6)
