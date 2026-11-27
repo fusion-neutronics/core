@@ -802,3 +802,115 @@ fn totals_convert_to_the_units_the_python_api_takes() {
     ));
     assert!(yani_wasm::convert_units("Gy/h", "Sv/h").is_err());
 }
+
+/// Fetching as the solve goes reaches the answer fetching the whole closure
+/// gives: upload the material's own nuclide, run, upload what the screening
+/// asked for and was not given, and run again until it asks for nothing new.
+#[test]
+fn fetching_what_the_screening_asks_for_gives_the_whole_closure_answer() {
+    let _exclusive = exclusive();
+    if chain_fixture().is_none() || nuclide_fixture("Fe56").is_none() {
+        eprintln!("skipping: run scripts/fetch_test_fixtures.py first");
+        return;
+    }
+    let files = [
+        "version.json",
+        "nuclide.arrow",
+        "energy.arrow",
+        "reactions.arrow",
+    ];
+    let upload = |session: &YaniSession, nuclide: &str| -> bool {
+        let Some(dir) = nuclide_fixture(nuclide) else {
+            return false;
+        };
+        for file in files {
+            let path = dir.join(file);
+            if path.exists() {
+                session.add_nuclide_data(nuclide, file, std::fs::read(&path).unwrap());
+            }
+        }
+        true
+    };
+    let spectra = r#"[{"boundaries": [1e-5, 1e5, 1e6, 1.5e7], "values": [1e12, 1e13, 1e14]}]"#;
+    let year = 365.25 * 86400.0;
+    let schedule =
+        format!(r#"[{{"dt": {year}, "rate": 1.11e14, "spectrum": 0}}, {{"dt": 86400.0}}]"#);
+    let fresh = || {
+        let mut session = session_with_chain().expect("chain").0;
+        session
+            .build_material(r#"{"Fe56": 1.0}"#, 7.874, "g/cm3", "atom", 1000.0)
+            .unwrap();
+        session
+    };
+    let activities = |out: &str| -> Vec<f64> {
+        serde_json::from_str::<serde_json::Value>(out)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| step["activity"].as_f64().unwrap())
+            .collect()
+    };
+    let screening = |session: &YaniSession| -> serde_json::Value {
+        serde_json::from_str(&session.product_screening()).unwrap()
+    };
+
+    let mut session = fresh();
+    assert!(screening(&session).is_null(), "no screening before a run");
+    upload(&session, "Fe56");
+    let mut asked: std::collections::BTreeSet<String> = ["Fe56".to_string()].into();
+    let mut fetched_more = 0;
+    let stepwise = loop {
+        let out = session.run(spectra, &schedule).expect("runs");
+        let s = screening(&session);
+        assert!(
+            s["closure"].as_u64().unwrap() > 100,
+            "closure: {}",
+            s["closure"]
+        );
+        let next: Vec<String> = s["unavailable"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n.as_str().unwrap().to_string())
+            .filter(|n| asked.insert(n.clone()))
+            .collect();
+        if next.is_empty() {
+            break activities(&out);
+        }
+        for n in &next {
+            if upload(&session, n) {
+                fetched_more += 1;
+            }
+        }
+    };
+    assert!(
+        fetched_more > 0,
+        "a product with a fixture should have been asked for"
+    );
+    let requested = screening(&session)["requested"].as_array().unwrap().len();
+    assert!(
+        requested < 100,
+        "the screening asks for a few dozen nuclides, not the closure: {requested}"
+    );
+
+    // Every fixture up front, as a host fetching the closure would.
+    let session = fresh();
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../yamc/tests");
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let name = entry.unwrap().file_name().into_string().unwrap();
+        if let Some(nuclide) = name.strip_suffix(".arrow") {
+            if nuclide.chars().any(|c| c.is_ascii_digit()) && !nuclide.starts_with("transmutation")
+            {
+                upload(&session, nuclide);
+            }
+        }
+    }
+    let mut session = session;
+    let whole = activities(&session.run(spectra, &schedule).expect("runs"));
+    assert!(whole[0] > 0.0);
+    assert_eq!(
+        stepwise, whole,
+        "stepwise fetching must give the closure's answer exactly"
+    );
+}

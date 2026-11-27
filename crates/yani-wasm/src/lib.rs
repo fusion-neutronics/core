@@ -59,6 +59,8 @@ pub struct YaniSession {
     chain_sections: ChainSections,
     loaded: Option<LoadedChain>,
     material: Option<Material>,
+    /// The last run's product screening, until the material or chain changes.
+    screening: Option<yani_transmute::ProductScreening>,
 }
 
 impl Default for YaniSession {
@@ -84,6 +86,7 @@ impl YaniSession {
             chain_sections: ChainSections::default(),
             loaded: None,
             material: None,
+            screening: None,
         }
     }
 
@@ -116,6 +119,7 @@ impl YaniSession {
         let (chain, branch) =
             yani::parse_chain_parts_from_bytes(&self.chain_sections).map_err(|e| e.to_string())?;
         let n = chain.len();
+        self.screening = None;
         self.loaded = Some(LoadedChain {
             chain: Arc::new(chain),
             branch,
@@ -207,6 +211,20 @@ impl YaniSession {
         )
     }
 
+    /// The last run's product screening, as JSON, or `null` before a run.
+    ///
+    /// `requested` is every nuclide the solve asked cross sections for, and
+    /// `unavailable` those of them it was not given. So a host can fetch as the
+    /// solve goes rather than the whole closure up front: upload the material's
+    /// own nuclides, run, fetch `unavailable`, and run again until a run asks
+    /// for nothing it did not ask before. The last run then had every nuclide
+    /// it asked for, which is the run that uploading the whole closure gives.
+    /// `closure` is that closure's size.
+    #[wasm_bindgen(js_name = productScreening)]
+    pub fn product_screening(&self) -> String {
+        serde_json::to_string(&self.screening).unwrap_or_else(|_| "null".to_string())
+    }
+
     /// The MT numbers the loaded chain names, as a sorted JSON array.
     ///
     /// Every reaction a run will ask a cross section for, and nothing else. The
@@ -274,6 +292,7 @@ impl YaniSession {
         let mut material = yamc_materials::collections::pnnl::material(name)?;
         material.volume(Some(volume))?;
         self.material = Some(material);
+        self.screening = None;
         Ok(())
     }
 
@@ -338,6 +357,7 @@ impl YaniSession {
         let mut material = Material::new(nuclides, fraction_type, density_units, Some(density))?;
         material.volume(Some(volume))?;
         self.material = Some(material);
+        self.screening = None;
         Ok(())
     }
 
@@ -441,6 +461,7 @@ impl YaniSession {
         // One entry per schedule step: `results` also carries the initial
         // composition at index 0, which is not a step.
         let material_id = material.get_material_id().unwrap_or(0);
+        self.screening = results.product_screening.get(&material_id).cloned();
         let step_materials = results.step_materials(material_id);
         // Gas produced, in appm of the initial atoms, with the starting H and
         // He subtracted. Index 0 of each series is the initial composition, so
