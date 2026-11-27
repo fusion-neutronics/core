@@ -172,14 +172,16 @@ and seed. Missing references or references from another generator fail the tests
 Same-seed primary results use tight floating-point tolerances; comparisons between
 different estimators retain statistical tolerances.
 
-OpenMC validation belongs in
-[yamc-verification-and-validation](https://github.com/fusion-neutronics/yamc-verification-and-validation), whose
-`Core main against OpenMC` workflow builds core's `main` nightly. It compares
-neutron transport, coupled transport, D1S and like-for-like depletion, retaining
-the results and provenance as CI artifacts. Only that V&V comparison removes
-MT=5 to match OpenMC's depletion chain. A self-reference update must also be
-reviewed against this independent validation; updating the goldens alone does
-not establish correctness.
+Validation against an independent transport code belongs in
+[yamc-verification-and-validation](https://github.com/fusion-neutronics/yamc-verification-and-validation),
+and runs locally rather than in CI. Its release check (see
+[Before tagging a yamc release](#before-tagging-a-yamc-release)) covers every
+model there, and its `yamc_verify.core_validation` compares these same
+regression cases (neutron transport, coupled transport, D1S and like-for-like
+depletion) with fresh reference results. Only that V&V comparison removes MT=5,
+to match the reference code's depletion chain. A self-reference update must
+also be reviewed against this independent validation; updating the goldens
+alone does not establish correctness.
 
 Install test dependencies:
 ```bash
@@ -646,8 +648,11 @@ An invalid version fails the release before any wheel is built.
 The flow is therefore:
 
 1. Merge to `main`. No version bump is needed in the PR.
-2. Tag with the versions to release and publish the GitHub release.
-3. `.github/workflows/ci-python.yml` writes those versions into the
+2. For a yamc release, run the V&V release check on that commit (see
+   [Before tagging a yamc release](#before-tagging-a-yamc-release)) and review
+   what it flags.
+3. Tag with the versions to release and publish the GitHub release.
+4. `.github/workflows/ci-python.yml` writes those versions into the
    `pyproject.toml` files, builds the wheels and publishes to PyPI.
 
 Before anything is uploaded, the `verify-versions` job fails the release if the
@@ -657,6 +662,27 @@ tag names no project, or if a version is already on PyPI. A manual
 
 If a release changes the published data format (`SUPPORTED_FORMAT_VERSIONS`, or
 `crates/nuclear-data-schema/src/`), release both `yamc` and `yani`.
+
+### Before tagging a yamc release
+
+Run the release check of
+[yamc-verification-and-validation](https://github.com/fusion-neutronics/yamc-verification-and-validation)
+on the commit you mean to tag, from a checkout of that repository beside this
+one:
+
+```bash
+vv run --release-check yamc-cpu@<commit> yamc-gpu@<commit>
+```
+
+It builds yamc at that commit from this checkout (`../yamc-and-yani`, or
+`$YAMC_CORE_ROOT`), runs every model on ENDF/B-VIII.1 on every stable isotope,
+and lists every result that dropped a grading band, failed, or went missing
+against the last published V&V run, plus what improved. It is about 6,000 yamc
+results, which takes days rather than hours, so start it well before the
+release; it needs the nuclear data the V&V repository describes. The check only
+reports: review what it flags and decide whether to release. Once the release
+is out, publish a V&V run of it (`vv publish`), so the next release is checked
+against this one.
 
 ### The Pyodide wheels
 
