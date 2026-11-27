@@ -1775,7 +1775,7 @@ pub(crate) const WW_SPLIT_BUDGET_PER_HISTORY: usize = 10_000;
 
 /// Apply a mesh weight window to a post-collision particle: split it when
 /// its weight exceeds the local `upper` bound, roulette it when at or below
-/// `lower`, and kill it below `weight_floor`. Weight is conserved (a split
+/// `lower` or below `weight_floor`. Weight is conserved (a split
 /// makes N copies at `w/N`; roulette conserves in expectation), so tally
 /// means are unchanged. A particle outside the mesh/energy binning or in a
 /// sentinel voxel is left untouched.
@@ -1799,19 +1799,29 @@ pub(crate) fn apply_weight_window<T: Tracker>(
         return;
     };
     let w = particle.weight;
-    // Absolute weight floor: kill below it.
+    // Absolute weight floor: a roulette with the floor as the survival weight,
+    // so the weight is kept in expectation. Killing outright here used to bias
+    // low every tally such particles would have reached, whenever a floor
+    // reached into the windows.
     if w < ww.weight_floor {
-        particle_bank.record_ww_floor_kill(w);
-        tracker.record_termination(
-            particle.position,
-            particle.direction,
-            particle.energy,
-            w,
-            cell.cell_id,
-            TrackEventType::RussianRoulette,
-        );
-        particle.alive = false;
-        particle.weight = 0.0;
+        let xi: f64 = rng.random();
+        let survived = weight_cutoff_roulette(w, ww.weight_floor, xi);
+        particle_bank.record_ww_floor_roulette(survived.is_some());
+        match survived {
+            Some(surviving_weight) => particle.weight = surviving_weight,
+            None => {
+                tracker.record_termination(
+                    particle.position,
+                    particle.direction,
+                    particle.energy,
+                    w,
+                    cell.cell_id,
+                    TrackEventType::RussianRoulette,
+                );
+                particle.alive = false;
+                particle.weight = 0.0;
+            }
+        }
         return;
     }
     if w > upper {
@@ -3259,13 +3269,14 @@ mod tests {
             let mut p = Particle::new(position, [1.0, 0.0, 0.0], 1.0e6);
             p.weight = weight;
             apply_weight_window(&windows, &mut p, &cell, &mut rng, bank, &mut tracker);
+            p
         };
         let inside = [5.0, 5.0, 5.0];
         hit(20.0, inside, &mut bank); // 4 copies of 5: 3 split copies
         hit(100.0, inside, &mut bank); // needs 20, capped at max_split: 9 copies
         hit(3.0, inside, &mut bank); // in its window
         hit(0.5, inside, &mut bank); // below it: roulette
-        hit(0.001, inside, &mut bank); // below the floor: killed
+        let floored = hit(0.0099, inside, &mut bank); // below the floor: survives (p = 0.99)
         hit(3.0, [50.0, 5.0, 5.0], &mut bank); // outside the mesh: no window
         bank.finish_history(6);
         let c = bank.ww_counts();
@@ -3276,8 +3287,10 @@ mod tests {
         assert_eq!((c.split_events, c.split_copies), (2, 12));
         assert_eq!(c.splits_capped_at_max_split, 1);
         assert_eq!(c.roulette_kills + c.roulette_survivals, 1);
-        assert_eq!(c.weight_floor_kills, 1);
-        assert!((c.weight_floor_weight - 0.001).abs() < 1e-15);
+        assert_eq!(c.weight_floor_roulettes, 1);
+        assert_eq!(c.weight_floor_kills, 0);
+        assert!(floored.alive);
+        assert_eq!(floored.weight, 0.01); // the floor is the survivor weight
         assert_eq!(c.max_split_copies_per_history, 12);
         assert_eq!((c.histories_at_split_budget, c.splits_cut_short), (0, 0));
 

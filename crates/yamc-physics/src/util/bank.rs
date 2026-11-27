@@ -45,9 +45,9 @@ pub struct WeightWindowCounts {
     /// Roulette games lost and won.
     pub roulette_kills: u64,
     pub roulette_survivals: u64,
-    /// Particles killed below the weight floor, and the weight they carried.
+    /// Roulettes played below the weight floor, and the particles they killed.
+    pub weight_floor_roulettes: u64,
     pub weight_floor_kills: u64,
-    pub weight_floor_weight: f64,
 }
 
 impl WeightWindowCounts {
@@ -71,8 +71,8 @@ impl WeightWindowCounts {
         self.splits_cut_short += other.splits_cut_short;
         self.roulette_kills += other.roulette_kills;
         self.roulette_survivals += other.roulette_survivals;
+        self.weight_floor_roulettes += other.weight_floor_roulettes;
         self.weight_floor_kills += other.weight_floor_kills;
-        self.weight_floor_weight += other.weight_floor_weight;
     }
 }
 
@@ -192,13 +192,14 @@ impl ParticleBank {
         }
     }
 
-    /// Record a weight-window check that killed a particle of weight `weight`
-    /// below the weight floor.
+    /// Record a weight-window check that played roulette below the weight floor.
     #[inline]
-    pub fn record_ww_floor_kill(&mut self, weight: f64) {
+    pub fn record_ww_floor_roulette(&mut self, survived: bool) {
         self.ww_counts.checks += 1;
-        self.ww_counts.weight_floor_kills += 1;
-        self.ww_counts.weight_floor_weight += weight;
+        self.ww_counts.weight_floor_roulettes += 1;
+        if !survived {
+            self.ww_counts.weight_floor_kills += 1;
+        }
     }
 
     /// Record a weight-window check that left the particle alone.

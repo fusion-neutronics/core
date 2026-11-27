@@ -398,8 +398,8 @@ group, for each particle type. Windows are applied after each collision:
 Splitting stops for a history once it has made 10,000 extra particles, which
 caps the cost of a badly placed window without changing the expected result;
 the run reports how many histories reached that budget. A particle whose
-weight falls below `weight_floor` is killed without a roulette, which loses
-its weight, so the floor must sit below every window.
+weight falls below `weight_floor` plays a roulette with the floor as its
+survival weight, so the floor, like the windows, keeps the expected weight.
 
 ### Generating windows (DeGVR)
 

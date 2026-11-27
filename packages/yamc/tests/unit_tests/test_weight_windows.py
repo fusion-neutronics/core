@@ -276,13 +276,13 @@ def test_weight_window_stats():
     assert s["max_split_copies_per_history"] == s["split_budget"]
     assert s["split_copies"] >= s["split_events"] > 0
     assert s["particles"] >= s["histories"] + s["split_copies"]
-    assert s["weight_floor_kills"] == 0
+    assert s["weight_floor_roulettes"] == 0
     assert s["no_window"] == 0
 
-    # A floor above the deep windows kills particles there, which is counted.
+    # A floor above the deep windows plays roulette there, which is counted.
     s = run(ratio=5.0, weight_floor=1e-3)
-    assert s["weight_floor_kills"] > 0
-    assert s["weight_floor_weight"] > 0.0
+    assert s["weight_floor_roulettes"] > 0
+    assert 0 < s["weight_floor_kills"] <= s["weight_floor_roulettes"]
 
     # Energy bins above the 1 MeV source leave every collision without a window.
     s = run(ratio=5.0, energy_bins=[2e6, 2e7])
