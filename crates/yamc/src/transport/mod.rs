@@ -1771,7 +1771,7 @@ fn constituent_is_discrete_level(reaction: &Reaction) -> bool {
 /// dropped still-queued split particles and destroyed their weight, biasing
 /// DeGVR flux low), the budget never discards a particle -- the bank always
 /// drains -- it only limits how many extra copies deep penetration spawns.
-const WW_SPLIT_BUDGET_PER_HISTORY: usize = 10_000;
+pub(crate) const WW_SPLIT_BUDGET_PER_HISTORY: usize = 10_000;
 
 /// Apply a mesh weight window to a post-collision particle: split it when
 /// its weight exceeds the local `upper` bound, roulette it when at or below
@@ -1795,11 +1795,13 @@ pub(crate) fn apply_weight_window<T: Tracker>(
         return;
     };
     let Some((lower, upper)) = ww.window(particle.position, particle.energy) else {
+        particle_bank.record_ww_no_window();
         return;
     };
     let w = particle.weight;
     // Absolute weight floor: kill below it.
     if w < ww.weight_floor {
+        particle_bank.record_ww_floor_kill(w);
         tracker.record_termination(
             particle.position,
             particle.direction,
@@ -1821,7 +1823,8 @@ pub(crate) fn apply_weight_window<T: Tracker>(
         // budget only caps how far a deep, heavily-splitting history grows the
         // population. (A hard per-history particle cap that dropped queued split
         // particles used to destroy their weight and bias DeGVR flux low.)
-        let n_target = ((w / upper).ceil() as u64).clamp(1, ww.max_split as u64);
+        let needed = (w / upper).ceil();
+        let n_target = (needed as u64).clamp(1, ww.max_split as u64);
         let budget_left =
             WW_SPLIT_BUDGET_PER_HISTORY.saturating_sub(particle_bank.ww_splits()) as u64;
         let n = n_target.min(1 + budget_left); // total copies including the original
@@ -1833,15 +1836,22 @@ pub(crate) fn apply_weight_window<T: Tracker>(
                 child.weight = split_weight;
                 particle_bank.bank_secondary(child);
             }
-            particle_bank.record_ww_splits((n - 1) as usize);
         }
+        particle_bank.record_ww_split(
+            (n - 1) as usize,
+            (n_target - n) as usize,
+            needed > ww.max_split as f64,
+        );
     } else if w <= lower {
         // Roulette toward survival_factor * lower, clamped so a very
         // low-weight particle is boosted by at most max_split in one event.
         let survive_weight = (w * ww.max_split as f64).min(ww.survival_factor * lower);
         let xi: f64 = rng.random();
         match weight_cutoff_roulette(w, survive_weight, xi) {
-            Some(surviving_weight) => particle.weight = surviving_weight,
+            Some(surviving_weight) => {
+                particle.weight = surviving_weight;
+                particle_bank.record_ww_roulette(true);
+            }
             None => {
                 tracker.record_termination(
                     particle.position,
@@ -1853,10 +1863,13 @@ pub(crate) fn apply_weight_window<T: Tracker>(
                 );
                 particle.alive = false;
                 particle.weight = 0.0;
+                particle_bank.record_ww_roulette(false);
             }
         }
+    } else {
+        // lower < w <= upper: the particle is in its window.
+        particle_bank.record_ww_in_window();
     }
-    // else: lower < w <= upper -- the particle is in-window; nothing to do.
 }
 
 /// Process a real neutron collision in `cell` (material `material`) at the current
@@ -3218,5 +3231,81 @@ mod tests {
         if let Some(d) = exit {
             assert!(d < 1e-6, "exit distance {d} should be tiny");
         }
+    }
+
+    #[test]
+    fn apply_weight_window_counts_each_outcome() {
+        use crate::track::NoOpTracker;
+        use crate::variance_reduction::WeightWindowBounds;
+        use yamc_particle::ParticleType;
+        use yamc_tallies::mesh::RegularRectangularMesh;
+        // One voxel over [0, 10]^3 with the window [1, 5].
+        let ww = WeightWindowBounds {
+            mesh: RegularRectangularMesh::new([0.0; 3], [10.0; 3], [1, 1, 1]),
+            particle: ParticleType::Neutron,
+            energy_bins: None,
+            lower_bounds: vec![1.0],
+            upper_bounds: vec![5.0],
+            survival_factor: 3.0,
+            max_split: 10,
+            weight_floor: 0.01,
+        };
+        let windows = [&ww];
+        let cell = make_cell(1);
+        let mut rng = FastRng::new(7);
+        let mut tracker = NoOpTracker::new();
+        let mut bank = ParticleBank::new();
+        let mut hit = |weight: f64, position: [f64; 3], bank: &mut ParticleBank| {
+            let mut p = Particle::new(position, [1.0, 0.0, 0.0], 1.0e6);
+            p.weight = weight;
+            apply_weight_window(&windows, &mut p, &cell, &mut rng, bank, &mut tracker);
+        };
+        let inside = [5.0, 5.0, 5.0];
+        hit(20.0, inside, &mut bank); // 4 copies of 5: 3 split copies
+        hit(100.0, inside, &mut bank); // needs 20, capped at max_split: 9 copies
+        hit(3.0, inside, &mut bank); // in its window
+        hit(0.5, inside, &mut bank); // below it: roulette
+        hit(0.001, inside, &mut bank); // below the floor: killed
+        hit(3.0, [50.0, 5.0, 5.0], &mut bank); // outside the mesh: no window
+        bank.finish_history(6);
+        let c = bank.ww_counts();
+        assert_eq!(c.histories, 1);
+        assert_eq!(c.particles, 6);
+        assert_eq!(c.checks, 5);
+        assert_eq!(c.no_window, 1);
+        assert_eq!((c.split_events, c.split_copies), (2, 12));
+        assert_eq!(c.splits_capped_at_max_split, 1);
+        assert_eq!(c.roulette_kills + c.roulette_survivals, 1);
+        assert_eq!(c.weight_floor_kills, 1);
+        assert!((c.weight_floor_weight - 0.001).abs() < 1e-15);
+        assert_eq!(c.max_split_copies_per_history, 12);
+        assert_eq!((c.histories_at_split_budget, c.splits_cut_short), (0, 0));
+
+        // A history that runs into the split budget: 9 copies a split, so the
+        // split that would pass the budget makes the copies that fit and is
+        // refused the rest, and one more check after that makes no split.
+        bank.clear();
+        let splits = WW_SPLIT_BUDGET_PER_HISTORY / 9;
+        for _ in 0..splits + 2 {
+            hit(100.0, inside, &mut bank);
+        }
+        bank.finish_history(1);
+        let c = bank.ww_counts();
+        let made = WW_SPLIT_BUDGET_PER_HISTORY as u64;
+        let asked = 9 * (splits as u64 + 2);
+        assert_eq!(c.histories, 2);
+        assert_eq!(c.histories_at_split_budget, 1);
+        assert_eq!(c.splits_cut_short, asked - made);
+        assert_eq!(c.max_split_copies_per_history, made);
+        // The check after the budget ran out split nothing, so it is not
+        // counted as a split capped at max_split.
+        assert_eq!(c.split_events, splits as u64 + 3);
+        assert_eq!(c.splits_capped_at_max_split, splits as u64 + 2);
+
+        // Merging adds the counts and keeps the larger maxima.
+        let mut total = c;
+        total.merge(&c);
+        assert_eq!(total.histories, 4);
+        assert_eq!(total.max_split_copies_per_history, made);
     }
 }

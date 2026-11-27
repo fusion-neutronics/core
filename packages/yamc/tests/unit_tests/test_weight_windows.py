@@ -239,6 +239,58 @@ def test_degvr_auto_density_reduction():
     assert gen_ovr.density_reduction == 16.0
 
 
+@requires_data
+def test_weight_window_stats():
+    """A run with windows reports what they did; a run without reports None.
+
+    The windows fall tenfold per 5 cm voxel from 0.3 at the source, far below
+    what the flux does in aluminium, so a history that gets deep splits until
+    the per-history budget refuses copies.
+    """
+    mesh = yamc.RegularRectangularMesh(
+        lower_left=[-20, -20, 0], upper_right=[20, 20, 40], shape=[1, 1, 8]
+    )
+    mat = yamc.Material(composition={"Al27": 1.0}, density=2.7, temperature=294)
+    mat.read_nuclear_data({"Al27": str(AL27)})
+    cyl = yamc.Cylinder(axis="z", radius=20.0, boundary="vacuum")
+    z0 = yamc.Plane(axis="z", offset=0.0, boundary="vacuum")
+    z1 = yamc.Plane(axis="z", offset=40.0, boundary="vacuum")
+    cell = yamc.Cell(name="rod", region=cyl.below & z0.above & z1.below, material=mat)
+    geom = yamc.Geometry([cell])
+    src = yamc.NeutronSource(position=(0, 0, 0.5), energy=yamc.sources.Discrete([1.0e6], [1.0]))
+    tally = yamc.Tally(scores=["flux"], name="flux", mesh=mesh, particle="neutron")
+    lower = [0.3 * 0.1**i for i in range(8)]
+
+    def run(**ww):
+        windows = [yamc.WeightWindowBounds(mesh=mesh, lower_bounds=lower, **ww)] if ww else []
+        model = yamc.Model(geometry=geom, source=src, tallies=[tally], variance_reduction=windows)
+        return model.simulate_transport(total_particles=100, seed=1).weight_window_stats
+
+    assert run() is None
+
+    s = run(ratio=5.0)
+    assert s["histories"] == 100
+    assert s["split_budget"] == 10_000
+    assert s["histories_at_split_budget"] > 0
+    assert s["splits_cut_short"] > 0
+    assert s["max_split_copies_per_history"] == s["split_budget"]
+    assert s["split_copies"] >= s["split_events"] > 0
+    assert s["particles"] >= s["histories"] + s["split_copies"]
+    assert s["weight_floor_kills"] == 0
+    assert s["no_window"] == 0
+
+    # A floor above the deep windows kills particles there, which is counted.
+    s = run(ratio=5.0, weight_floor=1e-3)
+    assert s["weight_floor_kills"] > 0
+    assert s["weight_floor_weight"] > 0.0
+
+    # Energy bins above the 1 MeV source leave every collision without a window.
+    s = run(ratio=5.0, energy_bins=[2e6, 2e7])
+    assert s["checks"] == 0
+    assert s["no_window"] > 0
+    assert s["split_events"] == 0
+
+
 def _degvr_rod_model():
     """Small Al27 rod + a DeGVR generator, shared by the stop-condition tests."""
     mesh = yamc.RegularRectangularMesh(

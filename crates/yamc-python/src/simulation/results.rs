@@ -801,6 +801,9 @@ pub struct PyTransportResults {
     pub transport_secs: Option<f64>,
     pub particles_per_second: Option<u64>,
     pub total_particles: usize,
+    /// What the weight windows did in the run, or `None` when it had none and
+    /// for combined, reloaded or transmutation-step results.
+    pub weight_window_counts: Option<yamc_physics::util::bank::WeightWindowCounts>,
 }
 
 impl PyTransportResults {
@@ -988,6 +991,7 @@ impl PyTransportResults {
             transport_secs: self.transport_secs,
             particles_per_second: self.particles_per_second,
             total_particles: self.total_particles,
+            weight_window_counts: self.weight_window_counts,
         })
     }
 
@@ -1043,6 +1047,57 @@ impl PyTransportResults {
             return None;
         }
         Some((self.total_particles as f64 / secs) as u64)
+    }
+
+    /// What the weight windows did in this run, as a dict of counts, or
+    /// ``None`` when the run had no windows and for combined, reloaded or
+    /// transmutation-step results. Window counts cover collisions of the
+    /// particle types that have a window:
+    ///
+    /// - ``histories``, ``particles`` (sources, secondaries and split copies)
+    ///   and ``max_particles_per_history``.
+    /// - ``checks``: collisions at which a window was checked. ``no_window``:
+    ///   collisions outside the window mesh or energy bins, or in a voxel
+    ///   without a window, where the windows do nothing.
+    /// - ``split_events``, ``split_copies`` and
+    ///   ``max_split_copies_per_history``. ``splits_capped_at_max_split``:
+    ///   splits that needed more than ``max_split`` copies, which leave the
+    ///   copies above their window.
+    /// - ``split_budget``, ``histories_at_split_budget`` and
+    ///   ``splits_cut_short``: the per-history budget of split copies, the
+    ///   histories that reached it and the copies it refused. Tallies stay
+    ///   unbiased, but what those histories reach last gets fewer, heavier
+    ///   particles.
+    /// - ``roulette_kills`` and ``roulette_survivals``.
+    /// - ``weight_floor_kills`` and ``weight_floor_weight``: particles killed
+    ///   below ``weight_floor`` and the weight they carried, summed over the
+    ///   run. A kill at the floor is not a roulette, so any biases tallies low.
+    #[getter]
+    fn weight_window_stats<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(c) = self.weight_window_counts else {
+            return Ok(None);
+        };
+        let d = PyDict::new(py);
+        d.set_item("histories", c.histories)?;
+        d.set_item("particles", c.particles)?;
+        d.set_item("max_particles_per_history", c.max_particles_per_history)?;
+        d.set_item("checks", c.checks)?;
+        d.set_item("no_window", c.no_window)?;
+        d.set_item("split_events", c.split_events)?;
+        d.set_item("split_copies", c.split_copies)?;
+        d.set_item(
+            "max_split_copies_per_history",
+            c.max_split_copies_per_history,
+        )?;
+        d.set_item("splits_capped_at_max_split", c.splits_capped_at_max_split)?;
+        d.set_item("split_budget", c.split_budget)?;
+        d.set_item("histories_at_split_budget", c.histories_at_split_budget)?;
+        d.set_item("splits_cut_short", c.splits_cut_short)?;
+        d.set_item("roulette_kills", c.roulette_kills)?;
+        d.set_item("roulette_survivals", c.roulette_survivals)?;
+        d.set_item("weight_floor_kills", c.weight_floor_kills)?;
+        d.set_item("weight_floor_weight", c.weight_floor_weight)?;
+        Ok(Some(d))
     }
 
     /// Provenance of the run(s) behind these results: a list of dicts
@@ -1180,6 +1235,7 @@ impl PyTransportResults {
             transport_secs: None,
             particles_per_second: None,
             total_particles: 0,
+            weight_window_counts: None,
         })
     }
 
@@ -1382,6 +1438,7 @@ pub(crate) fn build_results(
         data_load_secs: model.last_data_load_secs,
         transport_secs: model.last_transport_secs,
         particles_per_second: model.last_particles_per_second,
+        weight_window_counts: model.last_weight_window_counts,
         ..PyTransportResults::from(inner)
     })
 }
@@ -1399,6 +1456,7 @@ impl From<TransportResults> for PyTransportResults {
             transport_secs: None,
             particles_per_second: None,
             total_particles,
+            weight_window_counts: None,
         }
     }
 }
@@ -1424,6 +1482,7 @@ pub(crate) fn combine_inner(
         transport_secs: None,
         particles_per_second: None,
         total_particles: 0,
+        weight_window_counts: None,
     })
 }
 

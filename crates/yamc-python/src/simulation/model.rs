@@ -388,6 +388,7 @@ impl PyModel {
             last_particles_per_second: None,
             last_data_load_secs: None,
             last_transport_secs: None,
+            last_weight_window_counts: None,
             lost_particles: Vec::new(),
             convergence_targets: Vec::new(),
         };
