@@ -704,6 +704,12 @@ class DoseResult:
     int) or 2-D (one row per selected step). `by_nuclide` maps each parent
     radionuclide to its mean contribution, in the same shape. `times` is the
     elapsed time (seconds) at the end of each selected step.
+    
+    The values are per bin, in ``units``: the tally's unit per source
+    particle times the pulses' source rate, so ``"cm/s"`` for a photon flux
+    tally and ``"pSv·cm²·cm/s"`` for one with dose coefficients. ``to()``
+    converts, dividing by each bin's volume for a per-volume unit:
+    ``dose.to("uSv/h")``.
     """
     @property
     def mean(self) -> typing.Any:
@@ -780,6 +786,29 @@ class DoseResult:
     def times(self) -> typing.Any:
         r"""
         Elapsed time (seconds) at the end of each selected step.
+        """
+    @property
+    def units(self) -> builtins.list[builtins.str]:
+        r"""
+        The unit of the values, one per score: the tally's unit per source
+        particle times the pulses' source rate (``"cm/s"`` for a photon
+        flux, ``"pSv·cm²·cm/s"`` with dose coefficients), until ``to()``
+        converts them.
+        """
+    def to(self, units: typing.Any) -> DoseResult:
+        r"""
+        This result in ``units``: one unit for every score, or a list with one
+        per score. A per-volume unit divides each bin by its volume, which a
+        mesh tally's bins have: ``dose.to("uSv/h")`` for a dose tally,
+        ``dose.to("1/(cm2 s)")`` for a photon flux. Every array (``mean``,
+        ``std_dev``, ``by_nuclide`` and the nuclear-data uncertainties) is
+        converted; ``times`` stays in seconds.
+        
+        Args:
+            units: The unit, e.g. ``"uSv/h"``, ``"mSv/h"``, ``"Sv/s"``.
+        
+        Returns:
+            DoseResult: A converted copy.
         """
     def __repr__(self) -> builtins.str: ...
 

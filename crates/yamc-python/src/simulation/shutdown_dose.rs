@@ -90,7 +90,9 @@ use crate::tally::PyTally;
 ///
 /// Returns:
 ///     ``{tally name: DoseResult}``, each with one row per schedule step:
-///     ``.mean`` / ``.std_dev`` / ``.by_nuclide`` / ``.times``.
+///     ``.mean`` / ``.std_dev`` / ``.by_nuclide`` / ``.times``, in
+///     ``.units`` (the tally's unit times the pulses' rate, per second);
+///     ``.to("uSv/h")`` converts a mesh dose tally to a dose rate.
 ///
 /// Examples:
 ///     >>> schedule = yamc.PulseSchedule([
@@ -100,7 +102,7 @@ use crate::tally::PyTally;
 ///     ... ])
 ///     >>> dose = yamc.simulate_shutdown_dose(schedule, tallies=[dose_tally],
 ///     ...                                    total_particles=100_000)
-///     >>> dose["dose"].mean[-1]
+///     >>> dose["dose"].to("uSv/h").mean[-1]
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (schedule, tallies, total_particles, seed=1, threads=None, method="d1s", mesh=None))]
@@ -147,7 +149,9 @@ pub fn simulate_shutdown_dose(
         }
         names.push(name);
     }
-    let tallies: Vec<Arc<yamc_tallies::Tally>> = tallies.iter().map(|t| t.inner.clone()).collect();
+    let py_tallies = tallies;
+    let tallies: Vec<Arc<yamc_tallies::Tally>> =
+        py_tallies.iter().map(|t| t.inner.clone()).collect();
 
     // Distinct models by identity, distinct (model, moves) as stages.
     let mut model_objs: Vec<Py<PyAny>> = Vec::new();
@@ -214,12 +218,25 @@ pub fn simulate_shutdown_dose(
             ),
         })
         .map_err(PyValueError::new_err)?;
+    // The pulses' rates are particles per second, so the dose is each tally's
+    // unit at a strength of one particle per second.
+    let per_second = yamc_tallies::SourceStrength::new(1.0, yamc_tallies::StrengthPer::Second)
+        .map_err(PyValueError::new_err)?;
     names
         .into_iter()
+        .zip(&py_tallies)
         .zip(dose.tallies)
-        .map(|(name, d)| {
-            PyDoseResult::from_rows(py, d.mean, d.std_dev, d.by_nuclide, dose.times.clone())
-                .map(|r| (name, r))
+        .map(|((name, tally), d)| {
+            PyDoseResult::from_rows(
+                py,
+                d.mean,
+                d.std_dev,
+                d.by_nuclide,
+                dose.times.clone(),
+                yamc_tallies::units::result_units(&tally.inner, Some(per_second)),
+                tally.mesh_element_volumes(),
+            )
+            .map(|r| (name, r))
         })
         .collect()
 }

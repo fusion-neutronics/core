@@ -7582,6 +7582,7 @@ dependencies = [
  "yamc-nuclide",
  "yamc-particle",
  "yamc-source",
+ "yamc-units",
  "yani",
  "yani-convert",
  "yani-decay",
