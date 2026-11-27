@@ -98,7 +98,7 @@ pub fn bin_relative_error_quantile(bins: &[WelfordBin], n_histories: u64, q: f64
         return f64::INFINITY;
     }
     let n = n_histories as f64;
-    let mut errors: Vec<f64> = bins
+    let errors: Vec<f64> = bins
         .iter()
         .filter(|w| w.n_touched > 0)
         .map(|w| {
@@ -113,6 +113,12 @@ pub fn bin_relative_error_quantile(bins: &[WelfordBin], n_histories: u64, q: f64
             }
         })
         .collect();
+    relative_error_quantile(errors, q)
+}
+
+/// Quantile `q` of the relative errors of the scored bins: the smallest error
+/// at least a fraction `q` of them reach. Infinite when no bin has scored.
+pub fn relative_error_quantile(mut errors: Vec<f64>, q: f64) -> f64 {
     if errors.is_empty() {
         return f64::INFINITY;
     }

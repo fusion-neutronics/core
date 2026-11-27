@@ -1088,30 +1088,10 @@ impl PyTransportResults {
     ///   run. A kill at the floor is not a roulette, so any biases tallies low.
     #[getter]
     fn weight_window_stats<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
-        let Some(c) = self.weight_window_counts else {
-            return Ok(None);
-        };
-        let d = PyDict::new(py);
-        d.set_item("histories", c.histories)?;
-        d.set_item("particles", c.particles)?;
-        d.set_item("max_particles_per_history", c.max_particles_per_history)?;
-        d.set_item("checks", c.checks)?;
-        d.set_item("no_window", c.no_window)?;
-        d.set_item("split_events", c.split_events)?;
-        d.set_item("split_copies", c.split_copies)?;
-        d.set_item(
-            "max_split_copies_per_history",
-            c.max_split_copies_per_history,
-        )?;
-        d.set_item("splits_capped_at_max_split", c.splits_capped_at_max_split)?;
-        d.set_item("split_budget", c.split_budget)?;
-        d.set_item("histories_at_split_budget", c.histories_at_split_budget)?;
-        d.set_item("splits_cut_short", c.splits_cut_short)?;
-        d.set_item("roulette_kills", c.roulette_kills)?;
-        d.set_item("roulette_survivals", c.roulette_survivals)?;
-        d.set_item("weight_floor_kills", c.weight_floor_kills)?;
-        d.set_item("weight_floor_weight", c.weight_floor_weight)?;
-        Ok(Some(d))
+        self.weight_window_counts
+            .as_ref()
+            .map(|c| weight_window_counts_dict(py, c))
+            .transpose()
     }
 
     /// Provenance of the run(s) behind these results: a list of dicts
@@ -1436,6 +1416,34 @@ pub(crate) fn data_releases_dict<'py>(
         out.set_item(keyword, d)?;
     }
     Ok(out)
+}
+
+/// The dict of ``weight_window_stats``, from a run's window counts.
+pub(crate) fn weight_window_counts_dict<'py>(
+    py: Python<'py>,
+    c: &yamc_physics::util::bank::WeightWindowCounts,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("histories", c.histories)?;
+    d.set_item("particles", c.particles)?;
+    d.set_item("max_particles_per_history", c.max_particles_per_history)?;
+    d.set_item("checks", c.checks)?;
+    d.set_item("no_window", c.no_window)?;
+    d.set_item("split_events", c.split_events)?;
+    d.set_item("split_copies", c.split_copies)?;
+    d.set_item(
+        "max_split_copies_per_history",
+        c.max_split_copies_per_history,
+    )?;
+    d.set_item("splits_capped_at_max_split", c.splits_capped_at_max_split)?;
+    d.set_item("split_budget", c.split_budget)?;
+    d.set_item("histories_at_split_budget", c.histories_at_split_budget)?;
+    d.set_item("splits_cut_short", c.splits_cut_short)?;
+    d.set_item("roulette_kills", c.roulette_kills)?;
+    d.set_item("roulette_survivals", c.roulette_survivals)?;
+    d.set_item("weight_floor_kills", c.weight_floor_kills)?;
+    d.set_item("weight_floor_weight", c.weight_floor_weight)?;
+    Ok(d)
 }
 
 pub(crate) fn build_results(

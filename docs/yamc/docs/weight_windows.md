@@ -134,6 +134,33 @@ let generation run to its convergence target: with ``max_runtime`` capping
 generation, a small ``N`` looks cheap only because its passes stop before they
 converge.
 
+### What generation did
+
+The windows ``generate_weight_windows`` returns carry a ``generation`` dict
+saying how they were made. Windows built by hand, and the copies
+``model.variance_reduction`` returns, give ``None``:
+
+<!-- doctest: skip -->
+```python
+g = windows.generation
+if g is not None:
+    print(g["density_reduction"], g["optical_depth"])  # N, and the tau behind an automatic N
+    for name in ("fiducial", "asymptotic"):
+        p = g[name]
+        print(name, p["n_histories"], p["stop_reason"], p["transport_time"], p["bin_relative_error"])
+```
+
+``optical_depth`` is ``None`` when ``density_reduction`` was given.
+``bin_relative_error`` is the relative error that 95% of this particle's
+scored window-mesh bins reached, the quantity ``relative_error`` stops a pass
+on. A pass that stopped on ``"total_particles"`` or ``"max_runtime"`` with
+``bin_relative_error`` above the target built the windows from a flux field
+that had not converged, and the voxels it had not reached get no window (a
+negative lower bound). ``n_histories`` and ``transport_time`` show which pass
+the generation time went to. Each pass also has ``weight_window_stats``, as on
+``TransportResults``: ``None`` for the fiducial pass, which runs without
+windows, and what the fiducial windows did for the asymptotic pass.
+
 ## Applying windows directly
 
 If you already have bounds (e.g. from a previous generation, via
