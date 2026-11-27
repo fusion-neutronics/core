@@ -3534,6 +3534,15 @@ class Model:
             ``variance_reduction=[ww]``; pass a returned list straight through as
             ``variance_reduction=windows``.
         """
+    def weight_window_warnings(self) -> builtins.list[builtins.str]:
+        r"""
+        Problems with the model's weight windows that show before any transport,
+        as the messages a run prints as warnings: windows that sit more than ten
+        times below or above the source weight where most source particles are
+        born, energy bins that miss most source particles, and a weight floor
+        above some lower bounds. An empty list when there is nothing to say;
+        ``ValueError`` when a run would refuse the model.
+        """
     def estimate_density_reduction(self, generator: WeightWindowGeneratorDeGVR) -> tuple[builtins.float, builtins.float]:
         r"""
         Estimate the auto DeGVR density-reduction factor N and the optical depth
