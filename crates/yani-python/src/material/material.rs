@@ -1292,14 +1292,24 @@ impl PyMaterial {
     #[cfg(feature = "transport")]
     /// Compute neutron mean free path at a given energy.
     ///
+    /// Loads the material's neutron data if it is not loaded yet.
+    ///
     /// Args:
     ///     energy (float): Neutron energy in eV.
     ///
     /// Returns:
-    ///     Optional[float]: Mean free path (cm) or None if total XS unavailable.
-    fn mean_free_path_neutron(&mut self, energy: f64) -> PyResult<Option<f64>> {
+    ///     float: Mean free path in cm.
+    ///
+    /// Raises:
+    ///     ValueError: If the loaded data has no total cross section.
+    fn mean_free_path_neutron(&mut self, energy: f64) -> PyResult<f64> {
         self.load_neutron_data()?;
-        Ok(self.internal.mean_free_path_neutron(energy))
+        self.internal.mean_free_path_neutron(energy).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(
+                "the material's neutron data has no total cross section (MT 1), \
+                 so it has no mean free path",
+            )
+        })
     }
 
     /// Sorted list of all unique MT reaction numbers present.
