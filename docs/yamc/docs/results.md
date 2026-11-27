@@ -13,6 +13,43 @@ print(result.standard_deviation)  # list of standard deviations
 print(result.relative_error)      # list of relative errors
 ```
 
+### Units
+
+Transport scores per source particle, so a raw result is in units such as
+``eV/source-particle`` (heating), ``cm/source-particle`` (flux, a track length)
+or ``particles/source-particle`` (a reaction or production count). ``result.units`` gives one string per score.
+Set a source strength to get rates, then convert to whatever unit you report
+in with ``to()``:
+
+<!-- doctest: skip -->
+```python
+result = results.with_source_strength(1e20)[tally]   # neutrons per second
+print(result.units)                  # e.g. ['eV/s', 'cm/s', 'particles/s']
+
+heating = result.to("W/m3")          # one unit for every score ...
+mixed = result.to(["W/cm3", "1/(cm2 s)", "reactions/(m3 s)"])  # ... or one per score
+print(heating.mean, heating.units)
+```
+
+A per-volume unit divides each bin by its volume: the mesh element, or the
+cell when the cell has a ``volume``. For a pulsed source use
+``with_source_strength(1e18, per="pulse")`` and units such as ``"J/pulse"``.
+
+| score | example units |
+| --- | --- |
+| heating | ``"W"``, ``"W/cm3"``, ``"W/m3"``, ``"MW/m3"``, ``"MeV/s"``, ``"J/pulse"`` |
+| flux | ``"1/(cm2 s)"``, ``"n/cm2/s"``, ``"1/(m2 s)"`` |
+| reactions (e.g. ``"H3-production"``) | ``"reactions/s"``, ``"reactions/(cm3 s)"``, ``"1/(m3 s)"`` |
+| dose (flux with dose coefficients) | ``"Sv/h"``, ``"uSv/h"``, ``"mSv/h"`` |
+
+Units take SI prefixes (``p n u m c k M G T``) on ``m``, ``s``, ``eV``,
+``J``, ``W``, ``Sv`` and ``Gy``, and time as ``s``, ``min``, ``h``, ``d``, and
+``a`` for a year (annum), so a dose rate is ``"uSv/h"`` or ``"mSv/a"``. A unit that does not match the score, or that needs a source strength
+the result does not have, raises a ``ValueError`` saying why.
+
+The converted result is what ``to_xarray()``, ``to_dataset()`` and
+``to_vtkhdf()`` export, each with its units recorded.
+
 ### Statistical reliability
 
 Every ``TallyResult`` also carries reliability statistics. They are computed automatically from a small per-history aggregate, so the runtime cost is negligible. Printing a result shows all of them: the mean ± std, the figure of merit, the higher-moment metrics, and a PASS/FAIL verdict:
@@ -290,31 +327,44 @@ print(
 
 ### VTK-HDF export and interactive 3D view
 
-Mesh tally results export to VTK-HDF with ``Tally.to_vtkhdf()``, called after ``model.simulate_transport()`` on a tally that has a ``mesh`` set. The file opens in [ParaView](https://www.paraview.org/) and, as shown below, can also be viewed in the browser.
+Mesh tally results export to VTK-HDF for [ParaView](https://www.paraview.org/) and, as shown below, can also be viewed in the browser. Export the result in the units you want (see [Units](#units)), and the values are written exactly as the result holds them, with each dataset's unit in its ``units`` attribute:
 
 <!-- doctest: skip -->
 ```python
-tally.to_vtkhdf("flux.vtkhdf")
+result = results.with_source_strength(1e20)[tally]
 
-# With options
-tally.to_vtkhdf(
-    "flux.vtkhdf",
-    scaling_factor=1.6e-19 * 1e21,  # eV to W conversion
-    volume_normalization=True,      # divide by voxel volume (default)
-    sum_energy=True,                # sum over energy bins (default)
+# Heating in W/m3 on a mesh in metres
+result.to("W/m3").to_vtkhdf("heating.vtkhdf", length_units="m")
+
+# Heating in W/cm3, flux in n/cm2/s and tritium production per cm3 per second,
+# on a mesh in cm (the default)
+result.to(["W/cm3", "1/(cm2 s)", "reactions/(cm3 s)"]).to_vtkhdf("results.vtkhdf")
+
+# Options
+result.to("W/m3").to_vtkhdf(
+    "heating.vtkhdf",
+    scores=["heating"],             # a subset of scores, by name or index
+    datasets=("mean", "relative_error"),
+    sum_energy=False,               # one array per energy bin
     sum_nuclides=True,              # sum over parent nuclide bins (default)
+    length_units="m",
 )
-
-# Per-energy-bin export
-tally.to_vtkhdf("flux_per_energy.vtkhdf", sum_energy=False)
 ```
 
-Coordinates are written in cm by default. ``length_units="m"`` (or ``"mm"``) writes them in metres instead, for engineering workflows, without rescaling the file afterwards. Only the coordinates change: the data arrays are the same, so volume-normalized values stay per cm³. Every ``to_vtkhdf`` (geometry, cells, regions, sources, models, tracks and CAD meshes) takes the same argument, so files written with the same unit overlay in ParaView.
+``length_units`` (``"cm"`` by default, ``"m"`` or ``"mm"``) sets only the coordinates and the unit string sets only the values, so pick them to agree: ``"W/m3"`` with ``"m"``, ``"W/cm3"`` with ``"cm"``. Every ``to_vtkhdf`` (geometry, cells, regions, sources, models, tracks and CAD meshes) takes the same ``length_units``, so files written with the same unit overlay in ParaView:
 
 <!-- doctest: skip -->
 ```python
-tally.to_vtkhdf("flux.vtkhdf", length_units="m")
 model.to_vtkhdf("model.vtkhdf", length_units="m")
+tracks.to_vtkhdf("tracks.vtkhdf", length_units="m")
+```
+
+``Tally.to_vtkhdf()`` writes the tally itself, per source particle and divided by the element volume in cm³ (``volume_normalization=True``), with a ``scaling_factor`` you work out yourself. It writes no ``units`` attribute, so prefer exporting the result:
+
+<!-- doctest: skip -->
+```python
+tally.to_vtkhdf("flux.vtkhdf")                          # per source particle per cm3
+tally.to_vtkhdf("heating.vtkhdf", scaling_factor=1e20 * 1.602e-19)  # W/cm3, by hand
 ```
 
 The viewer below is rendered live when these docs are built. It is a neutron radiograph: the word ``YAMC`` is built from boron-10 blocks (a strong thermal-neutron absorber), a thermal point source (orange marker) sits in front of them, and the letters cast a shadow onto a flux screen behind them. Both the flux tally and the geometry are written to VTK-HDF; the grey ``YAMC`` blocks are the geometry (read back from ``geometry.vtkhdf``), and the coloured panel is the flux screen (read back from ``flux.vtkhdf``), where the letters appear as dark shadows. Drag to rotate, scroll to zoom, right-drag to pan. The same files open in [ParaView](https://www.paraview.org/) for further analysis.

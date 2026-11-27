@@ -7,6 +7,9 @@ Region, NeutronSource/PhotonSource and Tracks objects.  Requires ``h5py``
 Usage::
 
     tally.to_vtkhdf("heating.vtkhdf", scaling_factor=1.6e-19 * 1e21)
+    results.with_source_strength(1e20)[tally].to("W/m3").to_vtkhdf(
+        "heating.vtkhdf", length_units="m"
+    )
     geometry.to_vtkhdf("geometry.vtkhdf", resolution=10000)
     model.to_vtkhdf("model.vtkhdf", samples=1000)  # geometry + source blocks
     model.to_vtkhdf("source.vtkhdf", include=["source"])
@@ -188,7 +191,97 @@ def mesh_tally_to_vtkhdf(
         length_units: Unit of the written mesh coordinates, ``"cm"``
             (default), ``"m"`` or ``"mm"``. Only the coordinates are scaled:
             volume-normalized values stay per cm³ whatever this is.
+
+    The values are per source particle. For physical units (``"W/m3"``,
+    ``"1/(cm2 s)"``, ...) write the result instead, with
+    :func:`tally_result_to_vtkhdf`.
     """
+    _write_mesh_tally(
+        filename,
+        tally,
+        tally.mean,
+        tally.standard_deviation,
+        units=None,
+        scores=scores,
+        datasets=datasets,
+        sum_energy=sum_energy,
+        sum_nuclides=sum_nuclides,
+        volume_normalization=volume_normalization,
+        scaling_factor=scaling_factor,
+        length_units=length_units,
+    )
+
+
+def tally_result_to_vtkhdf(
+    filename: str,
+    result: yamc.TallyResult,
+    *,
+    scores: Sequence[int | str] | None = None,
+    datasets: Sequence[str] = ("mean", "standard_deviation", "relative_error"),
+    sum_energy: bool = True,
+    sum_nuclides: bool = True,
+    length_units: str = "cm",
+) -> None:
+    """Write a mesh tally result, in its own units, to a VTK-HDF file.
+
+    The values are written exactly as ``result`` holds them, so the units are
+    whatever ``result.units`` says: set a source strength and convert first to
+    get physical units, e.g. ``"W/m3"``, ``"1/(cm2 s)"`` or
+    ``"reactions/(m3 s)"`` (``TallyResult.to`` divides by each element's
+    volume for a per-volume unit). Each mean and standard deviation dataset
+    carries a ``units`` attribute; relative errors carry ``"1"``.
+
+    Pair a per-m³ unit with ``length_units="m"`` so the coordinates and the
+    values agree; the two are independent.
+
+    Args:
+        filename: Output file path (recommended extension: ``.vtkhdf``).
+        result: A mesh tally's :class:`yamc.TallyResult`, e.g.
+            ``results.with_source_strength(1e20)[tally].to("W/m3")``.
+        scores: Which scores to include -- by name (str) or index (int).
+            Default ``None`` writes all scores.
+        datasets: Which statistics to write as CellData arrays.  Any
+            combination of ``"mean"``, ``"standard_deviation"``,
+            ``"relative_error"``.
+        sum_energy: If *True* (default), sum over energy bins.
+        sum_nuclides: If *True* (default), sum over parent nuclide bins.
+        length_units: Unit of the written mesh coordinates, ``"cm"``
+            (default), ``"m"`` or ``"mm"``.
+    """
+    _write_mesh_tally(
+        filename,
+        result.tally,
+        result.mean,
+        result.standard_deviation,
+        units=result.units,
+        scores=scores,
+        datasets=datasets,
+        sum_energy=sum_energy,
+        sum_nuclides=sum_nuclides,
+        volume_normalization=False,
+        scaling_factor=1.0,
+        length_units=length_units,
+    )
+
+
+def _write_mesh_tally(
+    filename,
+    tally,
+    mean,
+    standard_deviation,
+    *,
+    units,
+    scores,
+    datasets,
+    sum_energy,
+    sum_nuclides,
+    volume_normalization,
+    scaling_factor,
+    length_units,
+):
+    """Write ``mean``/``standard_deviation`` (flat, in ``tally``'s bin order)
+    on ``tally``'s mesh. ``units`` is one string per score, written as each
+    dataset's ``units`` attribute, or ``None`` to write none."""
     _h5py = _require_h5py()
     scale = _length_scale(length_units)
 
@@ -237,7 +330,7 @@ def mesh_tally_to_vtkhdf(
 
     # --- Fetch and reshape raw data to 4-D ----------------------------------
     # Flat layout: [score][parent][energy][mesh]  (mesh fastest)
-    raw_mean = np.array(tally.mean)
+    raw_mean = np.array(mean)
     expected_bins = n_scores * n_parent_bins * n_energy_bins * n_mesh_bins
     if raw_mean.size != expected_bins:
         raise ValueError(
@@ -249,7 +342,7 @@ def mesh_tally_to_vtkhdf(
     raw_mean = raw_mean.reshape(
         n_scores, n_parent_bins, n_energy_bins, n_mesh_bins
     )
-    raw_std = np.array(tally.standard_deviation).reshape(
+    raw_std = np.array(standard_deviation).reshape(
         n_scores, n_parent_bins, n_energy_bins, n_mesh_bins
     )
 
@@ -328,10 +421,11 @@ def mesh_tally_to_vtkhdf(
                     parts.append(e_label)
                 prefix = "_".join(parts)
 
-                # Energy bin boundaries as dataset attribute metadata
-                e_bounds = None
+                # Energy bin boundaries and units as dataset attribute metadata
+                attrs = {}
                 if e_idx is not None and energy_bin_edges is not None:
-                    e_bounds = (energy_bin_edges[e_idx], energy_bin_edges[e_idx + 1])
+                    attrs["energy_low_eV"] = energy_bin_edges[e_idx]
+                    attrs["energy_high_eV"] = energy_bin_edges[e_idx + 1]
 
                 for val in datasets:
                     if val == "mean":
@@ -343,11 +437,14 @@ def mesh_tally_to_vtkhdf(
                     else:
                         raise ValueError(f"Unknown value type '{val}'")
 
+                    ds_attrs = dict(attrs)
+                    if units is not None:
+                        ds_attrs["units"] = "1" if val == "relative_error" else units[si]
                     ds_name = f"{prefix}_{val}"
                     if not unstructured:
-                        cell_data[ds_name] = (arr.reshape(nz, ny, nx), e_bounds)
+                        cell_data[ds_name] = (arr.reshape(nz, ny, nx), ds_attrs)
                     else:
-                        cell_data[ds_name] = (arr, e_bounds)
+                        cell_data[ds_name] = (arr, ds_attrs)
 
     # --- Write HDF5 file ----------------------------------------------------
     with _h5py.File(filename, "w") as f:
@@ -362,11 +459,10 @@ def mesh_tally_to_vtkhdf(
             _write_unstructured_header(root, tally, _h5py, scale)
 
         cd = root.create_group("CellData")
-        for name, (data, e_bounds) in cell_data.items():
+        for name, (data, ds_attrs) in cell_data.items():
             ds = cd.create_dataset(name, data=data.astype("float64"))
-            if e_bounds is not None:
-                ds.attrs["energy_low_eV"] = e_bounds[0]
-                ds.attrs["energy_high_eV"] = e_bounds[1]
+            for key, value in ds_attrs.items():
+                ds.attrs[key] = value
 
 
 # ---------------------------------------------------------------------------
