@@ -26,13 +26,17 @@ use yamc::geo::{BoundaryType, HalfspaceType, Region, Surface, SurfaceKind};
 use yamc::geometry::cell::Cell;
 use yamc::geometry::Geometry;
 use yamc::model::{Model, TransportSettings, Verbose};
+use yamc::variance_reduction::{VarianceReduction, WeightWindowBounds};
 use yamc_materials::Material;
+use yamc_particle::ParticleType;
+use yamc_physics::util::bank::WeightWindowCounts;
 use yamc_source::distribution::angular::AngularDistribution;
 use yamc_source::distribution::energy::Discrete;
 use yamc_source::distribution::spatial::Point;
 use yamc_source::source::{
     ParticleSource, Source, SourceEnergyDistribution, SourceSpatialDistribution,
 };
+use yamc_tallies::mesh::RegularRectangularMesh;
 
 /// The issue's reproducer: bare U235 metal at 19.1 g/cm3, 14.06 MeV point
 /// source at the centre, vacuum boundary. The bare-sphere critical radius at
@@ -91,8 +95,35 @@ fn source() -> ParticleSource {
 /// Transport `n` histories through a bare sphere of radius `r`, returning the
 /// panic message if the run aborts.
 fn run(r: f64, n: usize) -> Result<(), String> {
+    run_windowed(r, n, None).map(|_| ())
+}
+
+/// One weight window over the whole sphere with lower bound `lower` (upper
+/// five times that): far below the source weight, every history splits until
+/// its copies reach the window.
+fn windows(r: f64, lower: f64) -> VarianceReduction {
+    VarianceReduction::WeightWindowBounds(Box::new(WeightWindowBounds {
+        mesh: RegularRectangularMesh::new([-r; 3], [r; 3], [1, 1, 1]),
+        particle: ParticleType::Neutron,
+        energy_bins: None,
+        lower_bounds: vec![lower],
+        upper_bounds: vec![5.0 * lower],
+        survival_factor: 3.0,
+        max_split: 10,
+        weight_floor: 1e-38,
+    }))
+}
+
+/// [`run`], with the sphere under splitting windows when `lower` is given,
+/// returning what the windows did.
+fn run_windowed(
+    r: f64,
+    n: usize,
+    lower: Option<f64>,
+) -> Result<Option<WeightWindowCounts>, String> {
     let mut model = Model::new(bare_sphere(r), vec![source()], vec![]);
     model.verbose = Verbose::silent();
+    model.variance_reduction = lower.map(|l| windows(r, l)).into_iter().collect();
     let settings = TransportSettings {
         total_particles: Some(n),
         seed: 1234,
@@ -113,7 +144,7 @@ fn run(r: f64, n: usize) -> Result<(), String> {
     std::panic::set_hook(hook);
 
     match outcome {
-        Ok(result) => result.map(|_| ()),
+        Ok(result) => result.map(|_| model.last_weight_window_counts),
         Err(payload) => Err(payload
             .downcast_ref::<String>()
             .cloned()
@@ -206,4 +237,54 @@ fn a_just_subcritical_sphere_runs_untouched() {
         return;
     }
     run(8.0, 20_000).expect("a just-subcritical sphere must transport normally");
+}
+
+/// Splitting windows must not make a subcritical sphere look critical (#36).
+/// Each split copy starts a fission chain of its own, so a history of the 8 cm
+/// sphere under windows far below the source weight leads tens of thousands of
+/// particles. A fixed ceiling of 50,000 per history refused it as "at or above
+/// critical"; the ceiling is per lineage now.
+#[test]
+fn a_just_subcritical_sphere_under_splitting_windows_runs() {
+    if !data_present() {
+        return;
+    }
+    // About 7,000 split copies a history. One history is enough, as long as it
+    // leads more particles than the fixed ceiling allowed.
+    let c = run_windowed(8.0, 1, Some(6.7e-5))
+        .expect("splitting windows must not refuse a subcritical sphere")
+        .expect("a windowed run reports its counts");
+    assert!(
+        c.max_particles_per_history > 50_000,
+        "the fixed ceiling would not have fired: {c:?}"
+    );
+    // Windows so low that the history exhausts its split budget.
+    let c = run_windowed(8.0, 1, Some(1e-7))
+        .expect("a spent split budget must not refuse a subcritical sphere")
+        .expect("a windowed run reports its counts");
+    assert!(
+        c.histories_at_split_budget == 1,
+        "the split budget should be spent: {c:?}"
+    );
+}
+
+/// The per-lineage ceiling must not let a supercritical sphere through: under
+/// the same splitting windows the 10 cm sphere is still refused, promptly.
+#[test]
+fn a_barely_supercritical_sphere_under_splitting_windows_is_refused() {
+    if !data_present() {
+        return;
+    }
+    let start = std::time::Instant::now();
+    let err = run_windowed(10.0, 300, Some(6.7e-5))
+        .expect_err("a 10 cm bare U235 sphere must be refused under windows too");
+    assert!(
+        err.contains("fixed-source"),
+        "the message must diagnose the multiplying chain, got: {err}"
+    );
+    assert!(
+        start.elapsed().as_secs() < 60,
+        "the runaway must be caught promptly, took {:?}",
+        start.elapsed()
+    );
 }
