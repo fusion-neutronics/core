@@ -1,7 +1,7 @@
 //! Closest point on triangle -- 7-region algorithm from Geometric Tools.
 //!
 //! Reference: "Distance Between Point and Triangle in 3D" by David Eberly.
-//! https://www.geometrictools.com/Documentation/DistancePoint3Triangle3.pdf
+//! <https://www.geometrictools.com/Documentation/DistancePoint3Triangle3.pdf>
 
 use crate::query::intersect::{add, dot, length, scale, sub};
 

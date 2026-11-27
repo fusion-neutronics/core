@@ -18,9 +18,10 @@ use crate::ReactionRates;
 /// ```
 ///
 /// The drivers own the spectrum and compute `c_k` by summing the
-/// interpolation weights of [`FissionYieldSet::interp_weights`] over the
-/// fission-rate distribution `R_g = sigma_f,g * phi_g`, normalized so the
-/// coefficients sum to one. That is the exact commuted form of folding the
+/// interpolation weights of
+/// [`FissionYieldSet::interp_weights`](crate::chain::FissionYieldSet::interp_weights)
+/// over the fission-rate distribution `R_g = sigma_f,g * phi_g`, normalized so
+/// the coefficients sum to one. That is the exact commuted form of folding the
 /// yield vectors group by group, since either law the yields are tabulated
 /// with (histogram or linear-linear) is linear in the yields and so commutes
 /// with the sum, and it costs `n_groups + 4 * n_products` instead of
@@ -43,7 +44,7 @@ pub type EdgeRates = HashMap<String, HashMap<String, Vec<(Option<String>, f64)>>
 /// Split each nuclide's reaction rate over the edges it drives.
 ///
 /// The rate a matrix entry carries is `rx.branching * rates[parent][kind]`
-/// (see the reaction branch of [`accumulate_matrix`]), so that product is what
+/// (see the reaction branch of `accumulate_matrix`), so that product is what
 /// this returns, per `(parent, kind, target)`. It is the quantity the solve
 /// computed and then discarded: the burnup matrix keeps the sum over edges into
 /// each product, and nothing kept the edges.

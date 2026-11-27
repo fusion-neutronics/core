@@ -697,7 +697,7 @@ pub(crate) fn fraction_above(multigroup_flux: &[f64], group_boundaries: &[f64], 
 /// reaches: `(nuclide, top energy [eV], fraction of the flux)`, for the
 /// nuclides where that fraction is not zero, in name order.
 ///
-/// No cross section exists there and [`walk_group`] folds it as zero, which is
+/// No cross section exists there and `walk_group` folds it as zero, which is
 /// the honest value for one group's tail but misstates every rate once a
 /// material part of the spectrum is involved. TENDL evaluations end at 200
 /// MeV and ENDF/B's at 20 MeV, and CCFE-709 runs to 1 GeV, so a spectrum with
@@ -795,7 +795,7 @@ pub fn weight_sensitivity(
 ///
 /// This says which reactions are in the second case, so a caller can tell the
 /// difference between a converged rate and one that rests on the weight. It
-/// costs nothing extra: [`walk_group`] accumulates both averages on the same
+/// costs nothing extra: `walk_group` accumulates both averages on the same
 /// point set already, so this is the same walk the rates themselves do.
 ///
 /// Measured on the CoNDERC JAEA-FNS fields, the split is sharp and follows the
@@ -1751,7 +1751,7 @@ fn fy_set_for(chain_nuclide: &ChainNuclide) -> Option<&FissionYieldSet> {
 /// the groups gives the rate
 /// [`compute_multigroup_reaction_rates_shielded`] reports for the same
 /// channel, and each entry is that group's share of it. Both come from
-/// [`Collapse::walk_channel`], self-shielding included, so the two cannot
+/// `Collapse::walk_channel`, self-shielding included, so the two cannot
 /// disagree about what `sigma_g` means; they agree to floating-point rounding
 /// rather than bit-exactly, because the collapse divides the sum by the total
 /// flux and multiplies it back.
@@ -1897,7 +1897,7 @@ pub(crate) fn per_group_damage_energy_rates(
 ///
 /// `out[nuclide][kind][g]` is that group's share of the rate, so the nominal
 /// rate is the sum over `g`. Every group average comes from
-/// [`Collapse::walk_channel`], the same walk
+/// `Collapse::walk_channel`, the same walk
 /// [`compute_multigroup_reaction_rates_shielded`] collapses with and under the
 /// same `shielding`, so the terms sum to the rate that run produced rather than
 /// to a differently weighted one.

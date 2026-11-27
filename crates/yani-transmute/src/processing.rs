@@ -204,7 +204,7 @@ impl Processing {
     /// `rate`, into `destination` when given.
     ///
     /// `rate_units` is `"1/s"` (any duration unit after the slash), or
-    /// `"half-time"` for a rate given as the time [s] to remove half of it.
+    /// `"half-time"` for a rate given as the time \[s\] to remove half of it.
     pub fn add_transfer(
         &mut self,
         source: u32,

@@ -73,7 +73,7 @@ pub const MAX_EVAP_COMPONENTS: usize = 4;
 /// exotic case. 2 covers every multi-law correlated product in endf-b8.1.
 ///
 /// Owned here rather than in yamc-gpu's layout constants:
-/// [`CorrSlot::from_components`] is the code that enforces the cap, and
+/// `CorrSlot::from_components` is the code that enforces the cap, and
 /// yamc-physics cannot depend on yamc-gpu. yamc-gpu re-exports it.
 pub const MAX_CORR_COMPONENTS: usize = 4;
 
@@ -280,7 +280,7 @@ impl EoutSlot {
     /// product; photon products live in `reaction.products` filtered by
     /// `ParticleType::Photon`, so S3 calls this with the photon product's
     /// already-destructured `(energy, energy_out, histogram_interp)`.
-    /// Delegates to [`Self::from_continuous_tabular`] so the byte layout,
+    /// Delegates to `Self::from_continuous_tabular` so the byte layout,
     /// normalisation, subsampling, and `n_discrete` conversion are
     /// identical to the neutron eout buffers -- the resulting buffers feed
     /// `sample_continuous_tabular_eout` byte-compatibly.

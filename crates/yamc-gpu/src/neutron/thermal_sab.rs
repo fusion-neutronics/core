@@ -1,18 +1,22 @@
 //! The kernel's bound thermal scattering sampler: `#[cube]` twins of
 //! `yamc_physics::gpu::flat::thermal_sab` reading the flat layout of
-//! [`super::thermal_inputs::ThermalInputs`], with the draw schedule of the
-//! CPU's `sample_bound`. See [`super::thermal_inputs`] for the layout and the
-//! schedule, and [`super::thermal_inputs::sample_bound_cpu`] for the CPU twin.
+//! [`ThermalInputs`], with the draw schedule of the CPU's `sample_bound`. See
+//! [`thermal_inputs`] for the layout and the schedule, and
+//! [`sample_bound_cpu`] for the CPU twin.
 //!
 //! `exp`, `ln` and `expm1` go through the f64 polyfills, as everywhere in
 //! the kernels.
+//!
+//! [`ThermalInputs`]: crate::neutron::thermal_inputs::ThermalInputs
+//! [`thermal_inputs`]: crate::neutron::thermal_inputs
+//! [`sample_bound_cpu`]: crate::neutron::thermal_inputs::sample_bound_cpu
 
 use super::thermal_inputs::{
     SAB_ELASTIC_COHERENT, SAB_ELASTIC_INCOHERENT, SAB_ELASTIC_MIXED, SAB_NONE,
 };
 use cubecl::prelude::*;
 
-/// The result of [`sample_bound`]: `bound == 1` when the table scattered the
+/// The result of [`sample_bound()`]: `bound == 1` when the table scattered the
 /// neutron, with its outgoing energy and lab cosine; `bound == 0` when the
 /// slab is free, the energy is at or above energy_max, or the free share of
 /// a partly bound nuclide was drawn (the caller then scatters it as a free

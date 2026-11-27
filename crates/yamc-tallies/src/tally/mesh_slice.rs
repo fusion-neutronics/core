@@ -3,7 +3,7 @@ use super::*;
 impl Tally {
     /// Extract a 2D slice of mesh tally data for a given basis plane.
     ///
-    /// Returns a 2D grid where values_2d[row][col] contains the tally value
+    /// Returns a 2D grid where `values_2d[row][col]` contains the tally value
     /// at that voxel in the slice.
     ///
     /// Basis planes:

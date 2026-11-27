@@ -612,7 +612,7 @@ impl Material {
     /// Populate per-nuclide macroscopic cross sections for all MTs in the current cache.
     ///
     /// After `calculate_macroscopic_xs` has been called, this method builds
-    /// `macroscopic_xs_neutron_by_nuclide`: nuclide → (MT → Vec<f64>) using the
+    /// `macroscopic_xs_neutron_by_nuclide`: nuclide → (MT → `Vec<f64>`) using the
     /// same microscopic XS cache and atom densities.
     ///
     /// Called by the model when any tally has `nuclides` set.

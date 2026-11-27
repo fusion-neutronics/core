@@ -88,7 +88,7 @@ impl WeightWindowCounts {
 /// Every banked particle carries the 32-bit seed of its OWN collision stream,
 /// derived at BANK time from `(the seed of the walk that banked it, its ordinal
 /// among that walk's secondaries)` via
-/// [`secondary_seed`](yamc_rng::secondary_seed). The transport loop
+/// [`secondary_seed`]. The transport loop
 /// re-seeds its PCG from that value when the particle is popped, instead of
 /// letting the secondary continue whatever state the parent happened to leave
 /// behind. What a secondary samples is therefore a function of its position in

@@ -36,7 +36,7 @@ pub trait TransmutationStepper: Send + Sync {
     ///   nuclide with yields and a non-zero fission rate.
     /// * `parts` - Which optional subsections `chain` was built from, so a rate
     ///   needing one that was left out is refused rather than solved without it
-    /// * `dt` - Timestep duration [s]
+    /// * `dt` - Timestep duration \[s\]
     ///
     /// # Returns
     /// New material with updated composition (in sum mode)

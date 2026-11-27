@@ -39,7 +39,7 @@
 //! [`yani::reactions::ANYTHING`]), are a complete MF=9-like list: shares of the
 //! MT=5 total of the transport library, `y_r(E) / sum_r' y_r'(E) * sigma_5(E)`,
 //! with the isomeric state of each residual its own curve, from MF=6's LIP.
-//! Its light particles are a list of their own ([`ListRule::particles`]),
+//! Its light particles are a list of their own (`ListRule::particles`),
 //! each `m_p(E) * sigma_5(E)`, a multiplicity rather than a share. Both are
 //! folded in the walk that collapses MT=5, so a residual's share, a particle's
 //! multiplicity and the total see one spectrum under one weight. A
@@ -48,9 +48,9 @@
 //! "multiplicities" up to 1e9 where MT=5 vanishes. Because every MT=5
 //! evaluation sits in the network of every irradiation, what MT=5 clips or
 //! holds is refused by its share of the material's removal rather than of
-//! one parent's ([`refuse_clipped_or_held`]), as every list's is. Where the chain does not
+//! one parent's (`refuse_clipped_or_held`), as every list's is. Where the chain does not
 //! model MT=5's residuals at all, the rate is reported, and a warning above the
-//! tolerance is returned by [`unmodelled_mt5_warning`]; the solve continues.
+//! tolerance is returned by `unmodelled_mt5_warning`; the solve continues.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -61,8 +61,8 @@ use yani::{BranchCurve, BranchQuantity};
 /// Material-weighted removal-share threshold for branching diagnostics.
 ///
 /// Clipped impossible production and held fractions outside a list's range
-/// still refuse a solve above this threshold ([`refuse_clipped_or_held`]).
-/// Missing MT=5 residuals only warn ([`unmodelled_mt5_warning`]); the solve
+/// still refuse a solve above this threshold (`refuse_clipped_or_held`).
+/// Missing MT=5 residuals only warn (`unmodelled_mt5_warning`); the solve
 /// continues with the missing production reported, not fabricated.
 ///
 /// Every parent's contribution is weighted by its material density. This
@@ -898,7 +898,7 @@ pub struct UnmodelledRate {
     /// library has no MT=5 products for), or it carries one whose evaluation
     /// gives light particles and no residual.
     pub reason: String,
-    /// Whether [`unmodelled_mt5_warning`] includes it in the warning. False only on a
+    /// Whether `unmodelled_mt5_warning` includes it in the warning. False only on a
     /// reactions subsection that carries no `(n,X)` at all, one written
     /// before MT=5 was carried, which is reported as it always was until the
     /// library is re-converted: refusing there would stop every published

@@ -24,7 +24,7 @@ use crate::common::pcg32::expand_seed;
 use crate::neutron::xs::constants::ANGLE_INTERP_LINLIN;
 use cubecl::prelude::*;
 
-/// Result of [`sample_continuous_tabular_eout`]: the sampled outgoing energy
+/// Result of [`sample_continuous_tabular_eout()`]: the sampled outgoing energy
 /// (the single tabulated point when the chosen bin has exactly 1 point, or the
 /// passed-in `e_default` when it has 0 points) and the advanced 64-bit PCG state.
 #[derive(CubeType)]

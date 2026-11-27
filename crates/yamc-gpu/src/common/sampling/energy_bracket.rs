@@ -23,7 +23,7 @@ use crate::common::pcg32::{expand_seed, pcg_out};
 use crate::common::rng::{PCG_INCR, PCG_MULT};
 use cubecl::prelude::*;
 
-/// Result of [`pick_energy_bracket`]: the chosen grid index (`i` or `i + 1`)
+/// Result of [`pick_energy_bracket()`]: the chosen grid index (`i` or `i + 1`)
 /// and the advanced PCG-32 state.
 #[derive(CubeType)]
 pub struct BracketPick {
@@ -48,7 +48,7 @@ pub fn pick_energy_bracket(r: f64, i: u32, n: u32, state_in: u64) -> BracketPick
     }
 }
 
-/// CPU twin of [`pick_energy_bracket`] (wrapping 64-bit PCG arithmetic). Returns
+/// CPU twin of [`pick_energy_bracket()`] (wrapping 64-bit PCG arithmetic). Returns
 /// `(bin, state)`. Bit-for-bit identical to the `#[cube]` form (integer PCG
 /// plus one f64 compare; no transcendentals).
 pub fn pick_energy_bracket_cpu(r: f64, i: u32, n: u32, state_in: u64) -> (u32, u64) {

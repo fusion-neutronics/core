@@ -117,7 +117,7 @@ fn emits_photons(nuc: &ChainNuclide) -> bool {
 ///
 /// `root` must be an unstable nuclide present in `chain`; otherwise an empty
 /// `Vec` is returned. Cyclic / re-visited nuclides are skipped, and depth is
-/// capped at [`MAX_CHAIN_DEPTH`].
+/// capped at `MAX_CHAIN_DEPTH`.
 pub fn descendant_paths(chain: &HashMap<String, ChainNuclide>, root: &str) -> Vec<DecayChainPath> {
     let mut out = Vec::new();
     let root_nuc = match chain.get(root) {

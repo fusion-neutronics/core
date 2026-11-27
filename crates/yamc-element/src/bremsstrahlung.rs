@@ -378,7 +378,7 @@ fn collision_stopping_power(
 /// # Arguments
 /// * `ttb_e_grid` - Electron energy grid in LINEAR space (eV).
 /// * `ttb_k_grid` - Reduced photon energy grid (k = E_photon / E_electron).
-/// * `element_data` - Per-element: (atom_density, Z, &dcs[n_e][n_k], &stopping_power_radiative[n_e], &n_electrons, &ionization_energy, mean_excitation_energy)
+/// * `element_data` - Per-element: `(atom_density, Z, &dcs[n_e][n_k], &stopping_power_radiative[n_e], &n_electrons, &ionization_energy, mean_excitation_energy)`
 /// * `nuclide_awrs` - AWR for each element/nuclide pair
 #[allow(clippy::type_complexity)]
 pub fn init_bremsstrahlung(

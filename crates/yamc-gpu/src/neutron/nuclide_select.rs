@@ -25,6 +25,8 @@
 //! production neutron kernel + the descriptor-budget probe (P4). The
 //! single-nuclide RNG-draw fast path (production skips the draw) is also a
 //! P4 RNG-stream-alignment concern; here both backends always draw.
+//!
+//! [`select_nuclide_cpu`]: crate::neutron::nuclide_select::select_nuclide_cpu
 
 use crate::common::pcg32::{expand_seed, pcg_out};
 use crate::GpuContext;

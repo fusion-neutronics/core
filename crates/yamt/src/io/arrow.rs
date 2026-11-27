@@ -3,13 +3,13 @@
 //! The Arrow IPC file holds one record batch of one row. Each column is a whole
 //! table, stored as a list of its rows, so the tables keep their own lengths and
 //! no column is padded:
-//! - "vertices": List<FixedSizeList<3, Float64>>
-//! - "triangles": List<FixedSizeList<3, UInt32>>, with "triangle_surface_ids"
-//!   (List<UInt32>, 1-based) and "triangle_physical_groups" (List<Int32>)
-//! - "tetrahedra": List<FixedSizeList<4, UInt32>>, with "tet_volume_ids"
-//!   (List<UInt32>), "tet_physical_groups" (List<Int32>) and "tet_adjacency"
-//!   (List<FixedSizeList<4, Int32>>, -1 for a face on no other tet); empty for
-//!   a surface-only mesh
+//! - "vertices": `List<FixedSizeList<3, Float64>>`
+//! - "triangles": `List<FixedSizeList<3, UInt32>>`, with "triangle_surface_ids"
+//!   (`List<UInt32>`, 1-based) and "triangle_physical_groups" (`List<Int32>`)
+//! - "tetrahedra": `List<FixedSizeList<4, UInt32>>`, with "tet_volume_ids"
+//!   (`List<UInt32>`), "tet_physical_groups" (`List<Int32>`) and
+//!   "tet_adjacency" (`List<FixedSizeList<4, Int32>>`, -1 for a face on no
+//!   other tet); empty for a surface-only mesh
 //!
 //! Bounding boxes are not stored: the reader computes them from the vertices.
 //!
