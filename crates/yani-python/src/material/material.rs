@@ -1346,7 +1346,8 @@ impl PyMaterial {
     ///         there is just one, else 294 K.
     ///
     /// Returns:
-    ///     Tuple[List[float], List[float]]: (cross_section_values, energy_grid)
+    ///     Tuple[List[float], List[float]]: (cross_section_values, energy_grid):
+    ///     the macroscopic cross section in 1/cm, on the energy grid in eV.
     #[pyo3(text_signature = "(self, reaction, temperature=None)")]
     #[pyo3(signature = (reaction, temperature=None))]
     fn macroscopic_cross_section(

@@ -385,6 +385,9 @@ impl YaniSession {
     /// `schedule_json` is an array of `{"dt": seconds, "rate": n/cm^2/s,
     /// "spectrum": index}`, where a step with no `spectrum` is decay-only.
     ///
+    /// Each entry carries a `units` object naming the unit of every quantity
+    /// in it (`activity` in Bq, `decay_heat` in W, `contact_dose` in Gy/h, ...).
+    ///
     /// Returns one entry per step: cumulative time, total activity, decay heat
     /// and contact dose rate, each also broken down by nuclide, the atom
     /// densities, the decay photon line spectrum, and the photon continua
@@ -494,6 +497,20 @@ impl YaniSession {
                 "contact_dose": yani_decay::total(&contact_dose),
                 "contact_dose_by_nuclide": contact_dose,
                 "gas_production_appm": gas_production,
+                // What every number above is in, so a reader need not assume.
+                // `totalToUnits` and `convertUnits` convert from these.
+                "units": {
+                    "time": "s",
+                    "activity": "Bq",
+                    "decay_heat": "W",
+                    "contact_dose": yani_decay::DoseQuantity::AbsorbedAir.units(),
+                    "photon_energy": "eV",
+                    "photon_intensity": "1/s",
+                    "photon_continua_rates": "1/(s eV)",
+                    "photon_continua_emission_rate": "1/s",
+                    "gas_production": "appm",
+                    "atoms_per_barn_cm": "atoms/(barn cm)",
+                },
             }));
         }
         Ok(serde_json::Value::Array(out).to_string())

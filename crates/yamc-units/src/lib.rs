@@ -509,6 +509,23 @@ mod tests {
     }
 
     #[test]
+    fn dose_rates_in_the_units_people_quote() {
+        let year = 365.25 * 24.0;
+        for (unit, per_sv_h) in [
+            ("uSv/h", 1e6),
+            ("µSv/h", 1e6),
+            ("mSv/h", 1e3),
+            ("Sv/s", 1.0 / 3600.0),
+            ("mSv/a", 1e3 * year),
+            ("uSv/d", 1e6 * 24.0),
+        ] {
+            let f = convert("Sv/h", unit).unwrap();
+            assert!(close(f, per_sv_h), "{unit}: {f}");
+        }
+        assert!(close(convert("Gy/h", "mGy/a").unwrap(), 1e3 * year));
+    }
+
+    #[test]
     fn rejects_bad_units() {
         assert!(parse("").is_err());
         assert!(parse("furlong").unwrap_err().contains("unknown unit"));

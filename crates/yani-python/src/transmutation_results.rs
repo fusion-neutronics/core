@@ -813,18 +813,31 @@ impl PyTransmutationResults {
     ///     Estimate | dict[str, Estimate] | None: None if the transmutation
     ///     was run without ``data_uncertainty``.
     ///
+    ///     units (str): As ``Material.activity`` takes it: the total, ``"Bq"``
+    ///         (the default) or a scaled one such as ``"TBq"``, needs the
+    ///         material's ``volume``; per volume (``"Bq/cm3"``) or per mass
+    ///         (``"Bq/kg"``) does not.
+    ///
     /// Raises:
-    ///     ValueError: if the material has no ``volume`` in cm^3, which a
-    ///         quantity in becquerel needs.
-    #[pyo3(signature = (material_id, step, *, by_nuclide=false))]
+    ///     ValueError: if a total is asked for and the material has no
+    ///         ``volume`` in cm^3, or ``units`` is not an activity.
+    #[pyo3(signature = (material_id, step, *, by_nuclide=false, units="Bq"))]
     fn get_activity_uncertainty(
         &self,
         py: Python<'_>,
         material_id: u32,
         step: usize,
         by_nuclide: bool,
+        units: &str,
     ) -> PyResult<Py<PyAny>> {
-        self.derived(py, material_id, step, by_nuclide, Derived::Activity)
+        self.derived(
+            py,
+            material_id,
+            step,
+            by_nuclide,
+            Derived::Activity,
+            Some(units),
+        )
     }
 
     /// Decay heat at one timestep [W], with the nuclear-data spread on it.
@@ -860,17 +873,31 @@ impl PyTransmutationResults {
     ///     Estimate | dict[str, Estimate] | None: None if the transmutation
     ///     was run without ``data_uncertainty``.
     ///
+    ///     units (str): As ``Material.decay_heat`` takes it: the total,
+    ///         ``"W"`` (the default) or a scaled one such as ``"kW"``, needs the
+    ///         material's ``volume``; per volume (``"W/cm3"``) or per mass
+    ///         (``"W/kg"``) does not.
+    ///
     /// Raises:
-    ///     ValueError: if the material has no ``volume`` in cm^3.
-    #[pyo3(signature = (material_id, step, *, by_nuclide=false))]
+    ///     ValueError: if a total is asked for and the material has no
+    ///         ``volume`` in cm^3, or ``units`` is not a power.
+    #[pyo3(signature = (material_id, step, *, by_nuclide=false, units="W"))]
     fn get_decay_heat_uncertainty(
         &self,
         py: Python<'_>,
         material_id: u32,
         step: usize,
         by_nuclide: bool,
+        units: &str,
     ) -> PyResult<Py<PyAny>> {
-        self.derived(py, material_id, step, by_nuclide, Derived::DecayHeat)
+        self.derived(
+            py,
+            material_id,
+            step,
+            by_nuclide,
+            Derived::DecayHeat,
+            Some(units),
+        )
     }
 
     /// Contact dose rate at one timestep, with the nuclear-data spread on it.
@@ -914,11 +941,14 @@ impl PyTransmutationResults {
     ///     build_up (float): Build-up factor, a plain multiplier on the answer.
     ///     by_nuclide (bool): Return a ``dict[str, Estimate]`` instead of one
     ///         ``Estimate`` for the total.
+    ///     units (str | None): As ``Material.contact_dose`` takes it: ``None``
+    ///         for Gy/h or Sv/h, or a rate of the same kind such as ``"uGy/h"``
+    ///         or ``"mSv/h"``.
     ///
     /// Returns:
     ///     Estimate | dict[str, Estimate] | None: None if the transmutation
     ///     was run without ``data_uncertainty``.
-    #[pyo3(signature = (material_id, step, *, dose_quantity="absorbed-air", build_up=2.0, by_nuclide=false))]
+    #[pyo3(signature = (material_id, step, *, dose_quantity="absorbed-air", build_up=2.0, by_nuclide=false, units=None))]
     fn get_contact_dose_uncertainty(
         &self,
         py: Python<'_>,
@@ -927,6 +957,7 @@ impl PyTransmutationResults {
         dose_quantity: &str,
         build_up: f64,
         by_nuclide: bool,
+        units: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         let quantity = match dose_quantity {
             "absorbed-air" => yani_decay::DoseQuantity::AbsorbedAir,
@@ -943,6 +974,7 @@ impl PyTransmutationResults {
             step,
             by_nuclide,
             Derived::ContactDose { quantity, build_up },
+            units,
         )
     }
 
@@ -977,21 +1009,29 @@ impl PyTransmutationResults {
     ///         ``get_activity_uncertainty``, step 0 has a spread whenever the
     ///         ``"half_life"`` or ``"decay_photon_lines"`` source is sampled.
     ///
+    ///     units (str): The unit of the emission rates, as
+    ///         ``Material.decay_photon_spectrum`` takes it: ``"1/s"`` (the
+    ///         total, the default), per volume (``"1/(s cm3)"``) or per mass
+    ///         (``"1/(s kg)"``). Energies stay in eV.
+    ///
     /// Returns:
     ///     list[LineEstimate] | None: None if the transmutation was run without
     ///     ``data_uncertainty``.
     ///
     /// Raises:
-    ///     ValueError: if the material has no ``volume`` in cm^3.
+    ///     ValueError: if a total is asked for and the material has no
+    ///         ``volume`` in cm^3.
+    #[pyo3(signature = (material_id, step, *, units="1/s"))]
     fn get_decay_photon_spectrum_uncertainty(
         &self,
         material_id: u32,
         step: usize,
+        units: &str,
     ) -> PyResult<Option<Vec<PyLineEstimate>>> {
         let chain = crate::distribution::resolve_chain(ChainUse::Decay)?.chain;
         Ok(self
             .inner
-            .photon_spectrum_uncertainty(material_id, step, &chain)
+            .photon_spectrum_uncertainty_in(material_id, step, &chain, units)
             .map_err(PyValueError::new_err)?
             .map(|lines| lines.into_iter().map(PyLineEstimate::from).collect()))
     }
@@ -2497,17 +2537,27 @@ impl PyTransmutationResults {
         step: usize,
         by_nuclide: bool,
         which: Derived,
+        units: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         let chain = crate::distribution::resolve_chain(ChainUse::Decay)?.chain;
+        // A contact dose is converted by a constant factor; activity and decay
+        // heat by the core, which knows the volume and the density.
+        let dose_factor = match which {
+            Derived::ContactDose { quantity, .. } => {
+                quantity.unit_factor(units).map_err(PyValueError::new_err)?
+            }
+            _ => 1.0,
+        };
+        let unit = units.unwrap_or_default();
         if by_nuclide {
             let breakdown = match which {
                 Derived::Activity => {
                     self.inner
-                        .activity_uncertainty_by_nuclide(material_id, step, &chain)
+                        .activity_uncertainty_by_nuclide_in(material_id, step, &chain, unit)
                 }
                 Derived::DecayHeat => {
                     self.inner
-                        .decay_heat_uncertainty_by_nuclide(material_id, step, &chain)
+                        .decay_heat_uncertainty_by_nuclide_in(material_id, step, &chain, unit)
                 }
                 Derived::ContactDose { quantity, build_up } => {
                     self.inner.contact_dose_uncertainty_by_nuclide(
@@ -2525,15 +2575,22 @@ impl PyTransmutationResults {
             };
             let out = PyDict::new(py);
             for (nuclide, estimate) in breakdown {
-                out.set_item(nuclide, Py::new(py, PyEstimate::from(estimate))?)?;
+                out.set_item(
+                    nuclide,
+                    Py::new(py, PyEstimate::from(estimate.scaled(dose_factor)))?,
+                )?;
             }
             Ok(out.into_any().unbind())
         } else {
             let total =
                 match which {
-                    Derived::Activity => self.inner.activity_uncertainty(material_id, step, &chain),
+                    Derived::Activity => {
+                        self.inner
+                            .activity_uncertainty_in(material_id, step, &chain, unit)
+                    }
                     Derived::DecayHeat => {
-                        self.inner.decay_heat_uncertainty(material_id, step, &chain)
+                        self.inner
+                            .decay_heat_uncertainty_in(material_id, step, &chain, unit)
                     }
                     Derived::ContactDose { quantity, build_up } => self
                         .inner
@@ -2542,7 +2599,9 @@ impl PyTransmutationResults {
                 .map_err(PyValueError::new_err)?;
             match total {
                 None => Ok(py.None()),
-                Some(estimate) => Ok(Py::new(py, PyEstimate::from(estimate))?.into_any()),
+                Some(estimate) => {
+                    Ok(Py::new(py, PyEstimate::from(estimate.scaled(dose_factor)))?.into_any())
+                }
             }
         }
     }
