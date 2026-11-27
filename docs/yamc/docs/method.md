@@ -415,7 +415,7 @@ factor and the group maximum; the upper bound is 5 times the lower.
 
 If `density_reduction` is not given, $N$ is chosen without transport: a ray
 trace from the strongest source to the voxel centres gives the optical depth
-$\tau$ at the 90th percentile, and $N = \max(\tau / 7,\; 2)$. Coupled
+$\tau$ at the 90th percentile, and $N = \max(\tau / 7,\; 5)$. Coupled
 neutron-photon windows are generated from one pair of runs with a flux mesh
 per particle type.
 

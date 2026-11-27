@@ -91,7 +91,7 @@ analog = model.simulate_transport(total_particles=10_000_000_000,
 | ``mesh`` | -- | the regular mesh the windows are defined on |
 | ``particle`` | ``"neutron"`` | particle type the windows act on |
 | ``energy_bins`` | ``None`` | energy group edges (eV); ``None`` is a single group |
-| ``density_reduction`` | ``None`` (auto) | reduced-density factor ``N`` for the extrapolation; ``None`` computes it from a particle-free optical-depth ray-trace (source to deepest voxel), ``N = tau / 7`` (continuous, clamped ``>= 2``). Pass a float to override. |
+| ``density_reduction`` | ``None`` (auto) | reduced-density factor ``N`` for the extrapolation; ``None`` computes it from a particle-free optical-depth ray-trace (source to deepest voxel), ``N = max(5, tau / 7)`` (continuous). Pass a float (``>= 2``) to override. |
 | ``ratio`` | ``5`` | upper/lower bound ratio (window width) |
 | ``survival_factor`` | ``3`` | sets the roulette survival weight |
 | ``max_split`` | ``10`` | most copies one split may create |
@@ -100,15 +100,39 @@ analog = model.simulate_transport(total_particles=10_000_000_000,
 By default ``density_reduction`` is auto: ``N`` is derived, before the two
 generation passes, from the problem's optical thickness ``tau`` (a particle-free
 ray-trace from the source to the deepest mesh voxel at the source energy) as
-``N = tau / 7`` (continuous, clamped to ``>= 2``; ``tau`` is taken as a high
-percentile of the per-voxel optical depth so a single oblique corner voxel does
-not skew it). The empirical sweet spot
-``tau / N ~ 7`` mean free paths balances fiducial penetration against
-extrapolation error: a smaller ``N`` leaves the fiducial too thick to resolve
-the deep region, a larger ``N`` over-splits on a noise-amplified
-``G = F*(H/F)^(N-1)`` extrapolation. ``model.estimate_density_reduction(gen)``
-returns the ``(N, tau)`` it would pick without running generation. Pass an
-explicit float to ``density_reduction`` to override.
+``N = max(5, tau / 7)`` (continuous; ``tau`` is taken as a high percentile of
+the per-voxel optical depth so a single oblique corner voxel does not skew it).
+``model.estimate_density_reduction(gen)`` returns the ``(N, tau)`` it would
+pick without running generation. Pass an explicit float to
+``density_reduction`` to override.
+
+``N`` trades generation cost against window quality:
+
+- A smaller ``N`` makes the reduced-density passes thicker. The histories the
+  first pass needs grow as about ``exp(1.2 * span)``, ``span`` being the
+  number of e-folds its flux falls across the mesh at density / ``N``, so
+  generation cost grows steeply as ``N`` falls.
+- A larger ``N`` multiplies the two passes' statistical errors by ``N - 2``
+  and ``N - 1`` in the extrapolated window, and makes the window shallower at
+  depth. The production run slows, and in thick concrete it stopped reaching
+  the deep region from about ``N = tau / 3``.
+
+The automatic ``N`` sits between the two. In a study of ten 1D shield cases
+(six materials, neutron and photon sources, optical depths 10 to 33) and five
+3D models, counting generation plus a production run to a 5% geometric-mean
+error over the lowest-flux quarter of the mesh, the best ``N`` was 4 to 6 in
+most models and did not grow with depth, and ``max(5, tau / 7)`` cost on
+average 1.18 times the best ``N`` of each model (1.7 at worst)
+(``examples/python/degvr_density_reduction_study.py``). Above an optical depth
+of 35, deeper than the study went, the ``tau / 7`` term keeps the first pass
+at most 7 mean free paths thick.
+
+The floor assumes the default ``relative_error`` of 0.1, which the
+extrapolation multiplies by up to ``N - 1``, so with a looser target a smaller
+``N`` may serve better. When comparing ``N`` values yourself,
+let generation run to its convergence target: with ``max_runtime`` capping
+generation, a small ``N`` looks cheap only because its passes stop before they
+converge.
 
 ## Applying windows directly
 

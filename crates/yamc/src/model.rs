@@ -1356,8 +1356,10 @@ impl Model {
     /// thickness via a particle-free ray-trace from the source to the deepest
     /// mesh voxel. With several requested particles the per-species estimates are
     /// combined by taking the **max** N (thinnest fiducial), so one reduced-density
-    /// pair seeds every field. Returns `(n, tau)` for the species that set the max.
-    /// The current model is not mutated (works on a probe clone).
+    /// pair seeds every field. Returns `(n, tau)` for the species with the largest
+    /// tau, which sets the max N; where every species sits on the floor of `N`,
+    /// the tau is still the deepest species'. The current model is not mutated
+    /// (works on a probe clone).
     ///
     /// A photon window's ray-trace integrates the photon attenuation at a
     /// *photon* energy: the source energy when photons are emitted by a photon
@@ -1398,7 +1400,9 @@ impl Model {
             };
             let tau = probe.optical_depth_percentile(src_pos, &generator.mesh, energy, photon);
             let n = crate::variance_reduction::WeightWindowGeneratorDeGVR::n_from_tau(tau);
-            if best.is_none_or(|(bn, _)| n > bn) {
+            // N does not fall as tau grows, so the deepest species sets it; on the
+            // floor every species ties on N and the reported tau stays the deepest.
+            if best.is_none_or(|(_, bt)| tau > bt) {
                 best = Some((n, tau));
             }
         }
