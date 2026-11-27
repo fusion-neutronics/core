@@ -369,3 +369,71 @@ fn shielded_damage_follows_each_steps_collapse() {
         );
     }
 }
+
+/// A processed solve steps every material together, and re-collapses each
+/// shielded step the same way: with a transfer that moves nothing, it is the
+/// unprocessed shielded run at every step.
+#[test]
+fn a_processed_shielded_solve_recollapses_alike() {
+    use yani_transmute::{Processing, ProcessingRun, Rate};
+    let Some(data) = yamc_test_cache::nuclide(ABSORBER) else {
+        eprintln!("skipping: W186 fixture missing");
+        return;
+    };
+    let shielding = Shielding::new(CHORD_CM).expect("a positive chord");
+    let n = 4;
+    let mut plain = tungsten(&data);
+    plain.set_material_id(1);
+    let expected = transmute_material_shielded(
+        &mut plain,
+        &spectra(None),
+        &steps(n),
+        chain(),
+        &Default::default(),
+        Default::default(),
+        None,
+        Some(&shielding),
+    )
+    .expect("transmute");
+
+    let mut tank = Material::new(HashMap::new(), "atom", "sum", None).expect("empty tank");
+    tank.set_material_id(9);
+    tank.volume = Some(1.0);
+    let mut idle = Processing::new();
+    idle.add_transfer(1, Some("W"), Rate::Constant(0.0), "1/s", Some(9), None)
+        .unwrap();
+    let mut processed = tungsten(&data);
+    processed.set_material_id(1);
+    processed.volume = Some(1.0);
+    let got = yani_transmute::transmute_materials(
+        vec![yani_transmute::TransmuteCase {
+            material: &mut processed,
+            spectra: spectra(None),
+            steps: steps(n),
+            shielding: Some(shielding),
+            product_threshold: yani_transmute::DEFAULT_PRODUCT_THRESHOLD,
+        }],
+        chain(),
+        &Default::default(),
+        Default::default(),
+        None,
+        None,
+        Some(ProcessingRun {
+            processing: &idle,
+            receivers: vec![tank],
+        }),
+    )
+    .expect("processed solve");
+    for k in 1..=n {
+        let a = absorber_left(&expected, 1, k);
+        let b = absorber_left(&got, 1, k);
+        assert!(
+            (a - b).abs() <= 1e-9 * a,
+            "step {k}: processed {b:e} vs {a:e}"
+        );
+        assert_eq!(
+            capture_rate(&got, 1, k - 1),
+            capture_rate(&expected, 1, k - 1)
+        );
+    }
+}

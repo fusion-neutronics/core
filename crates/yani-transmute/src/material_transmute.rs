@@ -564,12 +564,24 @@ pub fn transmute_materials(
     let (outcomes, receiver_states): (Vec<Result<CaseOutcome, String>>, Vec<Vec<Material>>) =
         match &processing {
             Some(run) => {
+                let recollapse: Vec<Option<Recollapse>> = cases
+                    .iter()
+                    .map(|case| {
+                        case.shielding.as_ref().map(|shielding| Recollapse {
+                            spectra: &shared_spectra,
+                            lists: &lists,
+                            activation: &activation,
+                            shielding,
+                        })
+                    })
+                    .collect();
                 let (outcomes, states) = solve_processed(
                     &initial,
                     &receivers,
                     &ids,
                     &case_steps,
                     &per_spectrum,
+                    &recollapse,
                     &chain,
                     parts,
                     run.processing,
@@ -1275,6 +1287,7 @@ fn solve_processed(
     ids: &[u32],
     steps: &[Vec<TransmuteStep>],
     per_spectrum: &[PerSpectrum],
+    recollapse: &[Option<Recollapse<'_>>],
     chain: &Arc<HashMap<String, ChainNuclide>>,
     parts: yani::ChainParts,
     processing: &Processing,
@@ -1300,19 +1313,53 @@ fn solve_processed(
     let mut t0 = 0.0;
     for k in 0..steps.first().map_or(0, Vec::len) {
         let dt = steps[0][k].dt;
+        // As in `solve_case`: a shielded step after the first collapses at
+        // the composition its material starts the step from.
+        let mut own: Vec<Option<StepCollapse>> = Vec::with_capacity(steps.len());
+        for (c, s) in steps.iter().enumerate() {
+            own.push(match (&recollapse[c], s[k].irradiation) {
+                (Some(r), Some((idx, _))) if k > 0 => {
+                    let mut at = current[c].clone();
+                    at.nuclide_data = initial[c].nuclide_data.clone();
+                    let (collapse, info, report) = collapse_one(
+                        &at,
+                        &r.spectra[idx],
+                        chain,
+                        r.lists,
+                        r.activation,
+                        Some(r.shielding),
+                        None,
+                    )
+                    .map_err(|e| format!("material {}: {e}", member_ids[c]))?;
+                    Some(StepCollapse {
+                        collapse,
+                        info,
+                        report: Arc::new(report),
+                        composition: at,
+                    })
+                }
+                _ => None,
+            });
+        }
         let per_case: Vec<(
             ReactionRates,
             &FissionYieldWeights,
             &Arc<HashMap<String, ChainNuclide>>,
         )> = steps
             .iter()
-            .map(|s| match s[k].irradiation {
-                Some((idx, rate)) => (
+            .zip(&own)
+            .map(|(s, own)| match (s[k].irradiation, own) {
+                (Some((_, rate)), Some(o)) => (
+                    scale_rates(&o.collapse.0, rate),
+                    &o.collapse.1,
+                    &o.collapse.2,
+                ),
+                (Some((idx, rate)), None) => (
                     scale_rates(&per_spectrum[idx].0, rate),
                     &per_spectrum[idx].1,
                     &per_spectrum[idx].2,
                 ),
-                None => (HashMap::new(), &no_fission, chain),
+                (None, _) => (HashMap::new(), &no_fission, chain),
             })
             .collect();
         let members: Vec<Member<'_>> = current
@@ -1340,6 +1387,10 @@ fn solve_processed(
         for (c, (rates, _, step_chain)) in per_case.iter().enumerate() {
             outcomes[c].rates.push(per_edge_rates(step_chain, rates));
             outcomes[c].states.push(next[c].clone());
+        }
+        drop(per_case);
+        for (c, o) in own.into_iter().enumerate() {
+            outcomes[c].collapses.push(o);
         }
         for (r, state) in next[initial.len()..].iter().enumerate() {
             receiver_states[r].push(state.clone());
