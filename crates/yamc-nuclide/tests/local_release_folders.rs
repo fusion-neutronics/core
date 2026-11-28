@@ -215,6 +215,19 @@ fn a_folder_read_is_recorded_by_its_path() {
         record.converters,
         ["yamc-convert 0.1.0", "yani-convert 0.1.0"]
     );
+    // What to cite comes with it, by the library the manifest names: the four
+    // JEFF-4.0 data sets, the neutron data first.
+    let dois: Vec<&str> = record.citations.iter().map(|c| c.doi.as_str()).collect();
+    assert_eq!(
+        dois,
+        [
+            "10.82555/e9ajn-a3p20",
+            "10.82555/tw0c6-t1386",
+            "10.82555/trtwt-k2828",
+            "10.82555/scmva-nqh68"
+        ]
+    );
+    assert!(record.terms.contains("CC BY 4.0"), "{}", record.terms);
 
     // A manifest rewritten in place (the folder rebuilt) is read again, and
     // the new release is the one recorded.
@@ -285,6 +298,9 @@ fn a_locally_processed_subsection_is_recorded_by_its_path() {
     assert_eq!(record.format_version, 2);
     assert!(!record.offline);
     assert_eq!(record.converters, ["yani-python 0.30.0 (core abc)"]);
+    // A library with no credit entry has nothing to cite recorded for it.
+    assert!(record.citations.is_empty());
+    assert!(record.terms.is_empty());
     let first = record.manifest_sha256.clone();
     assert_eq!(first.len(), 64);
 

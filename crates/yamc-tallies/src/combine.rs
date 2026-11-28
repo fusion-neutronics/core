@@ -723,6 +723,8 @@ mod tests {
                     converters: vec!["yamc-convert 0.1.0".into()],
                     locally_processed: false,
                     library: String::new(),
+                    citations: Vec::new(),
+                    terms: String::new(),
                 },
             );
             r

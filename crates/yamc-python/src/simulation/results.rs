@@ -1140,8 +1140,13 @@ impl PyTransportResults {
     /// (every build that wrote the release's files, as its manifest lists
     /// them: the package, its version and the core commit it was compiled
     /// from, e.g. ``["yani-python 0.22.1 (core 250c439e...)"]``; empty for a
-    /// release published before releases recorded them). Empty when all data
-    /// came from local directories that are not release folders.
+    /// release published before releases recorded them), ``citations`` (what
+    /// to cite for the library's data: a list of dicts with ``reference`` and
+    /// ``doi``, the references its makers ask for) and ``terms`` (what its
+    /// data is redistributed under). Cite every library a run read: see
+    /// "Cite the nuclear data you use" on the nuclear data libraries page.
+    /// Empty when all data came from local directories that are not release
+    /// folders.
     #[getter]
     fn runs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let items: Vec<Bound<'py, PyDict>> = self
@@ -1438,9 +1443,27 @@ pub(crate) fn data_releases_dict<'py>(
         d.set_item("converters", &release.converters)?;
         d.set_item("locally_processed", release.locally_processed)?;
         d.set_item("library", &release.library)?;
+        d.set_item("citations", citations_list(py, &release.citations)?)?;
+        d.set_item("terms", &release.terms)?;
         out.set_item(keyword, d)?;
     }
     Ok(out)
+}
+
+/// A release's citations as a list of ``{"reference": ..., "doi": ...}``
+/// dicts.
+pub(crate) fn citations_list<'py>(
+    py: Python<'py>,
+    citations: &[yamc_nuclide::storage::release::Citation],
+) -> PyResult<Bound<'py, PyList>> {
+    let list = PyList::empty(py);
+    for c in citations {
+        let d = PyDict::new(py);
+        d.set_item("reference", &c.reference)?;
+        d.set_item("doi", &c.doi)?;
+        list.append(d)?;
+    }
+    Ok(list)
 }
 
 pub(crate) fn build_results(

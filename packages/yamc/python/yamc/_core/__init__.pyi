@@ -6724,6 +6724,12 @@ class TransmutationResults:
         True, ``library`` and ``release`` the library and ``data_version`` its
         converter recorded, and ``manifest_sha256`` the sha256 of its files.
         For a release ``locally_processed`` is False and ``library`` empty.
+        ``citations`` is what to cite for the library's data, a list of dicts
+        with ``reference`` and ``doi`` (the references its makers ask for), and
+        ``terms`` what its data is redistributed under; both are empty for a
+        library converted under a name of its own. Cite every library a
+        calculation read: see "Cite the nuclear data you use" on the nuclear
+        data libraries page.
         """
     @property
     def num_steps(self) -> builtins.int:
@@ -8304,8 +8310,13 @@ class TransportResults:
         (every build that wrote the release's files, as its manifest lists
         them: the package, its version and the core commit it was compiled
         from, e.g. ``["yani-python 0.22.1 (core 250c439e...)"]``; empty for a
-        release published before releases recorded them). Empty when all data
-        came from local directories that are not release folders.
+        release published before releases recorded them), ``citations`` (what
+        to cite for the library's data: a list of dicts with ``reference`` and
+        ``doi``, the references its makers ask for) and ``terms`` (what its
+        data is redistributed under). Cite every library a run read: see
+        "Cite the nuclear data you use" on the nuclear data libraries page.
+        Empty when all data came from local directories that are not release
+        folders.
         """
     def __len__(self) -> builtins.int:
         r"""

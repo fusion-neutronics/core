@@ -980,7 +980,10 @@ decides which reactions and products exist. See
 [The two that both say reactions](#the-two-that-both-say-reactions). They are global
 process state, not per-call arguments. See
 [Nuclear data libraries](libraries.md) for which library publishes which
-subsection, and how much is in each.
+subsection, how much is in each, and
+[what to cite](libraries.md#cite-the-nuclear-data-you-use) for each library a
+calculation uses: their evaluators ask to be cited wherever their data is used,
+and a mixed network means citing every library in it.
 
 There is also a `photon_cross_section_data` setting, the same one yamc has, which
 selects photon interaction data for photon transport. No yani calculation reads
@@ -1218,18 +1221,18 @@ yani.transmutation_fission_yields = "/data/endf-b8.1"
 yani.transmutation_branch_ratios = "/data/endf-b8.1"
 ```
 
-The libraries are `"endf-b8.1"`, `"jeff-4.0"`, `"jendl-5.0"`, `"tendl-2025"`,
-`"tendl-2017"`, `"fendl-3.2d"` and `"irdff-ii"`. Each is built from its own
+The libraries are [`"endf-b8.1"`][cite-endf-b8.1], [`"jeff-4.0"`][cite-jeff-4.0], [`"jendl-5.0"`][cite-jendl-5.0], [`"tendl-2025"`][cite-tendl-2025],
+[`"tendl-2017"`][cite-tendl-2017], [`"fendl-3.2d"`][cite-fendl-3.2d] and [`"irdff-ii"`][cite-irdff-ii]. Each is built from its own
 evaluations only, never with another library's data, so a library publishes the
 parts it can build from what it evaluates:
 
 | keyword | transport parts | transmutation parts |
 | --- | --- | --- |
-| `endf-b8.1`, `jendl-5.0` | neutron, photon, thermal | decay, reactions, fission_yields, branching |
-| `jeff-4.0` | neutron, thermal | decay, reactions, fission_yields, branching |
-| `tendl-2025`, `tendl-2017` | neutron, photonuclear | reactions, branching |
-| `fendl-3.2d` | neutron, photon | reactions, branching |
-| `irdff-ii` | none | branching |
+| [`endf-b8.1`][cite-endf-b8.1], [`jendl-5.0`][cite-jendl-5.0] | neutron, photon, thermal | decay, reactions, fission_yields, branching |
+| [`jeff-4.0`][cite-jeff-4.0] | neutron, thermal | decay, reactions, fission_yields, branching |
+| [`tendl-2025`][cite-tendl-2025], [`tendl-2017`][cite-tendl-2017] | neutron, photonuclear | reactions, branching |
+| [`fendl-3.2d`][cite-fendl-3.2d] | neutron, photon | reactions, branching |
+| [`irdff-ii`][cite-irdff-ii] | none | branching |
 
 `thermal` is the thermal scattering tables (`thermal/c_H_in_H2O.arrow/` and so
 on). Like `photon` and `photonuclear`, it is there for transport in yamc: no

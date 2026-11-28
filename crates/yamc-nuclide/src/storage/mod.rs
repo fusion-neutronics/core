@@ -7,13 +7,15 @@
 //! release folder's manifest); `local_release` reads release folders on local
 //! disk; `url_cache` resolves data keywords and caches downloads;
 //! `fetch` downloads one file pinned by its size and sha256 (a local library build's sources);
-//! `nuclide_loader` is the public load-a-nuclide entry point. The `backend` trait
+//! `nuclide_loader` is the public load-a-nuclide entry point; `credits` is who
+//! made each keyword's library and what to cite for it. The `backend` trait
 //! surface is glob-re-exported here so `crate::storage::{Storage, set_storage, ...}`
 //! and `yamc_nuclide::storage::*` keep resolving unchanged.
 
 mod backend;
 pub use backend::*;
 
+pub mod credits;
 // Native only: it streams over reqwest, which the emscripten build does not
 // link, and nothing in a browser builds a library.
 #[cfg(all(feature = "download", not(target_os = "emscripten")))]

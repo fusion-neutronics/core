@@ -1,0 +1,8 @@
+[cite-endf-b8.1]: https://doi.org/10.1016/j.nds.2026.04.001 "ENDF/B-VIII.1. Cite: G.P.A. Nobre, R. Capote, M.T. Pigni et al., Nuclear Data Sheets 210 (2026) 1-224, doi:10.1016/j.nds.2026.04.001"
+[cite-jeff-4.0]: https://doi.org/10.82555/e9ajn-a3p20 "JEFF-4.0. Cite the JEFF-4.0 data sets (OECD Nuclear Energy Agency, 2025) by DOI, starting with the neutron data, doi:10.82555/e9ajn-a3p20. All four are listed on the nuclear data libraries page"
+[cite-jendl-5.0]: https://doi.org/10.1080/00223131.2022.2141903 "JENDL-5. Cite (required by JAEA): O. Iwamoto et al., Journal of Nuclear Science and Technology 60 (2023) 1-60, doi:10.1080/00223131.2022.2141903"
+[cite-tendl]: https://doi.org/10.1016/j.nds.2012.11.002 "TENDL. Cite: A.J. Koning, D. Rochman, Nuclear Data Sheets 113 (2012) 2841, doi:10.1016/j.nds.2012.11.002, and A.J. Koning et al., Nuclear Data Sheets 155 (2019) 1, doi:10.1016/j.nds.2019.01.002"
+[cite-tendl-2025]: https://doi.org/10.1016/j.nds.2012.11.002 "TENDL-2025. Cite: A.J. Koning, D. Rochman, Nuclear Data Sheets 113 (2012) 2841, doi:10.1016/j.nds.2012.11.002, and A.J. Koning et al., Nuclear Data Sheets 155 (2019) 1, doi:10.1016/j.nds.2019.01.002"
+[cite-tendl-2017]: https://doi.org/10.1016/j.nds.2012.11.002 "TENDL-2017. Cite: A.J. Koning, D. Rochman, Nuclear Data Sheets 113 (2012) 2841, doi:10.1016/j.nds.2012.11.002, and A.J. Koning et al., Nuclear Data Sheets 155 (2019) 1, doi:10.1016/j.nds.2019.01.002"
+[cite-fendl-3.2d]: https://doi.org/10.1016/j.nds.2024.01.001 "FENDL-3.2d. Cite: G. Schnabel et al., Nuclear Data Sheets 193 (2024) 1-78, doi:10.1016/j.nds.2024.01.001"
+[cite-irdff-ii]: https://doi.org/10.1016/j.nds.2019.12.001 "IRDFF-II. Cite: A. Trkov et al., Nuclear Data Sheets 163 (2020) 1-108, doi:10.1016/j.nds.2019.12.001"
