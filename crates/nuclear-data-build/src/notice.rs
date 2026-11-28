@@ -50,9 +50,9 @@ pub fn render(
     line(
         &mut s,
         &format!(
-            "This folder is {}, an evaluated nuclear data library made by {}, \
-             converted for yamc and yani. Its evaluators ask to be cited wherever \
-             their data is used.",
+            "This folder is {}, an evaluated nuclear data library, converted for yamc \
+             and yani. It was made by {}. Its evaluators ask to be cited wherever their \
+             data is used.",
             credit.library, credit.made_by
         ),
     );
