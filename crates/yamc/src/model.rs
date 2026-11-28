@@ -3117,7 +3117,7 @@ impl Model {
                                 let mut welford_worker = welford_workers_ref[thread_idx].lock();
 
                                 // Process all particles in the bank (primary + secondaries)
-                                let mut particles_processed = 0;
+                                let mut particles_processed: usize = 0;
                                 // Last-resort ceiling on the per-history population.
                                 // Weight-window splitting is bounded by a per-history
                                 // split budget (WW_SPLIT_BUDGET_PER_HISTORY in transport),
@@ -3133,6 +3133,19 @@ impl Model {
                                 // (FISSION_BANK_LIMIT_PER_HISTORY in transport::fission);
                                 // this one is the backstop for a chain that grows too
                                 // slowly to trip it.
+                                //
+                                // The allowance scales with the lineages (#36):
+                                // MAX_PARTICLES_PER_HISTORY particles that are not split
+                                // copies for the source and for each weight-window split
+                                // copy, pooled over the history, so one runaway lineage
+                                // can use it all. A copy carries a share of its parent's
+                                // weight and starts a chain like the source's, so a fixed
+                                // ceiling refused subcritical multiplying models under
+                                // splitting windows as critical. Without windows it is
+                                // the fixed ceiling; with them it is at most
+                                // MAX_PARTICLES_PER_HISTORY x (1 + the split budget), so
+                                // under splitting windows the fission-bank guard is what
+                                // stops a supercritical chain promptly.
                                 const MAX_PARTICLES_PER_HISTORY: usize = 50_000;
 
                                 while let Some(mut particle) = particle_bank.pop_particle() {
@@ -3152,8 +3165,14 @@ impl Model {
                                     #[cfg(feature = "debug_diagnostics")]
                                     batch_secondary_count
                                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    if particles_processed > MAX_PARTICLES_PER_HISTORY {
-                                        let queued = particle_bank.len();
+                                    // Copies made, not processed, are subtracted, so a
+                                    // queued copy only delays the ceiling.
+                                    let copies = particle_bank.ww_splits();
+                                    let not_copies = particles_processed.saturating_sub(copies);
+                                    if not_copies > MAX_PARTICLES_PER_HISTORY * (1 + copies) {
+                                        // The particle just popped is not transported.
+                                        let transported = particles_processed - 1;
+                                        let queued = particle_bank.len() + 1;
                                         let progeny = particle_bank.fission_progeny();
                                         // Name the cause only when fission actually
                                         // accounts for the population. A trace-fissile
@@ -3172,7 +3191,6 @@ impl Model {
                                         } else {
                                             String::new()
                                         };
-                                        let copies = particle_bank.ww_splits();
                                         let diagnosis = if copies > 0 {
                                             format!(
                                                 "{diagnosis} The weight windows made {copies} \
@@ -3183,7 +3201,7 @@ impl Model {
                                         };
                                         panic!(
                                             "Source history {global_particle_index} did not \
-                                             drain: {MAX_PARTICLES_PER_HISTORY} particles \
+                                             drain: {transported} particles \
                                              transported with {queued} still \
                                              queued.{diagnosis} The run stops here rather \
                                              than truncating the history, because dropping \
