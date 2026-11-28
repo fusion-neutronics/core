@@ -96,7 +96,7 @@ fn lower_bounds() -> Vec<f64> {
         seed: 7,
         ..Default::default()
     };
-    let windows = iron_sphere_model()
+    let (windows, _) = iron_sphere_model()
         .generate_weight_windows(&generator(), &settings, None)
         .expect("generate weight windows");
     windows[0].lower_bounds.clone()

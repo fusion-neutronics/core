@@ -1548,7 +1548,8 @@ impl Model {
     /// windows so it reaches the whole mesh. It extrapolates the two flux
     /// fields back to the original density and returns one
     /// [`crate::variance_reduction::WeightWindowBounds`] per requested particle
-    /// (in `generator.particles` order) for a clean production run. `settings`
+    /// (in `generator.particles` order) for a clean production run, with a
+    /// [`DeGVRReport`] of what the passes did. `settings`
     /// controls the (throwaway) generation passes. The current model is not
     /// mutated.
     ///
@@ -1573,7 +1574,13 @@ impl Model {
         generator: &crate::variance_reduction::WeightWindowGeneratorDeGVR,
         settings: &TransportSettings,
         relative_error: Option<f64>,
-    ) -> Result<Vec<crate::variance_reduction::WeightWindowBounds>, String> {
+    ) -> Result<
+        (
+            Vec<crate::variance_reduction::WeightWindowBounds>,
+            DeGVRReport,
+        ),
+        String,
+    > {
         use crate::variance_reduction::{VarianceReduction, WeightWindowBounds};
         use yamc_tallies::{ConvergenceMetric, ConvergenceTarget};
         generator.validate()?;
@@ -1598,14 +1605,14 @@ impl Model {
             .collect();
         // Resolve N (one N for every species): explicit override, or auto from a
         // particle-free optical-depth ray-trace (max over species).
-        let n = match generator.density_reduction {
-            Some(explicit) => explicit,
+        let (n, optical_depth) = match generator.density_reduction {
+            Some(explicit) => (explicit, None),
             None => {
                 let (n, tau) = self.estimate_density_reduction(generator)?;
                 eprintln!(
                     "DeGVR auto density_reduction: N = {n:.2} (estimated optical depth tau = {tau:.2})"
                 );
-                n
+                (n, Some(tau))
             }
         };
         let expected = generator.n_groups() * generator.mesh.num_voxels();
@@ -1617,6 +1624,7 @@ impl Model {
         fiducial.convergence_targets.clone_from(&targets);
         fiducial.variance_reduction = Vec::new();
         fiducial.simulate_transport(settings)?;
+        let fiducial_pass = DeGVRPass::of(&fiducial)?;
         let mut fiducial_fields: Vec<Vec<f64>> = Vec::with_capacity(particles.len());
         let mut fiducial_windows: Vec<WeightWindowBounds> = Vec::with_capacity(particles.len());
         for (i, &particle) in particles.iter().enumerate() {
@@ -1640,6 +1648,7 @@ impl Model {
             .map(|w| VarianceReduction::WeightWindowBounds(Box::new(w)))
             .collect();
         asymptotic.simulate_transport(settings)?;
+        let asymptotic_pass = DeGVRPass::of(&asymptotic)?;
 
         // Extrapolate each field to the original density and build each window.
         let mut windows = Vec::with_capacity(particles.len());
@@ -1654,7 +1663,13 @@ impl Model {
             let g = generator.extrapolate(&fiducial_fields[i], &h, n);
             windows.push(generator.build_bounds(&g, particle));
         }
-        Ok(windows)
+        let report = DeGVRReport {
+            density_reduction: n,
+            optical_depth,
+            fiducial: fiducial_pass,
+            asymptotic: asymptotic_pass,
+        };
+        Ok((windows, report))
     }
 
     /// Populate the global LINEAR-space TTB energy grids from element 0's raw
@@ -4598,6 +4613,75 @@ impl StopReason {
             StopReason::ConvergenceTargets => "convergence_targets",
             StopReason::StatisticalChecks => "statistical_checks",
         }
+    }
+}
+
+/// What one DeGVR generation pass did.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeGVRPass {
+    /// Histories the pass ran.
+    pub n_histories: u64,
+    /// Why the pass stopped.
+    pub stop_reason: StopReason,
+    /// Transport seconds.
+    pub transport_secs: f64,
+    /// Per generated particle field, in the generator's order: the relative
+    /// error 95% of the scored window-mesh bins reached, which the
+    /// `relative_error` target watches.
+    pub bin_relative_error: Vec<f64>,
+    /// What the windows did; `None` for the fiducial pass, which has none.
+    pub weight_window_counts: Option<WeightWindowCounts>,
+}
+
+/// How [`Model::generate_weight_windows`] made its windows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeGVRReport {
+    /// The density-reduction factor N.
+    pub density_reduction: f64,
+    /// The estimated optical depth an automatic N came from; `None` when N
+    /// was given.
+    pub optical_depth: Option<f64>,
+    /// The analog pass at density / N.
+    pub fiducial: DeGVRPass,
+    /// The pass at density / (N/2) under the fiducial windows.
+    pub asymptotic: DeGVRPass,
+}
+
+impl DeGVRPass {
+    /// Read a pass off its model after the run; the model's tallies are the
+    /// pass's flux tallies, one per generated particle field.
+    fn of(pass: &Model) -> Result<Self, String> {
+        let stop_reason = pass
+            .last_stop_reason
+            .ok_or("a DeGVR pass did not record why it stopped")?;
+        let bin_relative_error = pass
+            .tallies
+            .iter()
+            .map(|t| {
+                // As the stop rule: no estimate before two histories.
+                if t.get_n_histories() < 2 {
+                    return f64::INFINITY;
+                }
+                let mean = t.get_mean();
+                let errors = mean
+                    .iter()
+                    .zip(t.get_std_dev())
+                    .filter(|(m, _)| **m != 0.0)
+                    .map(|(m, s)| s / m.abs())
+                    .collect();
+                yamc_tallies::welford::relative_error_quantile(
+                    errors,
+                    yamc_tallies::BIN_RELATIVE_ERROR_QUANTILE,
+                )
+            })
+            .collect();
+        Ok(Self {
+            n_histories: pass.tallies.first().map_or(0, |t| t.get_n_histories()),
+            stop_reason,
+            transport_secs: pass.last_transport_secs.unwrap_or(0.0),
+            bin_relative_error,
+            weight_window_counts: pass.last_weight_window_counts,
+        })
     }
 }
 

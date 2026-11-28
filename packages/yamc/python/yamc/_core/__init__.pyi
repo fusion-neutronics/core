@@ -8548,6 +8548,27 @@ class WeightWindowBounds:
             with the floor as its survivor weight (default 1e-38).
     """
     @property
+    def generation(self) -> typing.Optional[dict]:
+        r"""
+        How ``Model.generate_weight_windows`` made these windows, as a dict.
+        Only the windows it returns carry it: windows built by hand, and the
+        copies ``Model.variance_reduction`` returns, give ``None``.
+        
+        - ``density_reduction``: the factor N. ``optical_depth``: the
+          estimate an automatic N came from, ``None`` when N was given.
+        - ``fiducial`` and ``asymptotic``: one dict per pass, with
+          ``n_histories``, ``stop_reason`` (as ``TransportResults.stop_reason``),
+          ``transport_time`` in seconds, ``bin_relative_error`` and
+          ``weight_window_stats`` (as ``TransportResults.weight_window_stats``;
+          ``None`` for the fiducial pass, which runs without windows).
+          ``bin_relative_error`` is the relative error 95% of this particle's
+          scored window-mesh bins reached, which ``relative_error`` watches.
+        
+        A pass that stopped on ``total_particles`` or ``max_runtime`` with
+        ``bin_relative_error`` above the target left these windows on a flux
+        field that had not converged.
+        """
+    @property
     def lower_bounds(self) -> builtins.list[builtins.float]:
         r"""
         Lower window bounds, flat over (group, voxel).

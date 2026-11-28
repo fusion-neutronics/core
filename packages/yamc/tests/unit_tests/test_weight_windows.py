@@ -43,6 +43,7 @@ def test_weight_window_bounds_validation():
     assert wwb.particle == "neutron"
     assert len(wwb.upper_bounds) == 8
     assert wwb.upper_bounds[0] == pytest.approx(0.5)
+    assert wwb.generation is None
 
     # wrong-length bounds rejected
     with pytest.raises(ValueError):
@@ -328,7 +329,7 @@ def test_weight_window_warnings():
         yamc.WeightWindowBounds(mesh=mesh, lower_bounds=good, upper_bounds=good)
 
 
-def _degvr_rod_model():
+def _degvr_rod_model(**generator_kwargs):
     """Small Al27 rod + a DeGVR generator, shared by the stop-condition tests."""
     mesh = yamc.RegularRectangularMesh(
         lower_left=[-3, -3, 0], upper_right=[3, 3, 50], shape=[1, 1, 10]
@@ -343,7 +344,7 @@ def _degvr_rod_model():
     src = yamc.NeutronSource(position=(0, 0, 0.5), energy=yamc.sources.Discrete([1.0e6], [1.0]))
     tally = yamc.Tally(scores=["flux"], name="flux", mesh=mesh, particle="neutron")
     model = yamc.Model(geometry=geom, source=src, tallies=[tally])
-    gen = yamc.WeightWindowGeneratorDeGVR(mesh=mesh, particle="neutron")
+    gen = yamc.WeightWindowGeneratorDeGVR(mesh=mesh, particle="neutron", **generator_kwargs)
     return model, gen
 
 
@@ -376,6 +377,42 @@ def test_generate_weight_windows_stops_on_converged_mesh(capfd):
     scored = [x for x in wwb.lower_bounds if x > 0.0]
     assert len(scored) == 10
     assert scored[0] > scored[-1]
+    # The windows say how they were made: an automatic N, and both passes
+    # stopped on the converged mesh.
+    g = wwb.generation
+    n, tau = model.estimate_density_reduction(gen)
+    assert g["density_reduction"] == pytest.approx(n)
+    assert g["optical_depth"] == pytest.approx(tau)
+    for name in ("fiducial", "asymptotic"):
+        assert g[name]["stop_reason"] == "convergence_targets"
+        assert 0.0 < g[name]["bin_relative_error"] <= 0.1
+        assert g[name]["transport_time"] > 0.0
+    assert g["fiducial"]["weight_window_stats"] is None
+    stats = g["asymptotic"]["weight_window_stats"]
+    assert stats["histories"] == g["asymptotic"]["n_histories"]
+    assert stats["split_events"] > 0
+
+
+@requires_data
+def test_generation_report_shows_a_pass_cut_short():
+    # A particle budget too small for the mesh stops both passes before the
+    # target, and the report says so: the windows rest on a field whose deep
+    # voxels had not converged.
+    model, gen = _degvr_rod_model(density_reduction=4.0)
+    g = model.generate_weight_windows(gen, total_particles=200, seed=1).generation
+    assert g["density_reduction"] == 4.0
+    assert g["optical_depth"] is None
+    for name in ("fiducial", "asymptotic"):
+        assert g[name]["stop_reason"] == "total_particles"
+        assert g[name]["n_histories"] == 200
+        assert g[name]["bin_relative_error"] > 0.1
+    # One history gives no error estimate, as the stop rule sees it.
+    w = model.generate_weight_windows(gen, total_particles=1, seed=1)
+    for name in ("fiducial", "asymptotic"):
+        assert math.isinf(w.generation[name]["bin_relative_error"])
+    # The report stays with the returned windows, not the model's copies.
+    model.variance_reduction = [w]
+    assert model.variance_reduction[0].generation is None
 
 
 @requires_data

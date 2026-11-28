@@ -5,6 +5,7 @@
 //! later). Techniques compose; the list order carries no meaning.
 
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use yamc::variance_reduction::{
     SurvivalBiasing, VarianceReduction, WeightWindowBounds, WeightWindowGeneratorDeGVR,
@@ -165,6 +166,36 @@ fn rectangular_mesh(mesh: &Bound<'_, PyAny>, owner: &str) -> PyResult<PyRegularR
 #[derive(Clone)]
 pub struct PyWeightWindowBounds {
     pub inner: WeightWindowBounds,
+    /// The report of the `Model.generate_weight_windows` call that returned
+    /// these windows; `None` on any other window.
+    pub generation: Option<WindowGeneration>,
+}
+
+/// A DeGVR generation's report, and which of its particle fields a window is.
+#[derive(Clone)]
+pub struct WindowGeneration {
+    pub report: yamc::model::DeGVRReport,
+    pub field: usize,
+}
+
+/// One pass of a DeGVR generation, for the field a window came from.
+fn degvr_pass_dict<'py>(
+    py: Python<'py>,
+    pass: &yamc::model::DeGVRPass,
+    field: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("n_histories", pass.n_histories)?;
+    d.set_item("stop_reason", pass.stop_reason.name())?;
+    d.set_item("transport_time", pass.transport_secs)?;
+    d.set_item("bin_relative_error", pass.bin_relative_error.get(field))?;
+    let stats = pass
+        .weight_window_counts
+        .as_ref()
+        .map(|c| crate::simulation::weight_window_counts_dict(py, c))
+        .transpose()?;
+    d.set_item("weight_window_stats", stats)?;
+    Ok(d)
 }
 
 #[gen_stub_pymethods]
@@ -222,7 +253,46 @@ impl PyWeightWindowBounds {
         inner
             .validate()
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            generation: None,
+        })
+    }
+
+    /// How ``Model.generate_weight_windows`` made these windows, as a dict.
+    /// Only the windows it returns carry it: windows built by hand, and the
+    /// copies ``Model.variance_reduction`` returns, give ``None``.
+    ///
+    /// - ``density_reduction``: the factor N. ``optical_depth``: the
+    ///   estimate an automatic N came from, ``None`` when N was given.
+    /// - ``fiducial`` and ``asymptotic``: one dict per pass, with
+    ///   ``n_histories``, ``stop_reason`` (as ``TransportResults.stop_reason``),
+    ///   ``transport_time`` in seconds, ``bin_relative_error`` and
+    ///   ``weight_window_stats`` (as ``TransportResults.weight_window_stats``;
+    ///   ``None`` for the fiducial pass, which runs without windows).
+    ///   ``bin_relative_error`` is the relative error 95% of this particle's
+    ///   scored window-mesh bins reached, which ``relative_error`` watches.
+    ///
+    /// A pass that stopped on ``total_particles`` or ``max_runtime`` with
+    /// ``bin_relative_error`` above the target left these windows on a flux
+    /// field that had not converged.
+    #[getter]
+    pub fn generation<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(g) = &self.generation else {
+            return Ok(None);
+        };
+        let d = PyDict::new(py);
+        d.set_item("density_reduction", g.report.density_reduction)?;
+        d.set_item("optical_depth", g.report.optical_depth)?;
+        d.set_item(
+            "fiducial",
+            degvr_pass_dict(py, &g.report.fiducial, g.field)?,
+        )?;
+        d.set_item(
+            "asymptotic",
+            degvr_pass_dict(py, &g.report.asymptotic, g.field)?,
+        )?;
+        Ok(Some(d))
     }
 
     /// Lower window bounds, flat over (group, voxel).

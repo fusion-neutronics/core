@@ -867,6 +867,7 @@ impl PyModel {
                     yamc::variance_reduction::VarianceReduction::WeightWindowBounds(ww) => {
                         Ok(crate::variance_reduction::PyWeightWindowBounds {
                             inner: ww.as_ref().clone(),
+                            generation: None,
                         }
                         .into_pyobject(py)?
                         .into_any()
@@ -992,24 +993,27 @@ impl PyModel {
             self.inner
                 .generate_weight_windows(&generator.inner, &settings, relative_error)
         });
-        let mut windows = result.map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let (windows, report) = result.map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        // Each window carries the report, and which particle field it is.
+        let mut windows = windows.into_iter().enumerate().map(|(field, inner)| {
+            crate::variance_reduction::PyWeightWindowBounds {
+                inner,
+                generation: Some(crate::variance_reduction::WindowGeneration {
+                    report: report.clone(),
+                    field,
+                }),
+            }
+        });
         // Return shape mirrors the `particle` argument form: a single-string
         // request yields one WeightWindowBounds; a list request yields a list in
         // request order (even of one). `particle_is_list` records that intent so
         // `["photon"]` round-trips as a one-element list, not a bare bounds.
         if !generator.particle_is_list {
-            let single = crate::variance_reduction::PyWeightWindowBounds {
-                inner: windows.pop().unwrap(),
-            };
+            let single = windows.next().unwrap();
             Ok(single.into_pyobject(py)?.into_any())
         } else {
             let objs: Vec<Bound<'py, PyAny>> = windows
-                .into_iter()
-                .map(|inner| {
-                    crate::variance_reduction::PyWeightWindowBounds { inner }
-                        .into_pyobject(py)
-                        .map(|b| b.into_any())
-                })
+                .map(|w| w.into_pyobject(py).map(|b| b.into_any()))
                 .collect::<PyResult<_>>()?;
             Ok(objs.into_pyobject(py)?.into_any())
         }
