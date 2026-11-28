@@ -21,6 +21,7 @@ pub mod gates;
 pub mod generate;
 pub mod identify;
 pub mod index;
+pub mod notice;
 pub mod os_downloads;
 pub mod recipe;
 pub mod sources;

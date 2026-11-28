@@ -12,9 +12,11 @@ Each reference below is the one the library's developers ask for. Cite every
 library a calculation read: its cross sections, and each transmutation
 subsection taken from another library. TENDL ``reactions`` with ENDF/B-VIII.1
 ``decay``, for instance, means citing both. ``data_releases`` on a run's results
-records which library, and which release of it, the data came from. Throughout
-these pages a library's name links to its reference: hover over it to see the
-citation.
+records which library, and which release of it, the data came from, with what to
+cite for each under ``citations`` (each a ``reference`` and its ``doi``). Every
+published release also carries a ``NOTICE.md`` with the same credit, its terms,
+and what the conversion changed. Throughout these pages a library's name links to
+its reference: hover over it to see the citation.
 
 Each evaluation inside a library also names its own evaluators, and often the
 paper it is based on, in its header (MF=1, MT=451). Where a result rests on a

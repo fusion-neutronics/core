@@ -1,6 +1,7 @@
 """A run on a library keyword records, for each library it read, the
 published release and the builds that wrote it: ``converters``, as the
-release's manifest lists them.
+release's manifest lists them, and what to cite for the library:
+``citations``, each a ``reference`` and its ``doi``.
 
 End-to-end network tests against the published data. They skip when it is
 unavailable (offline with an empty cache), and compare each record with the
@@ -24,6 +25,8 @@ KEYS = {
     "converters",
     "locally_processed",
     "library",
+    "citations",
+    "terms",
 }
 
 
@@ -36,6 +39,18 @@ def _check(keyword, record):
     manifest = Path(yamc.cache_dir()) / keyword / record["release"] / "manifest.json"
     listed = json.loads(manifest.read_text()).get("converters", [])
     assert record["converters"] == listed
+    # Every published library has something to cite, and its terms.
+    assert record["citations"], keyword
+    for citation in record["citations"]:
+        assert set(citation) == {"reference", "doi"}
+        assert citation["doi"].startswith("10.")
+    assert record["terms"]
+    if keyword == "endf-b8.1":
+        # Its paper, then the library's own DOI.
+        assert [c["doi"] for c in record["citations"]] == [
+            "10.1016/j.nds.2026.04.001",
+            "10.11578/endf/2571019",
+        ]
 
 
 def _run(run):

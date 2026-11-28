@@ -3513,6 +3513,12 @@ class TransmutationResults:
         True, ``library`` and ``release`` the library and ``data_version`` its
         converter recorded, and ``manifest_sha256`` the sha256 of its files.
         For a release ``locally_processed`` is False and ``library`` empty.
+        ``citations`` is what to cite for the library's data, a list of dicts
+        with ``reference`` and ``doi`` (the references its makers ask for), and
+        ``terms`` what its data is redistributed under; both are empty for a
+        library converted under a name of its own. Cite every library a
+        calculation read: see "Cite the nuclear data you use" on the nuclear
+        data libraries page.
         """
     @property
     def num_steps(self) -> builtins.int:
