@@ -230,7 +230,8 @@ pub struct DataRelease {
 pub struct Citation {
     /// Authors, title, journal or publisher, volume, pages and year.
     pub reference: String,
-    /// Its DOI, without the `https://doi.org/` prefix.
+    /// Its DOI, without the `https://doi.org/` prefix, or empty for a credit
+    /// asked for in words rather than by a paper.
     pub doi: String,
 }
 

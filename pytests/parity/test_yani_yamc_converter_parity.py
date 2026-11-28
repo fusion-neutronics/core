@@ -201,7 +201,10 @@ def test_both_wheels_refuse_alike():
             module.Material({"Fe56": 1.0}, density=7.9, volume=1.0).activity()
         messages.append(str(error.value))
     assert messages[0] == messages[1], messages
-    assert "Libraries that publish decay data: endf-b8.1, jeff-4.0, jendl-5.0." in messages[0]
+    assert (
+        "Libraries that publish decay data: endf-b8.1, jeff-4.0, jendl-5.0, ukdd-2012, ukdd-2020."
+        in messages[0]
+    )
     with pytest.raises(RuntimeError) as a:
         yamc.generate_library("tendl-2025", "unused", parts=["decay"])
     with pytest.raises(RuntimeError) as b:

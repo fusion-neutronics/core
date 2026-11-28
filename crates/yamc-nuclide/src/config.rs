@@ -11,13 +11,13 @@ fn is_keyword_or_directory(value: &str) -> bool {
     crate::url_cache::is_keyword(value) || std::path::Path::new(value).is_dir()
 }
 
-/// Refuse a branching-only library keyword (`irdff-ii`) as a cross-section
-/// source, as the other invalid sources here are refused.
-fn refuse_branching_only(value: &str) {
-    if crate::url_cache::is_branching_only(value) {
+/// Refuse a chain-only library keyword (`irdff-ii`, `ukdd-2020`, ...) as a
+/// cross-section source, as the other invalid sources here are refused.
+fn refuse_chain_only(value: &str) {
+    if crate::url_cache::is_chain_only(value) {
         panic!(
             "{}",
-            crate::url_cache::branching_only_error(value, "the neutron cross-section library")
+            crate::url_cache::chain_only_error(value, "the neutron cross-section library")
         );
     }
 }
@@ -153,8 +153,8 @@ pub enum CrossSectionSource {
 impl CrossSectionSource {
     fn validate(&self, role: &str) -> Result<(), String> {
         let validate = |source: &str| {
-            if crate::url_cache::is_branching_only(source) {
-                return Err(crate::url_cache::branching_only_error(source, role));
+            if crate::url_cache::is_chain_only(source) {
+                return Err(crate::url_cache::chain_only_error(source, role));
             }
             if !source.trim().is_empty()
                 && (crate::url_cache::is_keyword(source)
@@ -257,7 +257,7 @@ impl Config {
 
     /// Set a cross section file path for a nuclide, or set a global default if only a keyword/directory is provided
     pub fn set_cross_section(&mut self, nuclide_or_keyword: &str, path: Option<&str>) {
-        refuse_branching_only(path.unwrap_or(nuclide_or_keyword));
+        refuse_chain_only(path.unwrap_or(nuclide_or_keyword));
         match path {
             Some(p) => {
                 // Validate file exists when a path is provided (keywords and directories bypass)
@@ -544,7 +544,7 @@ pub trait IntoCrossSectionsInput {
 impl IntoCrossSectionsInput for HashMap<String, String> {
     fn apply(self, config: &mut Config) {
         for (nuclide, path) in self {
-            refuse_branching_only(&path);
+            refuse_chain_only(&path);
             if !crate::url_cache::is_keyword(&path)
                 && !crate::storage::exists(std::path::Path::new(&path))
             {
@@ -563,7 +563,7 @@ impl IntoCrossSectionsInput for HashMap<String, String> {
 
 impl IntoCrossSectionsInput for &str {
     fn apply(self, config: &mut Config) {
-        refuse_branching_only(self);
+        refuse_chain_only(self);
         if !is_keyword_or_directory(self) {
             panic!(
                 "Invalid cross section source: '{}'. Must be a keyword ({}) or a directory path.",
@@ -878,7 +878,8 @@ mod transmutation_sources_tests {
             (
                 "decay data",
                 "transmutation_decay_data",
-                "Libraries that publish decay data: endf-b8.1, jeff-4.0, jendl-5.0.",
+                "Libraries that publish decay data: endf-b8.1, jeff-4.0, jendl-5.0, ukdd-2012, \
+                 ukdd-2020.",
             ),
             (
                 "reactions",
@@ -889,7 +890,8 @@ mod transmutation_sources_tests {
             (
                 "fission yields",
                 "transmutation_fission_yields",
-                "Libraries that publish fission yields: endf-b8.1, jeff-4.0, jendl-5.0.",
+                "Libraries that publish fission yields: endf-b8.1, jeff-4.0, jendl-5.0, \
+                 ukfy-4.2.",
             ),
         ] {
             let sentence = format!("this calculation needs {needs}, and {setting} is not set.");

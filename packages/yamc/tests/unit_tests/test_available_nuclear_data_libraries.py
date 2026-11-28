@@ -49,6 +49,9 @@ def test_every_hosted_library_is_listed_with_every_key(libraries):
         "jendl-5.0",
         "fendl-3.2d",
         "irdff-ii",
+        "ukdd-2012",
+        "ukdd-2020",
+        "ukfy-4.2",
     } <= set(libraries)
     for keyword, entry in libraries.items():
         assert set(entry) == KEYS, keyword
@@ -84,3 +87,17 @@ def test_a_branching_only_library_has_nothing_else(libraries):
         irdff["neutron"] == [] and irdff["photon"] == [] and irdff["photonuclear"] == []
     )
     assert not (irdff["decay"] or irdff["reactions"] or irdff["fission_yields"])
+
+
+@pytest.mark.parametrize(
+    "keyword, part",
+    [("ukdd-2012", "decay"), ("ukdd-2020", "decay"), ("ukfy-4.2", "fission_yields")],
+)
+def test_a_ukaea_library_has_its_one_subsection(libraries, keyword, part):
+    entry = libraries[keyword]
+    if entry["error"] is not None:
+        pytest.skip(entry["error"])
+    assert entry[part]
+    assert entry["neutron"] == [] and entry["photon"] == [] and entry["photonuclear"] == []
+    others = {"decay", "reactions", "fission_yields"} - {part}
+    assert not any(entry[k] for k in others) and not entry["isomeric_branching"]

@@ -385,7 +385,8 @@ fn range_header(spans: &[Range]) -> String {
 ///   relaxation pair the photon loader reads, so it publishes none.
 /// - `jendl-5.0`: neutron data (most evaluations to 200 MeV), the EPICS2017
 ///   photon pair, and all four transmutation subsections.
-/// - `irdff-ii`: isomeric branching only (see [`BRANCHING_ONLY_KEYWORDS`]).
+/// - `irdff-ii`: isomeric branching only, `ukdd-2012` and `ukdd-2020` decay
+///   data only, `ukfy-4.2` fission yields only (see [`CHAIN_ONLY_KEYWORDS`]).
 pub(crate) const KEYWORDS: &[&str] = &[
     "tendl-2025",
     "tendl-2017",
@@ -394,6 +395,9 @@ pub(crate) const KEYWORDS: &[&str] = &[
     "jeff-4.0",
     "jendl-5.0",
     "irdff-ii",
+    "ukdd-2012",
+    "ukdd-2020",
+    "ukfy-4.2",
 ];
 
 /// The transmutation subsections each library keyword's release publishes.
@@ -418,6 +422,9 @@ pub const TRANSMUTATION_SUBSECTIONS: &[(&str, &[&str])] = &[
         &["decay", "reactions", "fission_yields", "branching"],
     ),
     ("irdff-ii", &["branching"]),
+    ("ukdd-2012", &["decay"]),
+    ("ukdd-2020", &["decay"]),
+    ("ukfy-4.2", &["fission_yields"]),
 ];
 
 /// The library keywords whose releases publish the transmutation
@@ -466,46 +473,78 @@ pub fn no_thermal_tables(keyword: &str) -> String {
     )
 }
 
-/// The keywords of libraries that publish isomeric branching and nothing
-/// else: no cross sections, and no decay, reactions or fission-yield
-/// subsection. Such a library can only be a branching source
-/// (`transmutation_branch_ratios`), and naming it as anything else is refused
-/// before anything is downloaded.
+/// The keywords of libraries that publish one transmutation subsection and
+/// nothing else: no cross sections, and none of the other subsections. Such a
+/// library can only be the source of that subsection, and naming it as
+/// anything else is refused before anything is downloaded. None is ever a
+/// default: a run uses one only where it is named.
 ///
-/// - `irdff-ii`: the IAEA International Reactor Dosimetry and Fusion File
-///   (IRDFF-II, 2020). Its `branching` subsection is the isomer production it
-///   evaluates for dosimetry (MF=10, with the MF=40 covariances), among them
-///   In115 `(n,n')` In115_m1, In115 `(n,2n)` In114_m1 and Nb93 `(n,2n)`
-///   Nb92_m1, with product levels resolved against ENDF/B-VIII.1 decay data.
-///   It is never a default: a run uses it only where it is listed.
-pub const BRANCHING_ONLY_KEYWORDS: &[&str] = &["irdff-ii"];
+/// - `irdff-ii` (`branching`): the IAEA International Reactor Dosimetry and
+///   Fusion File (IRDFF-II, 2020). Its `branching` subsection is the isomer
+///   production it evaluates for dosimetry (MF=10, with the MF=40
+///   covariances), among them In115 `(n,n')` In115_m1, In115 `(n,2n)`
+///   In114_m1 and Nb93 `(n,2n)` Nb92_m1, with product levels resolved against
+///   ENDF/B-VIII.1 decay data.
+/// - `ukdd-2012`, `ukdd-2020` (`decay`): UKAEA's decay_2012 and decay_2020,
+///   the decay data FISPACT-II ships, compiled by UKAEA from JEFF, JENDL,
+///   ENDF/B and its own evaluations. decay_2012 is what the FISPACT-II
+///   calculations the IAEA CoNDERC archives publish were run with.
+/// - `ukfy-4.2` (`fission_yields`): UKFY-4.2, neutron-induced fission yields
+///   evaluated by R.W. Mills (NNL), 223 parents at 37 incident energies.
+pub const CHAIN_ONLY_KEYWORDS: &[&str] = &["irdff-ii", "ukdd-2012", "ukdd-2020", "ukfy-4.2"];
 
-/// Whether `source` is the keyword of a library that publishes isomeric
-/// branching only (see [`BRANCHING_ONLY_KEYWORDS`]).
-pub fn is_branching_only(source: &str) -> bool {
-    BRANCHING_ONLY_KEYWORDS.contains(&source)
+/// The one transmutation subsection `source` publishes, when it is the
+/// keyword of a chain-only library (see [`CHAIN_ONLY_KEYWORDS`]).
+pub fn chain_only_subsection(source: &str) -> Option<&'static str> {
+    if !CHAIN_ONLY_KEYWORDS.contains(&source) {
+        return None;
+    }
+    TRANSMUTATION_SUBSECTIONS
+        .iter()
+        .find(|(keyword, _)| *keyword == source)
+        .and_then(|(_, subsections)| subsections.first().copied())
+}
+
+/// Whether `source` is the keyword of a chain-only library (see
+/// [`CHAIN_ONLY_KEYWORDS`]).
+pub fn is_chain_only(source: &str) -> bool {
+    chain_only_subsection(source).is_some()
 }
 
 /// The keywords a cross-section source can name: every keyword but the
-/// branching-only ones.
+/// chain-only ones.
 pub fn cross_section_keywords() -> Vec<&'static str> {
     KEYWORDS
         .iter()
         .copied()
-        .filter(|k| !is_branching_only(k))
+        .filter(|k| !is_chain_only(k))
         .collect()
 }
 
-/// Why branching-only `keyword` cannot be `role` (e.g. "the neutron
-/// cross-section library"), saying what it can be.
-pub fn branching_only_error(keyword: &str, role: &str) -> String {
-    format!(
-        "'{keyword}' supplies isomeric branching only: that library publishes no cross \
-         sections and no decay, reactions or fission-yield data, so it cannot be {role}. \
-         Name it as a branching source with transmutation_branch_ratios, on its own or in \
-         an ordered list such as [\"{keyword}\", \"endf-b8.1\"], where each reaction takes \
-         its isomeric split from the first source that evaluates it"
-    )
+/// Why chain-only `keyword` cannot be `role` (e.g. "the neutron cross-section
+/// library"), saying which setting does take it.
+pub fn chain_only_error(keyword: &str, role: &str) -> String {
+    match chain_only_subsection(keyword) {
+        Some("decay") => format!(
+            "'{keyword}' supplies decay data only: that library publishes no cross \
+             sections and no reactions, fission-yield or branching data, so it cannot be \
+             {role}. Name it as the decay-data source, transmutation_decay_data = \
+             \"{keyword}\", beside the cross sections and reactions of another library"
+        ),
+        Some("fission_yields") => format!(
+            "'{keyword}' supplies fission yields only: that library publishes no cross \
+             sections and no decay, reactions or branching data, so it cannot be {role}. \
+             Name it as the fission-yield source, transmutation_fission_yields = \
+             \"{keyword}\", beside the cross sections and reactions of another library"
+        ),
+        _ => format!(
+            "'{keyword}' supplies isomeric branching only: that library publishes no cross \
+             sections and no decay, reactions or fission-yield data, so it cannot be {role}. \
+             Name it as a branching source with transmutation_branch_ratios, on its own or in \
+             an ordered list such as [\"{keyword}\", \"endf-b8.1\"], where each reaction takes \
+             its isomeric split from the first source that evaluates it"
+        ),
+    }
 }
 
 /// Which particle's data file to resolve under a library keyword. Different
@@ -603,8 +642,10 @@ pub fn resolve_subsection(
     subsection: &str,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     refuse_shadowed_keyword(source)?;
-    if is_branching_only(source) && subsection != "branching" {
-        return Err(branching_only_error(
+    if let Some(only) = chain_only_subsection(source)
+        && subsection != only
+    {
+        return Err(chain_only_error(
             source,
             &format!("the source of the '{subsection}' transmutation subsection"),
         )
@@ -2190,8 +2231,8 @@ pub fn resolve_path_or_url(
     scope: &crate::load_scope::LoadScope,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     refuse_shadowed_keyword(path_url_or_keyword)?;
-    if is_branching_only(path_url_or_keyword) {
-        return Err(branching_only_error(path_url_or_keyword, data_role(kind)).into());
+    if is_chain_only(path_url_or_keyword) {
+        return Err(chain_only_error(path_url_or_keyword, data_role(kind)).into());
     }
     if is_keyword(path_url_or_keyword) {
         // A library keyword: the current release, verified (release_cache).
@@ -2284,8 +2325,10 @@ pub fn resolve_subsection(
     subsection: &str,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     refuse_shadowed_keyword(source)?;
-    if is_branching_only(source) && subsection != "branching" {
-        return Err(branching_only_error(
+    if let Some(only) = chain_only_subsection(source)
+        && subsection != only
+    {
+        return Err(chain_only_error(
             source,
             &format!("the source of the '{subsection}' transmutation subsection"),
         )
@@ -2312,8 +2355,8 @@ pub fn resolve_path_or_url(
     _scope: &crate::load_scope::LoadScope,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     refuse_shadowed_keyword(path_url_or_keyword)?;
-    if is_branching_only(path_url_or_keyword) {
-        return Err(branching_only_error(path_url_or_keyword, data_role(kind)).into());
+    if is_chain_only(path_url_or_keyword) {
+        return Err(chain_only_error(path_url_or_keyword, data_role(kind)).into());
     }
     if is_keyword(path_url_or_keyword) {
         Err("URL downloading and keywords are not supported in WASM builds. Please use local file paths.".into())
@@ -3075,42 +3118,73 @@ mod cache_root_tests {
 }
 
 #[cfg(test)]
-mod branching_only_tests {
+mod chain_only_tests {
     use super::{
-        cross_section_keywords, is_branching_only, is_keyword, resolve_path_or_url,
-        resolve_subsection, DataKind,
+        chain_only_subsection, cross_section_keywords, is_chain_only, is_keyword,
+        resolve_path_or_url, resolve_subsection, DataKind,
     };
 
-    /// IRDFF-II is a keyword, so it resolves to its published release, and a
-    /// branching-only one, so it is offered nowhere but as a branching source.
+    /// Each is a keyword, so it resolves to its published release, and a
+    /// chain-only one, offered nowhere but as the source of its one
+    /// subsection.
     #[test]
-    fn irdff_ii_is_a_branching_only_keyword() {
-        assert!(is_keyword("irdff-ii"));
-        assert!(is_branching_only("irdff-ii"));
-        assert!(!is_branching_only("endf-b8.1"));
-        assert!(!cross_section_keywords().contains(&"irdff-ii"));
+    fn the_chain_only_keywords_and_their_subsections() {
+        for (keyword, only) in [
+            ("irdff-ii", "branching"),
+            ("ukdd-2012", "decay"),
+            ("ukdd-2020", "decay"),
+            ("ukfy-4.2", "fission_yields"),
+        ] {
+            assert!(is_keyword(keyword), "{keyword}");
+            assert!(is_chain_only(keyword), "{keyword}");
+            assert_eq!(chain_only_subsection(keyword), Some(only), "{keyword}");
+            assert!(!cross_section_keywords().contains(&keyword), "{keyword}");
+        }
+        assert!(!is_chain_only("endf-b8.1"));
         assert!(cross_section_keywords().contains(&"endf-b8.1"));
     }
 
-    /// Asked for cross sections or for another subsection, it is refused
-    /// before anything is fetched, with a message saying what it is for. No
-    /// network is involved: the refusal comes first.
+    /// Asked for cross sections or for another subsection, each is refused
+    /// before anything is fetched, with a message naming the setting that
+    /// does take it. No network is involved: the refusal comes first.
     #[test]
-    fn irdff_ii_is_refused_as_anything_but_a_branching_source() {
+    fn a_chain_only_library_is_refused_as_anything_but_its_subsection() {
         let scope = crate::load_scope::LoadScope::full();
-        for kind in [DataKind::Neutron, DataKind::Photon] {
-            let err = resolve_path_or_url("irdff-ii", "Fe56", kind, &scope)
-                .expect_err("not a cross-section library")
-                .to_string();
-            assert!(err.contains("supplies isomeric branching only"), "{err}");
-            assert!(err.contains("transmutation_branch_ratios"), "{err}");
-        }
-        for subsection in ["decay", "reactions", "fission_yields"] {
-            let err = resolve_subsection("irdff-ii", subsection)
-                .expect_err("not that subsection's source")
-                .to_string();
-            assert!(err.contains("supplies isomeric branching only"), "{err}");
-            assert!(err.contains(subsection), "{err}");
+        for (keyword, says, setting) in [
+            (
+                "irdff-ii",
+                "supplies isomeric branching only",
+                "transmutation_branch_ratios",
+            ),
+            (
+                "ukdd-2020",
+                "supplies decay data only",
+                "transmutation_decay_data",
+            ),
+            (
+                "ukfy-4.2",
+                "supplies fission yields only",
+                "transmutation_fission_yields",
+            ),
+        ] {
+            for kind in [DataKind::Neutron, DataKind::Photon] {
+                let err = resolve_path_or_url(keyword, "Fe56", kind, &scope)
+                    .expect_err("not a cross-section library")
+                    .to_string();
+                assert!(err.contains(says), "{err}");
+                assert!(err.contains(setting), "{err}");
+            }
+            let only = chain_only_subsection(keyword).unwrap();
+            for subsection in ["decay", "reactions", "fission_yields", "branching"] {
+                if subsection == only {
+                    continue;
+                }
+                let err = resolve_subsection(keyword, subsection)
+                    .expect_err("not that subsection's source")
+                    .to_string();
+                assert!(err.contains(says), "{err}");
+                assert!(err.contains(subsection), "{err}");
+            }
         }
     }
 }

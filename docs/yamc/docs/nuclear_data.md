@@ -265,7 +265,9 @@ use it: each library's evaluators ask to be cited wherever their data is used.
 
 TENDL has no decay or fission-yield evaluations. Take ``decay``/``fission_yields``
 from a library that has them while sourcing ``reactions`` and/or ``branching``
-from TENDL. TENDL publishes no photoatomic data, so for coupled neutron/photon
+from TENDL: a complete library, or UKAEA's ``ukdd-2012``, ``ukdd-2020`` and
+``ukfy-4.2``, which publish decay data or fission yields and nothing else (see
+[UKAEA decay data and UKFY fission yields](nuclear_data_libraries.md#ukaea-decay-data-and-ukfy-fission-yields)). TENDL publishes no photoatomic data, so for coupled neutron/photon
 transport set ``photon_cross_section_data`` to a library that does. The next
 TENDL release adds
 [photonuclear evaluated data](nuclear_data_libraries.md#photonuclear-data-in-the-next-tendl-release),
@@ -423,7 +425,8 @@ reader a simulation uses, and writes each particle's ``index.json`` and then the
 manifest.
 
 The libraries are [``"endf-b8.1"``][cite-endf-b8.1], [``"jeff-4.0"``][cite-jeff-4.0], [``"jendl-5.0"``][cite-jendl-5.0],
-[``"tendl-2025"``][cite-tendl-2025], [``"tendl-2017"``][cite-tendl-2017], [``"fendl-3.2d"``][cite-fendl-3.2d] and [``"irdff-ii"``][cite-irdff-ii]. Each is
+[``"tendl-2025"``][cite-tendl-2025], [``"tendl-2017"``][cite-tendl-2017], [``"fendl-3.2d"``][cite-fendl-3.2d], [``"irdff-ii"``][cite-irdff-ii], [``"ukdd-2012"``][cite-ukdd-2012],
+[``"ukdd-2020"``][cite-ukdd-2020] and [``"ukfy-4.2"``][cite-ukfy-4.2]. Each is
 built from its own evaluations only, never with another library's data:
 
 | keyword | particles | transmutation parts |
@@ -433,6 +436,8 @@ built from its own evaluations only, never with another library's data:
 | [``tendl-2025``][cite-tendl-2025], [``tendl-2017``][cite-tendl-2017] | neutron, photonuclear | reactions, branching |
 | [``fendl-3.2d``][cite-fendl-3.2d] | neutron, photon | reactions, branching |
 | [``irdff-ii``][cite-irdff-ii] | none | branching |
+| [``ukdd-2012``][cite-ukdd-2012], [``ukdd-2020``][cite-ukdd-2020] | none | decay |
+| [``ukfy-4.2``][cite-ukfy-4.2] | none | fission_yields |
 
 A library without decay data of its own (TENDL, FENDL, IRDFF-II) writes each
 excited product level of its branching as the evaluation gives it, and a run

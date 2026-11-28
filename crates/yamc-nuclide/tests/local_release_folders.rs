@@ -298,9 +298,15 @@ fn a_locally_processed_subsection_is_recorded_by_its_path() {
     assert_eq!(record.format_version, 2);
     assert!(!record.offline);
     assert_eq!(record.converters, ["yani-python 0.30.0 (core abc)"]);
-    // A library with no credit entry has nothing to cite recorded for it.
-    assert!(record.citations.is_empty());
-    assert!(record.terms.is_empty());
+    // The library it names is credited as a keyword's would be: UKAEA's
+    // attribution, which has no DOI, then the JENDL/DDF-2015 report JAEA
+    // requires for decay_2020's JENDL part.
+    let dois: Vec<&str> = record.citations.iter().map(|c| c.doi.as_str()).collect();
+    assert_eq!(dois, ["", "10.11484/jaea-data-code-2015-030"]);
+    assert!(record.citations[0]
+        .reference
+        .contains("processed for FISPACT-II by UKAEA"));
+    assert!(record.terms.contains("CC BY 4.0"), "{}", record.terms);
     let first = record.manifest_sha256.clone();
     assert_eq!(first.len(), 64);
 

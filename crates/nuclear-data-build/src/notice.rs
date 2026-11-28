@@ -50,9 +50,9 @@ pub fn render(
     line(
         &mut s,
         &format!(
-            "This folder is {}, an evaluated nuclear data library made by {}, \
-             converted for yamc and yani. Its evaluators ask to be cited wherever \
-             their data is used.",
+            "This folder is {}, an evaluated nuclear data library, converted for yamc \
+             and yani. It was made by {}. Its evaluators ask to be cited wherever their \
+             data is used.",
             credit.library, credit.made_by
         ),
     );
@@ -60,10 +60,14 @@ pub fn render(
     line(&mut s, "## Cite");
     line(&mut s, "");
     for r in credit.references {
-        line(
-            &mut s,
-            &format!("- {}, doi:{} (https://doi.org/{})", r.text, r.doi, r.doi),
-        );
+        if r.doi.is_empty() {
+            line(&mut s, &format!("- {}", r.text));
+        } else {
+            line(
+                &mut s,
+                &format!("- {}, doi:{} (https://doi.org/{})", r.text, r.doi, r.doi),
+            );
+        }
     }
     line(&mut s, "");
     line(&mut s, &format!("The library's page: {}", credit.page));

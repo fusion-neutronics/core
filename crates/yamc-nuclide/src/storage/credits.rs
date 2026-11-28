@@ -21,7 +21,9 @@ use super::release::Citation;
 pub struct Reference {
     /// Authors, title, journal or publisher, volume, pages and year.
     pub text: &'static str,
-    /// The DOI, without the `https://doi.org/` prefix.
+    /// The DOI, without the `https://doi.org/` prefix, or empty for a credit
+    /// its makers ask for in words rather than by a paper (the attribution
+    /// the UKAEA FISPACT-II data asks for).
     pub doi: &'static str,
 }
 
@@ -64,6 +66,22 @@ const TENDL_MADE_BY: &str = "A.J. Koning and D. Rochman, who founded TENDL in 20
                              benchmarking by J.-Ch. Sublet";
 
 const TENDL_TERMS: &str = "Publicly available from the TENDL project.";
+
+/// Where UKAEA's FISPACT-II data is published, and the terms it is
+/// redistributed under there (its LICENSE and NOTICE.md, commit f8eee131 of
+/// 2026-11-27).
+const UKAEA_PAGE: &str = "https://git.oecd-nea.org/fispact/nuclear_data";
+
+const UKAEA_TERMS: &str = "Creative Commons Attribution 4.0 International (CC BY 4.0), \
+                           https://creativecommons.org/licenses/by/4.0/, to the extent of \
+                           the rights held by UKAEA and the other rights holders, who gave \
+                           the OECD Nuclear Energy Agency permission to redistribute it in \
+                           original and processed form. Upstream terms stricter than CC BY \
+                           4.0 take precedence for the parts they cover; the ENDF/B parts \
+                           carry the US Government disclaimer. The data is provided as is, \
+                           without warranty of any kind. Nothing in the licence waives the \
+                           privileges and immunities of the OECD as an international \
+                           organisation.";
 
 /// One entry per library keyword.
 pub const CREDITS: &[Credit] = &[
@@ -178,6 +196,59 @@ pub const CREDITS: &[Credit] = &[
             doi: "10.1016/j.nds.2019.12.001",
         }],
     },
+    Credit {
+        keyword: "ukdd-2012",
+        library: "UKAEA decay_2012",
+        made_by: "UKAEA, which compiled it from JEFF-3.1.1, JEFF-3.1, JEFF-3.0, JEF-2.2, \
+                  ENDF/B-VII, ENDF/B-VII.1, UKPADD-6.5 to 6.10, UKHEDD-2.2, EAF-2012, ENDF/A-6 \
+                  and UKAEA evaluations and processed it for FISPACT-II; the OECD Nuclear \
+                  Energy Agency redistributes it",
+        page: UKAEA_PAGE,
+        terms: UKAEA_TERMS,
+        references: &[Reference {
+            text: "decay_2012 data processed for FISPACT-II by UKAEA, from \
+                   https://git.oecd-nea.org/fispact/nuclear_data, licensed under CC BY 4.0",
+            doi: "",
+        }],
+    },
+    Credit {
+        keyword: "ukdd-2020",
+        library: "UKAEA decay_2020",
+        made_by: "UKAEA, which compiled it from JEFF-3.3, JEF-2.2, JENDL/DDF-2015, \
+                  ENDF/B-VIII.0, ENDF/B-VII, UKPADD-6.12, EAF-2012, ENDF/A-6 and UKAEA \
+                  evaluations and processed it for FISPACT-II; the OECD Nuclear Energy Agency \
+                  redistributes it",
+        page: UKAEA_PAGE,
+        terms: UKAEA_TERMS,
+        references: &[
+            Reference {
+                text: "decay_2020 data processed for FISPACT-II by UKAEA, from \
+                       https://git.oecd-nea.org/fispact/nuclear_data, licensed under CC BY 4.0",
+                doi: "",
+            },
+            // JAEA requires its JENDL/DDF-2015 part to be cited.
+            Reference {
+                text: "J. Katakura, F. Minato, \"JENDL Decay Data File 2015\", JAEA-Data/Code \
+                       2015-030, Japan Atomic Energy Agency (2016)",
+                doi: "10.11484/jaea-data-code-2015-030",
+            },
+        ],
+    },
+    Credit {
+        keyword: "ukfy-4.2",
+        library: "UKFY-4.2",
+        made_by: "R.W. Mills (National Nuclear Laboratory), who evaluated its \
+                  neutron-induced fission yields; UKAEA processed it for FISPACT-II, and the \
+                  OECD Nuclear Energy Agency redistributes it",
+        page: UKAEA_PAGE,
+        terms: UKAEA_TERMS,
+        references: &[Reference {
+            text: "UKFY-4.2 data processed for FISPACT-II by UKAEA, from \
+                   https://git.oecd-nea.org/fispact/nuclear_data, licensed under CC BY 4.0. \
+                   Evaluation: R.W. Mills, National Nuclear Laboratory",
+            doi: "",
+        }],
+    },
 ];
 
 /// The credit due for the library `keyword` names, if it is one this table
@@ -225,12 +296,25 @@ mod tests {
         assert_eq!(keywords, credited);
     }
 
+    /// A library converted under a name of its own has nothing recorded to
+    /// cite, rather than a guess.
     #[test]
-    fn every_credit_has_a_reference_with_a_doi() {
+    fn an_unknown_library_has_no_credit() {
+        assert!(citations("my-decay-2026").is_empty());
+        assert!(terms("my-decay-2026").is_empty());
+    }
+
+    #[test]
+    fn every_credit_has_a_reference_and_every_doi_is_one() {
         for c in CREDITS {
             assert!(!c.references.is_empty(), "{}", c.keyword);
             for r in c.references {
-                assert!(r.doi.starts_with("10.") && r.doi.contains('/'), "{}", r.doi);
+                let none = r.doi.is_empty();
+                assert!(
+                    none || (r.doi.starts_with("10.") && r.doi.contains('/')),
+                    "{}",
+                    r.doi
+                );
                 assert!(!r.text.contains("  "), "{}: {}", c.keyword, r.text);
             }
         }
@@ -244,6 +328,7 @@ mod tests {
         let mut ours: Vec<String> = CREDITS
             .iter()
             .flat_map(|c| c.references.iter().map(|r| r.doi.to_lowercase()))
+            .filter(|doi| !doi.is_empty())
             .collect();
         ours.sort_unstable();
         ours.dedup();

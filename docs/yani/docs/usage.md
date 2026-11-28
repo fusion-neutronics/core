@@ -1222,7 +1222,8 @@ yani.transmutation_branch_ratios = "/data/endf-b8.1"
 ```
 
 The libraries are [`"endf-b8.1"`][cite-endf-b8.1], [`"jeff-4.0"`][cite-jeff-4.0], [`"jendl-5.0"`][cite-jendl-5.0], [`"tendl-2025"`][cite-tendl-2025],
-[`"tendl-2017"`][cite-tendl-2017], [`"fendl-3.2d"`][cite-fendl-3.2d] and [`"irdff-ii"`][cite-irdff-ii]. Each is built from its own
+[`"tendl-2017"`][cite-tendl-2017], [`"fendl-3.2d"`][cite-fendl-3.2d], [`"irdff-ii"`][cite-irdff-ii], [`"ukdd-2012"`][cite-ukdd-2012],
+[`"ukdd-2020"`][cite-ukdd-2020] and [`"ukfy-4.2"`][cite-ukfy-4.2]. Each is built from its own
 evaluations only, never with another library's data, so a library publishes the
 parts it can build from what it evaluates:
 
@@ -1233,6 +1234,8 @@ parts it can build from what it evaluates:
 | [`tendl-2025`][cite-tendl-2025], [`tendl-2017`][cite-tendl-2017] | neutron, photonuclear | reactions, branching |
 | [`fendl-3.2d`][cite-fendl-3.2d] | neutron, photon | reactions, branching |
 | [`irdff-ii`][cite-irdff-ii] | none | branching |
+| [`ukdd-2012`][cite-ukdd-2012], [`ukdd-2020`][cite-ukdd-2020] | none | decay |
+| [`ukfy-4.2`][cite-ukfy-4.2] | none | fission_yields |
 
 `thermal` is the thermal scattering tables (`thermal/c_H_in_H2O.arrow/` and so
 on). Like `photon` and `photonuclear`, it is there for transport in yamc: no
@@ -1356,9 +1359,9 @@ by its directory rather than a keyword, records it in
 `TransmutationResults.data_releases` under the directory's absolute path, with
 `locally_processed` set to `True`, `library` and `release` the `library` and
 `data_version` the converter recorded, and `manifest_sha256` the sha256 of its
-files. Data processed locally, such as the UKDD and UKFY libraries FISPACT-II
-pairs with TENDL, is then named in the result as what it is, not passed off as a
-published release.
+files. Data processed locally, such as a library converted from your own ENDF
+files, is then named in the result as what it is, not passed off as a published
+release.
 
 Both network converters record which nuclides carry reactions of their own, as
 `parents` on each subsection of the manifest they write. A nuclide that appears
