@@ -4000,7 +4000,7 @@ impl Model {
     /// The weight-window line of the run summary (with `verbose.summary`), and
     /// warnings at every verbosity when the windows misbehaved: the split
     /// budget reached in a noticeable share of histories, the weight floor
-    /// killing particles, or windows that never acted. The causes they name are
+    /// playing roulette inside the windows, or windows that never acted. The causes they name are
     /// in the windows, which the user controls; the limits themselves are not
     /// settings.
     fn report_weight_windows(&self, c: &WeightWindowCounts) {
@@ -4008,15 +4008,16 @@ impl Model {
         if self.verbose.summary {
             println!(
                 "Weight windows: {} splits ({} copies, {} capped at max_split), {} of {} \
-                 roulettes lost, {} weight-floor kills; split budget reached in {} of {} \
-                 histories ({} copies refused); no window at {} of {} collisions; at most {} \
-                 particles in one history",
+                 roulettes lost, {} of {} weight-floor roulettes lost; split budget reached in \
+                 {} of {} histories ({} copies refused); no window at {} of {} collisions; at \
+                 most {} particles in one history",
                 c.split_events,
                 c.split_copies,
                 c.splits_capped_at_max_split,
                 c.roulette_kills,
                 c.roulette_kills + c.roulette_survivals,
                 c.weight_floor_kills,
+                c.weight_floor_roulettes,
                 c.histories_at_split_budget,
                 c.histories,
                 c.splits_cut_short,
@@ -4041,14 +4042,13 @@ impl Model {
                 c.splits_cut_short,
             );
         }
-        if c.weight_floor_kills > 0 {
+        if c.weight_floor_roulettes > 0 {
             eprintln!(
-                "WARNING: the weight floor killed {} particles, carrying {:.3e} of weight per \
-                 source particle. A kill at the floor is not a roulette, so the tallies these \
-                 particles would have reached are biased low. Set weight_floor below every \
-                 window's lower bound.",
-                c.weight_floor_kills,
-                c.weight_floor_weight / c.histories.max(1) as f64,
+                "WARNING: the weight floor played {} roulettes inside the windows, which killed \
+                 {} particles. The roulette keeps the tallies unbiased, but a floor above the \
+                 windows overrides them there. Set weight_floor below every window's lower \
+                 bound.",
+                c.weight_floor_roulettes, c.weight_floor_kills,
             );
         }
         if c.checks == 0 && c.no_window > 0 {
@@ -4382,8 +4382,8 @@ fn sum_weight_window_counts(
         c.splits_cut_short,
         c.roulette_kills,
         c.roulette_survivals,
+        c.weight_floor_roulettes,
         c.weight_floor_kills,
-        c.weight_floor_weight.to_bits(),
     ];
     let k = local.len();
     let mut out = local;
@@ -4404,8 +4404,8 @@ fn sum_weight_window_counts(
                 splits_cut_short: rank[10],
                 roulette_kills: rank[11],
                 roulette_survivals: rank[12],
-                weight_floor_kills: rank[13],
-                weight_floor_weight: f64::from_bits(rank[14]),
+                weight_floor_roulettes: rank[13],
+                weight_floor_kills: rank[14],
                 split_budget: 0,
             });
         }
@@ -4424,8 +4424,8 @@ fn sum_weight_window_counts(
             t.splits_cut_short,
             t.roulette_kills,
             t.roulette_survivals,
+            t.weight_floor_roulettes,
             t.weight_floor_kills,
-            t.weight_floor_weight.to_bits(),
         ];
     }
     mpi_ctx.broadcast_u64(&mut out, 0);
@@ -4443,8 +4443,8 @@ fn sum_weight_window_counts(
         splits_cut_short: out[10],
         roulette_kills: out[11],
         roulette_survivals: out[12],
-        weight_floor_kills: out[13],
-        weight_floor_weight: f64::from_bits(out[14]),
+        weight_floor_roulettes: out[13],
+        weight_floor_kills: out[14],
         split_budget: counts.split_budget,
     }
 }

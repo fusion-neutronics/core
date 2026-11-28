@@ -8262,9 +8262,10 @@ class TransportResults:
           unbiased, but what those histories reach last gets fewer, heavier
           particles.
         - ``roulette_kills`` and ``roulette_survivals``.
-        - ``weight_floor_kills`` and ``weight_floor_weight``: particles killed
-          below ``weight_floor`` and the weight they carried, summed over the
-          run. A kill at the floor is not a roulette, so any biases tallies low.
+        - ``weight_floor_roulettes`` and ``weight_floor_kills``: roulettes played
+          below ``weight_floor``, and the particles they killed. The roulette
+          keeps tallies unbiased, but a floor that plays at all sits above some
+          windows and overrides them there.
         """
     @property
     def runs(self) -> list:
@@ -8506,7 +8507,8 @@ class WeightWindowBounds:
     weight exceeds the local upper bound is split into equal-weight copies
     (capped by ``max_split``), one at or below the lower bound plays Russian
     roulette (survivor weight ``survival_factor * lower``), and one below
-    ``weight_floor`` is killed. Bounds are given per (energy group, voxel),
+    ``weight_floor`` plays roulette with the floor as its survivor weight.
+    Bounds are given per (energy group, voxel),
     flat, indexed ``group * num_voxels + voxel``; a negative lower bound is
     the "no window" sentinel. Add to ``Model(variance_reduction=[...])``; one
     entry per particle type is allowed, and two for the same particle is
@@ -8529,8 +8531,8 @@ class WeightWindowBounds:
         particle: ``"neutron"`` (default) or ``"photon"``.
         survival_factor: Roulette survivor weight = factor * lower (default 3).
         max_split: Maximum copies produced in one split event (default 10).
-        weight_floor: Absolute weight floor below which a particle is killed
-            (default 1e-38).
+        weight_floor: Absolute weight below which a particle plays roulette
+            with the floor as its survivor weight (default 1e-38).
     """
     @property
     def generation(self) -> typing.Optional[dict]:
@@ -8581,7 +8583,8 @@ class WeightWindowBounds:
     @property
     def weight_floor(self) -> builtins.float:
         r"""
-        Absolute weight floor below which a particle is killed.
+        Absolute weight below which a particle plays roulette, the floor being
+        its survivor weight.
         """
     def __new__(cls, mesh: RegularRectangularMesh, lower_bounds: typing.Sequence[builtins.float], upper_bounds: typing.Optional[typing.Sequence[builtins.float]] = None, ratio: builtins.float = 5.0, energy_bins: typing.Optional[typing.Sequence[builtins.float]] = None, particle: builtins.str = 'neutron', survival_factor: builtins.float = 3.0, max_split: builtins.int = 10, weight_floor: builtins.float = 1e-38) -> WeightWindowBounds: ...
     def __repr__(self) -> builtins.str: ...

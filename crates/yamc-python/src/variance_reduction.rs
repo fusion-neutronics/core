@@ -135,7 +135,8 @@ fn rectangular_mesh(mesh: &Bound<'_, PyAny>, owner: &str) -> PyResult<PyRegularR
 /// weight exceeds the local upper bound is split into equal-weight copies
 /// (capped by ``max_split``), one at or below the lower bound plays Russian
 /// roulette (survivor weight ``survival_factor * lower``), and one below
-/// ``weight_floor`` is killed. Bounds are given per (energy group, voxel),
+/// ``weight_floor`` plays roulette with the floor as its survivor weight.
+/// Bounds are given per (energy group, voxel),
 /// flat, indexed ``group * num_voxels + voxel``; a negative lower bound is
 /// the "no window" sentinel. Add to ``Model(variance_reduction=[...])``; one
 /// entry per particle type is allowed, and two for the same particle is
@@ -158,8 +159,8 @@ fn rectangular_mesh(mesh: &Bound<'_, PyAny>, owner: &str) -> PyResult<PyRegularR
 ///     particle: ``"neutron"`` (default) or ``"photon"``.
 ///     survival_factor: Roulette survivor weight = factor * lower (default 3).
 ///     max_split: Maximum copies produced in one split event (default 10).
-///     weight_floor: Absolute weight floor below which a particle is killed
-///         (default 1e-38).
+///     weight_floor: Absolute weight below which a particle plays roulette
+///         with the floor as its survivor weight (default 1e-38).
 #[gen_stub_pyclass]
 #[pyclass(module = "yamc._core", name = "WeightWindowBounds", from_py_object)]
 #[derive(Clone)]
@@ -327,7 +328,8 @@ impl PyWeightWindowBounds {
         self.inner.max_split
     }
 
-    /// Absolute weight floor below which a particle is killed.
+    /// Absolute weight below which a particle plays roulette, the floor being
+    /// its survivor weight.
     #[getter]
     pub fn weight_floor(&self) -> f64 {
         self.inner.weight_floor

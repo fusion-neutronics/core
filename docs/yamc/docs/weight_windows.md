@@ -95,7 +95,7 @@ analog = model.simulate_transport(total_particles=10_000_000_000,
 | ``ratio`` | ``5`` | upper/lower bound ratio (window width) |
 | ``survival_factor`` | ``3`` | sets the roulette survival weight |
 | ``max_split`` | ``10`` | most copies one split may create |
-| ``weight_floor`` | ``1e-38`` | absolute weight below which a particle is killed |
+| ``weight_floor`` | ``1e-38`` | absolute weight below which a particle plays roulette, the floor being its survivor weight |
 
 By default ``density_reduction`` is auto: ``N`` is derived, before the two
 generation passes, from the problem's optical thickness ``tau`` (a particle-free
@@ -207,7 +207,7 @@ window, where the windows do nothing); ``split_events``, ``split_copies``,
 ``max_split_copies_per_history`` and ``splits_capped_at_max_split`` (splits
 that needed more than ``max_split`` copies); ``split_budget``,
 ``histories_at_split_budget`` and ``splits_cut_short``; ``roulette_kills`` and
-``roulette_survivals``; ``weight_floor_kills`` and ``weight_floor_weight``.
+``roulette_survivals``; ``weight_floor_roulettes`` and ``weight_floor_kills``.
 The run summary prints most of them on one line.
 
 Three things also print a warning, whatever the ``verbose`` setting:
@@ -222,9 +222,10 @@ Three things also print a warning, whatever the ``verbose`` setting:
   efficient. The run warns when 5% of histories reach it, which usually means
   the windows split far more than the flux falls: they drop faster than the
   flux from voxel to voxel, or sit far below the source weight.
-- **The weight floor.** A particle below ``weight_floor`` is killed, not
-  rouletted, so any kill biases low the tallies it would have reached. Keep
-  ``weight_floor`` below every lower bound, as the default (1e-38) is.
+- **The weight floor.** A particle below ``weight_floor`` plays a roulette with
+  the floor as its survival weight, which keeps the tallies unbiased; but a
+  floor that plays at all sits above some windows and overrides them there.
+  Keep ``weight_floor`` below every lower bound, as the default (1e-38) is.
 - **No window acting at any collision**, for example energy bins that miss
   the source: the windows then do nothing.
 

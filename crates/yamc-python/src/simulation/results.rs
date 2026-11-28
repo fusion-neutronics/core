@@ -1083,9 +1083,10 @@ impl PyTransportResults {
     ///   unbiased, but what those histories reach last gets fewer, heavier
     ///   particles.
     /// - ``roulette_kills`` and ``roulette_survivals``.
-    /// - ``weight_floor_kills`` and ``weight_floor_weight``: particles killed
-    ///   below ``weight_floor`` and the weight they carried, summed over the
-    ///   run. A kill at the floor is not a roulette, so any biases tallies low.
+    /// - ``weight_floor_roulettes`` and ``weight_floor_kills``: roulettes played
+    ///   below ``weight_floor``, and the particles they killed. The roulette
+    ///   keeps tallies unbiased, but a floor that plays at all sits above some
+    ///   windows and overrides them there.
     #[getter]
     fn weight_window_stats<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
         self.weight_window_counts
@@ -1441,8 +1442,8 @@ pub(crate) fn weight_window_counts_dict<'py>(
     d.set_item("splits_cut_short", c.splits_cut_short)?;
     d.set_item("roulette_kills", c.roulette_kills)?;
     d.set_item("roulette_survivals", c.roulette_survivals)?;
+    d.set_item("weight_floor_roulettes", c.weight_floor_roulettes)?;
     d.set_item("weight_floor_kills", c.weight_floor_kills)?;
-    d.set_item("weight_floor_weight", c.weight_floor_weight)?;
     Ok(d)
 }
 
