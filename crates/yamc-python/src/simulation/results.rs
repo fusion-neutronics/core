@@ -319,7 +319,11 @@ impl PyTallyResult {
         self.inner.figure_of_merit.clone()
     }
 
-    /// Tally-level scalar figure of merit of the integrated response.
+    /// Figure of merit of the tally total, ``1 / (aggregate_relative_error**2
+    /// * elapsed_secs)``, so it keeps the correlation between bins that one
+    /// history scores together. Results without the per-history total (MPI
+    /// runs, results read back with ``from_arrow``) sum the per-bin variances
+    /// instead, which overstates it for a mesh tally.
     #[getter]
     pub fn aggregate_figure_of_merit(&self) -> f64 {
         self.inner.aggregate_figure_of_merit
