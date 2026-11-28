@@ -142,6 +142,9 @@ INJECTED_METHODS: dict[str, list[tuple[str, str]]] = {
         "Write the cells with each one's region_id to a VTKHDF UnstructuredGrid file for ParaView. Requires h5py (pip install yamc[viz])."))],
     "NeutronSource": [_VTKHDF],
     "PhotonSource": [_VTKHDF],
+    "WeightWindowBounds": [("to_vtkhdf", _m(
+        'to_vtkhdf(self, filename: builtins.str, *, length_units: typing.Literal["mm", "cm", "m", "km"] = "cm") -> None',
+        "Write the lower and upper bounds to a VTK-HDF ImageData file for ParaView, one pair of arrays per energy group, NaN where a voxel has no window. Requires h5py (pip install yamc[viz])."))],
     "Tracks": [("to_vtkhdf", _m(
         'to_vtkhdf(self, filename: builtins.str, *, length_units: typing.Literal["mm", "cm", "m", "km"] = "cm") -> None',
         "Write one polyline per particle track to a VTK-HDF PolyData file for ParaView. Requires h5py (pip install yamc[viz])."))],

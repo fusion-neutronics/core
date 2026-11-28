@@ -8561,12 +8561,15 @@ class WeightWindowBounds:
     @property
     def lower_bounds(self) -> builtins.list[builtins.float]:
         r"""
-        Lower window bounds, flat over (group, voxel).
+        Lower window bounds, flat over (group, voxel): index
+        ``group * mesh.num_bins + voxel``, with ``voxel = (iz * ny + iy) * nx +
+        ix``, so ``numpy.reshape(lower_bounds, (n_groups, nz, ny, nx))`` lays
+        them out on the mesh. A negative bound marks a voxel without a window.
         """
     @property
     def upper_bounds(self) -> builtins.list[builtins.float]:
         r"""
-        Upper window bounds, flat over (group, voxel).
+        Upper window bounds, laid out as ``lower_bounds``.
         """
     @property
     def particle(self) -> builtins.str:
@@ -8589,8 +8592,31 @@ class WeightWindowBounds:
         Absolute weight below which a particle plays roulette, the floor being
         its survivor weight.
         """
+    @property
+    def mesh(self) -> RegularRectangularMesh:
+        r"""
+        The mesh the windows are defined on.
+        """
+    @property
+    def energy_bins(self) -> typing.Optional[builtins.list[builtins.float]]:
+        r"""
+        Energy group edges in eV, or ``None`` for one group spanning all
+        energies.
+        """
     def __new__(cls, mesh: RegularRectangularMesh, lower_bounds: typing.Sequence[builtins.float], upper_bounds: typing.Optional[typing.Sequence[builtins.float]] = None, ratio: builtins.float = 5.0, energy_bins: typing.Optional[typing.Sequence[builtins.float]] = None, particle: builtins.str = 'neutron', survival_factor: builtins.float = 3.0, max_split: builtins.int = 10, weight_floor: builtins.float = 1e-38) -> WeightWindowBounds: ...
+    def window(self, position: typing.Sequence[builtins.float], energy: builtins.float) -> typing.Optional[tuple[builtins.float, builtins.float]]:
+        r"""
+        The window a particle at ``position`` with ``energy`` gets, as
+        ``(lower, upper)``, or ``None`` where it gets none: outside the mesh or
+        the energy bins, or in a voxel without a window.
+        
+        Args:
+            position: ``(x, y, z)`` in cm.
+            energy: Energy in eV.
+        """
     def __repr__(self) -> builtins.str: ...
+    def to_vtkhdf(self, filename: builtins.str, *, length_units: typing.Literal["mm", "cm", "m", "km"] = "cm") -> None:
+        r"""Write the lower and upper bounds to a VTK-HDF ImageData file for ParaView, one pair of arrays per energy group, NaN where a voxel has no window. Requires h5py (pip install yamc[viz])."""
 
 @typing.final
 class WeightWindowGeneratorDeGVR:

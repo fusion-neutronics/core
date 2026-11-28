@@ -485,6 +485,54 @@ def _write_mesh_tally(
 
 
 # ---------------------------------------------------------------------------
+# Weight-window writer
+# ---------------------------------------------------------------------------
+
+
+def weight_windows_to_vtkhdf(
+    filename: str,
+    windows: yamc.WeightWindowBounds,
+    *,
+    length_units: str = "cm",
+) -> None:
+    """Write weight windows to a VTK-HDF ImageData file for ParaView.
+
+    Writes ``lower_bound`` and ``upper_bound`` CellData arrays on the window
+    mesh, one pair per energy group (``lower_bound_E0``, ... with
+    ``energy_low_eV`` and ``energy_high_eV`` attributes) when the windows have
+    energy bins. A voxel without a window is NaN.
+
+    Args:
+        filename: Output file path (recommended extension: ``.vtkhdf``).
+        windows: A :class:`yamc.WeightWindowBounds`.
+        length_units: Unit of the written coordinates, ``"cm"`` (default),
+            ``"m"``, ``"mm"`` or ``"km"``. The bounds are written unchanged.
+    """
+    _h5py = _require_h5py()
+    scale = _length_scale(length_units)
+    mesh = windows.mesh
+    nx, ny, nz = mesh.shape
+    edges = windows.energy_bins
+    n_groups = 1 if edges is None else len(edges) - 1
+    lower = np.asarray(windows.lower_bounds, dtype="float64").reshape(n_groups, nz, ny, nx)
+    upper = np.asarray(windows.upper_bounds, dtype="float64").reshape(n_groups, nz, ny, nx)
+    no_window = lower < 0.0
+    lower[no_window] = np.nan
+    upper[no_window] = np.nan
+    with _h5py.File(filename, "w") as f:
+        root = _root(f, length_units)
+        _write_imagedata_header(root, mesh.lower_left, mesh.width, mesh.shape, _h5py, scale)
+        cd = root.create_group("CellData")
+        for g in range(n_groups):
+            suffix = "" if edges is None else f"_E{g}"
+            for name, data in (("lower_bound", lower[g]), ("upper_bound", upper[g])):
+                ds = cd.create_dataset(name + suffix, data=data)
+                if edges is not None:
+                    ds.attrs["energy_low_eV"] = edges[g]
+                    ds.attrs["energy_high_eV"] = edges[g + 1]
+
+
+# ---------------------------------------------------------------------------
 # Geometry writer
 # ---------------------------------------------------------------------------
 

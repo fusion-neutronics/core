@@ -157,6 +157,20 @@ windows = yamc.WeightWindowBounds(
 )
 ```
 
+Windows read back: ``windows.mesh`` and ``windows.energy_bins`` give their
+mesh and group edges, and ``windows.window(position, energy)`` the
+``(lower, upper)`` window a particle there gets, or ``None`` where it gets
+none (outside the mesh or the energy bins, or a voxel without a window).
+``windows.to_vtkhdf("windows.vtkhdf")`` writes the bounds for ParaView, one
+``lower_bound`` and ``upper_bound`` array per energy group (``lower_bound_E0``,
+... when there are energy bins), NaN where a voxel has no window:
+
+<!-- doctest: skip -->
+```python
+print(windows.window((0.0, 0.0, 50.0), 1.0e6))  # (lower, upper), or None
+windows.to_vtkhdf("windows.vtkhdf")
+```
+
 ## Checks before a run
 
 Windows that cannot work as set are caught before any transport. A bound that

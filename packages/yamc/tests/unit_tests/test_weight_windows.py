@@ -57,6 +57,46 @@ def test_weight_window_bounds_validation():
         yamc.WeightWindowBounds(mesh=mesh, lower_bounds=[0.1] * 8, ratio=0.9)
 
 
+def test_window_read_back(tmp_path):
+    # Two voxels along x, two energy groups, the second voxel of the first
+    # group without a window.
+    mesh = yamc.RegularRectangularMesh(lower_left=[0, 0, 0], upper_right=[2, 1, 1], shape=[2, 1, 1])
+    edges = [0.0, 1.0e3, 2.0e7]
+    ww = yamc.WeightWindowBounds(
+        mesh=mesh, lower_bounds=[0.5, -1.0, 0.1, 0.2], ratio=5.0, energy_bins=edges
+    )
+    assert list(ww.mesh.shape) == [2, 1, 1]
+    assert list(ww.mesh.upper_right) == [2.0, 1.0, 1.0]
+    assert ww.energy_bins == edges
+    assert ww.window((0.5, 0.5, 0.5), 10.0) == pytest.approx((0.5, 2.5))
+    assert ww.window((1.5, 0.5, 0.5), 1.0e6) == pytest.approx((0.2, 1.0))
+    assert ww.window((1.5, 0.5, 0.5), 10.0) is None  # no window in that voxel
+    assert ww.window((5.0, 0.5, 0.5), 10.0) is None  # outside the mesh
+    assert ww.window((0.5, 0.5, 0.5), 3.0e7) is None  # above the energy bins
+    single = yamc.WeightWindowBounds(mesh=mesh, lower_bounds=[0.5, 0.25], ratio=4.0)
+    assert single.energy_bins is None
+    assert single.window((1.5, 0.5, 0.5), 1.0e6) == pytest.approx((0.25, 1.0))
+
+    h5py = pytest.importorskip("h5py")
+    path = tmp_path / "windows.vtkhdf"
+    ww.to_vtkhdf(str(path))
+    with h5py.File(path, "r") as f:
+        root = f["VTKHDF"]
+        assert list(root.attrs["WholeExtent"]) == [0, 2, 0, 1, 0, 1]
+        cd = root["CellData"]
+        assert sorted(cd) == ["lower_bound_E0", "lower_bound_E1", "upper_bound_E0", "upper_bound_E1"]
+        lower0 = cd["lower_bound_E0"][...]
+        assert lower0.shape == (1, 1, 2)  # (nz, ny, nx)
+        assert lower0[0, 0, 0] == 0.5 and math.isnan(lower0[0, 0, 1])
+        assert math.isnan(cd["upper_bound_E0"][0, 0, 1])
+        assert list(cd["lower_bound_E1"][0, 0, :]) == [0.1, 0.2]
+        assert cd["lower_bound_E1"].attrs["energy_low_eV"] == 1.0e3
+        assert cd["lower_bound_E1"].attrs["energy_high_eV"] == 2.0e7
+    single.to_vtkhdf(str(path))
+    with h5py.File(path, "r") as f:
+        assert sorted(f["VTKHDF/CellData"]) == ["lower_bound", "upper_bound"]
+
+
 @requires_data
 def test_weight_windows_unbiased_and_reduce_deep_variance():
     mesh = _mesh()
