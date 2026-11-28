@@ -74,8 +74,8 @@ fn cram_solve(
 /// # Arguments
 /// * `a` - Transmutation matrix (n x n, row-major, flattened)
 /// * `n` - Matrix dimension (number of nuclides)
-/// * `n0` - Initial nuclide densities [atoms/barn-cm]
-/// * `dt` - Time step [s]
+/// * `n0` - Initial nuclide densities (atoms/barn-cm)
+/// * `dt` - Time step (s)
 ///
 /// # Returns
 /// Final nuclide densities after time dt
@@ -519,8 +519,8 @@ fn cram_solve_sparse(
 /// # Arguments
 /// * `triplets` - Transmutation matrix in COO format: `(row, col, value)` entries
 /// * `n` - Matrix dimension (number of nuclides)
-/// * `n0` - Initial nuclide densities [atoms/barn-cm]
-/// * `dt` - Time step [s]
+/// * `n0` - Initial nuclide densities (atoms/barn-cm)
+/// * `dt` - Time step (s)
 ///
 /// # Returns
 /// Final nuclide densities after time dt

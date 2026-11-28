@@ -319,7 +319,11 @@ impl PyTallyResult {
         self.inner.figure_of_merit.clone()
     }
 
-    /// Tally-level scalar figure of merit of the integrated response.
+    /// Figure of merit of the tally total, ``1 / (aggregate_relative_error**2
+    /// * elapsed_secs)``, so it keeps the correlation between bins that one
+    /// history scores together. Results without the per-history total (MPI
+    /// runs, results read back with ``from_arrow``) sum the per-bin variances
+    /// instead, which overstates it for a mesh tally.
     #[getter]
     pub fn aggregate_figure_of_merit(&self) -> f64 {
         self.inner.aggregate_figure_of_merit
@@ -804,6 +808,9 @@ pub struct PyTransportResults {
     /// What the weight windows did in the run, or `None` when it had none and
     /// for combined, reloaded or transmutation-step results.
     pub weight_window_counts: Option<yamc_physics::util::bank::WeightWindowCounts>,
+    /// Why the run stopped, or `None` for GPU runs and for combined or
+    /// reloaded results.
+    pub stop_reason: Option<&'static str>,
 }
 
 impl PyTransportResults {
@@ -992,6 +999,7 @@ impl PyTransportResults {
             particles_per_second: self.particles_per_second,
             total_particles: self.total_particles,
             weight_window_counts: self.weight_window_counts,
+            stop_reason: self.stop_reason,
         })
     }
 
@@ -1049,6 +1057,16 @@ impl PyTransportResults {
         Some((self.total_particles as f64 / secs) as u64)
     }
 
+    /// Why the run stopped: ``"total_particles"`` (it ran every history),
+    /// ``"max_runtime"``, ``"convergence_targets"`` (every target was met) or
+    /// ``"statistical_checks"`` (with no stop condition, every scored bin
+    /// passed the statistical checks). ``None`` for GPU runs, and for combined
+    /// or reloaded results.
+    #[getter]
+    fn stop_reason(&self) -> Option<&'static str> {
+        self.stop_reason
+    }
+
     /// What the weight windows did in this run, as a dict of counts, or
     /// ``None`` when the run had no windows and for combined, reloaded or
     /// transmutation-step results. Window counts cover collisions of the
@@ -1069,9 +1087,10 @@ impl PyTransportResults {
     ///   unbiased, but what those histories reach last gets fewer, heavier
     ///   particles.
     /// - ``roulette_kills`` and ``roulette_survivals``.
-    /// - ``weight_floor_kills`` and ``weight_floor_weight``: particles killed
-    ///   below ``weight_floor`` and the weight they carried, summed over the
-    ///   run. A kill at the floor is not a roulette, so any biases tallies low.
+    /// - ``weight_floor_roulettes`` and ``weight_floor_kills``: roulettes played
+    ///   below ``weight_floor``, and the particles they killed. The roulette
+    ///   keeps tallies unbiased, but a floor that plays at all sits above some
+    ///   windows and overrides them there.
     #[getter]
     fn weight_window_stats<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
         let Some(c) = self.weight_window_counts else {
@@ -1095,8 +1114,8 @@ impl PyTransportResults {
         d.set_item("splits_cut_short", c.splits_cut_short)?;
         d.set_item("roulette_kills", c.roulette_kills)?;
         d.set_item("roulette_survivals", c.roulette_survivals)?;
+        d.set_item("weight_floor_roulettes", c.weight_floor_roulettes)?;
         d.set_item("weight_floor_kills", c.weight_floor_kills)?;
-        d.set_item("weight_floor_weight", c.weight_floor_weight)?;
         Ok(Some(d))
     }
 
@@ -1236,6 +1255,7 @@ impl PyTransportResults {
             particles_per_second: None,
             total_particles: 0,
             weight_window_counts: None,
+            stop_reason: None,
         })
     }
 
@@ -1439,6 +1459,7 @@ pub(crate) fn build_results(
         transport_secs: model.last_transport_secs,
         particles_per_second: model.last_particles_per_second,
         weight_window_counts: model.last_weight_window_counts,
+        stop_reason: model.last_stop_reason.map(|r| r.name()),
         ..PyTransportResults::from(inner)
     })
 }
@@ -1457,6 +1478,7 @@ impl From<TransportResults> for PyTransportResults {
             particles_per_second: None,
             total_particles,
             weight_window_counts: None,
+            stop_reason: None,
         }
     }
 }
@@ -1483,6 +1505,7 @@ pub(crate) fn combine_inner(
         particles_per_second: None,
         total_particles: 0,
         weight_window_counts: None,
+        stop_reason: None,
     })
 }
 

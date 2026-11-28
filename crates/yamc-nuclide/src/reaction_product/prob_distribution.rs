@@ -170,7 +170,7 @@ impl TabulatedProbability {
     }
 
     /// Get the first continuous energy value (for interpolation bounds)
-    /// This is x[n_discrete], not x[0], when discrete lines are present
+    /// This is `x[n_discrete]`, not `x[0]`, when discrete lines are present
     pub fn get_first_continuous_energy(&self) -> f64 {
         match self {
             TabulatedProbability::Tabulated { x, n_discrete, .. } => {

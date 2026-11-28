@@ -5,9 +5,9 @@
 //!
 //! - [`decay_chain`] -- enumerate the photon-emitting descendants of a produced
 //!   nuclide, and evolve their Bateman activity across an irradiation schedule
-//! - [`decay`] -- activity [Bq] and decay heat [W] of an inventory, and the
+//! - [`decay`] -- activity (Bq) and decay heat (W) of an inventory, and the
 //!   decay photon lines and continua it emits
-//! - [`contact_dose`] -- the contact dose rate [Gy/h or Sv/h] of an inventory,
+//! - [`contact_dose`] -- the contact dose rate (Gy/h or Sv/h) of an inventory,
 //!   from its own decay photons through its own self-shielding
 //! - [`decay_photons`] -- the D1S (Direct 1-Step) shutdown-dose-rate
 //!   post-processing: radionuclide discovery, time-correction factors, and

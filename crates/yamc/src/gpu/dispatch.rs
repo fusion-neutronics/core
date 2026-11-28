@@ -658,6 +658,8 @@ pub fn run_on_gpu_with_device(
 ) -> Result<GpuRunResult, GpuDispatchError> {
     // The GPU runs no weight windows, so no earlier CPU run's counts carry over.
     model.last_weight_window_counts = None;
+    // GPU runs do not record why they stopped.
+    model.last_stop_reason = None;
     let result = run_on_gpu_dispatch(model, device, settings);
     match result {
         Ok(mut run) => {

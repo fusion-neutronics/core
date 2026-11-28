@@ -84,7 +84,7 @@ fn default_max_split() -> u32 {
     10
 }
 
-/// Default absolute weight floor below which a particle is killed.
+/// Default absolute weight floor, below which a particle plays roulette.
 fn default_weight_floor() -> f64 {
     1e-38
 }
@@ -154,7 +154,8 @@ pub(crate) const DEGVR_PHOTON_REP_ENERGY_EV: f64 = 1.0e6;
 /// Applied at collisions: a particle with weight above `upper` is split
 /// into equal-weight copies (capped by `max_split`); one at or below
 /// `lower` plays Russian roulette (survivor weight `survival_factor *
-/// lower`); one below `weight_floor` is killed. A negative `lower` entry
+/// lower`); one below `weight_floor` plays roulette with the floor as its
+/// survivor weight. A negative `lower` entry
 /// is the "no window" sentinel, so that region is skipped. Bounds are
 /// stored flat, indexed `group * num_voxels + voxel`. Multiple
 /// `WeightWindowBounds` entries may coexist in the variance-reduction
@@ -181,7 +182,8 @@ pub struct WeightWindowBounds {
     /// Maximum number of copies produced in one split event. Default 10.
     #[serde(default = "default_max_split")]
     pub max_split: u32,
-    /// Absolute weight floor; a particle below it is killed. Default 1e-38.
+    /// Absolute weight floor; a particle below it plays roulette with the floor
+    /// as its survivor weight. Default 1e-38.
     #[serde(default = "default_weight_floor")]
     pub weight_floor: f64,
 }
@@ -308,9 +310,21 @@ impl WeightWindowBounds {
             ));
         }
         for (i, (&lo, &hi)) in self.lower_bounds.iter().zip(&self.upper_bounds).enumerate() {
-            if lo >= 0.0 && hi < lo {
+            // A NaN window used to pass and act as no window at all.
+            if !lo.is_finite() || !hi.is_finite() {
                 return Err(format!(
-                    "WeightWindowBounds upper {hi} < lower {lo} at index {i}"
+                    "WeightWindowBounds bounds must be finite: lower {lo}, upper {hi} at index {i}"
+                ));
+            }
+            // A zero-width window splits and roulettes the same particle in turn.
+            if lo >= 0.0 && hi <= lo {
+                let hint = if lo == 0.0 {
+                    "; a voxel without a window takes a negative lower bound"
+                } else {
+                    ""
+                };
+                return Err(format!(
+                    "WeightWindowBounds upper {hi} must be above lower {lo} at index {i}{hint}"
                 ));
             }
         }
@@ -566,6 +580,21 @@ mod tests {
             max_split: 10,
             weight_floor: 1e-38,
         }
+    }
+
+    #[test]
+    fn validate_refuses_non_finite_and_zero_width_windows() {
+        // A NaN or infinite bound, and a window whose upper bound is not above
+        // its lower one, are refused; the -1 sentinel and a zero lower bound
+        // are not.
+        let nan = wwb(vec![f64::NAN, 0.1, 0.1, 0.1], vec![0.5; 4], None);
+        assert!(nan.validate().unwrap_err().contains("finite"));
+        let inf = wwb(vec![0.1; 4], vec![f64::INFINITY, 0.5, 0.5, 0.5], None);
+        assert!(inf.validate().unwrap_err().contains("finite"));
+        let flat = wwb(vec![0.1; 4], vec![0.5, 0.1, 0.5, 0.5], None);
+        assert!(flat.validate().unwrap_err().contains("above"));
+        let sentinel = wwb(vec![-1.0, 0.0, 0.1, 0.1], vec![-1.0, 0.5, 0.5, 0.5], None);
+        assert!(sentinel.validate().is_ok());
     }
 
     #[test]

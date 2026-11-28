@@ -48,7 +48,7 @@ pub fn urr_nuclide_random(base_seed: f64, za: u32) -> f64 {
     (z >> 11u64) as f64 * (1.0 / URR_TWO_POW_53)
 }
 
-/// CPU twin of [`urr_nuclide_random`] (explicit wrapping `u64` arithmetic).
+/// CPU twin of [`urr_nuclide_random()`] (explicit wrapping `u64` arithmetic).
 /// Kept alongside the `#[cube]` function so the host test can compare the
 /// exact bit pattern the GPU compiles from against the canonical
 /// [`yamc_nuclide::urr::urr_nuclide_random`].
@@ -73,7 +73,7 @@ fn urr_nuclide_random_kernel(base_seeds: &[f64], zas: &[u32], out: &mut [f64]) {
     out[ABSOLUTE_POS] = urr_nuclide_random(base_seeds[ABSOLUTE_POS], zas[ABSOLUTE_POS]);
 }
 
-/// Run [`urr_nuclide_random`] on the GPU for each `(base_seed, za)` pair.
+/// Run [`urr_nuclide_random()`] on the GPU for each `(base_seed, za)` pair.
 /// For test/validation use.
 // The output buffer is sized by element count (one f64 per pair), not by the
 // `base_seeds` slice's byte size; they coincide here but the intent is a count.
@@ -312,7 +312,7 @@ fn band_ratio(sampled: f64, smooth: f64) -> f64 {
 /// The band factors of slab `slab` at this collision: its smooth partials read
 /// from `nuc_partial_xs` at rows `p_lo` / `p_hi` (the slab's FINE bracket, as
 /// the kernel's URR loop reads them) interpolated by `frac_f`, perturbed by
-/// [`urr_slab_partials`] at the collision's base random `r_base`. Deterministic
+/// [`urr_slab_partials()`] at the collision's base random `r_base`. Deterministic
 /// given those inputs, so it reproduces the band the step sampled.
 #[cube]
 #[allow(clippy::too_many_arguments)]

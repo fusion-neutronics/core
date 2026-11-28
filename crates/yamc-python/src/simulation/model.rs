@@ -388,6 +388,7 @@ impl PyModel {
             last_particles_per_second: None,
             last_data_load_secs: None,
             last_transport_secs: None,
+            last_stop_reason: None,
             last_weight_window_counts: None,
             lost_particles: Vec::new(),
             convergence_targets: Vec::new(),
@@ -1012,6 +1013,18 @@ impl PyModel {
                 .collect::<PyResult<_>>()?;
             Ok(objs.into_pyobject(py)?.into_any())
         }
+    }
+
+    /// Problems with the model's weight windows that show before any transport,
+    /// as the messages a run prints as warnings: windows that sit more than ten
+    /// times below or above the source weight where most source particles are
+    /// born, energy bins that miss most source particles, and a weight floor
+    /// above some lower bounds. An empty list when there is nothing to say;
+    /// ``ValueError`` when a run would refuse the model.
+    pub fn weight_window_warnings(&self) -> PyResult<Vec<String>> {
+        self.inner
+            .weight_window_warnings()
+            .map_err(pyo3::exceptions::PyValueError::new_err)
     }
 
     /// Estimate the auto DeGVR density-reduction factor N and the optical depth

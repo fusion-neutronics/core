@@ -441,7 +441,7 @@ impl Nuclide {
     }
 
     /// Sample the top-level reaction type without auto-loading (requires data to be pre-loaded)
-    /// This version is used when the nuclide is stored in shared/immutable contexts like Arc<Nuclide>.
+    /// This version is used when the nuclide is stored in shared/immutable contexts like `Arc<Nuclide>`.
     /// Returns ReactionType enum - for scattering, use sample_scattering_constituent to get the specific reaction.
     ///
     /// When energy is in the unresolved resonance range (URR) and URR probability tables are

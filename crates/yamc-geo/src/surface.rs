@@ -602,7 +602,8 @@ impl Surface {
         }
     }
 
-    /// Compute a [`BoundingBox`] for the halfspace defined by this surface.
+    /// Compute a [`BoundingBox`](crate::bounding_box::BoundingBox) for the
+    /// halfspace defined by this surface.
     ///
     /// Combines `axis_constraint` (for axis-aligned planes) and `bounding_box`
     /// (for spheres, cylinders, tori) into a single result.  Bounds that cannot

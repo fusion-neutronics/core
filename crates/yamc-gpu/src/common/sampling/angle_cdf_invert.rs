@@ -28,7 +28,7 @@ use crate::common::rng::{PCG_INCR, PCG_MULT};
 use crate::neutron::xs::constants::ANGLE_INTERP_LINLIN;
 use cubecl::prelude::*;
 
-/// Result of [`invert_angle_cdf`]: the sampled (and clamped to `[-1, 1]`)
+/// Result of [`invert_angle_cdf()`]: the sampled (and clamped to `[-1, 1]`)
 /// scattering cosine and the advanced 64-bit PCG state.
 #[derive(CubeType)]
 pub struct AngleSample {
@@ -121,7 +121,7 @@ pub fn invert_angle_cdf(
     AngleSample { mu, state }
 }
 
-/// CPU twin of [`invert_angle_cdf`]. Same algorithm and same 64-bit-state PCG
+/// CPU twin of [`invert_angle_cdf()`]. Same algorithm and same 64-bit-state PCG
 /// draw (via `wrapping_*`), so it matches the `#[cube]` kernel to within a few
 /// ULPs. Returns `(mu, state)`.
 #[allow(clippy::too_many_arguments, clippy::manual_clamp)]

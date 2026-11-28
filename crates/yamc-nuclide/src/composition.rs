@@ -1,7 +1,7 @@
 //! Free functions for building nuclide compositions from elements, enriched
 //! elements, and chemical formulas.
 //!
-//! These were previously methods on [`Material`] but are now standalone so they
+//! These were previously methods on `Material` but are now standalone so they
 //! can be composed freely before constructing a material.
 
 use crate::data::{ELEMENT_NAMES, ELEMENT_NUCLIDES, NATURAL_ABUNDANCE};

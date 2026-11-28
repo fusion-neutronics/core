@@ -334,7 +334,7 @@ pub enum TallyVarianceMode<'a> {
         total_bins: u32,
         source_idx: Option<&'a [u32]>,
     },
-    /// Mesh-tally per-source variance. Like [`PerSource`] on the
+    /// Mesh-tally per-source variance. Like [`PerSource`](Self::PerSource) on the
     /// host (same `src_acc` sizing, `source_idx`, and host-side `sum_sq`
     /// finalize), but the kernel accumulates each contribution DIRECTLY into
     /// `src_acc` (bypassing the touched-list/spill) so a track-length mesh tally
@@ -1203,7 +1203,7 @@ pub fn energy_function_weight(params: &[f64], off: usize, energy: f64) -> Option
 /// Voxel bin for a point in a cylindrical mesh, or `None` if outside. Plain-Rust
 /// twin of the `#[cube]` `cyl_mesh_bin_at_kernel` and a faithful port of
 /// `CylindricalMesh::get_bin`; drives the collision estimator's mesh binning.
-/// Operates on the packed descriptor (see [`CylMeshView`]).
+/// Operates on the packed descriptor (see `CylMeshView`).
 #[inline]
 pub fn cyl_mesh_bin_at(params: &[f64], pos: [f64; 3]) -> Option<u32> {
     CylMeshView::parse(params).bin_at(pos)

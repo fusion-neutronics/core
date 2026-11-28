@@ -590,7 +590,7 @@ pub enum NuclideXsError {
     /// Atomic densities sum to zero -- material has no mass.
     ZeroTotalDensity,
     /// The nuclide carries neutron-emitting scattering MTs that have no slot in
-    /// [`MT_SLOTS`](crate::neutron::xs::MT_SLOTS), and they are big enough to
+    /// [`MT_SLOTS`], and they are big enough to
     /// matter.
     ///
     /// The kernel can only sample MTs it has a slot for. An unslotted channel's

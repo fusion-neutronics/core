@@ -476,6 +476,10 @@ pub struct Model {
     pub last_data_load_secs: Option<f64>,
     #[serde(skip)]
     pub last_transport_secs: Option<f64>,
+    /// Why the last CPU run stopped; `None` before a run, after a GPU run, and
+    /// after a run that failed.
+    #[serde(skip)]
+    pub last_stop_reason: Option<StopReason>,
     /// What the weight windows did in the last run; `None` when it had none.
     #[serde(skip)]
     pub last_weight_window_counts: Option<WeightWindowCounts>,
@@ -732,6 +736,7 @@ impl Model {
             last_particles_per_second: None,
             last_data_load_secs: None,
             last_transport_secs: None,
+            last_stop_reason: None,
             last_weight_window_counts: None,
             lost_particles: Vec::new(),
             convergence_targets: Vec::new(),
@@ -764,6 +769,7 @@ impl Model {
             last_particles_per_second: None,
             last_data_load_secs: None,
             last_transport_secs: None,
+            last_stop_reason: None,
             last_weight_window_counts: None,
             lost_particles: Vec::new(),
             convergence_targets: Vec::new(),
@@ -902,6 +908,124 @@ impl Model {
                 VarianceReduction::SurvivalBiasing(_) => None,
             })
             .collect()
+    }
+
+    /// Problems with the weight windows that show before any transport, one
+    /// message each, from 1,000 source particles sampled on a stream of their
+    /// own (the transport's streams are untouched): windows that sit far below
+    /// or above the source weight where most source particles are born, energy
+    /// bins that miss most source particles, and a weight floor above some
+    /// lower bounds. Empty when there are no windows or nothing to say; `Err`
+    /// with the message a run would refuse the model with.
+    pub fn weight_window_warnings(&self) -> Result<Vec<String>, String> {
+        if self.weight_windows().is_empty() {
+            return Ok(Vec::new());
+        }
+        // Sampling a source that a run would refuse spins, then panics.
+        self.validate_variance_reduction()?;
+        self.validate_source_domains()?;
+        Ok(self.checked_window_warnings())
+    }
+
+    /// [`Self::weight_window_warnings`] for a model a run has already validated.
+    fn checked_window_warnings(&self) -> Vec<String> {
+        // The default max_split: one split makes at most max_split copies and
+        // one roulette raises a weight at most max_split-fold, so a source
+        // particle further than this from its window is still outside it after
+        // its first collision.
+        const FAR: f64 = 10.0;
+        let windows = self.weight_windows();
+        if windows.is_empty() {
+            return Vec::new();
+        }
+        let births: Vec<yamc_particle::particle::Particle> = if self.sources.is_empty() {
+            Vec::new()
+        } else {
+            let mut rng = FastRng::new(0x5EED_3636);
+            (0..1000).map(|_| self.sample_source(&mut rng)).collect()
+        };
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let mut out = Vec::new();
+        for ww in windows {
+            let kind = format!("{:?}", ww.particle).to_lowercase();
+            let lowest = ww
+                .lower_bounds
+                .iter()
+                .copied()
+                .filter(|&l| l > 0.0)
+                .reduce(f64::min);
+            if let Some(lowest) = lowest.filter(|&l| ww.weight_floor > l) {
+                out.push(format!(
+                    "weight_floor {:.3e} is above the lowest lower bound of the {kind} windows \
+                     ({lowest:.3e}), so below it the floor overrides them. Set weight_floor below \
+                     every lower bound.",
+                    ww.weight_floor
+                ));
+            }
+            let born: Vec<_> = births
+                .iter()
+                .filter(|p| p.particle_type == ww.particle)
+                .collect();
+            if born.is_empty() {
+                continue;
+            }
+            if let Some(bins) = ww.energy_bins.as_ref() {
+                let share = |n: usize| 100.0 * n as f64 / born.len() as f64;
+                if let Some(&bottom) = bins.first() {
+                    let below = born.iter().filter(|p| p.energy < bottom).count();
+                    if 2 * below > born.len() {
+                        out.push(format!(
+                            "the {kind} windows' energy bins start at {bottom:.4e} eV, above the \
+                             energy of {:.0}% of the source particles, which have no window, and \
+                             slowing down never gives them one.",
+                            share(below)
+                        ));
+                    }
+                }
+                if let Some(&top) = bins.last() {
+                    let above = born.iter().filter(|p| p.energy > top).count();
+                    if 2 * above > born.len() {
+                        out.push(format!(
+                            "the {kind} windows' energy bins end at {top:.4e} eV, below the energy \
+                             of {:.0}% of the source particles, which have no window until they \
+                             fall below it.",
+                            share(above)
+                        ));
+                    }
+                }
+            }
+            let (above_upper, below_lower): (Vec<f64>, Vec<f64>) = born
+                .iter()
+                .filter_map(|p| {
+                    ww.window(p.position, p.energy)
+                        .map(|(lower, upper)| (p.weight / upper, lower / p.weight))
+                })
+                .unzip();
+            if above_upper.is_empty() {
+                continue;
+            }
+            let (high, low) = (median(above_upper), median(below_lower));
+            if high > FAR {
+                out.push(format!(
+                    "the {kind} windows where most source particles are born sit {high:.0} times \
+                     below the source weight, so each is split that many times at its first \
+                     collisions. Windows are usually scaled so the source weight falls in the \
+                     window at the source."
+                ));
+            }
+            if low > FAR {
+                out.push(format!(
+                    "the {kind} windows where most source particles are born sit {low:.0} times \
+                     above the source weight, so most are lost to roulette at their first \
+                     collision. Windows are usually scaled so the source weight falls in the \
+                     window at the source."
+                ));
+            }
+        }
+        out
     }
 
     /// Sample a particle from the source(s), selecting by strength weight.
@@ -2167,6 +2291,7 @@ impl Model {
         use crate::shutdown_dose::{Captured, RawBirth, ReplayStats, StagedRun};
         // A run that fails must not leave the previous run's counts behind.
         self.last_weight_window_counts = None;
+        self.last_stop_reason = None;
         let (mut capture_out, replay, mut replay_out, cell_source) = match staged {
             None => (None, None, None, None),
             Some(StagedRun::Capture(out)) => (Some(out), None, None, None),
@@ -2668,6 +2793,8 @@ impl Model {
         // count rather than the full request. Set from the chunk cursor once
         // the batch loop exits (whether by break or natural completion).
         let particles_run: u64;
+        // Why the run stopped, set where the batch loop breaks.
+        let mut stop_reason = StopReason::TotalParticles;
 
         {
             // Progress reporting is in terms of total particles (not
@@ -2816,6 +2943,12 @@ impl Model {
                             short.join(", ")
                         );
                     }
+                }
+            }
+            // Said once per transmutation, before its first transport.
+            if is_root && transmutation_tallies.is_none() {
+                for warning in self.checked_window_warnings() {
+                    eprintln!("WARNING: {warning}");
                 }
             }
             // Flattened per-(nuclide, MT) inelastic kinematics tables, built
@@ -3117,7 +3250,7 @@ impl Model {
                                 let mut welford_worker = welford_workers_ref[thread_idx].lock();
 
                                 // Process all particles in the bank (primary + secondaries)
-                                let mut particles_processed = 0;
+                                let mut particles_processed: usize = 0;
                                 // Last-resort ceiling on the per-history population.
                                 // Weight-window splitting is bounded by a per-history
                                 // split budget (WW_SPLIT_BUDGET_PER_HISTORY in transport),
@@ -3133,6 +3266,19 @@ impl Model {
                                 // (FISSION_BANK_LIMIT_PER_HISTORY in transport::fission);
                                 // this one is the backstop for a chain that grows too
                                 // slowly to trip it.
+                                //
+                                // The allowance scales with the lineages (#36):
+                                // MAX_PARTICLES_PER_HISTORY particles that are not split
+                                // copies for the source and for each weight-window split
+                                // copy, pooled over the history, so one runaway lineage
+                                // can use it all. A copy carries a share of its parent's
+                                // weight and starts a chain like the source's, so a fixed
+                                // ceiling refused subcritical multiplying models under
+                                // splitting windows as critical. Without windows it is
+                                // the fixed ceiling; with them it is at most
+                                // MAX_PARTICLES_PER_HISTORY x (1 + the split budget), so
+                                // under splitting windows the fission-bank guard is what
+                                // stops a supercritical chain promptly.
                                 const MAX_PARTICLES_PER_HISTORY: usize = 50_000;
 
                                 while let Some(mut particle) = particle_bank.pop_particle() {
@@ -3152,8 +3298,14 @@ impl Model {
                                     #[cfg(feature = "debug_diagnostics")]
                                     batch_secondary_count
                                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    if particles_processed > MAX_PARTICLES_PER_HISTORY {
-                                        let queued = particle_bank.len();
+                                    // Copies made, not processed, are subtracted, so a
+                                    // queued copy only delays the ceiling.
+                                    let copies = particle_bank.ww_splits();
+                                    let not_copies = particles_processed.saturating_sub(copies);
+                                    if not_copies > MAX_PARTICLES_PER_HISTORY * (1 + copies) {
+                                        // The particle just popped is not transported.
+                                        let transported = particles_processed - 1;
+                                        let queued = particle_bank.len() + 1;
                                         let progeny = particle_bank.fission_progeny();
                                         // Name the cause only when fission actually
                                         // accounts for the population. A trace-fissile
@@ -3172,7 +3324,6 @@ impl Model {
                                         } else {
                                             String::new()
                                         };
-                                        let copies = particle_bank.ww_splits();
                                         let diagnosis = if copies > 0 {
                                             format!(
                                                 "{diagnosis} The weight windows made {copies} \
@@ -3183,7 +3334,7 @@ impl Model {
                                         };
                                         panic!(
                                             "Source history {global_particle_index} did not \
-                                             drain: {MAX_PARTICLES_PER_HISTORY} particles \
+                                             drain: {transported} particles \
                                              transported with {queued} still \
                                              queued.{diagnosis} The run stops here rather \
                                              than truncating the history, because dropping \
@@ -3583,6 +3734,7 @@ impl Model {
                                  stopping early."
                             );
                         }
+                        stop_reason = StopReason::ConvergenceTargets;
                         break;
                     }
 
@@ -3611,6 +3763,7 @@ impl Model {
                                     settings.convergence.name()
                                 );
                             }
+                            stop_reason = StopReason::StatisticalChecks;
                             break;
                         }
                         if is_root && !panel_active && self.verbose.eta && elapsed >= next_status {
@@ -3671,6 +3824,7 @@ impl Model {
                                  stopping early."
                             );
                         }
+                        stop_reason = StopReason::MaxRuntime;
                         break;
                     }
                 }
@@ -3905,6 +4059,7 @@ impl Model {
         self.last_particles_per_second = Some(particles_per_second);
         self.last_data_load_secs = Some(data_load_secs);
         self.last_transport_secs = Some(transport_secs);
+        self.last_stop_reason = Some(stop_reason);
         // What the weight windows did, summed over ranks so every rank holds
         // the run's totals.
         let mut ww_counts = sum_weight_window_counts(&mpi_ctx, &ww_counts);
@@ -3972,7 +4127,7 @@ impl Model {
     /// The weight-window line of the run summary (with `verbose.summary`), and
     /// warnings at every verbosity when the windows misbehaved: the split
     /// budget reached in a noticeable share of histories, the weight floor
-    /// killing particles, or windows that never acted. The causes they name are
+    /// playing roulette inside the windows, or windows that never acted. The causes they name are
     /// in the windows, which the user controls; the limits themselves are not
     /// settings.
     fn report_weight_windows(&self, c: &WeightWindowCounts) {
@@ -3980,15 +4135,16 @@ impl Model {
         if self.verbose.summary {
             println!(
                 "Weight windows: {} splits ({} copies, {} capped at max_split), {} of {} \
-                 roulettes lost, {} weight-floor kills; split budget reached in {} of {} \
-                 histories ({} copies refused); no window at {} of {} collisions; at most {} \
-                 particles in one history",
+                 roulettes lost, {} of {} weight-floor roulettes lost; split budget reached in \
+                 {} of {} histories ({} copies refused); no window at {} of {} collisions; at \
+                 most {} particles in one history",
                 c.split_events,
                 c.split_copies,
                 c.splits_capped_at_max_split,
                 c.roulette_kills,
                 c.roulette_kills + c.roulette_survivals,
                 c.weight_floor_kills,
+                c.weight_floor_roulettes,
                 c.histories_at_split_budget,
                 c.histories,
                 c.splits_cut_short,
@@ -4013,14 +4169,13 @@ impl Model {
                 c.splits_cut_short,
             );
         }
-        if c.weight_floor_kills > 0 {
+        if c.weight_floor_roulettes > 0 {
             eprintln!(
-                "WARNING: the weight floor killed {} particles, carrying {:.3e} of weight per \
-                 source particle. A kill at the floor is not a roulette, so the tallies these \
-                 particles would have reached are biased low. Set weight_floor below every \
-                 window's lower bound.",
-                c.weight_floor_kills,
-                c.weight_floor_weight / c.histories.max(1) as f64,
+                "WARNING: the weight floor played {} roulettes inside the windows, which killed \
+                 {} particles. The roulette keeps the tallies unbiased, but a floor above the \
+                 windows overrides them there. Set weight_floor below every window's lower \
+                 bound.",
+                c.weight_floor_roulettes, c.weight_floor_kills,
             );
         }
         if c.checks == 0 && c.no_window > 0 {
@@ -4354,8 +4509,8 @@ fn sum_weight_window_counts(
         c.splits_cut_short,
         c.roulette_kills,
         c.roulette_survivals,
+        c.weight_floor_roulettes,
         c.weight_floor_kills,
-        c.weight_floor_weight.to_bits(),
     ];
     let k = local.len();
     let mut out = local;
@@ -4376,8 +4531,8 @@ fn sum_weight_window_counts(
                 splits_cut_short: rank[10],
                 roulette_kills: rank[11],
                 roulette_survivals: rank[12],
-                weight_floor_kills: rank[13],
-                weight_floor_weight: f64::from_bits(rank[14]),
+                weight_floor_roulettes: rank[13],
+                weight_floor_kills: rank[14],
                 split_budget: 0,
             });
         }
@@ -4396,8 +4551,8 @@ fn sum_weight_window_counts(
             t.splits_cut_short,
             t.roulette_kills,
             t.roulette_survivals,
+            t.weight_floor_roulettes,
             t.weight_floor_kills,
-            t.weight_floor_weight.to_bits(),
         ];
     }
     mpi_ctx.broadcast_u64(&mut out, 0);
@@ -4415,9 +4570,34 @@ fn sum_weight_window_counts(
         splits_cut_short: out[10],
         roulette_kills: out[11],
         roulette_survivals: out[12],
-        weight_floor_kills: out[13],
-        weight_floor_weight: f64::from_bits(out[14]),
+        weight_floor_roulettes: out[13],
+        weight_floor_kills: out[14],
         split_budget: counts.split_budget,
+    }
+}
+
+/// Why a CPU transport run stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    /// It ran every history of `total_particles`.
+    TotalParticles,
+    /// `max_runtime` ran out.
+    MaxRuntime,
+    /// Every convergence target was met.
+    ConvergenceTargets,
+    /// With no stop condition, every scored bin passed the statistical checks.
+    StatisticalChecks,
+}
+
+impl StopReason {
+    /// The name the Python results report.
+    pub fn name(self) -> &'static str {
+        match self {
+            StopReason::TotalParticles => "total_particles",
+            StopReason::MaxRuntime => "max_runtime",
+            StopReason::ConvergenceTargets => "convergence_targets",
+            StopReason::StatisticalChecks => "statistical_checks",
+        }
     }
 }
 

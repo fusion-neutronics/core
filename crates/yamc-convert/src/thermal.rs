@@ -519,9 +519,9 @@ impl Prepared {
     /// equiprobable cosines, so this is what holds them to NJOY's conventions.
     /// Each is compared with what NJOY makes of the closed form, rather than
     /// with the closed form itself: where NJOY puts its Bragg edges
-    /// ([`njoy_edges_below`]), which temperature's factors it takes
-    /// ([`rdelas_temperature`]) and how it interpolates the incoherent part
-    /// ([`njoy_incoherent`]). Together they reproduce what NJOY wrote to a
+    /// (`njoy_edges_below`), which temperature's factors it takes
+    /// (`rdelas_temperature`) and how it interpolates the incoherent part
+    /// (`njoy_incoherent`). Together they reproduce what NJOY wrote to a
     /// few parts in 10^7, the precision of its tapes. What is written is the
     /// closed form at the evaluation's own temperature, which those
     /// approximations of NJOY's do not touch.

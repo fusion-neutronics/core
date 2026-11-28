@@ -241,7 +241,7 @@ pub struct DataUncertainty {
     /// For a Gaussian output `SE(sigma) / sigma` is about `1 / sqrt(2(n-1))`,
     /// so a target `t` needs about `1 / (2 t^2) + 1` replicas: 201 at 5%, 51
     /// at 10%. A heavy-tailed output needs more (see
-    /// [`std_dev_standard_error`]), and [`MAX_SAMPLES`] bounds the run, so a
+    /// [`std_dev_standard_error`]), and `MAX_SAMPLES` bounds the run, so a
     /// target much below 2.2% (the Gaussian figure at the cap) cannot be met.
     /// What is tracked is listed on [`Ensemble::unconverged`].
     pub convergence: f64,
@@ -300,7 +300,7 @@ impl FluxResponseReport {
 /// The replicas a transport-coupled run's transport carries:
 /// `request.samples` where it is set, else the count a Gaussian output needs
 /// to reach `request.convergence`, `1 / (2 t^2) + 1`, rounded up to a whole
-/// [`BLOCK`] and kept within [`MIN_SAMPLES`] and [`MAX_SAMPLES`]: 256 at the
+/// `BLOCK` and kept within `MIN_SAMPLES` and `MAX_SAMPLES`: 256 at the
 /// default 5%.
 ///
 /// The count has to be fixed before the transport, since every history
@@ -506,7 +506,7 @@ pub struct Info {
     pub converged: bool,
     /// The convergence target the run judged against, `SE(sigma) / sigma`.
     pub convergence: f64,
-    /// Whether the run stopped on [`MAX_SAMPLES`] with some tracked sigma
+    /// Whether the run stopped on `MAX_SAMPLES` with some tracked sigma
     /// still short of the target, or with replica weights, on the replicas
     /// its transport carried ([`transport_replicas_for`]). Never set on a
     /// fixed sample count.
@@ -1164,7 +1164,7 @@ impl Moments {
 
 /// Accumulates the ensemble of perturbed inventories.
 ///
-/// One [`Moments`] per (step, nuclide), plus the per-replica densities so a
+/// One `Moments` per (step, nuclide), plus the per-replica densities so a
 /// derived quantity can be evaluated per sample rather than from the mean. That
 /// distinction is load-bearing for anything summed over nuclides: evaluating
 /// from the mean throws away the inter-nuclide correlations the resampling
@@ -1505,7 +1505,7 @@ impl Ensemble {
         self.samples.densities(step, nuclide)
     }
 
-    /// The perturbed half-lives [s] each replica was solved with, by replica.
+    /// The perturbed half-lives \[s\] each replica was solved with, by replica.
     ///
     /// Empty maps when half-lives were not perturbed. A nuclide absent from a
     /// replica's map kept its nominal half-life there.
@@ -1675,15 +1675,15 @@ impl Ensemble {
     /// Every tracked sigma that misses `convergence`, worst first.
     ///
     /// Tracked, at every schedule step: the density of each nuclide within
-    /// [`SIGNIFICANCE`] of that step's largest, and the total activity, decay
+    /// `SIGNIFICANCE` of that step's largest, and the total activity, decay
     /// heat and decay photon line rate evaluated so far by
-    /// [`Self::track_derived`]. Every step, not only the last, since a cooling
+    /// `Self::track_derived`. Every step, not only the last, since a cooling
     /// step is often the one read, and an output noisy at one step only keeps
     /// the run going. The judgement is `SE(sigma) / sigma` from
     /// [`std_dev_standard_error`], so a heavy-tailed output needs more
     /// replicas than a Gaussian one, and with the Monte Carlo noise removed
     /// from [`noise_removed_standard_error`] on the sigma reported. An output
-    /// with no spread, or a sigma under [`NEGLIGIBLE`] of its mean, has
+    /// with no spread, or a sigma under `NEGLIGIBLE` of its mean, has
     /// nothing worth converging and is not tracked.
     ///
     /// Not tracked: the photon spectrum line by line and the contact dose,
@@ -1714,7 +1714,7 @@ impl Ensemble {
     /// Every tracked output whose removed Monte Carlo noise variance exceeds
     /// [`NOISE_FLAG_FRACTION`] of the nuclear-data variance left, the largest
     /// share first; empty when the noise was not measured. An output with a
-    /// spread under [`NEGLIGIBLE`] of its mean is not judged.
+    /// spread under `NEGLIGIBLE` of its mean is not judged.
     pub fn noisy(&self) -> Vec<NoisyOutput> {
         let Some(scale) = self.noise_scale() else {
             return Vec::new();
@@ -2396,7 +2396,7 @@ pub(crate) fn spread_and_noise(values: &[f64], even: &[f64], scale: f64) -> (f64
 }
 
 /// The standard error of the noise-removed standard deviation
-/// `sqrt(S^2(y) - scale S^2(d))` (see [`spread_and_noise`]), or `None` below
+/// `sqrt(S^2(y) - scale S^2(d))` (see `spread_and_noise`), or `None` below
 /// four values or where the removed variance is not positive.
 ///
 /// The estimate is a mean over replicas of `z_k = n/(n-1) [(y_k - ȳ)^2 -

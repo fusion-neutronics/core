@@ -60,7 +60,7 @@
 //! damage energy and dpa ([`DisplacementDamage::replicas`]), from three
 //! things that move per replica:
 //!
-//! - **Its composition.** [`accumulate`] runs over the replica's own states,
+//! - **Its composition.** `accumulate` runs over the replica's own states,
 //!   so a nuclide that burns faster in a replica damages less there.
 //! - **Its cross sections.** MT=444 carries no covariance of its own, but it
 //!   is the sum `K = Σ_mt σ_mt h_mt` of what each reaction deposits, and the
@@ -129,7 +129,7 @@ impl DamageRequest {
         })
     }
 
-    /// The user's displacement threshold energies, by element symbol [eV].
+    /// The user's displacement threshold energies, by element symbol \[eV\].
     pub fn displacement_energies(&self) -> &BTreeMap<String, f64> {
         &self.displacement_energies
     }
@@ -179,11 +179,11 @@ impl DamageRequest {
 /// schedule step `i - 1`.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct DisplacementDamage {
-    /// Damage energy per atom of the material [eV].
+    /// Damage energy per atom of the material \[eV\].
     pub damage_energy: Vec<f64>,
     /// NRT displacements per atom of the material.
     pub dpa: Vec<f64>,
-    /// Per element, damage energy per atom of that element [eV].
+    /// Per element, damage energy per atom of that element \[eV\].
     pub element_damage_energy: BTreeMap<String, Vec<f64>>,
     /// Per element with a displacement threshold energy, NRT displacements per
     /// atom of that element.
@@ -209,7 +209,7 @@ pub struct DisplacementDamage {
 /// `[replica][state]` with the states as in [`DisplacementDamage`].
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct DamageReplicas {
-    /// Damage energy per atom of the material [eV].
+    /// Damage energy per atom of the material \[eV\].
     pub damage_energy: Vec<Vec<f64>>,
     /// NRT displacements per atom of the material.
     pub dpa: Vec<Vec<f64>>,
@@ -774,7 +774,7 @@ impl crate::results::TransmutationResults {
         self.damage_estimate(material_id, step, element, Series::Dpa)
     }
 
-    /// Damage energy per atom [eV] at `step`, with the nuclear-data spread on
+    /// Damage energy per atom \[eV\] at `step`, with the nuclear-data spread on
     /// it, as [`Self::dpa_uncertainty`].
     pub fn damage_energy_uncertainty(
         &self,

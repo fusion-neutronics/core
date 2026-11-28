@@ -318,8 +318,8 @@ pub struct ComptonRelaxTarget {
 /// Complete photon interaction data for a single element.
 ///
 /// All cross sections and the energy grid are stored in log form:
-/// - energy[i] = ln(E_i)
-/// - xs[i] = ln(sigma_i) if sigma > exp(-499), else -900.0
+/// - `energy[i] = ln(E_i)`
+/// - `xs[i] = ln(sigma_i)` if sigma > exp(-499), else -900.0
 #[derive(Debug, Clone)]
 pub struct PhotonInteraction {
     /// Element name (e.g., "Fe").
@@ -360,9 +360,9 @@ pub struct PhotonInteraction {
     pub electron_pdf: Vec<f64>,
     /// Binding energy per Compton profile shell in eV (from compton_profiles/binding_energy).
     pub binding_energy: Vec<f64>,
-    /// Compton profile PDF J(pz) for each shell. profile_pdf[shell][pz_index].
+    /// Compton profile PDF J(pz) for each shell. `profile_pdf[shell][pz_index]`.
     pub profile_pdf: Vec<Vec<f64>>,
-    /// Compton profile CDF (computed by trapezoidal integration). profile_cdf[shell][pz_index].
+    /// Compton profile CDF (computed by trapezoidal integration). `profile_cdf[shell][pz_index]`.
     ///
     /// Both `profile_pdf` and `profile_cdf` are normalised at load by
     /// [`finalize_compton_profiles`] so that the tabulated half-profile plus
@@ -390,7 +390,7 @@ pub struct PhotonInteraction {
     pub shells: Vec<ElectronSubshell>,
 
     /// 2D cross section storage for photoelectric subshell XS.
-    /// cross_sections[i_grid][i_shell] = ln(sigma) at energy grid index i_grid for shell i_shell.
+    /// `cross_sections[i_grid][i_shell]` = ln(sigma) at energy grid index i_grid for shell i_shell.
     /// For grid indices below a shell's threshold, the value is 0.0.
     pub cross_sections: Vec<Vec<f64>>,
 
@@ -405,7 +405,7 @@ pub struct PhotonInteraction {
     /// the OpenMC / NIST mu_tr convention and avoiding a double-count of the
     /// separately-transported fluorescence energy. Empty (or all-zero) when the
     /// element has no atomic-relaxation data. See
-    /// [`compute_subshell_radiative_energy`].
+    /// `compute_subshell_radiative_energy`.
     pub subshell_radiative_energy: Vec<f64>,
 
     /// Expected radiative (fluorescence) photon energy emitted per Compton
@@ -446,7 +446,7 @@ pub struct PhotonInteraction {
     // ------------------------------------------------------------------
     // Bremsstrahlung data (for TTB electron treatment)
     // ------------------------------------------------------------------
-    /// Scaled bremsstrahlung DCS: dcs[i_e][i_k] where i_e indexes electron
+    /// Scaled bremsstrahlung DCS: `dcs[i_e][i_k]` where i_e indexes electron
     /// energy and i_k indexes reduced photon energy (k = E_photon / E_electron).
     pub dcs: Vec<Vec<f64>>,
     /// Radiative stopping power S_rad(E) for this element, one value per
@@ -1902,9 +1902,9 @@ pub fn ttb_k_grid() -> Vec<f64> {
 
 /// Build the log-space copy of the TTB electron energy grid, once.
 ///
-/// Idempotent and non-destructive: the linear [`TTB_E_GRID`] is left
+/// Idempotent and non-destructive: the linear `TTB_E_GRID` is left
 /// untouched (prep-time readers still need it linear) and
-/// [`TTB_E_GRID_LOG`] is populated only if not already built. This is
+/// `TTB_E_GRID_LOG` is populated only if not already built. This is
 /// safe to call at the start of every simulation, including from
 /// concurrent simulations sharing the process -- it never mutates a grid
 /// that another simulation's transport may be reading.

@@ -67,7 +67,7 @@ impl TransmutationDriver {
     /// * `rates` - Reaction rates for this material (sigma*phi for each nuclide/reaction)
     /// * `fy_weights` - Spectrum weights over each fissionable nuclide's
     ///   tabulated fission-yield energies
-    /// * `dt` - Timestep duration [s]
+    /// * `dt` - Timestep duration \[s\]
     ///
     /// # Returns
     /// New material with updated composition (in sum mode)

@@ -13,7 +13,7 @@
 //!   nuclide name, so the same result always writes the same file; a parent's
 //!   products keep the order the solve built them in.
 //! - Schema-level metadata: the format version, the writing build, and the
-//!   rest of the result as JSON (see [`Meta`]), objects sorted and floats
+//!   rest of the result as JSON (see `Meta`), objects sorted and floats
 //!   written so they parse back to the same bits. A non-finite float that
 //!   JSON would turn into `null` is refused on save rather than lost.
 //!

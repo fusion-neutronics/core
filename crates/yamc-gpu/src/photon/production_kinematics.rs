@@ -50,6 +50,13 @@
 //! [`sample_continuous_tabular_eout`], [`draw_uniform`]) are the existing,
 //! separately-tested shared helpers -- this slice only sequences them in the
 //! CPU's draw order; it does not reimplement any sampling math.
+//!
+//! [`sample_photon_kinematics`]: crate::photon::production_kinematics::sample_photon_kinematics()
+//! [`sample_photon_kinematics_cpu`]: crate::photon::production_kinematics::sample_photon_kinematics_cpu
+//! [`pick_energy_bracket`]: crate::common::sampling::energy_bracket::pick_energy_bracket()
+//! [`invert_angle_cdf`]: crate::common::sampling::angle_cdf_invert::invert_angle_cdf()
+//! [`sample_continuous_tabular_eout`]: crate::common::sampling::eout_continuous_tabular::sample_continuous_tabular_eout()
+//! [`draw_uniform`]: crate::common::pcg32::draw_uniform()
 
 use crate::common::pcg32::{draw_uniform, draw_uniform_cpu, expand_seed};
 use crate::common::sampling::angle_cdf_invert::{invert_angle_cdf, invert_angle_cdf_cpu};
@@ -61,7 +68,7 @@ use crate::neutron::xs::photon_production::{
 use crate::GpuContext;
 use cubecl::prelude::*;
 
-/// Result of [`sample_photon_kinematics`]: the sampled outgoing photon energy
+/// Result of [`sample_photon_kinematics()`]: the sampled outgoing photon energy
 /// (`e_out`, eV), the scattering cosine (`mu`, in `[-1, 1]`), and the advanced
 /// PCG-32 `state`.
 #[derive(CubeType)]
@@ -253,7 +260,7 @@ pub fn sample_photon_kinematics(
     PhotonKin { e_out, mu, state }
 }
 
-/// CPU twin of [`sample_photon_kinematics`]. Identical structure and identical
+/// CPU twin of [`sample_photon_kinematics()`]. Identical structure and identical
 /// 32-bit-PCG draws (via the `_cpu` helper twins), so it matches the `#[cube]`
 /// kernel bit-for-bit on the integer / discrete paths and to within a few ULPs
 /// where a `sqrt` is involved. Returns `(e_out, mu, state)`.

@@ -70,7 +70,7 @@ impl fmt::Display for DisplacementEnergySource {
 /// One element's displacement threshold energy and where it came from.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DisplacementEnergy {
-    /// The spatially averaged displacement threshold energy `E_d` [eV].
+    /// The spatially averaged displacement threshold energy `E_d` (eV).
     pub energy_ev: f64,
     /// Where the value came from.
     pub source: DisplacementEnergySource,

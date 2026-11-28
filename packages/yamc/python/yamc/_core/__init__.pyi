@@ -3534,6 +3534,15 @@ class Model:
             ``variance_reduction=[ww]``; pass a returned list straight through as
             ``variance_reduction=windows``.
         """
+    def weight_window_warnings(self) -> builtins.list[builtins.str]:
+        r"""
+        Problems with the model's weight windows that show before any transport,
+        as the messages a run prints as warnings: windows that sit more than ten
+        times below or above the source weight where most source particles are
+        born, energy bins that miss most source particles, and a weight floor
+        above some lower bounds. An empty list when there is nothing to say;
+        ``ValueError`` when a run would refuse the model.
+        """
     def estimate_density_reduction(self, generator: WeightWindowGeneratorDeGVR) -> tuple[builtins.float, builtins.float]:
         r"""
         Estimate the auto DeGVR density-reduction factor N and the optical depth
@@ -6216,7 +6225,11 @@ class TallyResult:
     @property
     def aggregate_figure_of_merit(self) -> builtins.float:
         r"""
-        Tally-level scalar figure of merit of the integrated response.
+        Figure of merit of the tally total, ``1 / (aggregate_relative_error**2
+        * elapsed_secs)``, so it keeps the correlation between bins that one
+        history scores together. Results without the per-history total (MPI
+        runs, results read back with ``from_arrow``) sum the per-bin variances
+        instead, which overstates it for a mesh tally.
         """
     @property
     def aggregate_mean(self) -> builtins.float:
@@ -8231,6 +8244,15 @@ class TransportResults:
         ``None`` for combined / reloaded results.
         """
     @property
+    def stop_reason(self) -> typing.Optional[builtins.str]:
+        r"""
+        Why the run stopped: ``"total_particles"`` (it ran every history),
+        ``"max_runtime"``, ``"convergence_targets"`` (every target was met) or
+        ``"statistical_checks"`` (with no stop condition, every scored bin
+        passed the statistical checks). ``None`` for GPU runs, and for combined
+        or reloaded results.
+        """
+    @property
     def weight_window_stats(self) -> typing.Optional[dict]:
         r"""
         What the weight windows did in this run, as a dict of counts, or
@@ -8253,9 +8275,10 @@ class TransportResults:
           unbiased, but what those histories reach last gets fewer, heavier
           particles.
         - ``roulette_kills`` and ``roulette_survivals``.
-        - ``weight_floor_kills`` and ``weight_floor_weight``: particles killed
-          below ``weight_floor`` and the weight they carried, summed over the
-          run. A kill at the floor is not a roulette, so any biases tallies low.
+        - ``weight_floor_roulettes`` and ``weight_floor_kills``: roulettes played
+          below ``weight_floor``, and the particles they killed. The roulette
+          keeps tallies unbiased, but a floor that plays at all sits above some
+          windows and overrides them there.
         """
     @property
     def runs(self) -> list:
@@ -8497,7 +8520,8 @@ class WeightWindowBounds:
     weight exceeds the local upper bound is split into equal-weight copies
     (capped by ``max_split``), one at or below the lower bound plays Russian
     roulette (survivor weight ``survival_factor * lower``), and one below
-    ``weight_floor`` is killed. Bounds are given per (energy group, voxel),
+    ``weight_floor`` plays roulette with the floor as its survivor weight.
+    Bounds are given per (energy group, voxel),
     flat, indexed ``group * num_voxels + voxel``; a negative lower bound is
     the "no window" sentinel. Add to ``Model(variance_reduction=[...])``; one
     entry per particle type is allowed, and two for the same particle is
@@ -8520,8 +8544,8 @@ class WeightWindowBounds:
         particle: ``"neutron"`` (default) or ``"photon"``.
         survival_factor: Roulette survivor weight = factor * lower (default 3).
         max_split: Maximum copies produced in one split event (default 10).
-        weight_floor: Absolute weight floor below which a particle is killed
-            (default 1e-38).
+        weight_floor: Absolute weight below which a particle plays roulette
+            with the floor as its survivor weight (default 1e-38).
     """
     @property
     def lower_bounds(self) -> builtins.list[builtins.float]:
@@ -8554,7 +8578,8 @@ class WeightWindowBounds:
     @property
     def weight_floor(self) -> builtins.float:
         r"""
-        Absolute weight floor below which a particle is killed.
+        Absolute weight below which a particle plays roulette, the floor being
+        its survivor weight.
         """
     @property
     def mesh(self) -> RegularRectangularMesh:

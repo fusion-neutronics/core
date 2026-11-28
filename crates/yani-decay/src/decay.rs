@@ -16,7 +16,7 @@ const EV_TO_J: f64 = 1.602_176_634e-19;
 /// Barns per cm²: converts atom density in atoms/(barn·cm) to atoms/cm³.
 const BARN_PER_CM_SQ: f64 = 1.0e24;
 
-/// Activity of each nuclide in `atom_densities` [Bq].
+/// Activity of each nuclide in `atom_densities` (Bq).
 ///
 /// `atom_densities` maps nuclide name -> atoms/(barn·cm); `volume` is in cm³.
 /// Total atoms are `density · 1e24 · volume` and the activity is `N · ln2 /
@@ -61,7 +61,7 @@ pub fn total(by_nuclide: &HashMap<String, f64>) -> f64 {
     names.into_iter().map(|name| by_nuclide[name]).sum()
 }
 
-/// Total activity of a material inventory [Bq]. See [`activity_by_nuclide`].
+/// Total activity of a material inventory (Bq). See [`activity_by_nuclide`].
 pub fn activity_total(
     atom_densities: &HashMap<String, f64>,
     volume: f64,
@@ -70,7 +70,7 @@ pub fn activity_total(
     total(&activity_by_nuclide(atom_densities, volume, chain))
 }
 
-/// Decay heat contribution of each nuclide in `atom_densities` [W].
+/// Decay heat contribution of each nuclide in `atom_densities` (W).
 ///
 /// Multiplies each nuclide's activity (see [`activity_by_nuclide`]) by its mean
 /// decay energy and the eV→J factor. Nuclides with non-positive decay energy
@@ -91,7 +91,7 @@ pub fn decay_heat_by_nuclide(
     heats
 }
 
-/// One component of each nuclide's decay heat [W]: its activity times that
+/// One component of each nuclide's decay heat (W): its activity times that
 /// component's mean energy (`component` indexes
 /// [`yani::DECAY_ENERGY_COMPONENTS`]: beta, gamma, alpha).
 ///
@@ -135,7 +135,7 @@ pub fn decay_heat_component_by_nuclide(
     }
 }
 
-/// Total decay heat of a material inventory [W]. See [`decay_heat_by_nuclide`].
+/// Total decay heat of a material inventory (W). See [`decay_heat_by_nuclide`].
 pub fn decay_heat_total(
     atom_densities: &HashMap<String, f64>,
     volume: f64,
@@ -200,9 +200,9 @@ pub fn decay_photon_lines(
 pub struct PhotonContinuum {
     /// The emitting nuclide.
     pub nuclide: String,
-    /// Tabulated energies [eV], ascending.
+    /// Tabulated energies (eV), ascending.
     pub energies: Vec<f64>,
-    /// The emission-rate density at each energy [photons/s/eV]: the chain's
+    /// The emission-rate density at each energy (photons/s/eV): the chain's
     /// per-atom density times the nuclide's atom count.
     pub rates: Vec<f64>,
     /// How `rates` is read between the energies, `None` where the chain

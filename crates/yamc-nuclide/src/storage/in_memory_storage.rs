@@ -26,6 +26,11 @@
 //! backend, so one `InMemoryStorage` is active per process at a time.
 //! Browser hosts that want multiple independent simulations should
 //! reuse the same backend and namespace by path prefix.
+//!
+//! [`open_read`]: crate::storage::open_read
+//! [`read_to_string`]: crate::storage::read_to_string
+//! [`exists`]: crate::storage::exists
+//! [`add_file`]: InMemoryStorage::add_file
 
 use std::collections::HashMap;
 use std::io;
@@ -38,7 +43,7 @@ use crate::storage::{ReadSeek, Storage};
 /// In-RAM virtual file store. Cheap to clone (just bumps an
 /// `Arc<RwLock<…>>` refcount) -- the canonical idiom is to keep one
 /// clone for inserting files and hand a second to
-/// [`yamc_nuclide::storage::set_storage`]:
+/// [`yamc_nuclide::storage::set_storage`](crate::storage::set_storage):
 ///
 /// ```ignore
 /// let storage = InMemoryStorage::new();

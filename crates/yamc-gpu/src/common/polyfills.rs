@@ -188,7 +188,7 @@ macro_rules! polyfills {
 
         /// `exp(x) - 1` without the cancellation `exp_f64(x) - 1` suffers near 0:
         /// the Taylor series for `|x| < 0.5` (25 terms, far below an ulp there), else
-        /// [`exp_f64`] less 1. Same input assumption as [`exp_f64`].
+        /// [`exp_f64()`] less 1. Same input assumption as [`exp_f64()`].
         $(#[$attr])?
         pub fn expm1_f64(x: f64) -> f64 {
             let mut ax = x;
@@ -342,7 +342,7 @@ macro_rules! polyfills {
             }
         }
 
-        /// `atan` for any real `t`, accurate to 2 ulps. Helper for [`atan2_f64`].
+        /// `atan` for any real `t`, accurate to 2 ulps. Helper for [`atan2_f64()`].
         ///
         /// The plain 12-term Taylor for `atan` converges to only ~1e-6 near `|t| = 1`
         /// (the series' radius-of-convergence edge), so this uses a two-level range
@@ -413,7 +413,7 @@ macro_rules! polyfills {
         /// `atan2(y, x)` polyfill, ~1e-13 vs libm. cubecl-spirv has no validated
         /// `atan`/`atan2` lowering on the AMD/RADV f64 path, and the cylindrical mesh
         /// binning needs `φ = atan2(y, x)` on the track-length walk. Builds
-        /// on [`atan_full`] with the standard quadrant assembly from the signs of x, y.
+        /// on [`atan_full()`] with the standard quadrant assembly from the signs of x, y.
         $(#[$attr])?
         pub fn atan2_f64(y: f64, x: f64) -> f64 {
             let pi = std::f64::consts::PI;

@@ -29,7 +29,7 @@
 //! | 0 `ABOVE` | push `surface_evaluate(surf_idx) > 0` | +1 |
 //! | 1 `BELOW` | push `surface_evaluate(surf_idx) < 0` | +1 |
 //! | 2 `AND`   | pop two, push `a && b` | -1 |
-//! | 3 `OR`    | pop two, push `a || b` | -1 |
+//! | 3 `OR`    | pop two, push `a \|\| b` | -1 |
 //! | 4 `NOT`   | pop one, push `!a` | 0 |
 //!
 //! This matches `yamc_geo::region::flat::RegionOp` and its `contains`
@@ -252,7 +252,7 @@ pub fn region_contains(
 
 // ----------------------- CPU mirrors -----------------------
 
-/// CPU twin of [`surface_evaluate`]. Same formulas, plain Rust, so the
+/// CPU twin of [`surface_evaluate()`]. Same formulas, plain Rust, so the
 /// rayon / sequential CPU transport paths resolve the identical cell.
 pub fn surface_evaluate_cpu(
     surface_types: &[u32],
@@ -326,7 +326,7 @@ fn torus_evaluate_cpu(t1: f64, t2: f64, ax: f64, a: f64, b: f64, c: f64) -> f64 
     r * r / (c * c) + ax * ax / (b * b) - 1.0
 }
 
-/// CPU twin of [`region_contains`]. Same RPN program, same boolean order.
+/// CPU twin of [`region_contains()`]. Same RPN program, same boolean order.
 #[allow(clippy::too_many_arguments)]
 pub fn region_contains_cpu(
     region_program: &[u32],

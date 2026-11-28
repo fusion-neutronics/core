@@ -33,9 +33,10 @@
 //! just the bytes it spans. Sharing a narrow view of a wide Arrow column
 //! therefore pins bytes the loader had decided to drop, so it is only a win
 //! when the load retains essentially all of the column. That decision belongs
-//! to the caller, which is why this type offers both [`share`](Self::share) and
-//! [`from_slice`](Self::from_slice) rather than picking for you; see
-//! `LoadScope::is_unfiltered` and its use in `nuclide_arrow`.
+//! to the caller, which is why this type offers both
+//! [`share`](F64Buffer::share) and [`from_slice`](F64Buffer::from_slice)
+//! rather than picking for you; see `LoadScope::is_unfiltered` and its use in
+//! `nuclide_arrow`.
 
 use std::ops::Deref;
 

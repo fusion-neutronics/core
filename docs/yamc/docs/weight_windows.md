@@ -95,7 +95,7 @@ analog = model.simulate_transport(total_particles=10_000_000_000,
 | ``ratio`` | ``5`` | upper/lower bound ratio (window width) |
 | ``survival_factor`` | ``3`` | sets the roulette survival weight |
 | ``max_split`` | ``10`` | most copies one split may create |
-| ``weight_floor`` | ``1e-38`` | absolute weight below which a particle is killed |
+| ``weight_floor`` | ``1e-38`` | absolute weight below which a particle plays roulette, the floor being its survivor weight |
 
 By default ``density_reduction`` is auto: ``N`` is derived, before the two
 generation passes, from the problem's optical thickness ``tau`` (a particle-free
@@ -171,6 +171,16 @@ print(windows.window((0.0, 0.0, 50.0), 1.0e6))  # (lower, upper), or None
 windows.to_vtkhdf("windows.vtkhdf")
 ```
 
+## Checks before a run
+
+Windows that cannot work as set are caught before any transport. A bound that
+is not finite, or an upper bound that is not above its lower bound, is refused
+when the windows are built. A run then warns, before transporting anything,
+when the windows where most source particles are born sit more than ten times
+below or above the source weight, when the energy bins miss most source
+particles, or when ``weight_floor`` is above some lower bounds.
+``model.weight_window_warnings()`` returns the same messages without running.
+
 ## What the windows did
 
 A run with windows reports what they did: how often they split, rouletted and
@@ -194,7 +204,7 @@ window, where the windows do nothing); ``split_events``, ``split_copies``,
 ``max_split_copies_per_history`` and ``splits_capped_at_max_split`` (splits
 that needed more than ``max_split`` copies); ``split_budget``,
 ``histories_at_split_budget`` and ``splits_cut_short``; ``roulette_kills`` and
-``roulette_survivals``; ``weight_floor_kills`` and ``weight_floor_weight``.
+``roulette_survivals``; ``weight_floor_roulettes`` and ``weight_floor_kills``.
 The run summary prints most of them on one line.
 
 Three things also print a warning, whatever the ``verbose`` setting:
@@ -209,9 +219,10 @@ Three things also print a warning, whatever the ``verbose`` setting:
   efficient. The run warns when 5% of histories reach it, which usually means
   the windows split far more than the flux falls: they drop faster than the
   flux from voxel to voxel, or sit far below the source weight.
-- **The weight floor.** A particle below ``weight_floor`` is killed, not
-  rouletted, so any kill biases low the tallies it would have reached. Keep
-  ``weight_floor`` below every lower bound, as the default (1e-38) is.
+- **The weight floor.** A particle below ``weight_floor`` plays a roulette with
+  the floor as its survival weight, which keeps the tallies unbiased; but a
+  floor that plays at all sits above some windows and overrides them there.
+  Keep ``weight_floor`` below every lower bound, as the default (1e-38) is.
 - **No window acting at any collision**, for example energy bins that miss
   the source: the windows then do nothing.
 
@@ -302,7 +313,9 @@ activation path runs twice at reduced density).
 
 - With or without windows the tally means agree within statistics;
   only the variance (and the run cost) differ. Judge the benefit by coverage and
-  the per-tally relative error in the deep region, or the per-tally FOM.
+  the per-bin relative error or ``figure_of_merit`` in the deep region. The
+  ``aggregate_figure_of_merit`` measures the tally total, which the bins near
+  the source dominate.
 - Windows help most under exponential attenuation (thick shields, many decades
   of flux drop), where analog cannot reach at all. For pure void streaming (an air duct),
   analog already fills the domain and the gain is smaller.

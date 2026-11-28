@@ -36,8 +36,8 @@ impl PyVolumeResult {
 /// Compute a single-bin stochastic volume estimate.
 ///
 /// Resolves the bounding box (user-provided or `default_bbox`), runs
-/// [`calculate_stochastic_volumes`] with the given classifier, and
-/// returns a [`PyVolumeResult`].
+/// [`calculate_stochastic_volumes`](yamc::stochastic_volume::calculate_stochastic_volumes)
+/// with the given classifier, and returns a [`PyVolumeResult`].
 pub fn compute_single_volume(
     samples: u64,
     bounding_box: Option<&PyBoundingBox>,

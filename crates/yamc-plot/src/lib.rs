@@ -3,7 +3,7 @@
 //! 1. `yamc-python::PyInteractivePlot` -- the Python `model.plot()` /
 //!    `geometry.plot()` / `cell.plot()` family. Calls
 //!    [`build_interactive_html`] and ships the result through Jupyter's
-//!    `_repr_html_` (or [`PyInteractivePlot::save`] writes to disk).
+//!    `_repr_html_` (or `PyInteractivePlot::save` writes to disk).
 //! 2. `yamc::wasm::WasmSimulation` -- the browser-side editor exposes
 //!    wasm-bindgen entries that return raw slice samples; the JS host
 //!    mounts the viewer code (extracted from this crate) and refreshes

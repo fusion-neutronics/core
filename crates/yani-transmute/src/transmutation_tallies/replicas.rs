@@ -85,8 +85,8 @@ use yani::{fission_yield_interp_weights, FissionYieldWeights, ReactionRates};
 /// tally asks it once per nuclide per track segment.
 pub trait ReplicaChanges: Sync {
     /// Add, for nuclide `nuclide` of material `material_id` (its position in
-    /// the tally's [`TransmutationTallies::layout`]) at `energy` [eV], every
-    /// replica's change `Δsigma_k` [barns] to each of the tally's MTs for the
+    /// the tally's [`TransmutationTallies::layout`]) at `energy` \[eV\], every
+    /// replica's change `Δsigma_k` \[barns\] to each of the tally's MTs for the
     /// material, into `out`, laid out MT-major: `out[m * R + k]` for MT
     /// `mts[m]` and replica `k`. Return whether anything was added; `out`
     /// arrives zeroed.
@@ -615,7 +615,8 @@ impl ReplicaSums {
 impl TransmutationTallies {
     /// Also keep, for each of `replicas` nuclear-data replicas drawn from
     /// `seed`, a copy of every sum the transmutation reads, scored under the
-    /// transport's replica weights (see the [module docs](self)).
+    /// transport's replica weights (see the `transmutation_tallies::replicas`
+    /// module docs).
     ///
     /// Off unless asked for. A transport that scores this tally must pass
     /// each segment's replica factors to

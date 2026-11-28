@@ -15,10 +15,10 @@ pub struct TransmutationResults {
     /// Index 0 is initial composition, index i is after timestep[i-1].
     pub materials: HashMap<u32, Vec<Material>>,
 
-    /// Cumulative times [s] (index 0 = 0.0, index i = sum of first i timesteps)
+    /// Cumulative times \[s\] (index 0 = 0.0, index i = sum of first i timesteps)
     pub times: Vec<f64>,
 
-    /// Timesteps used [s]
+    /// Timesteps used \[s\]
     pub timesteps: Vec<f64>,
 
     /// Material ID -> the rate each step was driven at, indexed as
@@ -167,7 +167,7 @@ pub struct CollapseReuse {
 /// (see [`crate::multigroup::reaction_rate_spectrum`]).
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct CollapseInputs {
-    /// One entry per distinct spectrum: group boundaries [eV], ascending and
+    /// One entry per distinct spectrum: group boundaries \[eV\], ascending and
     /// one longer than the flux, and the flux shape the collapse weighted with.
     ///
     /// The shape is normalized, so the magnitude of a step's flux is the
@@ -207,7 +207,7 @@ pub struct UncertaintyBreakdown {
 /// One channel's reaction rate, resolved onto the spectrum's own groups.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RateSpectrum {
-    /// Group boundaries [eV], ascending, one longer than `rates`.
+    /// Group boundaries \[eV\], ascending, one longer than `rates`.
     pub boundaries: Vec<f64>,
     /// Each group's contribution to the rate [1/s], summing to the rate
     /// [`TransmutationResults::get_reaction_rates`] reports for the channel.

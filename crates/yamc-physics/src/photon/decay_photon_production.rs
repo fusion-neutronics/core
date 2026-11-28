@@ -24,7 +24,7 @@ use yani::{Continuum, Interpolation};
 /// Pre-computed D1S photon production data for a single nuclide at one temperature.
 pub struct DecayPhotonNuclideData {
     /// D1S photon production XS at each energy grid point.
-    /// decay_photon_prod[i] = Σ { reaction_xs[i] × branching × photon_per_decay }
+    /// `decay_photon_prod[i] = Σ { reaction_xs[i] × branching × photon_per_decay }`
     pub photon_prod: Vec<f64>,
     /// D1S photon channels for sampling which reaction/product produced the photon.
     pub channels: Vec<DecayPhotonChannel>,
@@ -53,7 +53,7 @@ pub struct DecayPhotonChannel {
 
 /// The energy spectrum of one D1S channel: one decay source of the emitter.
 pub enum DecayPhotonSpectrum {
-    /// Discrete lines [eV], each drawn in proportion to its intensity (the
+    /// Discrete lines (eV), each drawn in proportion to its intensity (the
     /// chain's emission rate).
     Lines {
         energies: Vec<f64>,
@@ -96,7 +96,7 @@ impl DecayPhotonSpectrum {
         }
     }
 
-    /// Draw one photon energy [eV].
+    /// Draw one photon energy (eV).
     pub fn sample<R: rand::Rng>(&self, rng: &mut R) -> f64 {
         match self {
             DecayPhotonSpectrum::Lines {

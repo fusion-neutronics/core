@@ -469,7 +469,7 @@ pub type YieldChannelLabel = (String, String, String);
 /// factor squared.
 #[derive(Debug, Clone)]
 pub struct HistoryCovariance {
-    /// Base-grid edges [eV]. Bin `c` is `[grid[c], grid[c+1])`; the last bin
+    /// Base-grid edges \[eV\]. Bin `c` is `[grid[c], grid[c+1])`; the last bin
     /// runs to infinity.
     pub grid: Vec<f64>,
     /// The directly scored yield channels, in order: one per producing state

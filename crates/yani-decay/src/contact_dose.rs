@@ -295,7 +295,7 @@ fn multiplier(quantity: DoseQuantity, build_up: f64) -> f64 {
 /// rather than returned as zero.
 ///
 /// A continuum is integrated over its part of that range, its density read
-/// exactly under its law (see [`weight_moments`]). The part below or above the
+/// exactly under its law (see `weight_moments`). The part below or above the
 /// range is left out, as a line there is, and nothing reports it: for the
 /// JEFF-4.0 Cf252 continuum, which starts at 0 eV, it is 3.3e-4 of the
 /// continuum's emission below 10 keV and 3.3e-6 below 1 keV (see
