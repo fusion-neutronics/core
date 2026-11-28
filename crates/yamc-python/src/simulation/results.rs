@@ -808,6 +808,9 @@ pub struct PyTransportResults {
     /// What the weight windows did in the run, or `None` when it had none and
     /// for combined, reloaded or transmutation-step results.
     pub weight_window_counts: Option<yamc_physics::util::bank::WeightWindowCounts>,
+    /// Why the run stopped, or `None` for GPU runs and for combined or
+    /// reloaded results.
+    pub stop_reason: Option<&'static str>,
 }
 
 impl PyTransportResults {
@@ -996,6 +999,7 @@ impl PyTransportResults {
             particles_per_second: self.particles_per_second,
             total_particles: self.total_particles,
             weight_window_counts: self.weight_window_counts,
+            stop_reason: self.stop_reason,
         })
     }
 
@@ -1051,6 +1055,16 @@ impl PyTransportResults {
             return None;
         }
         Some((self.total_particles as f64 / secs) as u64)
+    }
+
+    /// Why the run stopped: ``"total_particles"`` (it ran every history),
+    /// ``"max_runtime"``, ``"convergence_targets"`` (every target was met) or
+    /// ``"statistical_checks"`` (with no stop condition, every scored bin
+    /// passed the statistical checks). ``None`` for GPU runs, and for combined
+    /// or reloaded results.
+    #[getter]
+    fn stop_reason(&self) -> Option<&'static str> {
+        self.stop_reason
     }
 
     /// What the weight windows did in this run, as a dict of counts, or
@@ -1241,6 +1255,7 @@ impl PyTransportResults {
             particles_per_second: None,
             total_particles: 0,
             weight_window_counts: None,
+            stop_reason: None,
         })
     }
 
@@ -1444,6 +1459,7 @@ pub(crate) fn build_results(
         transport_secs: model.last_transport_secs,
         particles_per_second: model.last_particles_per_second,
         weight_window_counts: model.last_weight_window_counts,
+        stop_reason: model.last_stop_reason.map(|r| r.name()),
         ..PyTransportResults::from(inner)
     })
 }
@@ -1462,6 +1478,7 @@ impl From<TransportResults> for PyTransportResults {
             particles_per_second: None,
             total_particles,
             weight_window_counts: None,
+            stop_reason: None,
         }
     }
 }
@@ -1488,6 +1505,7 @@ pub(crate) fn combine_inner(
         particles_per_second: None,
         total_particles: 0,
         weight_window_counts: None,
+        stop_reason: None,
     })
 }
 

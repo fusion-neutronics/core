@@ -8244,6 +8244,15 @@ class TransportResults:
         ``None`` for combined / reloaded results.
         """
     @property
+    def stop_reason(self) -> typing.Optional[builtins.str]:
+        r"""
+        Why the run stopped: ``"total_particles"`` (it ran every history),
+        ``"max_runtime"``, ``"convergence_targets"`` (every target was met) or
+        ``"statistical_checks"`` (with no stop condition, every scored bin
+        passed the statistical checks). ``None`` for GPU runs, and for combined
+        or reloaded results.
+        """
+    @property
     def weight_window_stats(self) -> typing.Optional[dict]:
         r"""
         What the weight windows did in this run, as a dict of counts, or

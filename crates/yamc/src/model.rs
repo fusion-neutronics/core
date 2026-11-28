@@ -476,6 +476,10 @@ pub struct Model {
     pub last_data_load_secs: Option<f64>,
     #[serde(skip)]
     pub last_transport_secs: Option<f64>,
+    /// Why the last CPU run stopped; `None` before a run, after a GPU run, and
+    /// after a run that failed.
+    #[serde(skip)]
+    pub last_stop_reason: Option<StopReason>,
     /// What the weight windows did in the last run; `None` when it had none.
     #[serde(skip)]
     pub last_weight_window_counts: Option<WeightWindowCounts>,
@@ -732,6 +736,7 @@ impl Model {
             last_particles_per_second: None,
             last_data_load_secs: None,
             last_transport_secs: None,
+            last_stop_reason: None,
             last_weight_window_counts: None,
             lost_particles: Vec::new(),
             convergence_targets: Vec::new(),
@@ -764,6 +769,7 @@ impl Model {
             last_particles_per_second: None,
             last_data_load_secs: None,
             last_transport_secs: None,
+            last_stop_reason: None,
             last_weight_window_counts: None,
             lost_particles: Vec::new(),
             convergence_targets: Vec::new(),
@@ -2285,6 +2291,7 @@ impl Model {
         use crate::shutdown_dose::{Captured, RawBirth, ReplayStats, StagedRun};
         // A run that fails must not leave the previous run's counts behind.
         self.last_weight_window_counts = None;
+        self.last_stop_reason = None;
         let (mut capture_out, replay, mut replay_out, cell_source) = match staged {
             None => (None, None, None, None),
             Some(StagedRun::Capture(out)) => (Some(out), None, None, None),
@@ -2786,6 +2793,8 @@ impl Model {
         // count rather than the full request. Set from the chunk cursor once
         // the batch loop exits (whether by break or natural completion).
         let particles_run: u64;
+        // Why the run stopped, set where the batch loop breaks.
+        let mut stop_reason = StopReason::TotalParticles;
 
         {
             // Progress reporting is in terms of total particles (not
@@ -3725,6 +3734,7 @@ impl Model {
                                  stopping early."
                             );
                         }
+                        stop_reason = StopReason::ConvergenceTargets;
                         break;
                     }
 
@@ -3753,6 +3763,7 @@ impl Model {
                                     settings.convergence.name()
                                 );
                             }
+                            stop_reason = StopReason::StatisticalChecks;
                             break;
                         }
                         if is_root && !panel_active && self.verbose.eta && elapsed >= next_status {
@@ -3813,6 +3824,7 @@ impl Model {
                                  stopping early."
                             );
                         }
+                        stop_reason = StopReason::MaxRuntime;
                         break;
                     }
                 }
@@ -4047,6 +4059,7 @@ impl Model {
         self.last_particles_per_second = Some(particles_per_second);
         self.last_data_load_secs = Some(data_load_secs);
         self.last_transport_secs = Some(transport_secs);
+        self.last_stop_reason = Some(stop_reason);
         // What the weight windows did, summed over ranks so every rank holds
         // the run's totals.
         let mut ww_counts = sum_weight_window_counts(&mpi_ctx, &ww_counts);
@@ -4560,6 +4573,31 @@ fn sum_weight_window_counts(
         weight_floor_roulettes: out[13],
         weight_floor_kills: out[14],
         split_budget: counts.split_budget,
+    }
+}
+
+/// Why a CPU transport run stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    /// It ran every history of `total_particles`.
+    TotalParticles,
+    /// `max_runtime` ran out.
+    MaxRuntime,
+    /// Every convergence target was met.
+    ConvergenceTargets,
+    /// With no stop condition, every scored bin passed the statistical checks.
+    StatisticalChecks,
+}
+
+impl StopReason {
+    /// The name the Python results report.
+    pub fn name(self) -> &'static str {
+        match self {
+            StopReason::TotalParticles => "total_particles",
+            StopReason::MaxRuntime => "max_runtime",
+            StopReason::ConvergenceTargets => "convergence_targets",
+            StopReason::StatisticalChecks => "statistical_checks",
+        }
     }
 }
 
