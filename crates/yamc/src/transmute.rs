@@ -434,6 +434,13 @@ impl Model {
         let scout_start = std::time::Instant::now();
 
         let scout: Option<Arc<TransmutationTallies>> = if peak_source_rate > 0.0 {
+            // The transports below run with transmutation tallies, which keeps
+            // them quiet about the windows, so the warnings are said once here.
+            if crate::mpi_context::MpiContext::init().is_root() {
+                for warning in self.weight_window_warnings()? {
+                    eprintln!("WARNING: {warning}");
+                }
+            }
             println!("Scouting transport for the flux spectrum the product screening needs...");
             let scout = {
                 let seeded: HashMap<u32, &Material> = transmutable_cells

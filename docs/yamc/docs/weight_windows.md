@@ -157,6 +157,16 @@ windows = yamc.WeightWindowBounds(
 )
 ```
 
+## Checks before a run
+
+Windows that cannot work as set are caught before any transport. A bound that
+is not finite, or an upper bound that is not above its lower bound, is refused
+when the windows are built. A run then warns, before transporting anything,
+when the windows where most source particles are born sit more than ten times
+below or above the source weight, when the energy bins miss most source
+particles, or when ``weight_floor`` is above some lower bounds.
+``model.weight_window_warnings()`` returns the same messages without running.
+
 ## What the windows did
 
 A run with windows reports what they did: how often they split, rouletted and

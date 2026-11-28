@@ -904,6 +904,124 @@ impl Model {
             .collect()
     }
 
+    /// Problems with the weight windows that show before any transport, one
+    /// message each, from 1,000 source particles sampled on a stream of their
+    /// own (the transport's streams are untouched): windows that sit far below
+    /// or above the source weight where most source particles are born, energy
+    /// bins that miss most source particles, and a weight floor above some
+    /// lower bounds. Empty when there are no windows or nothing to say; `Err`
+    /// with the message a run would refuse the model with.
+    pub fn weight_window_warnings(&self) -> Result<Vec<String>, String> {
+        if self.weight_windows().is_empty() {
+            return Ok(Vec::new());
+        }
+        // Sampling a source that a run would refuse spins, then panics.
+        self.validate_variance_reduction()?;
+        self.validate_source_domains()?;
+        Ok(self.checked_window_warnings())
+    }
+
+    /// [`Self::weight_window_warnings`] for a model a run has already validated.
+    fn checked_window_warnings(&self) -> Vec<String> {
+        // The default max_split: one split makes at most max_split copies and
+        // one roulette raises a weight at most max_split-fold, so a source
+        // particle further than this from its window is still outside it after
+        // its first collision.
+        const FAR: f64 = 10.0;
+        let windows = self.weight_windows();
+        if windows.is_empty() {
+            return Vec::new();
+        }
+        let births: Vec<yamc_particle::particle::Particle> = if self.sources.is_empty() {
+            Vec::new()
+        } else {
+            let mut rng = FastRng::new(0x5EED_3636);
+            (0..1000).map(|_| self.sample_source(&mut rng)).collect()
+        };
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let mut out = Vec::new();
+        for ww in windows {
+            let kind = format!("{:?}", ww.particle).to_lowercase();
+            let lowest = ww
+                .lower_bounds
+                .iter()
+                .copied()
+                .filter(|&l| l > 0.0)
+                .reduce(f64::min);
+            if let Some(lowest) = lowest.filter(|&l| ww.weight_floor > l) {
+                out.push(format!(
+                    "weight_floor {:.3e} is above the lowest lower bound of the {kind} windows \
+                     ({lowest:.3e}), so below it the floor overrides them. Set weight_floor below \
+                     every lower bound.",
+                    ww.weight_floor
+                ));
+            }
+            let born: Vec<_> = births
+                .iter()
+                .filter(|p| p.particle_type == ww.particle)
+                .collect();
+            if born.is_empty() {
+                continue;
+            }
+            if let Some(bins) = ww.energy_bins.as_ref() {
+                let share = |n: usize| 100.0 * n as f64 / born.len() as f64;
+                if let Some(&bottom) = bins.first() {
+                    let below = born.iter().filter(|p| p.energy < bottom).count();
+                    if 2 * below > born.len() {
+                        out.push(format!(
+                            "the {kind} windows' energy bins start at {bottom:.4e} eV, above the \
+                             energy of {:.0}% of the source particles, which have no window, and \
+                             slowing down never gives them one.",
+                            share(below)
+                        ));
+                    }
+                }
+                if let Some(&top) = bins.last() {
+                    let above = born.iter().filter(|p| p.energy > top).count();
+                    if 2 * above > born.len() {
+                        out.push(format!(
+                            "the {kind} windows' energy bins end at {top:.4e} eV, below the energy \
+                             of {:.0}% of the source particles, which have no window until they \
+                             fall below it.",
+                            share(above)
+                        ));
+                    }
+                }
+            }
+            let (above_upper, below_lower): (Vec<f64>, Vec<f64>) = born
+                .iter()
+                .filter_map(|p| {
+                    ww.window(p.position, p.energy)
+                        .map(|(lower, upper)| (p.weight / upper, lower / p.weight))
+                })
+                .unzip();
+            if above_upper.is_empty() {
+                continue;
+            }
+            let (high, low) = (median(above_upper), median(below_lower));
+            if high > FAR {
+                out.push(format!(
+                    "the {kind} windows where most source particles are born sit {high:.0} times \
+                     below the source weight, so each is split that many times at its first \
+                     collisions. Windows are usually scaled so the source weight falls in the \
+                     window at the source."
+                ));
+            }
+            if low > FAR {
+                out.push(format!(
+                    "the {kind} windows where most source particles are born sit {low:.0} times \
+                     above the source weight, so most are lost to roulette at their first \
+                     collision. Windows are usually scaled so the source weight falls in the \
+                     window at the source."
+                ));
+            }
+        }
+        out
+    }
+
     /// Sample a particle from the source(s), selecting by strength weight.
     pub fn sample_source<R: rand::Rng + ?Sized>(
         &self,
@@ -2816,6 +2934,12 @@ impl Model {
                             short.join(", ")
                         );
                     }
+                }
+            }
+            // Said once per transmutation, before its first transport.
+            if is_root && transmutation_tallies.is_none() {
+                for warning in self.checked_window_warnings() {
+                    eprintln!("WARNING: {warning}");
                 }
             }
             // Flattened per-(nuclide, MT) inelastic kinematics tables, built
