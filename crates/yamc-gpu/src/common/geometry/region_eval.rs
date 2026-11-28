@@ -153,6 +153,62 @@ pub fn surface_evaluate(
     value
 }
 
+/// Cosine between the direction `(dx, dy, dz)` and the unit normal of surface
+/// `s` at `(px, py, pz)`, the normal pointing to the surface's `Above` side
+/// (where [`surface_evaluate`] is positive). The normal is the gradient of
+/// [`surface_evaluate`] by central differences with step
+/// `h = 1e-6 * (1 + max(|px|, |py|, |pz|))`, exactly as the CPU transport's
+/// `scoring::surface_normal` takes it, so a surface-current tally decides
+/// above and below the same way on both backends. Clamped to `[-1, 1]`;
+/// `0` where the gradient vanishes.
+// `clamp` is not a cube op; the bounds are compared by hand.
+#[allow(clippy::manual_clamp)]
+#[cube]
+pub fn surface_crossing_mu(
+    surface_types: &[u32],
+    surface_params: &[f64],
+    s: u32,
+    px: f64,
+    py: f64,
+    pz: f64,
+    dx: f64,
+    dy: f64,
+    dz: f64,
+) -> f64 {
+    let mut m = 0.0_f64;
+    let ax = if px < 0.0 { -px } else { px };
+    let ay = if py < 0.0 { -py } else { py };
+    let az = if pz < 0.0 { -pz } else { pz };
+    if ax > m {
+        m = ax;
+    }
+    if ay > m {
+        m = ay;
+    }
+    if az > m {
+        m = az;
+    }
+    let h = 1e-6 * (1.0 + m);
+    let gx = surface_evaluate(surface_types, surface_params, s, px + h, py, pz)
+        - surface_evaluate(surface_types, surface_params, s, px - h, py, pz);
+    let gy = surface_evaluate(surface_types, surface_params, s, px, py + h, pz)
+        - surface_evaluate(surface_types, surface_params, s, px, py - h, pz);
+    let gz = surface_evaluate(surface_types, surface_params, s, px, py, pz + h)
+        - surface_evaluate(surface_types, surface_params, s, px, py, pz - h);
+    let norm = (gx * gx + gy * gy + gz * gz).sqrt();
+    let mut mu = 0.0_f64;
+    if norm > 0.0 {
+        mu = dx * (gx / norm) + dy * (gy / norm) + dz * (gz / norm);
+    }
+    if mu > 1.0 {
+        mu = 1.0;
+    }
+    if mu < -1.0 {
+        mu = -1.0;
+    }
+    mu
+}
+
 /// Torus implicit value `(ρ - a)²/c² + ax²/b² - 1` with `ρ = √(t1² + t2²)`.
 /// Mirrors `yamc_geo::surface::torus::torus_evaluate`; the caller permutes
 /// the transverse / axial coordinates per torus axis.
@@ -318,6 +374,35 @@ pub fn surface_evaluate_cpu(
     } else {
         0.0
     }
+}
+/// CPU twin of [`surface_crossing_mu()`]: the same central differences, in
+/// the same order, over [`surface_evaluate_cpu`].
+#[allow(clippy::too_many_arguments)]
+pub fn surface_crossing_mu_cpu(
+    surface_types: &[u32],
+    surface_params: &[f64],
+    s: u32,
+    px: f64,
+    py: f64,
+    pz: f64,
+    dx: f64,
+    dy: f64,
+    dz: f64,
+) -> f64 {
+    let m = px.abs().max(py.abs()).max(pz.abs()).max(0.0);
+    let h = 1e-6 * (1.0 + m);
+    let at =
+        |x: f64, y: f64, z: f64| surface_evaluate_cpu(surface_types, surface_params, s, x, y, z);
+    let gx = at(px + h, py, pz) - at(px - h, py, pz);
+    let gy = at(px, py + h, pz) - at(px, py - h, pz);
+    let gz = at(px, py, pz + h) - at(px, py, pz - h);
+    let norm = (gx * gx + gy * gy + gz * gz).sqrt();
+    let mu = if norm > 0.0 {
+        dx * (gx / norm) + dy * (gy / norm) + dz * (gz / norm)
+    } else {
+        0.0
+    };
+    mu.clamp(-1.0, 1.0)
 }
 
 fn torus_evaluate_cpu(t1: f64, t2: f64, ax: f64, a: f64, b: f64, c: f64) -> f64 {

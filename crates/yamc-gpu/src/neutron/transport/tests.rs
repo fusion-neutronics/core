@@ -390,6 +390,7 @@ fn mesh_track_length_accumulates_per_voxel() {
         score_urr_key: vec![0],
         fixed_point_scales: vec![DEFAULT_FIXED_POINT_SCALE],
         is_collision: vec![0],
+        surface_to_bin: Vec::new(),
         n_parent_per_tally: vec![1],
         parent_offsets: vec![0, 0],
         parent_ids: Vec::new(),
@@ -991,8 +992,53 @@ fn run_equiv(
     max_steps: u32,
     survival: &SurvivalBiasingInputs,
 ) -> (MultiCellResult, MultiCellResult) {
-    let log_min = log_grid[0];
-    let log_max = *log_grid.last().unwrap();
+    let pack = flux_abs_pack_for(
+        &cell_aabbs,
+        &log_uniform_edges(log_grid[0], *log_grid.last().unwrap(), n_energy_bins),
+    );
+    run_equiv_with_pack(
+        ctx,
+        seeds,
+        energies,
+        positions,
+        directions,
+        cell_aabbs,
+        cell_to_material,
+        surface_types,
+        surface_params,
+        surface_boundaries,
+        region_program,
+        log_grid,
+        xs_e_per_mat,
+        xs_a_per_mat,
+        target_mass_per_material,
+        &pack,
+        max_steps,
+        survival,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_equiv_with_pack(
+    ctx: &GpuContext,
+    seeds: Vec<u32>,
+    energies: Vec<f64>,
+    positions: Vec<f64>,
+    directions: Vec<f64>,
+    cell_aabbs: Vec<f64>,
+    cell_to_material: Vec<u32>,
+    surface_types: Vec<u32>,
+    surface_params: Vec<f64>,
+    surface_boundaries: Vec<u32>,
+    region_program: Vec<u32>,
+    log_grid: Vec<f64>,
+    xs_e_per_mat: Vec<f64>,
+    xs_a_per_mat: Vec<f64>,
+    target_mass_per_material: Vec<f64>,
+    pack: &TalliesPack,
+    max_steps: u32,
+    survival: &SurvivalBiasingInputs,
+) -> (MultiCellResult, MultiCellResult) {
     let gpu = run_multi_cell_transport(
         ctx,
         &seeds,
@@ -1125,10 +1171,7 @@ fn run_equiv(
         &Vec::<f64>::new(),                          // urr_cdf
         &Vec::<f64>::new(),                          // urr_xs
         &vec![0.0_f64; target_mass_per_material.len()],
-        &flux_abs_pack_for(
-            &cell_aabbs,
-            &log_uniform_edges(log_min, log_max, n_energy_bins),
-        ),
+        pack,
         &[],
         survival,
         &CoupledPhotonInputs::coupled_off(1, 1),
@@ -1272,10 +1315,7 @@ fn run_equiv(
         &Vec::<f64>::new(),                          // urr_cdf
         &Vec::<f64>::new(),                          // urr_xs
         &vec![0.0_f64; target_mass_per_material.len()],
-        &flux_abs_pack_for(
-            &cell_aabbs,
-            &log_uniform_edges(log_min, log_max, n_energy_bins),
-        ),
+        pack,
         &[],
         survival,
         &NuclideSelectInputs::single_nuclide(&target_mass_per_material, log_grid.len()),
@@ -1717,32 +1757,16 @@ fn cpu_gpu_equivalence_curved_surfaces() {
     );
 }
 
-/// D10: GPU vs CPU across an INTERNAL transmission boundary in a real
-/// CSG multi-cell geometry (not the AABB-only identity fixture every
-/// other equivalence test uses). Two concentric spheres of DIFFERENT
-/// materials sharing one internal transmission surface, with a vacuum
-/// outer boundary and an isotropic point source at the origin:
-///   surface 0: sphere r = 2  (internal transmission boundary)
-///   surface 1: sphere r = 5  (vacuum outer boundary)
-///   cell 0 (inner ball):  below s0                  -> material 0
-///   cell 1 (outer shell): above s0 AND below s1     -> material 1
-/// Every history streams out from r = 0 and MUST cross the internal
-/// r = 2 surface, handing off cell 0 -> cell 1. The per-cell flux
-/// (track-length) and absorption (track-length) tallies are compared
-/// bit-for-bit: a double-count, lost track length, or a mis-identified
-/// next cell at the crossing would shift a cell's integer tally and
-/// fail. Spheres are bit-exact across backends (quadratic, no FMA
-/// drift), so exact parity is the right bar here.
-#[test]
-fn cpu_gpu_equivalence_concentric_transmission_boundary() {
-    let ctx = match GpuContext::new() {
-        Ok(c) => c,
-        Err(GpuInitError::NoF64Adapter) => {
-            println!("no Vulkan f64 adapter -- skipping");
-            return;
-        }
-    };
-
+/// The two-cell concentric model of
+/// `cpu_gpu_equivalence_concentric_transmission_boundary` (an absorbing ball
+/// inside a scattering shell, bounded by an internal transmission sphere and a
+/// vacuum outer one), run on the kernel and its CPU twin with the tallies
+/// `pack_for(cell_aabbs, log_edges)` builds over four energy bins. Returns both
+/// results and the history count.
+fn run_concentric_shells(
+    ctx: &GpuContext,
+    pack_for: impl Fn(&[f64], &[f64]) -> TalliesPack,
+) -> (MultiCellResult, MultiCellResult, usize) {
     // RPN region-program word builders (see region_eval). "inside a
     // sphere" is `below` its surface; the shell is the complement of the
     // inner ball intersected with the outer ball.
@@ -1811,10 +1835,13 @@ fn cpu_gpu_equivalence_concentric_transmission_boundary() {
         directions.extend_from_slice(&[r * phi.cos(), r * phi.sin(), z]);
     }
 
-    let n_energy_bins = 4;
+    let pack = pack_for(
+        &cell_aabbs,
+        &log_uniform_edges(log_grid[0], *log_grid.last().unwrap(), 4),
+    );
     let max_steps: u32 = 400;
-    let (gpu, cpu) = run_equiv(
-        &ctx,
+    let (gpu, cpu) = run_equiv_with_pack(
+        ctx,
         seeds,
         energies,
         positions,
@@ -1829,10 +1856,40 @@ fn cpu_gpu_equivalence_concentric_transmission_boundary() {
         xs_e_per_mat,
         xs_a_per_mat,
         target_mass_per_material,
-        n_energy_bins,
+        &pack,
         max_steps,
         &SurvivalBiasingInputs::off(),
     );
+    (gpu, cpu, n)
+}
+
+/// D10: GPU vs CPU across an INTERNAL transmission boundary in a real
+/// CSG multi-cell geometry (not the AABB-only identity fixture every
+/// other equivalence test uses). Two concentric spheres of DIFFERENT
+/// materials sharing one internal transmission surface, with a vacuum
+/// outer boundary and an isotropic point source at the origin:
+///   surface 0: sphere r = 2  (internal transmission boundary)
+///   surface 1: sphere r = 5  (vacuum outer boundary)
+///   cell 0 (inner ball):  below s0                  -> material 0
+///   cell 1 (outer shell): above s0 AND below s1     -> material 1
+/// Every history streams out from r = 0 and MUST cross the internal
+/// r = 2 surface, handing off cell 0 -> cell 1. The per-cell flux
+/// (track-length) and absorption (track-length) tallies are compared
+/// bit-for-bit: a double-count, lost track length, or a mis-identified
+/// next cell at the crossing would shift a cell's integer tally and
+/// fail. Spheres are bit-exact across backends (quadratic, no FMA
+/// drift), so exact parity is the right bar here.
+#[test]
+fn cpu_gpu_equivalence_concentric_transmission_boundary() {
+    let ctx = match GpuContext::new() {
+        Ok(c) => c,
+        Err(GpuInitError::NoF64Adapter) => {
+            println!("no Vulkan f64 adapter -- skipping");
+            return;
+        }
+    };
+
+    let (gpu, cpu, n) = run_concentric_shells(&ctx, flux_abs_pack_for);
 
     // Bit-exact per-(cell x bin) flux and absorption across the internal
     // transmission boundary, plus exact alive flags and bounded n_steps /
@@ -1853,6 +1910,113 @@ fn cpu_gpu_equivalence_concentric_transmission_boundary() {
     println!(
         "concentric transmission-boundary equivalence: inner flux {:.4}, shell flux {:.4}",
         gpu_flux[0], gpu_flux[1]
+    );
+}
+
+/// `pack` plus `current-above`, `current-below` and `current-net` entries over
+/// all `n_surfaces` surfaces (surface `s` scores into bin `s`), binned by
+/// `log_edges`, as the dispatch packs surface tallies.
+fn with_surface_currents(
+    mut pack: TalliesPack,
+    n_surfaces: usize,
+    log_edges: &[f64],
+) -> TalliesPack {
+    use crate::common::tallies::{
+        CURRENT_ABOVE, CURRENT_BELOW, CURRENT_NET, DEFAULT_FIXED_POINT_SCALE, ESTIMATOR_SURFACE,
+        MESH_NONE, NOT_IN_TALLY, SCORE_CURRENT,
+    };
+    let n_existing = pack.n_tallies() as usize;
+    let n_cells = pack.cell_to_bin.len() / n_existing;
+    let n_bins = (log_edges.len() - 1) as u32;
+    pack.surface_to_bin = vec![NOT_IN_TALLY; n_existing * n_surfaces];
+    for direction in [CURRENT_ABOVE, CURRENT_BELOW, CURRENT_NET] {
+        pack.score_kinds.push(SCORE_CURRENT);
+        pack.cell_to_bin
+            .extend(std::iter::repeat_n(NOT_IN_TALLY, n_cells));
+        pack.n_cells_per_tally.push(n_surfaces as u32);
+        pack.edges_offsets.push(pack.log_edges.len() as u32);
+        pack.n_bins_per_tally.push(n_bins);
+        pack.log_edges.extend_from_slice(log_edges);
+        let out = *pack.out_offsets.last().unwrap();
+        pack.out_offsets.push(out + n_surfaces as u32 * n_bins);
+        pack.score_data.push(direction);
+        pack.score_mt.push(0);
+        pack.score_urr_key.push(0);
+        pack.fixed_point_scales.push(DEFAULT_FIXED_POINT_SCALE);
+        pack.is_collision.push(ESTIMATOR_SURFACE);
+        pack.surface_to_bin.extend(0..n_surfaces as u32);
+        pack.n_parent_per_tally.push(1);
+        let parent = *pack.parent_offsets.last().unwrap();
+        pack.parent_offsets.push(parent);
+        pack.n_mesh_per_tally.push(1);
+        pack.mesh_kind.push(MESH_NONE);
+        let mesh = *pack.mesh_params_offsets.last().unwrap();
+        pack.mesh_params_offsets.push(mesh);
+        let efunc = *pack.efunc_offsets.last().unwrap();
+        pack.efunc_offsets.push(efunc);
+    }
+    pack
+}
+
+/// Surface currents score the same crossings with the same weights on the
+/// kernel and its CPU twin, bit for bit: the crossing cosine (central
+/// differences of `surface_evaluate`), the direction test, the signed net
+/// contribution and its symmetric rounding. On the concentric model the inner
+/// sphere is crossed both ways and the outer, vacuum one only outwards.
+#[test]
+fn cpu_gpu_equivalence_surface_currents() {
+    let ctx = match GpuContext::new() {
+        Ok(c) => c,
+        Err(GpuInitError::NoF64Adapter) => {
+            println!("no Vulkan f64 adapter -- skipping");
+            return;
+        }
+    };
+    let (gpu, cpu, n) = run_concentric_shells(&ctx, |aabbs, edges| {
+        with_surface_currents(flux_abs_pack_for(aabbs, edges), 2, edges)
+    });
+    // The flux and absorption tallies are unchanged by scoring crossings.
+    assert_gpu_cpu_equiv(&gpu, &cpu, n);
+    let bits = |v: &[f64]| -> Vec<i64> {
+        v.iter()
+            .map(|x| (x * 1_073_741_824.0).round() as i64)
+            .collect()
+    };
+    let [above, below, net] = [2, 3, 4].map(|t| bits(&gpu.tally_outputs[t]));
+    for t in 2..5 {
+        assert_eq!(
+            bits(&gpu.tally_outputs[t]),
+            bits(&cpu.tally_outputs[t]),
+            "surface-current entry {t} must match the twin bit for bit"
+        );
+    }
+    // 2 surfaces x 4 energy bins each; surface 0 is the inner sphere.
+    let per_surface = |v: &[i64], s: usize| -> i64 { v[s * 4..(s + 1) * 4].iter().sum() };
+    assert!(
+        per_surface(&above, 0) > 0 && per_surface(&below, 0) > 0,
+        "the inner sphere is crossed both ways"
+    );
+    assert!(
+        per_surface(&above, 1) > 0,
+        "particles leave through the outer sphere"
+    );
+    assert_eq!(
+        per_surface(&below, 1),
+        0,
+        "nothing comes back in through the vacuum sphere"
+    );
+    for i in 0..above.len() {
+        assert_eq!(
+            net[i],
+            above[i] - below[i],
+            "net is above minus below, exactly, in bin {i}"
+        );
+    }
+    println!(
+        "surface currents: inner out {} in {}, outer out {} (fixed-point units)",
+        per_surface(&above, 0),
+        per_surface(&below, 0),
+        per_surface(&above, 1)
     );
 }
 

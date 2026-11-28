@@ -1153,6 +1153,24 @@ pub fn run_multi_cell_transport(
         tallies.efunc_params.clone()
     };
     let tally_efunc_params_h = client.create_from_slice(bytemuck::cast_slice(&efunc_params_padded));
+    // Surface-current map: full `[n_tallies × n_surfaces]` when some entry is
+    // a surface current, else empty and padded to one slot the kernel never
+    // reads (it is compiled out with `surface_tallies` off).
+    let surface_tallies = tallies.has_surface_tallies();
+    if surface_tallies {
+        assert_eq!(
+            tallies.surface_to_bin.len(),
+            n_tallies * surface_types.len(),
+            "surface_to_bin must be flat [n_tallies × n_surfaces]"
+        );
+    }
+    let surface_to_bin_padded: Vec<u32> = if tallies.surface_to_bin.is_empty() {
+        vec![crate::common::tallies::NOT_IN_TALLY]
+    } else {
+        tallies.surface_to_bin.clone()
+    };
+    let tally_surface_to_bin_h =
+        client.create_from_slice(bytemuck::cast_slice(&surface_to_bin_padded));
     // Pad an all-zero slot when the model has no per-MT score tallies
     // -- cubecl rejects zero-length buffers and the kernel only reads
     // this when SCORE_PER_MT fires.
@@ -1602,6 +1620,8 @@ pub fn run_multi_cell_transport(
             // ---- energy-function weighting ----
             BufferArg::from_raw_parts(tally_efunc_offsets_h.clone(), tallies.efunc_offsets.len(),),
             BufferArg::from_raw_parts(tally_efunc_params_h.clone(), efunc_params_padded.len()),
+            // ---- surface currents ----
+            BufferArg::from_raw_parts(tally_surface_to_bin_h.clone(), surface_to_bin_padded.len()),
             // ---- survival biasing (implicit capture) ----
             BufferArg::from_raw_parts(survival_h.clone(), survival.params.len()),
             // ---- free-gas threshold ----
@@ -1698,6 +1718,7 @@ pub fn run_multi_cell_transport(
             per_source,
             total_bins as u32,
             mesh_direct,
+            surface_tallies,
         );
         let _ = pollster::block_on(client.sync());
         slices.record(end - start, dispatched.elapsed());

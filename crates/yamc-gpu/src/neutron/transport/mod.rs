@@ -187,7 +187,7 @@ pub const REGION_CROSS_EPS: f64 = 1e-8;
 // NOTE: this counts the kernel's READ-ONLY `&[T]` slice parameters only, which
 // is what the lockstep test in `tests.rs` checks; `&mut [T]` outputs (including
 // the lost-particle `lost_count` / `lost_f64` pair) are not included.
-pub const KERNEL_STORAGE_BUFFER_COUNT: u32 = 193;
+pub const KERNEL_STORAGE_BUFFER_COUNT: u32 = 194;
 
 /// Compile-time cap on the number of secondary photons banked per neutron
 /// collision (coupled neutron->photon production, S4b). cubecl needs a bounded
@@ -592,7 +592,7 @@ pub(super) fn accumulate_tallies(
         // `accumulate_collision_tallies`, not per step -- skip them here
         // so they never get both contributions (mirrors the GPU kernel's
         // `is_collision[t] == 0` gate on the per-step block).
-        if tallies.is_collision[t] == 1 {
+        if tallies.is_collision[t] != crate::common::tallies::ESTIMATOR_TRACK_LENGTH {
             continue;
         }
         let cell_bin = tallies.cell_to_bin[t * n_cells + cell];
@@ -765,6 +765,85 @@ impl UrrScore<'_> {
             102 => d.absorption,
             _ => 0.0,
         }
+    }
+}
+
+/// Surface-crossing accumulator (mirror of the GPU kernel's crossing block
+/// under `surface_tallies`). Called once per surface crossing, before the
+/// vacuum kill, with the particle ON surface `surface` and the flight's
+/// energy, weight and direction: each surface-current entry naming that
+/// surface adds the weight (signed for `current-net`) into its
+/// `surface bin x energy bin` slot, as the CPU's `score_surface_crossing` does.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub(super) fn accumulate_surface_tallies(
+    tallies: &TalliesPack,
+    surface_types: &[u32],
+    surface_params: &[f64],
+    surface: usize,
+    position: [f64; 3],
+    direction: [f64; 3],
+    log_e: f64,
+    energy: f64,
+    weight: f64,
+    tally_acc: &mut [u64],
+) {
+    use crate::common::geometry::region_eval::surface_crossing_mu_cpu;
+    use crate::common::tallies::{
+        CURRENT_ABOVE, CURRENT_BELOW, CURRENT_NET, ESTIMATOR_SURFACE, NOT_IN_TALLY,
+    };
+    if !tallies.has_surface_tallies() {
+        return;
+    }
+    let n_surfaces = surface_types.len();
+    let mut mu = None;
+    for t in 0..tallies.n_tallies() as usize {
+        if tallies.is_collision[t] != ESTIMATOR_SURFACE {
+            continue;
+        }
+        let surface_bin = tallies.surface_to_bin[t * n_surfaces + surface];
+        if surface_bin == NOT_IN_TALLY {
+            continue;
+        }
+        let mu = *mu.get_or_insert_with(|| {
+            surface_crossing_mu_cpu(
+                surface_types,
+                surface_params,
+                surface as u32,
+                position[0],
+                position[1],
+                position[2],
+                direction[0],
+                direction[1],
+                direction[2],
+            )
+        });
+        let n_bins = tallies.n_bins_per_tally[t] as usize;
+        let edges_off = tallies.edges_offsets[t] as usize;
+        let edges = &tallies.log_edges[edges_off..edges_off + n_bins + 1];
+        let Some(bin_e) = log_edges_bin(edges, log_e) else {
+            continue;
+        };
+        let above = mu >= 0.0;
+        let value = match tallies.score_data[t] {
+            CURRENT_ABOVE if above => weight,
+            CURRENT_BELOW if !above => weight,
+            CURRENT_NET => {
+                if above {
+                    weight
+                } else {
+                    -weight
+                }
+            }
+            _ => continue,
+        };
+        let Some(value) = apply_energy_function(tallies, t, energy, value) else {
+            continue;
+        };
+        let scaled =
+            crate::common::tallies::round_fixed_point_bits(value, tallies.fixed_point_scales[t]);
+        let idx = tallies.out_offsets[t] as usize + surface_bin as usize * n_bins + bin_e;
+        tally_acc[idx] = tally_acc[idx].wrapping_add(scaled);
     }
 }
 

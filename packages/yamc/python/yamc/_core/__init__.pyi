@@ -5928,8 +5928,9 @@ class Tally:
                 A surface tally takes ``energy_bins`` (the crossing energy),
                 ``cosine_bins``, ``particle`` and an energy function, and no cells,
                 materials, mesh, nuclides, response or estimator. It needs surface
-                tracking (not ``"woodcock"`` or ``"hybrid"``) and CSG surfaces, and
-                runs on the CPU. Units are particles per source particle.
+                tracking (not ``"woodcock"`` or ``"hybrid"``) and CSG surfaces. It
+                also runs with ``compute="gpu"``, except with ``cosine_bins``. Units
+                are particles per source particle.
             cosine_bins (list[float], optional): Bin a surface tally by the cosine of
                 the angle between the particle's direction and the surface normal at
                 the crossing, the normal pointing to ``.above`` (outwards on a

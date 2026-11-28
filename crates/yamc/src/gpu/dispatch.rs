@@ -23,12 +23,18 @@
 //! evaluated at the particle's energy, and drops the event outright
 //! when that energy falls off the table.
 //!
+//! A surface-current tally (`current-above` / `current-below` /
+//! `current-net` on a `SurfaceFilter`) is scored at each surface crossing,
+//! before a vacuum surface kills the particle, as the CPU scores it: the
+//! crossing's weight (signed for net) by the sign of the direction's cosine
+//! with the surface normal.
+//!
 //! Models with no tally still run cleanly. Anything else (filters other
-//! than `CellFilter` / `MaterialFilter` / `MeshFilter` / `EnergyFilter`
-//! / `EnergyFunctionFilter` / `ParticleTypeFilter` /
-//! `ParentNuclideFilter`, multi-score, a per-nuclide axis other than the
-//! material total) is rejected up front with a structured
-//! `GpuDispatchError`.
+//! than `CellFilter` / `MaterialFilter` / `MeshFilter` / `SurfaceFilter` /
+//! `EnergyFilter` / `EnergyFunctionFilter` / `ParticleTypeFilter` /
+//! `ParentNuclideFilter`, a `CosineFilter` on a surface tally, a
+//! per-nuclide axis other than the material total) is rejected up front
+//! with a structured `GpuDispatchError`.
 //!
 //! ## macOS
 //!
@@ -55,7 +61,7 @@ use yamc_gpu::common::tallies::TallyVarianceMode;
 use yamc_gpu::common::tallies::{
     efunc_table_len, per_mt_fixed_point_scales, TalliesPack, DEFAULT_FIXED_POINT_SCALE,
     KERMA_FIXED_POINT_SCALE, MESH_CYLINDRICAL, MESH_NONE, MESH_RECT_ROWMAJOR, NOT_IN_TALLY,
-    SCORE_FLUX, SCORE_PER_MT, SCORE_TOTAL,
+    SCORE_CURRENT, SCORE_FLUX, SCORE_PER_MT, SCORE_TOTAL,
 };
 use yamc_gpu::{GpuContext, GpuInitError, GpuSelectError};
 
@@ -86,11 +92,20 @@ pub enum GpuDispatchError {
     Translate(GpuTranslateError),
     /// Tally filters outside the supported set. Each tally must carry a
     /// spatial binner -- a `CellFilter`, a `MaterialFilter` and/or a
-    /// `MeshFilter` -- with an optional `EnergyFilter`,
-    /// `EnergyFunctionFilter` and/or `ParticleTypeFilter`, and nothing else.
+    /// `MeshFilter`, or a `SurfaceFilter` for a surface current -- with an
+    /// optional `EnergyFilter`, `EnergyFunctionFilter` and/or a
+    /// `ParticleTypeFilter` matching the pass (`particle`), and nothing else.
     UnsupportedTallyFilters {
         tally_index: usize,
         found: Vec<&'static str>,
+        particle: ParticleType,
+    },
+    /// A surface tally names a surface id that bounds no cell of the
+    /// geometry, so no crossing could ever score into it. The CPU refuses
+    /// the same model.
+    SurfaceNotInGeometry {
+        tally_index: usize,
+        surface_id: usize,
     },
     /// Tally has more than one score, or a score the kernel can't
     /// estimate (only `Flux`, `ReactionRate(total)`, and
@@ -217,13 +232,26 @@ impl std::fmt::Display for GpuDispatchError {
             Self::GpuUnavailable(e) => write!(f, "GPU unavailable: {e}"),
             Self::AdapterNotFound(msg) => write!(f, "{msg}"),
             Self::Translate(e) => write!(f, "{e}"),
-            Self::UnsupportedTallyFilters { tally_index, found } => write!(
+            Self::UnsupportedTallyFilters {
+                tally_index,
+                found,
+                particle,
+            } => write!(
                 f,
                 "compute='gpu' tally {tally_index}: filters must be a spatial binner \
-                 (a CellFilter, a MaterialFilter and/or a MeshFilter) with an optional \
-                 EnergyFilter, EnergyFunctionFilter and/or ParticleTypeFilter(Neutron); \
-                 got [{}]",
+                 (a CellFilter, a MaterialFilter and/or a MeshFilter), or a SurfaceFilter \
+                 for a surface current, with an optional EnergyFilter, EnergyFunctionFilter \
+                 and/or a ParticleTypeFilter({particle:?}) matching the particles this pass \
+                 transports; got [{}]",
                 found.join(", ")
+            ),
+            Self::SurfaceNotInGeometry {
+                tally_index,
+                surface_id,
+            } => write!(
+                f,
+                "compute='gpu' tally {tally_index}: a surface tally names surface id \
+                 {surface_id}, but no cell in the geometry is bounded by it"
             ),
             Self::UnsupportedTallyScore {
                 tally_index,
@@ -1065,14 +1093,17 @@ fn validate_tallies(
         }
 
         // Filters: a spatial binner is required -- a CellFilter, a
-        // MaterialFilter and/or a MeshFilter. An optional
-        // EnergyFilter, an optional EnergyFunctionFilter and an optional
-        // `ParticleType` filter matching the pass are accepted (the last just
-        // gates on something already true). Anything else -- a mismatched
-        // particle filter, an unstructured mesh, etc. -- rejects.
+        // MaterialFilter and/or a MeshFilter, or a SurfaceFilter for a surface
+        // current (which then stands alone: the CPU allows no cell, material or
+        // mesh beside it). An optional EnergyFilter, an optional
+        // EnergyFunctionFilter and an optional `ParticleType` filter matching
+        // the pass are accepted (the last just gates on something already
+        // true). Anything else -- a mismatched particle filter, an unstructured
+        // mesh, a CosineFilter on a surface current, etc. -- rejects.
         let mut have_cell = false;
         let mut have_material = false;
         let mut have_mesh = false;
+        let mut have_surface = false;
         let mut have_energy = false;
         let mut found_names: Vec<&'static str> = Vec::new();
         let mut all_filters_supported = true;
@@ -1081,6 +1112,10 @@ fn validate_tallies(
             match filter {
                 Filter::Cell(_) => have_cell = true,
                 Filter::Energy(_) => have_energy = true,
+                // Surface filter of a surface current: the spatial binner of
+                // a crossing score, mapped onto the kernel's surface order by
+                // `build_tallies_pack`.
+                Filter::Surface(_) => have_surface = true,
                 // Material filter. A cell's material is fixed for
                 // the run, so the material bin is a function of the cell index
                 // exactly like the cell bin: `build_tallies_pack` folds both
@@ -1115,10 +1150,12 @@ fn validate_tallies(
                 _ => all_filters_supported = false,
             }
         }
-        if !all_filters_supported || !(have_cell || have_material || have_mesh) {
+        let cell_binned = have_cell || have_material || have_mesh;
+        if !all_filters_supported || cell_binned == have_surface {
             return Err(GpuDispatchError::UnsupportedTallyFilters {
                 tally_index: idx,
                 found: found_names,
+                particle: expected_particle,
             });
         }
 
@@ -1152,6 +1189,24 @@ fn validate_tallies(
             return Err(GpuDispatchError::UnsupportedTallyScore {
                 tally_index: idx,
                 reason: "tally has no scores".to_string(),
+            });
+        }
+        // A surface filter carries current scores and nothing else, and a
+        // current needs a surface filter (as the CPU's tally validation has
+        // it); checked here too so the kernel never sees a crossing score
+        // without a surface map, or a track-length score with one.
+        if let Some(score) = t
+            .scores
+            .iter()
+            .find(|s| matches!(s, Score::Current(_)) != have_surface)
+        {
+            return Err(GpuDispatchError::UnsupportedTallyScore {
+                tally_index: idx,
+                reason: if have_surface {
+                    format!("a SurfaceFilter tally scores surface currents only, got {score:?}")
+                } else {
+                    format!("{score:?} is scored on surfaces: give the tally a SurfaceFilter (surfaces=)")
+                },
             });
         }
         // Energy filter, if present, must give at least one bin. Checked once
@@ -1240,6 +1295,9 @@ fn classify_score(
 ) -> Result<(u32, Option<i32>), GpuDispatchError> {
     Ok(match score {
         Score::Flux(_) => (SCORE_FLUX, None),
+        // Surface current, either particle: scored at each crossing, with the
+        // direction carried in `score_data` (see `build_tallies_pack`).
+        Score::Current(_) => (SCORE_CURRENT, None),
         Score::ReactionRate(rr) if rr.mt == Mt::TOTAL => (SCORE_TOTAL, None),
         // Reaction-rate-by-MT is a neutron score. On the photon path a
         // specific MT is a category error -- a photon does not undergo a
@@ -1352,6 +1410,12 @@ fn build_tallies_pack(
     let mut score_urr_key = Vec::with_capacity(n_tallies);
     let mut fixed_point_scales = Vec::with_capacity(n_tallies);
     let mut is_collision = Vec::with_capacity(n_tallies);
+    // Surface currents score into the bin each names for the crossed surface,
+    // over the kernel's deduplicated surface order. The map is built only when
+    // some entry is a surface current (the kernels read it only then).
+    let kernel_surfaces = super::translate::unique_surfaces(&geometry.cells);
+    let any_surface = validated.iter().any(|v| v.score_kind == SCORE_CURRENT);
+    let mut surface_to_bin: Vec<u32> = Vec::new();
     let mut n_parent_per_tally = Vec::with_capacity(n_tallies);
     let mut parent_offsets = Vec::with_capacity(n_tallies + 1);
     let mut parent_ids: Vec<u32> = Vec::new();
@@ -1368,19 +1432,61 @@ fn build_tallies_pack(
 
     for v in validated {
         score_kinds.push(v.score_kind);
+        let is_surface = v.score_kind == SCORE_CURRENT;
         // Estimator flag: 1 = collision estimator (score
         // `weight × score_xs / Σ_t` once per real collision),
-        // 0 = track-length (per-step `d × score_xs × weight`).
-        is_collision.push(u32::from(
-            v.tally.estimator == yamc_tallies::Estimator::Collision,
-        ));
+        // 0 = track-length (per-step `d × score_xs × weight`),
+        // 2 = surface current (scored per crossing; neither loop runs it).
+        is_collision.push(if is_surface {
+            yamc_gpu::common::tallies::ESTIMATOR_SURFACE
+        } else {
+            u32::from(v.tally.estimator == yamc_tallies::Estimator::Collision)
+        });
+        // Surface-bin map: this entry's bin for each kernel surface, or
+        // NOT_IN_TALLY. Every id the filter names must bound some cell, as the
+        // CPU's `SurfaceScoring::build` requires.
+        let surface_filter = if is_surface {
+            v.tally.get_surface_filter()
+        } else {
+            None
+        };
+        if let Some(sf) = surface_filter {
+            for &id in &sf.surface_ids {
+                if !kernel_surfaces
+                    .iter()
+                    .any(|surface| surface.surface_id == Some(id))
+                {
+                    return Err(GpuDispatchError::SurfaceNotInGeometry {
+                        tally_index: v.index,
+                        surface_id: id,
+                    });
+                }
+            }
+        }
+        if any_surface {
+            for surface in &kernel_surfaces {
+                let bin = surface_filter
+                    .zip(surface.surface_id)
+                    .and_then(|(sf, id)| sf.get_bin(id));
+                surface_to_bin.push(bin.map_or(NOT_IN_TALLY, |b| b as u32));
+            }
+        }
         // Per-tally auxiliary integer. SCORE_PER_MT carries the slot
         // index into `xs_score_per_mt`; everyone else gets 0 (ignored
         // by the kernel for non-PER_MT scores).
         let slot_index = v
             .score_mt
             .and_then(|mt| score_slots.binary_search(&(mt, v.nuclide)).ok());
-        score_data.push(slot_index.unwrap_or(0) as u32);
+        // A surface current carries which crossings count instead.
+        let current_direction = match &v.tally.scores[v.score_index] {
+            Score::Current(c) if is_surface => Some(match c.direction {
+                yamc_tallies::CurrentDirection::Above => yamc_gpu::common::tallies::CURRENT_ABOVE,
+                yamc_tallies::CurrentDirection::Below => yamc_gpu::common::tallies::CURRENT_BELOW,
+                yamc_tallies::CurrentDirection::Net => yamc_gpu::common::tallies::CURRENT_NET,
+            }),
+            _ => None,
+        };
+        score_data.push(current_direction.unwrap_or(slot_index.unwrap_or(0) as u32));
         // Raw ENDF MT for the kernel's URR-window scoring fix. Only
         // SCORE_PER_MT tallies carry an MT (capture 102 / absorption 27
         // are the ones affected by URR self-shielding); other score
@@ -1465,12 +1571,20 @@ fn build_tallies_pack(
                 None => Some(0),
             };
             let bin = match (cell_bin, material_bin) {
-                (Some(c), Some(m)) if !v.scores_nothing => c as u32 * n_material_bins + m as u32,
+                // A surface current is in no cell: it scores at crossings only.
+                (Some(c), Some(m)) if !v.scores_nothing && !is_surface => {
+                    c as u32 * n_material_bins + m as u32
+                }
                 _ => NOT_IN_TALLY,
             };
             cell_to_bin.push(bin);
         }
-        let n_cells = n_cell_bins * n_material_bins;
+        // The output block's spatial dimension: surface bins for a surface
+        // current, else the folded cell x material bins.
+        let n_cells = match surface_filter {
+            Some(sf) => sf.surface_ids.len() as u32,
+            None => n_cell_bins * n_material_bins,
+        };
         n_cells_per_tally.push(n_cells);
 
         // Energy bins. Cell-only tallies collapse to one bin spanning
@@ -1568,6 +1682,7 @@ fn build_tallies_pack(
         score_urr_key,
         fixed_point_scales,
         is_collision,
+        surface_to_bin,
         n_parent_per_tally,
         parent_offsets,
         parent_ids,
@@ -1786,6 +1901,23 @@ const MT_TOTAL: i32 = 1;
 /// raw per-history `sum` (and `sum_sq`) across launches and divides by the true
 /// history count once, at finalize.
 fn accumulate_kernel_tally(v: &ValidatedTally<'_>, out: &[f64], acc: &mut [f64]) {
+    // A surface current's block is `surface bin -> energy` (no parent, mesh
+    // or cosine dimension: the cosine filter is refused up front), onto the
+    // CPU's surface layout `score -> surface -> cosine -> energy`.
+    if v.score_kind == SCORE_CURRENT {
+        let n_surfaces = v.tally.num_surface_bins();
+        let n_bins = out.len().checked_div(n_surfaces).unwrap_or(0);
+        for surface_bin in 0..n_surfaces {
+            for energy_bin in 0..n_bins {
+                let tally_bin_idx = v
+                    .tally
+                    .get_surface_bin_index(0, surface_bin, 0, energy_bin)
+                    .expect("surface bin index in range -- bin counts validated up front");
+                acc[tally_bin_idx] += out[surface_bin * n_bins + energy_bin];
+            }
+        }
+        return;
+    }
     let n_cells = v
         .tally
         .get_cell_filter()
@@ -3565,7 +3697,10 @@ pub(super) fn run_on_gpu_photon(
     // Refinement A: raw MT into score_data so the photon kernel switches on it.
     if !validated.is_empty() {
         for (i, v) in validated.iter().enumerate() {
-            pack.score_data[i] = v.score_mt.map(|m| m as u32).unwrap_or(0);
+            // A surface current keeps its direction in score_data.
+            if v.score_kind != SCORE_CURRENT {
+                pack.score_data[i] = v.score_mt.map(|m| m as u32).unwrap_or(0);
+            }
         }
     }
 
@@ -3928,7 +4063,10 @@ fn run_on_gpu_coupled(
     // convention as `run_on_gpu_photon`.
     if !validated_p.is_empty() {
         for (i, v) in validated_p.iter().enumerate() {
-            pack_p.score_data[i] = v.score_mt.map(|m| m as u32).unwrap_or(0);
+            // A surface current keeps its direction in score_data.
+            if v.score_kind != SCORE_CURRENT {
+                pack_p.score_data[i] = v.score_mt.map(|m| m as u32).unwrap_or(0);
+            }
         }
     }
 
@@ -4455,7 +4593,10 @@ fn run_on_gpu_mixed(
     };
     if !validated_p.is_empty() {
         for (i, v) in validated_p.iter().enumerate() {
-            pack_p.score_data[i] = v.score_mt.map(|m| m as u32).unwrap_or(0);
+            // A surface current keeps its direction in score_data.
+            if v.score_kind != SCORE_CURRENT {
+                pack_p.score_data[i] = v.score_mt.map(|m| m as u32).unwrap_or(0);
+            }
         }
     }
 
@@ -4919,6 +5060,9 @@ fn score_needs_photon_pass(score: &Score) -> bool {
         // heating (both with the per-estimator CPU convention -- track-length
         // KERMA, collision analog deposit), and the dual fold sums them.
         Score::Heating(_) | Score::HeatingLocal(_) => true,
+        // Neutrons and photons both cross surfaces, and the CPU counts every
+        // crossing into an unfiltered surface current, so it is the dual sum.
+        Score::Current(_) => true,
         _ => false,
     }
 }
@@ -6751,6 +6895,185 @@ mod tests {
             err,
             GpuDispatchError::EnergyBinsTooFew { tally_index: 0 }
         ));
+    }
+
+    // ---- surface currents on the GPU (yamc-and-yani#104) -----------------
+    //
+    // A surface current is scored at each crossing, into the bin its
+    // SurfaceFilter gives the crossed surface. These pin the validation, the
+    // surface map over the kernel's surface order, and the writeback onto the
+    // CPU's `score -> surface -> cosine -> energy` layout.
+
+    fn surface_tally(
+        ids: Vec<usize>,
+        score: yamc_tallies::CurrentScore,
+        energy: Option<Vec<f64>>,
+    ) -> Arc<Tally> {
+        let mut t = Tally::new();
+        t.filters = vec![Filter::Surface(yamc_tallies::SurfaceFilter::from_ids(ids))];
+        if let Some(bins) = energy {
+            t.filters.push(Filter::Energy(EnergyFilter::new(bins)));
+        }
+        t.scores = vec![Score::Current(score)];
+        t.estimator = yamc_tallies::Estimator::Surface;
+        Arc::new(t)
+    }
+
+    #[test]
+    fn a_surface_current_validates_on_either_pass() {
+        let t = surface_tally(
+            vec![1],
+            yamc_tallies::CurrentScore::ABOVE,
+            Some(vec![1e-3, 1.0, 1e3]),
+        );
+        for particle in [ParticleType::Neutron, ParticleType::Photon] {
+            let v = validate_tallies(std::slice::from_ref(&t), particle).unwrap();
+            assert_eq!(v.len(), 1);
+            assert_eq!(v[0].score_kind, SCORE_CURRENT);
+        }
+    }
+
+    #[test]
+    fn the_pack_maps_each_kernel_surface_to_its_tally_bin() {
+        // Two cells, bounded by surfaces 1 and 2 (kernel order 0, 1); the
+        // tally names them in the other order, so kernel surface 0 is bin 1.
+        let geometry = geometry_with_materials(&[(1, None), (2, None)], Vec::new());
+        let flux = flux_tally_cell_energy(vec![1, 2], vec![1e-3, 1.0, 1e3]);
+        let current = surface_tally(
+            vec![2, 1],
+            yamc_tallies::CurrentScore::NET,
+            Some(vec![1e-3, 1.0, 1e3]),
+        );
+        let tallies = [flux, current];
+        let validated = validate_tallies(&tallies, ParticleType::Neutron).unwrap();
+        let pack = build_tallies_pack(&validated, &geometry, 2, &[], &[]).unwrap();
+        use yamc_gpu::common::tallies::{CURRENT_NET, ESTIMATOR_SURFACE};
+        assert_eq!(pack.is_collision, vec![0, ESTIMATOR_SURFACE]);
+        assert!(pack.has_surface_tallies());
+        // [n_tallies x n_surfaces]: the flux entry names no surface.
+        assert_eq!(pack.surface_to_bin, vec![NOT_IN_TALLY, NOT_IN_TALLY, 1, 0]);
+        // The current is in no cell, and carries its direction.
+        assert_eq!(&pack.cell_to_bin[2..], &[NOT_IN_TALLY, NOT_IN_TALLY]);
+        assert_eq!(pack.score_data[1], CURRENT_NET);
+        // Its block is 2 surfaces x 2 energy bins.
+        assert_eq!(pack.n_cells_per_tally[1], 2);
+        assert_eq!(pack.out_offsets[2] - pack.out_offsets[1], 4);
+    }
+
+    #[test]
+    fn a_pack_without_surface_currents_has_no_surface_map() {
+        let geometry = geometry_with_materials(&[(1, None)], Vec::new());
+        let t = flux_tally_cell_energy(vec![1], vec![1e-3, 1.0, 1e3]);
+        let validated = validate_tallies(std::slice::from_ref(&t), ParticleType::Neutron).unwrap();
+        let pack = build_tallies_pack(&validated, &geometry, 1, &[], &[]).unwrap();
+        assert!(pack.surface_to_bin.is_empty() && !pack.has_surface_tallies());
+    }
+
+    #[test]
+    fn a_surface_that_bounds_no_cell_is_refused() {
+        let geometry = geometry_with_materials(&[(1, None)], Vec::new());
+        let t = surface_tally(vec![1, 99], yamc_tallies::CurrentScore::ABOVE, None);
+        let validated = validate_tallies(std::slice::from_ref(&t), ParticleType::Neutron).unwrap();
+        let err = build_tallies_pack(&validated, &geometry, 1, &[], &[]).unwrap_err();
+        assert!(matches!(
+            err,
+            GpuDispatchError::SurfaceNotInGeometry { surface_id: 99, .. }
+        ));
+        assert!(err
+            .to_string()
+            .contains("surface id 99, but no cell in the geometry is bounded by it"));
+    }
+
+    #[test]
+    fn a_cosine_filter_on_a_surface_current_is_refused_naming_the_pass() {
+        let mut t = Tally::new();
+        t.filters = vec![
+            Filter::Surface(yamc_tallies::SurfaceFilter::from_ids(vec![1])),
+            Filter::Cosine(yamc_tallies::CosineFilter::new(vec![-1.0, 0.0, 1.0]).unwrap()),
+        ];
+        t.scores = vec![Score::Current(yamc_tallies::CurrentScore::ABOVE)];
+        t.estimator = yamc_tallies::Estimator::Surface;
+        let arc = Arc::new(t);
+        let err = validate_tallies(std::slice::from_ref(&arc), ParticleType::Photon).unwrap_err();
+        assert!(matches!(
+            err,
+            GpuDispatchError::UnsupportedTallyFilters { .. }
+        ));
+        let text = err.to_string();
+        assert!(
+            text.contains("ParticleTypeFilter(Photon)") && text.contains("CosineFilter"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_current_needs_a_surface_filter_and_a_surface_filter_needs_currents() {
+        let current_in_a_cell =
+            tally_with_score(vec![1], Score::Current(yamc_tallies::CurrentScore::NET));
+        assert!(matches!(
+            validate_tallies(
+                std::slice::from_ref(&current_in_a_cell),
+                ParticleType::Neutron
+            )
+            .unwrap_err(),
+            GpuDispatchError::UnsupportedTallyScore { .. }
+        ));
+        let mut flux_on_a_surface = Tally::new();
+        flux_on_a_surface.filters = vec![Filter::Surface(yamc_tallies::SurfaceFilter::from_ids(
+            vec![1],
+        ))];
+        flux_on_a_surface.scores = vec![Score::Flux(yamc_tallies::score::FluxScore)];
+        let arc = Arc::new(flux_on_a_surface);
+        assert!(matches!(
+            validate_tallies(std::slice::from_ref(&arc), ParticleType::Neutron).unwrap_err(),
+            GpuDispatchError::UnsupportedTallyScore { .. }
+        ));
+        let mut surface_and_cell = Tally::new();
+        surface_and_cell.filters = vec![
+            Filter::Surface(yamc_tallies::SurfaceFilter::from_ids(vec![1])),
+            Filter::Cell(CellFilter { cell_ids: vec![1] }),
+        ];
+        surface_and_cell.scores = vec![Score::Current(yamc_tallies::CurrentScore::NET)];
+        let arc = Arc::new(surface_and_cell);
+        assert!(matches!(
+            validate_tallies(std::slice::from_ref(&arc), ParticleType::Neutron).unwrap_err(),
+            GpuDispatchError::UnsupportedTallyFilters { .. }
+        ));
+    }
+
+    #[test]
+    fn surface_current_writeback_lands_on_the_cpu_surface_layout() {
+        // Kernel block: surface-major, energy-minor. The CPU layout is
+        // `score -> surface -> cosine -> energy`, which with one score and no
+        // cosine filter is the same order -- but must go through
+        // `get_surface_bin_index`, not the 7D cell index (which has no surface
+        // dimension and would panic past the first surface).
+        let t = surface_tally(
+            vec![5, 6],
+            yamc_tallies::CurrentScore::ABOVE,
+            Some(vec![1e-3, 1.0, 1e3, 1e6]),
+        );
+        let validated = validate_tallies(std::slice::from_ref(&t), ParticleType::Neutron).unwrap();
+        assert_eq!(t.num_bins(), 6);
+        let kernel_out = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mut acc = vec![0.0; t.num_bins()];
+        accumulate_kernel_tally(&validated[0], &kernel_out, &mut acc);
+        for surface_bin in 0..2 {
+            for energy_bin in 0..3 {
+                let idx = t
+                    .get_surface_bin_index(0, surface_bin, 0, energy_bin)
+                    .unwrap();
+                assert_eq!(acc[idx], kernel_out[surface_bin * 3 + energy_bin]);
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn an_unfiltered_surface_current_is_scored_on_both_passes() {
+        let t = surface_tally(vec![1], yamc_tallies::CurrentScore::NET, None);
+        let (neutron, photon, dual) = classify_coupled_tallies(std::slice::from_ref(&t)).unwrap();
+        assert!(neutron.is_empty() && photon.is_empty() && dual.len() == 1);
     }
 }
 
