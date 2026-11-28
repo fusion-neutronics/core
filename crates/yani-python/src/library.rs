@@ -232,7 +232,8 @@ pub fn verify_library(py: Python<'_>, path: &str) -> PyResult<Py<PyDict>> {
 /// ----------
 /// keyword : str
 ///     The library: ``"endf-b8.1"``, ``"jeff-4.0"``, ``"jendl-5.0"``,
-///     ``"tendl-2025"``, ``"tendl-2017"``, ``"fendl-3.2d"`` or ``"irdff-ii"``.
+///     ``"tendl-2025"``, ``"tendl-2017"``, ``"fendl-3.2d"``, ``"irdff-ii"``,
+///     ``"ukdd-2012"``, ``"ukdd-2020"`` or ``"ukfy-4.2"``.
 /// path : str
 ///     The folder to build in, created if absent. It must be new, empty or an
 ///     earlier build of the same library, and not inside :func:`cache_dir`.

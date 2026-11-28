@@ -60,10 +60,14 @@ pub fn render(
     line(&mut s, "## Cite");
     line(&mut s, "");
     for r in credit.references {
-        line(
-            &mut s,
-            &format!("- {}, doi:{} (https://doi.org/{})", r.text, r.doi, r.doi),
-        );
+        if r.doi.is_empty() {
+            line(&mut s, &format!("- {}", r.text));
+        } else {
+            line(
+                &mut s,
+                &format!("- {}, doi:{} (https://doi.org/{})", r.text, r.doi, r.doi),
+            );
+        }
     }
     line(&mut s, "");
     line(&mut s, &format!("The library's page: {}", credit.page));

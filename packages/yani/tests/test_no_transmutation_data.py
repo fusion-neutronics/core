@@ -36,7 +36,10 @@ def test_an_irradiation_names_every_unset_source():
         assert f"{setting} is not set" in message, message
     # Each part names the libraries that publish it, and no package prefix,
     # so the message reads the same from yamc.
-    assert "Libraries that publish fission yields: endf-b8.1, jeff-4.0, jendl-5.0." in message
+    assert (
+        "Libraries that publish fission yields: endf-b8.1, jeff-4.0, jendl-5.0, ukfy-4.2."
+        in message
+    )
     assert "yani." not in message and "yamc." not in message, message
 
 

@@ -376,6 +376,39 @@ static RECIPES: &[Recipe<'static>] = &[
         thermal: &[],
         disk_bytes: GB,
     },
+    // UKAEA's decay and fission yield libraries, as FISPACT-II ships them.
+    // Each is one subsection and nothing else: no cross sections, no NJOY.
+    Recipe {
+        keyword: "ukdd-2012",
+        sources: UKDD_2012,
+        parts: &[Part::Decay],
+        njoy: Flavour::Upstream,
+        unconvertible: &[],
+        thermal: &[],
+        // A 5.5 MB archive that unpacks to 52 MB.
+        disk_bytes: GB,
+    },
+    Recipe {
+        keyword: "ukdd-2020",
+        sources: UKDD_2020,
+        parts: &[Part::Decay],
+        njoy: Flavour::Upstream,
+        unconvertible: &[],
+        thermal: &[],
+        // A 6.2 MB archive that unpacks to 56 MB.
+        disk_bytes: GB,
+    },
+    Recipe {
+        keyword: "ukfy-4.2",
+        sources: UKFY_4_2,
+        parts: &[Part::FissionYields],
+        njoy: Flavour::Upstream,
+        unconvertible: &[],
+        thermal: &[],
+        // A 0.21 GB archive that unpacks to 1.56 GB, and about 0.53 GB of
+        // fission_yields tables.
+        disk_bytes: 3 * GB,
+    },
 ];
 
 /// TENDL's parts: neutron and photonuclear data, and a chain of reactions and
@@ -803,9 +836,104 @@ static IRDFF_II: &[Source] = &[Source {
     keep: |n| n == "IRDFF-II.endf",
 }];
 
+/// A per-nuclide ENDF-6 file in UKAEA's FISPACT-II archives, named for its
+/// nuclide (`Ag119m`, `Y097`, `Ne030`): not the archives' indexes, READMEs,
+/// macOS `._*` and `.DS_Store` files, or the hazard, clearance, A2 and
+/// absorption tables decay_2012's archive carries beside its evaluations.
+fn ukaea_nuclide(name: &str) -> bool {
+    let b = name.as_bytes();
+    let letters = match b {
+        [a, c, ..] if a.is_ascii_uppercase() && c.is_ascii_lowercase() => 2,
+        [a, ..] if a.is_ascii_uppercase() => 1,
+        _ => return false,
+    };
+    let rest = &b[letters..];
+    rest.len() >= 3
+        && rest[..3].iter().all(u8::is_ascii_digit)
+        && rest[3..]
+            .iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+}
+
+// The three below are from UKAEA's FISPACT-II nuclear data repository,
+// https://git.oecd-nea.org/fispact/nuclear_data, readable without an
+// account. Its LICENSE and NOTICE.md (commit f8eee131, 2026-11-27) put the
+// archives under CC BY 4.0, redistributed by the OECD Nuclear Energy Agency
+// with the permission of their rights holders. The archives are Git LFS
+// objects served over plain HTTPS; none has changed since 2022-11-18.
+
+/// UKAEA decay_2012 (UKAEADD-12): 3,875 nuclides, under
+/// `decay/decay_2012/`. The decay data of the FISPACT-II calculations the
+/// IAEA CoNDERC archives publish. Three of its files (Ag119m, Bi198, Y097)
+/// carry a Latin-1 description line, which `endf` reads by character.
+static UKDD_2012: &[Source] = &[Source {
+    name: "decay.tar.bz2",
+    url: "https://git.oecd-nea.org/fispact/nuclear_data/-/raw/main/decay.tar.bz2",
+    pin: Pin {
+        bytes: 5_524_094,
+        sha256: "84c0fbf89c092a77cdc7b905cfa08218e58fc05440f6bc646518f91d31ad2229",
+    },
+    sublibrary: Sublibrary::Decay,
+    keep: ukaea_nuclide,
+}];
+
+/// UKAEA decay_2020: 4,035 nuclides, under `decay_2020/`, compiled from
+/// JEFF-3.3, JENDL/DDF-2015, ENDF/B-VIII.0 and others.
+static UKDD_2020: &[Source] = &[Source {
+    name: "decay2020.tar.bz2",
+    url: "https://git.oecd-nea.org/fispact/nuclear_data/-/raw/main/decay2020.tar.bz2",
+    pin: Pin {
+        bytes: 6_235_767,
+        sha256: "f2ff9501f6d279c964c029f9958ddd545453398401b11edb68307c3858b1e3ba",
+    },
+    sublibrary: Sublibrary::Decay,
+    keep: ukaea_nuclide,
+}];
+
+/// UKFY-4.2, neutron-induced fission yields evaluated by R.W. Mills (NNL):
+/// 223 parents, each at 37 incident energies from 1e-5 eV to 150 MeV, under
+/// `UKFY42data/ukfy4_2n/`. UKFY-4.1, its companion, holds only proton,
+/// deuteron, alpha and photon induced yields, which no neutron irradiation
+/// reads.
+static UKFY_4_2: &[Source] = &[Source {
+    name: "UKFY42data.tar.bz2",
+    url: "https://git.oecd-nea.org/fispact/nuclear_data/-/raw/main/UKFY42data.tar.bz2",
+    pin: Pin {
+        bytes: 212_459_948,
+        sha256: "e7a2505c32ef28955ba77677b03699a00bf2880749532447a8b9b50ddf8b6faf",
+    },
+    sublibrary: Sublibrary::FissionYields,
+    keep: ukaea_nuclide,
+}];
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The UKAEA archives' evaluations by name, and none of what they carry
+    /// beside them.
+    #[test]
+    fn a_ukaea_archive_keeps_its_per_nuclide_files_only() {
+        for name in ["Ag119m", "Y097", "Ne030", "Am242n", "H003", "U235"] {
+            assert!(ukaea_nuclide(name), "{name}");
+        }
+        for name in [
+            "a2_2012",
+            "abs_2012",
+            "clear_2012",
+            "hazards_2012",
+            "decay_2012_index_2012",
+            "decay_2020_index.txt",
+            "._decay_2020_index.txt",
+            ".DS_Store",
+            "README.md",
+            "U23",
+            "u235",
+            "Ag119M",
+        ] {
+            assert!(!ukaea_nuclide(name), "{name}");
+        }
+    }
 
     #[test]
     fn every_hosted_keyword_has_a_recipe() {
@@ -819,7 +947,10 @@ mod tests {
                 "tendl-2025",
                 "tendl-2017",
                 "fendl-3.2d",
-                "irdff-ii"
+                "irdff-ii",
+                "ukdd-2012",
+                "ukdd-2020",
+                "ukfy-4.2"
             ]
         );
         let err = recipe("endf-b8.0").unwrap_err();

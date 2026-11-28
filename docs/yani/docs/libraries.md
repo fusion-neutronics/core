@@ -29,6 +29,12 @@ yani.transmutation_fission_yields = "endf-b8.1"
 The evaluators who made these libraries ask to be cited wherever their data is
 used: see [Cite the nuclear data you use](#cite-the-nuclear-data-you-use).
 
+Four more keywords each supply one transmutation subsection and no cross
+sections: [`irdff-ii`][cite-irdff-ii] (isomeric branching),
+[`ukdd-2012`][cite-ukdd-2012] and [`ukdd-2020`][cite-ukdd-2020] (decay data)
+and [`ukfy-4.2`][cite-ukfy-4.2] (fission yields). See
+[UKAEA decay data and UKFY fission yields](#ukaea-decay-data-and-ukfy-fission-yields).
+
 Every setting also takes a path to a converted directory instead of a keyword,
 including a folder that holds a whole library laid out as a release, which
 serves every setting at once (see
@@ -126,6 +132,45 @@ activation rates use neutron cross sections. Photoatomic data matters when a
 decay photon spectrum is transported in yamc; it is not the photonuclear data
 in TENDL. JEFF's photonuclear sublibrary is not processed as photoatomic data,
 and FENDL's photoatomic data carries no atomic relaxation.
+
+### UKAEA decay data and UKFY fission yields
+
+Three keywords supply one transmutation subsection each, and no cross sections:
+the decay and fission-yield libraries UKAEA processes for FISPACT-II, from
+[UKAEA's FISPACT-II nuclear data repository](https://git.oecd-nea.org/fispact/nuclear_data).
+
+| keyword | what it is | subsection | cite |
+| --- | --- | --- | --- |
+| [`ukdd-2012`][cite-ukdd-2012] | UKAEA decay_2012: 3,875 nuclides. | `decay` | [UKAEA (CC BY 4.0)](#cite-ukdd) |
+| [`ukdd-2020`][cite-ukdd-2020] | UKAEA decay_2020, its update from newer evaluations (JEFF-3.3, JENDL/DDF-2015, ENDF/B-VIII.0 among them): 4,035 nuclides. | `decay` | [UKAEA (CC BY 4.0); Katakura and Minato 2016](#cite-ukdd) |
+| [`ukfy-4.2`][cite-ukfy-4.2] | UKFY-4.2, neutron-induced fission yields evaluated by R.W. Mills (NNL): 223 parents, each at 37 incident energies from 1e-5 eV to 150 MeV. | `fission_yields` | [UKAEA (CC BY 4.0); evaluator R.W. Mills](#cite-ukfy-4-2) |
+
+[TENDL][cite-tendl] has no decay or fission-yield evaluations, so a TENDL
+network takes them from another library, and these are the ones FISPACT-II
+reads. A calculation set up with them reads the same data as a FISPACT-II
+calculation on the same TENDL release, which is what a comparison with
+published FISPACT-II results needs: those in the IAEA CoNDERC archives were run
+with TENDL-2017 and decay_2012.
+
+<!-- doctest: skip -->
+```python
+yani.neutron_cross_section_data = "tendl-2017"
+yani.transmutation_reactions = "tendl-2017"
+yani.transmutation_branch_ratios = "tendl-2017"
+yani.transmutation_decay_data = "ukdd-2012"
+yani.transmutation_fission_yields = "ukfy-4.2"
+```
+
+Each is the source of its one subsection only. Named as cross sections or as
+another subsection, it is refused before anything is downloaded, with a message
+naming the setting that does take it. `data_releases` records each library
+of a mixed network like this one, and each one in it is to be cited: see
+[Cite the nuclear data you use](#cite-the-nuclear-data-you-use).
+
+UKFY-4.2 is large for a yields table: its `fission_yields` subsection is
+about 0.5 GB, against 2.8 MB for ENDF/B-VIII.1's, because every parent is
+evaluated at 37 energies. The first run that reads it downloads it, and later
+runs read it from the cache.
 
 ### Photonuclear data in the next TENDL release
 

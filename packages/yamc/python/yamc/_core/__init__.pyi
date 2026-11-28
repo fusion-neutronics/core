@@ -9487,7 +9487,8 @@ def generate_library(keyword: builtins.str, path: builtins.str, *, parts: typing
     ----------
     keyword : str
         The library: ``"endf-b8.1"``, ``"jeff-4.0"``, ``"jendl-5.0"``,
-        ``"tendl-2025"``, ``"tendl-2017"``, ``"fendl-3.2d"`` or ``"irdff-ii"``.
+        ``"tendl-2025"``, ``"tendl-2017"``, ``"fendl-3.2d"``, ``"irdff-ii"``,
+        ``"ukdd-2012"``, ``"ukdd-2020"`` or ``"ukfy-4.2"``.
     path : str
         The folder to build in, created if absent. It must be new, empty or an
         earlier build of the same library, and not inside :func:`cache_dir`.
@@ -9956,6 +9957,9 @@ def set_transmutation_decay_data(value: typing.Optional[builtins.str]) -> None:
     Every transmutation and decay quantity (activity, decay heat, dose) reads
     it, and there is no default library, so one with it unset is refused
     before any work, naming the setting. Pass ``None`` to unset it.
+    
+    ``"ukdd-2012"`` and ``"ukdd-2020"``, UKAEA's decay_2012 and decay_2020,
+    supply decay data only, so this is the one setting that takes them.
     """
 
 def set_transmutation_fission_yields(value: typing.Optional[builtins.str | typing.Literal[False]]) -> None:
@@ -9965,6 +9969,8 @@ def set_transmutation_fission_yields(value: typing.Optional[builtins.str | typin
     Pass a library keyword or a path to choose one. An irradiation reads it,
     and there is no default library, so one with it unset is refused before
     any work, naming the setting. Pass ``None`` to unset it.
+    ``"ukfy-4.2"``, the UKFY-4.2 neutron-induced yields, supplies fission
+    yields only, so this is the one setting that takes it.
     
     Pass ``False`` to turn the subsection off, which is the honest setting for
     a material nothing in which fissions and for a library that publishes no

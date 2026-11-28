@@ -4,15 +4,18 @@ use pyo3::types::PyDict;
 use pyo3_stub_gen::derive::gen_stub_pyfunction;
 use yamc_nuclide::config::{BranchSources, CrossSectionSource, SubsectionSource, CONFIG};
 
-/// Refuse a branching-only library keyword (`irdff-ii`) where `role` names
-/// what it was asked to be, before anything is stored or downloaded.
-fn refuse_branching_only(source: &str, role: &str) -> PyResult<()> {
-    if yamc_nuclide::url_cache::is_branching_only(source) {
-        return Err(PyValueError::new_err(
-            yamc_nuclide::url_cache::branching_only_error(source, role),
-        ));
+/// Refuse a chain-only library keyword (`irdff-ii`, `ukdd-2020`, ...) where
+/// it is asked to be something other than the source of the one subsection it
+/// publishes, before anything is stored or downloaded. `subsection` is the
+/// subsection the setting reads, `None` for cross sections, and `role` what
+/// the source would be, for the message.
+fn refuse_chain_only(source: &str, subsection: Option<&str>, role: &str) -> PyResult<()> {
+    match yamc_nuclide::url_cache::chain_only_subsection(source) {
+        Some(only) if Some(only) != subsection => Err(PyValueError::new_err(
+            yamc_nuclide::url_cache::chain_only_error(source, role),
+        )),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// Get the current cross-section data mapping.
@@ -182,7 +185,7 @@ pub fn set_neutron_cross_section_data_entry(
     nuclide_or_keyword: &str,
     path: Option<&str>,
 ) -> PyResult<()> {
-    refuse_branching_only(path.unwrap_or(nuclide_or_keyword), CROSS_SECTION_ROLE)?;
+    refuse_chain_only(path.unwrap_or(nuclide_or_keyword), None, CROSS_SECTION_ROLE)?;
     let mut config = CONFIG
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -230,9 +233,14 @@ impl pyo3_stub_gen::PyStubType for SubsectionArg {
 }
 
 /// Read a subsection setter's argument, naming the three spellings when the
-/// caller reaches for a fourth. `role` is what the source would be, for the
-/// refusal of a branching-only library.
-fn subsection_source(value: Option<SubsectionArg>, role: &str) -> PyResult<SubsectionSource> {
+/// caller reaches for a fourth. `subsection` is the subsection the setting
+/// reads and `role` what the source would be, for the refusal of a chain-only
+/// library that publishes another one.
+fn subsection_source(
+    value: Option<SubsectionArg>,
+    subsection: &str,
+    role: &str,
+) -> PyResult<SubsectionSource> {
     match value {
         None => Ok(SubsectionSource::Unset),
         Some(SubsectionArg::Toggle(false)) => Ok(SubsectionSource::Off),
@@ -241,7 +249,7 @@ fn subsection_source(value: Option<SubsectionArg>, role: &str) -> PyResult<Subse
              one, False to turn the subsection off, or None to unset it",
         )),
         Some(SubsectionArg::Source(source)) => {
-            refuse_branching_only(&source, role)?;
+            refuse_chain_only(&source, Some(subsection), role)?;
             Ok(SubsectionSource::Set(source))
         }
     }
@@ -277,11 +285,14 @@ pub fn get_transmutation_decay_data() -> Option<String> {
 /// Every transmutation and decay quantity (activity, decay heat, dose) reads
 /// it, and there is no default library, so one with it unset is refused
 /// before any work, naming the setting. Pass ``None`` to unset it.
+///
+/// ``"ukdd-2012"`` and ``"ukdd-2020"``, UKAEA's decay_2012 and decay_2020,
+/// supply decay data only, so this is the one setting that takes them.
 #[gen_stub_pyfunction]
 #[pyfunction]
 pub fn set_transmutation_decay_data(value: Option<&str>) -> PyResult<()> {
     if let Some(source) = value {
-        refuse_branching_only(source, "the decay-data source")?;
+        refuse_chain_only(source, Some("decay"), "the decay-data source")?;
     }
     CONFIG
         .lock()
@@ -319,7 +330,7 @@ pub fn get_transmutation_reactions() -> Option<SubsectionArg> {
 #[gen_stub_pyfunction]
 #[pyfunction]
 pub fn set_transmutation_reactions(value: Option<SubsectionArg>) -> PyResult<()> {
-    let source = subsection_source(value, "the reactions source")?;
+    let source = subsection_source(value, "reactions", "the reactions source")?;
     CONFIG
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -346,6 +357,8 @@ pub fn get_transmutation_fission_yields() -> Option<SubsectionArg> {
 /// Pass a library keyword or a path to choose one. An irradiation reads it,
 /// and there is no default library, so one with it unset is refused before
 /// any work, naming the setting. Pass ``None`` to unset it.
+/// ``"ukfy-4.2"``, the UKFY-4.2 neutron-induced yields, supplies fission
+/// yields only, so this is the one setting that takes it.
 ///
 /// Pass ``False`` to turn the subsection off, which is the honest setting for
 /// a material nothing in which fissions and for a library that publishes no
@@ -355,7 +368,7 @@ pub fn get_transmutation_fission_yields() -> Option<SubsectionArg> {
 #[gen_stub_pyfunction]
 #[pyfunction]
 pub fn set_transmutation_fission_yields(value: Option<SubsectionArg>) -> PyResult<()> {
-    let source = subsection_source(value, "the fission-yields source")?;
+    let source = subsection_source(value, "fission_yields", "the fission-yields source")?;
     CONFIG
         .lock()
         .unwrap_or_else(|p| p.into_inner())

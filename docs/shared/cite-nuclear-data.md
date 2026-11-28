@@ -114,6 +114,36 @@ coordinated by the [IAEA Nuclear Data Section](https://www-nds.iaea.org/IRDFF/).
   Sheets* **163** (2020) 1-108,
   doi:[10.1016/j.nds.2019.12.001](https://doi.org/10.1016/j.nds.2019.12.001).
 
+### UKAEA decay_2012 and decay_2020 { #cite-ukdd }
+
+Keywords ``ukdd-2012`` and ``ukdd-2020``. Decay data compiled by UKAEA from
+JEFF, JEF, JENDL, ENDF/B, UKPADD, EAF, ENDF/A and its own evaluations, and
+processed for FISPACT-II, published in
+[UKAEA's FISPACT-II nuclear data repository](https://git.oecd-nea.org/fispact/nuclear_data)
+under CC BY 4.0 and redistributed by the OECD Nuclear Energy Agency. UKAEA asks
+for this credit:
+
+- "decay_2012 data processed for FISPACT-II by UKAEA, from
+  https://git.oecd-nea.org/fispact/nuclear_data, licensed under CC BY 4.0."
+  For ``ukdd-2020``, the same with decay_2020.
+
+decay_2020 includes JENDL/DDF-2015 evaluations, and JAEA requires them to be
+cited wherever they are used, so a calculation on ``ukdd-2020`` also cites:
+
+- J. Katakura, F. Minato, "JENDL Decay Data File 2015", JAEA-Data/Code
+  2015-030, Japan Atomic Energy Agency (2016),
+  doi:[10.11484/jaea-data-code-2015-030](https://doi.org/10.11484/jaea-data-code-2015-030).
+
+### UKFY-4.2 { #cite-ukfy-4-2 }
+
+Keyword ``ukfy-4.2``. Neutron-induced fission yields evaluated by R.W. Mills
+(National Nuclear Laboratory), processed for FISPACT-II by UKAEA and published
+in the same repository under CC BY 4.0. UKAEA asks for this credit:
+
+- "UKFY-4.2 data processed for FISPACT-II by UKAEA, from
+  https://git.oecd-nea.org/fispact/nuclear_data, licensed under CC BY 4.0."
+  Name R.W. Mills (National Nuclear Laboratory) as its evaluator.
+
 ### BibTeX { #cite-bibtex }
 
 Every reference above, with the full author lists the publishers registered.
