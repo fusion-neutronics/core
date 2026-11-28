@@ -17,12 +17,12 @@
 use super::dispatch::sample_inelastic_angle;
 use super::urr_perturb;
 use super::{
-    accumulate_collision_tallies, accumulate_tallies, BOUNDARY_VACUUM, CHI_SLAB_CHANNEL_XS_BASE,
-    CHI_SLAB_DELAYED_ROW, CHI_SLAB_META_COLS, CHI_SLAB_N_CHANNELS, CHI_SLAB_PROMPT_ROW,
-    COARSE_META_COLS, COL_COARSE_GRID_OFFSET, COL_COARSE_MT_BASE, COL_COARSE_N,
-    COL_FINE_GRID_OFFSET, COL_FINE_N, COL_FINE_NUC_BASE, COL_PERMT_I_START, COL_PERMT_N_STORED,
-    COL_PERMT_VALUE_OFFSET, FINE_META_COLS, FISSION_WEIGHT_CAP, NUC_YIELD_BETA, NUC_YIELD_COLS,
-    NUC_YIELD_NU_BAR, PERMT_META_COLS, REGION_CROSS_EPS,
+    accumulate_collision_tallies, accumulate_surface_tallies, accumulate_tallies, BOUNDARY_VACUUM,
+    CHI_SLAB_CHANNEL_XS_BASE, CHI_SLAB_DELAYED_ROW, CHI_SLAB_META_COLS, CHI_SLAB_N_CHANNELS,
+    CHI_SLAB_PROMPT_ROW, COARSE_META_COLS, COL_COARSE_GRID_OFFSET, COL_COARSE_MT_BASE,
+    COL_COARSE_N, COL_FINE_GRID_OFFSET, COL_FINE_N, COL_FINE_NUC_BASE, COL_PERMT_I_START,
+    COL_PERMT_N_STORED, COL_PERMT_VALUE_OFFSET, FINE_META_COLS, FISSION_WEIGHT_CAP, NUC_YIELD_BETA,
+    NUC_YIELD_COLS, NUC_YIELD_NU_BAR, PERMT_META_COLS, REGION_CROSS_EPS,
 };
 use crate::common::geometry::bvh_cell_finding::bvh_find_cell_at_point;
 use crate::common::geometry::cell_finding::CELL_NOT_FOUND;
@@ -2283,21 +2283,38 @@ pub(super) fn transport_one_particle(
                         reaction: reaction_rec,
                     });
                 }
-            } else if inputs.surface_boundaries[winner_surface] == BOUNDARY_VACUUM {
-                // Surface crossing into a vacuum boundary --
-                // particle terminates at the surface.
-                alive = 0;
             } else {
-                // Transmission crossing: the step landed the particle
-                // exactly ON the surface, where the point-in-region cell
-                // test is in neither neighbouring cell. Nudge a hair past
-                // the surface so the next cell-find lands strictly inside
-                // the entered cell (mirrors the kernel + the CPU handoff
-                // eps in `Cell::distance_to_surface`).
-                px += dx * REGION_CROSS_EPS;
-                py += dy * REGION_CROSS_EPS;
-                pz += dz * REGION_CROSS_EPS;
-                on_surface = winner_surface as u32;
+                // Surface currents score the crossing before the vacuum kill,
+                // ON the surface, with the flight's energy, weight and
+                // direction (mirrors the kernel's crossing block).
+                accumulate_surface_tallies(
+                    inputs.tallies,
+                    inputs.surface_types,
+                    inputs.surface_params,
+                    winner_surface,
+                    [px, py, pz],
+                    [dx, dy, dz],
+                    log_e,
+                    energy,
+                    weight,
+                    tally_acc,
+                );
+                if inputs.surface_boundaries[winner_surface] == BOUNDARY_VACUUM {
+                    // Surface crossing into a vacuum boundary --
+                    // particle terminates at the surface.
+                    alive = 0;
+                } else {
+                    // Transmission crossing: the step landed the particle
+                    // exactly ON the surface, where the point-in-region cell
+                    // test is in neither neighbouring cell. Nudge a hair past
+                    // the surface so the next cell-find lands strictly inside
+                    // the entered cell (mirrors the kernel + the CPU handoff
+                    // eps in `Cell::distance_to_surface`).
+                    px += dx * REGION_CROSS_EPS;
+                    py += dy * REGION_CROSS_EPS;
+                    pz += dz * REGION_CROSS_EPS;
+                    on_surface = winner_surface as u32;
+                }
             }
         }
 

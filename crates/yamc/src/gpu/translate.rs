@@ -824,15 +824,10 @@ pub(crate) fn translate_cells(
     Ok((aabbs, cell_to_material, has_void))
 }
 
-/// Walk every cell's region, dedupe surfaces by `Arc::as_ptr`, encode
-/// each as `(type, [params; 7])`. Both `Transmission` and `Vacuum`
-/// boundaries are supported by the kernel; `surface_boundaries[i]`
-/// matches yamc-geo's `BoundaryType` enum order so the kernel sees
-/// `0` for transmission and `1` for vacuum.
-#[allow(clippy::type_complexity)]
-pub(crate) fn translate_surfaces(
-    cells: &[Cell],
-) -> Result<(Vec<u32>, Vec<f64>, Vec<u32>), GpuTranslateError> {
+/// Every surface the cells are bounded by, deduplicated by `Arc::as_ptr` in
+/// cell-then-region order: the kernels' surface index order, which
+/// [`translate_surfaces`] encodes and the tally pack's `surface_to_bin` maps.
+pub(crate) fn unique_surfaces(cells: &[Cell]) -> Vec<Arc<Surface>> {
     // Dedupe across cells via pointer identity; the same `Arc<Surface>`
     // is shared by every cell that references it.
     let mut seen: HashMap<*const Surface, ()> = HashMap::new();
@@ -845,6 +840,19 @@ pub(crate) fn translate_surfaces(
             }
         }
     }
+    surfaces_in_order
+}
+
+/// Walk every cell's region, dedupe surfaces by `Arc::as_ptr`, encode
+/// each as `(type, [params; 7])`. Both `Transmission` and `Vacuum`
+/// boundaries are supported by the kernel; `surface_boundaries[i]`
+/// matches yamc-geo's `BoundaryType` enum order so the kernel sees
+/// `0` for transmission and `1` for vacuum.
+#[allow(clippy::type_complexity)]
+pub(crate) fn translate_surfaces(
+    cells: &[Cell],
+) -> Result<(Vec<u32>, Vec<f64>, Vec<u32>), GpuTranslateError> {
+    let surfaces_in_order = unique_surfaces(cells);
 
     let mut surface_types = Vec::with_capacity(surfaces_in_order.len());
     let mut surface_params = Vec::with_capacity(surfaces_in_order.len() * SURFACE_PARAM_STRIDE);

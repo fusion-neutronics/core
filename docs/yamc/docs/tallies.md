@@ -367,7 +367,7 @@ detector_view = yamc.Tally(
 )
 ```
 
-A surface tally cannot also take ``cells``, ``materials``, ``mesh``, ``nuclides``, ``response`` or ``estimator``. It needs ``tracking_mode="surface"`` (the default) and CSG surfaces, and runs on the CPU. Each surface needs an id; one is assigned automatically when a surface is created without ``surface_id=``.
+A surface tally cannot also take ``cells``, ``materials``, ``mesh``, ``nuclides``, ``response`` or ``estimator``. It needs ``tracking_mode="surface"`` (the default) and CSG surfaces. It runs on the CPU and with ``compute="gpu"``, except that ``cosine_bins`` is CPU only. Each surface needs an id; one is assigned automatically when a surface is created without ``surface_id=``.
 
 #### Example: leakage spectrum from an iron sphere
 

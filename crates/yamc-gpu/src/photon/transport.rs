@@ -47,7 +47,7 @@
 
 use crate::common::geometry::birth::birth_step;
 use crate::common::geometry::bvh_cell_finding::build_and_flatten_bvh;
-use crate::common::geometry::region_eval::region_contains;
+use crate::common::geometry::region_eval::{region_contains, surface_crossing_mu};
 use crate::common::geometry::surface_distance::{
     cone_smallest_positive, quadric_smallest_positive, torus_smallest_positive,
 };
@@ -94,7 +94,7 @@ pub const PHOTON_BOUNDARY_VACUUM: u32 = 1;
 /// more storage buffers than the adapter advertises aliases bindings and
 /// produces garbage reads that look like physics bugs. Kept in lockstep with
 /// the kernel signature by `photon_kernel_storage_buffer_count_matches_signature`.
-pub const PHOTON_KERNEL_STORAGE_BUFFER_COUNT: u32 = 88;
+pub const PHOTON_KERNEL_STORAGE_BUFFER_COUNT: u32 = 89;
 
 /// `run_params` slot holding the model's `photon_cutoff_energy` in eV.
 /// One buffer carries the per-run scalars so adding another costs a slot
@@ -274,6 +274,10 @@ fn multi_cell_photon_transport_kernel(
     // and drops the event when the photon energy is off the table.
     tally_efunc_offsets: &[u32],
     tally_efunc_params: &[f64],
+    // Surface-current entries: the photon twin of the neutron kernel's
+    // `tally_surface_to_bin`, `[n_tallies × n_surfaces]`, read only when
+    // `surface_tallies` is on.
+    tally_surface_to_bin: &[u32],
     // Thick-target bremsstrahlung (TTB) tables. Populated when the
     // model has `electron_treatment == Ttb` and every material has
     // a `Bremsstrahlung` pack from CPU `init_bremsstrahlung`. When
@@ -428,6 +432,9 @@ fn multi_cell_photon_transport_kernel(
     // layout; `spill_cap` is 0 so the history-end flush is a no-op. Mirrors the
     // neutron kernel's `mesh_direct`.
     #[comptime] mesh_direct: bool,
+    // Some entry is a surface current, so each crossing is scored (mirrors
+    // the neutron kernel's switch). Off => nothing compiled, byte-identical.
+    #[comptime] surface_tallies: bool,
 ) {
     // The history this thread runs: its place in this dispatch's slice of
     // the launch. A launch dispatched in slices runs every history exactly
@@ -3507,6 +3514,152 @@ fn multi_cell_photon_transport_kernel(
                         }
                     }
                 } else {
+                    // Surface currents score the crossing BEFORE the vacuum kill,
+                    // as the CPU's `SurfaceScoring::score_crossing` runs ahead of
+                    // `handle_surface_crossing`: a particle leaving through a
+                    // vacuum surface is counted on its way out. The particle sits
+                    // ON the surface here (moved by `d`, not yet nudged), with
+                    // the flight's energy, weight and direction, which is what
+                    // the CPU scores with. One crossing per step, so an entry
+                    // touches at most one bin per step (the spill bound holds).
+                    if surface_tallies {
+                        let n_surfaces = surface_types.len() as u32;
+                        let mut mu = 0.0_f64;
+                        let mut have_mu = false;
+                        let mut ts = 0u32;
+                        while ts < n_tallies {
+                            let sbin =
+                                tally_surface_to_bin[(ts * n_surfaces + winner_surface) as usize];
+                            if tally_is_collision[ts as usize] == 2u32 && sbin != 4_294_967_295u32 {
+                                if !have_mu {
+                                    mu = surface_crossing_mu(
+                                        surface_types,
+                                        surface_params,
+                                        winner_surface,
+                                        px,
+                                        py,
+                                        pz,
+                                        dx,
+                                        dy,
+                                        dz,
+                                    );
+                                    have_mu = true;
+                                }
+                                // Energy bin: the same search, bounds and edge
+                                // convention as the per-step block.
+                                let n_bins_s = tally_n_bins[ts as usize];
+                                let edges_off_s = tally_edges_offsets[ts as usize];
+                                let lo_edge_s = tally_log_edges[edges_off_s as usize];
+                                let hi_edge_s = tally_log_edges[(edges_off_s + n_bins_s) as usize];
+                                let mut counts = log_e >= lo_edge_s && log_e <= hi_edge_s;
+                                let mut lo_s = 0u32;
+                                let mut hi_s = n_bins_s;
+                                let mut iter_s = 0u32;
+                                while iter_s < 16u32 && lo_s + 1u32 < hi_s {
+                                    let mid_s: u32 = (lo_s + hi_s) / 2u32;
+                                    if log_e <= tally_log_edges[(edges_off_s + mid_s) as usize] {
+                                        hi_s = mid_s;
+                                    } else {
+                                        lo_s = mid_s;
+                                    }
+                                    iter_s += 1u32;
+                                }
+                                let mut bin_s = lo_s;
+                                if bin_s >= n_bins_s {
+                                    bin_s = n_bins_s - 1u32;
+                                }
+                                // Direction: CPU `CurrentScore::contribution`.
+                                // `mu >= 0` is above (a crossing along the
+                                // surface counts as above, and positive in net).
+                                let direction = tally_score_data[ts as usize];
+                                let above = mu >= 0.0;
+                                let mut value = weight;
+                                if direction == 0u32 && !above {
+                                    counts = false;
+                                }
+                                if direction == 1u32 && above {
+                                    counts = false;
+                                }
+                                if direction == 2u32 && !above {
+                                    value = -weight;
+                                }
+                                // Energy-function weight, or no score off its table.
+                                let ef_lo_s = tally_efunc_offsets[ts as usize];
+                                let ef_hi_s = tally_efunc_offsets[(ts + 1u32) as usize];
+                                if ef_hi_s > ef_lo_s {
+                                    let n_ef_s = tally_efunc_params[ef_lo_s as usize] as u32;
+                                    let e_first_s = tally_efunc_params[(ef_lo_s + 2u32) as usize];
+                                    let e_last_s =
+                                        tally_efunc_params[(ef_lo_s + n_ef_s + 1u32) as usize];
+                                    if energy < e_first_s || energy > e_last_s {
+                                        counts = false;
+                                    } else {
+                                        value = value
+                                            * energy_function_weight_kernel(
+                                                tally_efunc_params,
+                                                ef_lo_s,
+                                                energy,
+                                            );
+                                    }
+                                }
+                                if counts {
+                                    let scale_s = tally_fixed_point_scales[ts as usize];
+                                    let scaled_fs = value * scale_s;
+                                    let scaled_s = if scaled_fs >= 0.0 {
+                                        (scaled_fs + 0.5) as i64
+                                    } else {
+                                        -((-scaled_fs + 0.5) as i64)
+                                    };
+                                    let idx_s =
+                                        tally_out_offsets[ts as usize] + sbin * n_bins_s + bin_s;
+                                    if mesh_direct {
+                                        src_acc[src_base + idx_s as usize]
+                                            .fetch_add(u64::reinterpret(scaled_s));
+                                    } else if per_history_var {
+                                        let mut found_s = false;
+                                        let mut j_s = 0u32;
+                                        while j_s < th_count {
+                                            if th_bin[j_s as usize] == idx_s {
+                                                th_val[j_s as usize] += value;
+                                                found_s = true;
+                                            }
+                                            j_s += 1u32;
+                                        }
+                                        if !found_s {
+                                            if th_count < PERHIST_K {
+                                                th_bin[th_count as usize] = idx_s;
+                                                th_val[th_count as usize] = value;
+                                                th_count += 1u32;
+                                            } else {
+                                                let mut sfound_s = false;
+                                                let mut k_s = 0u32;
+                                                while k_s < spill_count {
+                                                    if spill_bin[spill_base + k_s as usize] == idx_s
+                                                    {
+                                                        spill_val[spill_base + k_s as usize] +=
+                                                            value;
+                                                        sfound_s = true;
+                                                    }
+                                                    k_s += 1u32;
+                                                }
+                                                if !sfound_s {
+                                                    spill_bin[spill_base + spill_count as usize] =
+                                                        idx_s;
+                                                    spill_val[spill_base + spill_count as usize] =
+                                                        value;
+                                                    spill_count += 1u32;
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        tally_out[idx_s as usize]
+                                            .fetch_add(u64::reinterpret(scaled_s));
+                                    }
+                                }
+                            }
+                            ts += 1u32;
+                        }
+                    }
                     // Surface crossing. Apply boundary semantics.
                     let boundary = surface_boundaries[winner_surface as usize];
                     if boundary == 1u32 {
@@ -3972,6 +4125,24 @@ pub fn run_multi_cell_photon_transport(
         tallies.efunc_params.clone()
     };
     let tally_efunc_params_h = client.create_from_slice(bytemuck::cast_slice(&efunc_params_padded));
+    // Surface-current map, as in the neutron host: full `[n_tallies ×
+    // n_surfaces]` when some entry is a surface current, else a one-slot pad
+    // the kernel never reads.
+    let surface_tallies = tallies.has_surface_tallies();
+    if surface_tallies {
+        assert_eq!(
+            tallies.surface_to_bin.len(),
+            tallies.n_tallies() as usize * surface_types.len(),
+            "surface_to_bin must be flat [n_tallies × n_surfaces]"
+        );
+    }
+    let surface_to_bin_padded: Vec<u32> = if tallies.surface_to_bin.is_empty() {
+        vec![crate::common::tallies::NOT_IN_TALLY]
+    } else {
+        tallies.surface_to_bin.clone()
+    };
+    let tally_surface_to_bin_h =
+        client.create_from_slice(bytemuck::cast_slice(&surface_to_bin_padded));
     let ttb_e_grid_log_h = client.create_from_slice(bytemuck::cast_slice(ttb_e_grid_log));
     let ttb_electron_pdf_h = client.create_from_slice(bytemuck::cast_slice(ttb_electron_pdf));
     let ttb_electron_cdf_h = client.create_from_slice(bytemuck::cast_slice(ttb_electron_cdf));
@@ -4182,6 +4353,7 @@ pub fn run_multi_cell_photon_transport(
             BufferArg::from_raw_parts(tally_mesh_params_h.clone(), mesh_params_padded.len()),
             BufferArg::from_raw_parts(tally_efunc_offsets_h.clone(), tallies.efunc_offsets.len(),),
             BufferArg::from_raw_parts(tally_efunc_params_h.clone(), efunc_params_padded.len()),
+            BufferArg::from_raw_parts(tally_surface_to_bin_h.clone(), surface_to_bin_padded.len()),
             BufferArg::from_raw_parts(ttb_e_grid_log_h.clone(), ttb_e_grid_log.len()),
             BufferArg::from_raw_parts(ttb_electron_pdf_h.clone(), ttb_electron_pdf.len()),
             BufferArg::from_raw_parts(ttb_electron_cdf_h.clone(), ttb_electron_cdf.len()),
@@ -4239,6 +4411,7 @@ pub fn run_multi_cell_photon_transport(
             per_source,
             total_bins as u32,
             mesh_direct,
+            surface_tallies,
         );
         let _ = pollster::block_on(client.sync());
         slices.record(end - start, dispatched.elapsed());

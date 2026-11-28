@@ -46,6 +46,33 @@ pub const SCORE_ABSORPTION: u32 = 2;
 /// `inelastic`, `fission`, per-MT integers, …) and as the
 /// sub-routine for KERMA-shape scores.
 pub const SCORE_PER_MT: u32 = 3;
+/// Score kind: surface current (`current-above` / `current-below` /
+/// `current-net`). Scored once per surface crossing, not per step: the
+/// crossing's weight, signed for `current-net`, into the surface bin
+/// `surface_to_bin` gives for the crossed surface. Which direction counts is
+/// `score_data[t]` (one of the `CURRENT_*` values). Always carries the
+/// [`ESTIMATOR_SURFACE`] estimator flag.
+pub const SCORE_CURRENT: u32 = 4;
+
+/// `score_data[t]` of a [`SCORE_CURRENT`] entry: crossings towards the
+/// surface's `.above` side (positive cosine with its normal) count.
+pub const CURRENT_ABOVE: u32 = 0;
+/// `score_data[t]` of a [`SCORE_CURRENT`] entry: crossings towards the
+/// surface's `.below` side count.
+pub const CURRENT_BELOW: u32 = 1;
+/// `score_data[t]` of a [`SCORE_CURRENT`] entry: every crossing counts, with
+/// the sign of its cosine (a crossing exactly along the surface counts as
+/// above, as the CPU's `CurrentScore::contribution` has it).
+pub const CURRENT_NET: u32 = 2;
+
+/// `is_collision[t]` of a track-length entry, scored per step.
+pub const ESTIMATOR_TRACK_LENGTH: u32 = 0;
+/// `is_collision[t]` of a collision-estimator entry, scored per collision.
+pub const ESTIMATOR_COLLISION: u32 = 1;
+/// `is_collision[t]` of a surface-current entry, scored per surface crossing.
+/// Neither the per-step block (`== 0`) nor the collision loop (`== 1`) runs
+/// for it, and every cell maps to `NOT_IN_TALLY` besides.
+pub const ESTIMATOR_SURFACE: u32 = 2;
 
 /// Mesh-tally kind discriminant for [`TalliesPack::mesh_kind`].
 /// A tally with `MESH_NONE` has no spatial mesh dimension (`n_mesh_per_tally
@@ -469,8 +496,18 @@ pub struct TalliesPack {
     /// gates the per-step block on `is_collision[t] == 0` and
     /// runs a parallel collision-site scoring loop for
     /// `is_collision[t] == 1`, so a tally never gets both
-    /// contributions. Length `n_tallies`.
+    /// contributions. `2` ([`ESTIMATOR_SURFACE`]) marks a surface-current
+    /// entry, which neither loop scores: the kernel scores it at each surface
+    /// crossing instead. Length `n_tallies`.
     pub is_collision: Vec<u32>,
+    /// Surface-bin map for surface-current entries, flat
+    /// `[n_tallies × n_surfaces]` over the kernel's deduplicated surface index
+    /// order (the order `surface_types` is in). Entry `t`'s crossing of
+    /// surface `s` scores into spatial bin `surface_to_bin[t * n_surfaces + s]`
+    /// of its output block, or nowhere when that is `NOT_IN_TALLY` (always,
+    /// for every entry that is not a surface current). EMPTY when the pack has
+    /// no surface-current entry; the kernels read it only when it has.
+    pub surface_to_bin: Vec<u32>,
     /// Number of `parent_nuclides` bins per tally (D1S). `1` for any tally
     /// without a `ParentNuclideFilter` -- the parent dimension collapses and
     /// the flat index `(cell_bin * 1 + 0) * n_bins + e == cell_bin * n_bins + e`
@@ -552,6 +589,12 @@ impl TalliesPack {
         self.out_offsets.last().copied().unwrap_or(0)
     }
 
+    /// Whether any entry is a surface current, which the kernels then score at
+    /// each surface crossing (their `surface_tallies` comptime switch).
+    pub fn has_surface_tallies(&self) -> bool {
+        self.is_collision.contains(&ESTIMATOR_SURFACE)
+    }
+
     /// A degenerate single-Flux-on-one-cell-bin pack with no energy
     /// bins. Used when the model has no tallies -- the kernel still
     /// needs at least one slot so the buffer length doesn't go to
@@ -573,6 +616,7 @@ impl TalliesPack {
             score_urr_key: vec![0],
             fixed_point_scales: vec![DEFAULT_FIXED_POINT_SCALE],
             is_collision: vec![0],
+            surface_to_bin: Vec::new(),
             n_parent_per_tally: vec![1],
             parent_offsets: vec![0, 0],
             parent_ids: Vec::new(),
@@ -623,6 +667,7 @@ impl TalliesPack {
             score_urr_key: vec![0, 0],
             fixed_point_scales: vec![DEFAULT_FIXED_POINT_SCALE, DEFAULT_FIXED_POINT_SCALE],
             is_collision: vec![0, 0],
+            surface_to_bin: Vec::new(),
             n_parent_per_tally: vec![1, 1],
             parent_offsets: vec![0, 0, 0],
             parent_ids: Vec::new(),
