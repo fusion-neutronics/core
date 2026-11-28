@@ -527,6 +527,8 @@ pub fn transmute_materials(
                 .iter()
                 .map(|&g| per_spectrum[g].clone())
                 .collect(),
+            // One collapse per spectrum, so each is its own.
+            draw_spectrum: (0..cases[c].spectra.len()).collect(),
             request,
             shielding: cases[c].shielding.as_ref(),
             lists: &lists,
@@ -1038,6 +1040,9 @@ struct Replicas<'a> {
     spectra: &'a [MultigroupSpectrum],
     steps: &'a [TransmuteStep],
     per_spectrum: Vec<PerSpectrum>,
+    /// The spectrum each of `per_spectrum` was collapsed from, which keys
+    /// that spectrum's own random draws.
+    draw_spectrum: Vec<usize>,
     request: &'a DataUncertainty,
     shielding: Option<&'a Shielding>,
     /// The branching lists the nominal fold applied, which a flux replica
@@ -1108,6 +1113,7 @@ fn solve_case(
             r.spectra,
             r.steps,
             &r.per_spectrum,
+            &r.draw_spectrum,
             chain,
             parts,
             &stepper,
@@ -1929,6 +1935,7 @@ pub fn transport_replicas(
         std::slice::from_ref(&tallied.spectrum),
         &steps,
         &per_spectrum,
+        &[0],
         chain,
         parts,
         &ForwardEulerStepper,
@@ -2246,12 +2253,18 @@ pub(crate) fn decay_photon_candidates(
 /// problem dominated by one well-behaved channel stops early and a heavy-tailed
 /// one keeps going. The knob is the precision of the sigmas, not a sample
 /// count, so turning it says what it buys.
+///
+/// `spectra`, `per_spectrum` and the steps' indices are per collapse, and
+/// `draw_spectrum` names the spectrum each collapse belongs to. A spectrum's
+/// own random draws (its flux error) are keyed on that spectrum, so collapses
+/// of one spectrum at different compositions draw it alike.
 #[allow(clippy::too_many_arguments)]
 fn run_replicas(
     initial: &Material,
     spectra: &[MultigroupSpectrum],
     steps: &[TransmuteStep],
     per_spectrum: &[PerSpectrum],
+    draw_spectrum: &[usize],
     chain: &Arc<HashMap<String, ChainNuclide>>,
     parts: yani::ChainParts,
     stepper: &ForwardEulerStepper,
@@ -2265,6 +2278,7 @@ fn run_replicas(
     damage: Option<&crate::damage::ReplicaDamage<'_>>,
 ) -> Result<(Ensemble, Info), Box<dyn std::error::Error>> {
     check_convergence(request.convergence)?;
+    debug_assert_eq!(draw_spectrum.len(), per_spectrum.len());
     let no_inputs = crate::covariance_fold::DamageInputs::new();
     let damage_inputs = damage.map_or(&no_inputs, |d| d.inputs);
     // The two paths each have one source the other lacks. A transport run has
@@ -3098,7 +3112,7 @@ fn run_replicas(
                     &terms.error,
                     request.seed,
                     replica,
-                    idx,
+                    draw_spectrum[idx],
                     &mut flux_coverage,
                 )
             });
@@ -3408,6 +3422,7 @@ fn run_replicas(
                     spectra,
                     steps,
                     per_spectrum,
+                    draw_spectrum,
                     chain,
                     parts,
                     stepper,
