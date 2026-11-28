@@ -506,6 +506,8 @@ impl Material {
     /// A photoatomic evaluation is interpreted on its own, so any atomic
     /// relaxation data has to come from its own MF=28; pass a separate
     /// evaluation to [`IncidentPhoton::from_endf`] directly when there is one.
+    ///
+    /// [`IncidentPhoton::from_endf`]: crate::IncidentPhoton::from_endf
     pub fn interpret(&self) -> Result<Interpretation> {
         let nsub = self
             .mf1_mt451()

@@ -33,7 +33,7 @@
 //! transport of replica `k` tallies its isomeric partials, and every step
 //! splits them, on production curves carrying replica `k`'s draw, the one an
 //! independent replica of the same index makes (see
-//! [`crate::isomer_branching_uncertainty`]). A curve only moves what is
+//! `crate::isomer_branching_uncertainty`). A curve only moves what is
 //! tallied, not what is transported, so this source needs no seed of its
 //! own, as the decay data need none.
 //!
@@ -63,7 +63,7 @@ pub type Inventories = Vec<HashMap<String, f64>>;
 /// What one replica drew of the decay data.
 #[derive(Debug, Default, Clone)]
 pub struct Drawn {
-    /// Every perturbed half-life [s], by nuclide.
+    /// Every perturbed half-life \[s\], by nuclide.
     pub half_lives: HashMap<String, f64>,
     /// Every parent whose decay branching was drawn.
     pub decay_branchings: BTreeSet<String>,

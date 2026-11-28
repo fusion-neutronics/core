@@ -1,7 +1,7 @@
 //! Tally scores: what physical quantity a tally accumulates.
 //!
 //! The score-kind structs live in [`kinds`]; the name<->score string mapping
-//! lives in [`convert`]. This module owns the [`Score`] enum-of-structs and its
+//! lives in `convert`. This module owns the [`Score`] enum-of-structs and its
 //! query methods (`kind`/`name`/`mt`/`from_mt*`/`required_estimator`), and
 //! re-exports the kinds so `crate::score::<T>` paths stay stable.
 

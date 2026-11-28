@@ -10,15 +10,15 @@
 //! immediately re-cross it.
 //!
 //! These are faithful ports of the corresponding `yamc-geo` routines:
-//! - [`torus_smallest_positive`] ↔ `yamc_geo::surface::torus::torus_distance`
-//! - [`quadric_smallest_positive`] ↔ `yamc_geo::surface::quadric::distance`
-//! - [`cone_smallest_positive`] ↔ `yamc_geo::surface::cone::distance`
+//! - [`torus_smallest_positive()`] ↔ `yamc_geo::surface::torus::torus_distance`
+//! - [`quadric_smallest_positive()`] ↔ `yamc_geo::surface::quadric::distance`
+//! - [`cone_smallest_positive()`] ↔ `yamc_geo::surface::cone::distance`
 //!
-//! The X/Y/Z tori all route through [`torus_smallest_positive`] with
+//! The X/Y/Z tori all route through [`torus_smallest_positive()`] with
 //! their transverse/axial coordinates permuted by the caller, exactly
 //! as the CPU `SurfaceKind::{X,Y,Z}Torus` arms permute into the shared
 //! `torus_distance`. Quadric and cone both reduce to a quadratic and
-//! share [`quadratic_smallest_positive`] for root selection.
+//! share [`quadratic_smallest_positive()`] for root selection.
 //!
 //! Sphere, plane and cylinder are deliberately *not* centralized here:
 //! their intersection math is a few lines and stays inlined at each
@@ -109,7 +109,7 @@ pub const TORUS_ON_SURFACE_TOLERANCE: f64 = 1e-9;
 /// Port of `yamc_geo`'s `torus_distance`, which documents the method:
 /// the axial coordinate is scaled by `c/b` (elliptical to circular),
 /// lengths are divided by `a + c`, the quartic is factorised by
-/// [`quartic_factors`] (Algorithm 1010), and roots on the mirror torus
+/// [`quartic_factors()`] (Algorithm 1010), and roots on the mirror torus
 /// (`|q|^2 + a^2 - c^2 < 0` at the hit point) are rejected.
 ///
 /// `on_surface_offset >= 0` says the particle has just crossed this
@@ -302,7 +302,7 @@ pub fn cone_smallest_positive(
 
 // ----------------------------- CPU mirrors -----------------------------
 
-/// CPU mirror of [`quadratic_smallest_positive`]. Same algorithm.
+/// CPU mirror of [`quadratic_smallest_positive()`]. Same algorithm.
 pub fn quadratic_smallest_positive_cpu(qa: f64, qb: f64, qc: f64) -> f64 {
     if qa.abs() < 1e-30 {
         if qb.abs() < 1e-30 {
@@ -328,7 +328,7 @@ pub fn quadratic_smallest_positive_cpu(qa: f64, qb: f64, qc: f64) -> f64 {
     }
 }
 
-/// CPU mirror of [`torus_smallest_positive`]. Same algorithm.
+/// CPU mirror of [`torus_smallest_positive()`]. Same algorithm.
 #[allow(clippy::too_many_arguments)]
 pub fn torus_smallest_positive_cpu(
     t1: f64,
@@ -405,7 +405,7 @@ pub fn torus_smallest_positive_cpu(
     }
 }
 
-/// CPU mirror of [`quadric_smallest_positive`]. Same algorithm.
+/// CPU mirror of [`quadric_smallest_positive()`]. Same algorithm.
 #[allow(clippy::too_many_arguments)]
 pub fn quadric_smallest_positive_cpu(
     px: f64,
@@ -446,7 +446,7 @@ pub fn quadric_smallest_positive_cpu(
     quadratic_smallest_positive_cpu(qa, qb, qc)
 }
 
-/// CPU mirror of [`cone_smallest_positive`]. Same algorithm.
+/// CPU mirror of [`cone_smallest_positive()`]. Same algorithm.
 #[allow(clippy::too_many_arguments)]
 pub fn cone_smallest_positive_cpu(
     px: f64,
@@ -499,7 +499,7 @@ fn torus_distance_kernel(cases: &[f64], out: &mut [f64]) {
     );
 }
 
-/// Run [`torus_smallest_positive`] on the GPU for the parity tests;
+/// Run [`torus_smallest_positive()`] on the GPU for the parity tests;
 /// `cases` as in `torus_distance_kernel`.
 pub fn run_torus_distance(ctx: &crate::GpuContext, cases: &[f64]) -> Vec<f64> {
     assert!(cases.len().is_multiple_of(10));

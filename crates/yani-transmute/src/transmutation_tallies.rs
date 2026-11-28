@@ -1286,8 +1286,8 @@ impl TransmutationTallies {
     ///
     /// # Arguments
     /// * `material_id` - ID of the material being traversed
-    /// * `energy` - Neutron energy [eV]
-    /// * `track_length` - Track segment length [cm]
+    /// * `energy` - Neutron energy \[eV\]
+    /// * `track_length` - Track segment length \[cm\]
     /// * `material` - Reference to the material (for nuclide data access)
     #[inline]
     pub fn score(
@@ -1564,7 +1564,7 @@ impl TransmutationTallies {
     ///
     /// # Arguments
     /// * `material_id` - ID of the material
-    /// * `volume` - Material volume [cm³]
+    /// * `volume` - Material volume \[cm³\]
     /// * `source_rate` - Total source rate [n/s]
     ///
     /// # Returns

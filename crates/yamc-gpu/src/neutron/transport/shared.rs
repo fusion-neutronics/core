@@ -667,7 +667,7 @@ pub(super) struct ParticleOutcome {
 /// per-history CPU-vs-GPU diff harness.
 ///
 /// Emitted only when a trace sink (`Some(&mut Vec<_>)`) is passed to
-/// [`transport_one_particle`]; the production / kernel paths pass `None` and
+/// `transport_one_particle`; the production / kernel paths pass `None` and
 /// the recording branch is never taken, so the per-step stream stays
 /// byte-identical. The fields mirror what the production CPU's track capture
 /// records per collision (`TrackEvent::{energy_in, energy_out, reaction_mt}`),

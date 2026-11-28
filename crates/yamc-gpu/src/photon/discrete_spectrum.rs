@@ -27,6 +27,8 @@
 //! reaction/product selection walk and direction sampling (P3c), and wiring
 //! into a production photon-production kernel that appends to the device
 //! particle bank (P4 / D1S P5).
+//!
+//! [`sample_discrete_photon_energy_cpu`]: crate::photon::discrete_spectrum::sample_discrete_photon_energy_cpu
 
 use crate::common::pcg32::{expand_seed, pcg_out};
 use crate::GpuContext;

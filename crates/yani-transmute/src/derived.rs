@@ -163,11 +163,11 @@ impl Estimate {
 /// was drawn at.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LineEstimate {
-    /// Nominal line energy [eV], the one the evaluation states.
+    /// Nominal line energy \[eV\], the one the evaluation states.
     pub energy: f64,
     /// Emission rate [photons/s], with the ensemble's spread.
     pub estimate: Estimate,
-    /// The energy each replica emitted the line at [eV], with the spread,
+    /// The energy each replica emitted the line at \[eV\], with the spread,
     /// over the emitting replicas only: a replica that does not emit a line
     /// gives it no energy. Where coincident lines are summed it is their
     /// rate-weighted mean. `nominal` is `energy`.
@@ -835,7 +835,7 @@ impl TransmutationResults {
         )))
     }
 
-    /// Activity of a material at `step` [Bq], with the ensemble's spread.
+    /// Activity of a material at `step` \[Bq\], with the ensemble's spread.
     ///
     /// `Ok(None)` when the run carried no uncertainty for this material, which
     /// is the default path. `Err` when the material has no volume, the same
@@ -856,7 +856,7 @@ impl TransmutationResults {
         self.derived_total(material_id, step, chain, Quantity::Activity, None)
     }
 
-    /// Decay heat of a material at `step` [W], with the ensemble's spread.
+    /// Decay heat of a material at `step` \[W\], with the ensemble's spread.
     ///
     /// With the `decay_photon_lines` source on, each replica's gamma decay
     /// energy follows its drawn lines (see `replica_chain`), so the heat has
@@ -872,7 +872,7 @@ impl TransmutationResults {
         self.derived_total(material_id, step, chain, Quantity::DecayHeat, None)
     }
 
-    /// Activity at `step` broken down by nuclide [Bq], each with its spread.
+    /// Activity at `step` broken down by nuclide \[Bq\], each with its spread.
     ///
     /// These do NOT add up to [`Self::activity_uncertainty`] in quadrature, and
     /// are not meant to: see the module documentation.
@@ -887,7 +887,7 @@ impl TransmutationResults {
             .map(|f| estimate_by_nuclide(&f)))
     }
 
-    /// Decay heat at `step` broken down by nuclide [W], each with its spread.
+    /// Decay heat at `step` broken down by nuclide \[W\], each with its spread.
     ///
     /// See [`Self::activity_uncertainty_by_nuclide`].
     pub fn decay_heat_uncertainty_by_nuclide(

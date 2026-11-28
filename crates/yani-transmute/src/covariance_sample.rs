@@ -25,10 +25,10 @@
 //! # The eigensolver
 //!
 //! Every factorization is an eigendecomposition of a correlation matrix
-//! ([`clipped_factor`]), scaled back by the standard deviations, so a cell is
+//! (`clipped_factor`), scaled back by the standard deviations, so a cell is
 //! factorized as accurately as its own variance allows however far it sits
 //! from the largest. Large blocks go to faer's blocked tridiagonalization and
-//! divide and conquer ([`dense_eigen`]), which signs every eigenvector by a
+//! divide and conquer (`dense_eigen`), which signs every eigenvector by a
 //! fixed rule so the factor is a function of the matrix and not of the
 //! solver; small ones go to cyclic Jacobi. Each runs in a fixed order, so a
 //! factorization is the same on any thread count. A Cholesky would be the
@@ -622,7 +622,7 @@ fn principal(matrix: &[f64], n: usize, kept: f64) -> (Vec<f64>, Vec<f64>, Vec<f6
 }
 
 /// What making a joint draw admissible did to the covariance between its
-/// members (see [`JointDraw`]).
+/// members (see `JointDraw`).
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct JointAdjustment {
     /// `||X' - X||_F / ||X||_F` over every pair of members, `X` the stated
@@ -640,7 +640,7 @@ pub struct JointAdjustment {
     /// The largest change of a correlation between two members' averages,
     /// drawn against stated, the stated one clipped to one first.
     pub largest_correlation_change: f64,
-    /// L-BFGS iterations of the fit ([`crate::joint_fit`]), and whether it
+    /// L-BFGS iterations of the fit (`crate::joint_fit`), and whether it
     /// converged rather than stopping at its cap (the draw is admissible
     /// either way).
     pub iterations: usize,
@@ -2126,7 +2126,7 @@ impl Sampler {
     /// Each member keeps its own covariance exactly, repair and all, so its
     /// channels' sigmas and every report on it are what they are drawn on its
     /// own; only the covariance between members is added (see
-    /// [`JointDraw`]). The absolute cells and short-range noise stay each
+    /// `JointDraw`). The absolute cells and short-range noise stay each
     /// nuclide's own.
     pub fn coupled(
         fields: &BTreeMap<String, crate::covariance_fold::CellField>,

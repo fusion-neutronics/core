@@ -149,7 +149,7 @@ pub struct BranchCurve {
     pub target: String,
     /// Whether `values` are yields (fractions) or partial cross sections.
     pub quantity: BranchQuantity,
-    /// Incident-neutron energy grid [eV], ascending.
+    /// Incident-neutron energy grid (eV), ascending.
     pub energy: Vec<f64>,
     /// Curve values on `energy`: fraction (Yield) or barns (CrossSection).
     pub values: Vec<f64>,
@@ -404,7 +404,7 @@ impl Default for ChainParts {
 /// Fission product yields at a single incident neutron energy.
 #[derive(Clone, Debug)]
 pub struct FissionYield {
-    /// Incident neutron energy [eV]
+    /// Incident neutron energy (eV)
     pub energy: f64,
     /// Product nuclide names and their yields (fractional per fission).
     ///
@@ -510,7 +510,7 @@ impl FissionYieldSet {
         Self { yields }
     }
 
-    /// The tabulated incident energies [eV], ascending.
+    /// The tabulated incident energies (eV), ascending.
     ///
     /// Enough on its own to drive [`fission_yield_interp_weights`], so a hot
     /// path can fold against a nuclide's yields without holding its (~1000
@@ -648,13 +648,13 @@ fn bracket(
 #[derive(Clone, Debug, PartialEq)]
 pub enum DecaySourceDistribution {
     /// Discrete line spectrum: each (energy, intensity) pair is a spectral
-    /// line, its intensity the emission rate per atom [1/s].
+    /// line, its intensity the emission rate per atom (1/s).
     Discrete {
         energies: Vec<f64>,
         intensities: Vec<f64>,
     },
     /// A continuum: `intensities` is the emission-rate density per atom
-    /// [1/s/eV] at each of `energies` [eV], read between them by
+    /// (1/s/eV) at each of `energies` (eV), read between them by
     /// `interpolation`. `None` there is a file that states no law, which a
     /// `decay/sources.arrow` written before the column does for every
     /// continuum; see [`crate::continuum`].
@@ -770,7 +770,7 @@ pub struct DecaySourceUncertainty {
     /// constant times FD times dRI). `None` on a continuum, whose points
     /// carry no sigma.
     pub intensity_uncertainties: Option<Vec<f64>>,
-    /// Each line's energy sigma dER [eV]. `None` on a continuum.
+    /// Each line's energy sigma dER (eV). `None` on a continuum.
     pub energy_uncertainties: Option<Vec<f64>>,
     /// The spectrum's covariance, where the evaluation states one.
     pub covariance: Option<SourceCovariance>,
@@ -787,7 +787,7 @@ pub struct SourceCovariance {
     pub ls: Option<i32>,
     /// The LB flag, which says how `values` is laid out.
     pub lb: i32,
-    /// ER for the lines, Ek for a continuum [eV].
+    /// ER for the lines, Ek for a continuum (eV).
     pub energies: Vec<f64>,
     /// The packed matrix for the lines, the Fk list for a continuum.
     pub values: Vec<f64>,
@@ -800,9 +800,9 @@ pub const DECAY_ENERGY_COMPONENTS: [&str; 3] = ["beta", "gamma", "alpha"];
 /// One recoverable-heat component of a decay energy.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DecayEnergyComponent {
-    /// Mean energy per decay [eV].
+    /// Mean energy per decay (eV).
     pub energy: f64,
-    /// The evaluation's standard deviation on it [eV], as the file stores it.
+    /// The evaluation's standard deviation on it (eV), as the file stores it.
     /// `None` and `Some(0.0)` both mean none was stated (0.0 is how MT=457
     /// writes that), never that the energy is exact.
     pub uncertainty: Option<f64>,
@@ -823,7 +823,7 @@ pub struct ChainNuclide {
     /// "not stated". Both are an unstated sigma and neither is zero: every
     /// consumer takes a sigma only when it is positive.
     pub half_life_uncertainty: Option<f64>,
-    /// Mean decay energy released per decay [eV].
+    /// Mean decay energy released per decay (eV).
     pub decay_energy: f64,
     /// The evaluation's standard deviation on `decay_energy`, in eV.
     ///

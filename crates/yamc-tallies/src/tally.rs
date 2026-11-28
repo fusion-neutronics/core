@@ -2213,7 +2213,7 @@ impl Tally {
         self.accumulator.n_realizations.store(0, Ordering::Relaxed);
     }
 
-    /// Reset through a shared reference (for use with Arc<Tally>). Zeroes
+    /// Reset through a shared reference (for use with `Arc<Tally>`). Zeroes
     /// the existing per-bin `values` without reallocating them.
     pub fn reset_accumulation_shared(&self) {
         self.update_cache();

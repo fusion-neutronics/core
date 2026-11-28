@@ -1,17 +1,16 @@
 //! Runtime gate for the device fission particle bank.
 //!
-//! Mirrors the gate-flag idiom of [`super::survival_biasing::SurvivalBiasingInputs`]
-//! and [`CoupledPhotonInputs`](super::transport::CoupledPhotonInputs): a single
-//! one-element buffer carries an enable flag so the kernel stays byte-identical
-//! to today's analog run when the flag is `0`.
+//! Mirrors the gate-flag idiom of [`SurvivalBiasingInputs`] and
+//! `CoupledPhotonInputs`: a single one-element buffer carries an enable flag so
+//! the kernel stays byte-identical to today's analog run when the flag is `0`.
 //!
 //! # Why this struct lives in an always-built module
 //!
 //! The plain input struct is referenced by the always-compiled
 //! `translate.rs` / `dispatch.rs` layers, which build on macOS too (where the
-//! cubecl kernel module [`super::transport`] is
+//! cubecl kernel module `transport` is
 //! `#[cfg(not(target_os = "macos"))]`-gated). Placing the struct here -- next
-//! to [`super::survival_biasing`] / [`super::nuclide_select_inputs`] -- keeps it
+//! to [`survival_biasing`] / [`nuclide_select_inputs`] -- keeps it
 //! reachable on every target. Several past PRs regressed the macOS wheel build
 //! by putting such a struct inside the gated kernel module.
 //!
@@ -28,6 +27,10 @@
 //!   the banked neutrons and transports them as a fission source in a second
 //!   pass, folding into the same tallies -- the GPU twin of the CPU
 //!   `sample_fission_neutrons` -> `bank_secondary` fission chain.
+//!
+//! [`SurvivalBiasingInputs`]: crate::neutron::survival_biasing::SurvivalBiasingInputs
+//! [`survival_biasing`]: crate::neutron::survival_biasing
+//! [`nuclide_select_inputs`]: crate::neutron::nuclide_select_inputs
 
 /// Runtime gate for the device fission bank, ready to upload as one `&[u32]`
 /// kernel buffer. A single buffer keeps the kernel's storage-descriptor budget

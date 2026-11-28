@@ -20,7 +20,7 @@ use crate::common::polyfills::{cos_f64, sin_f64};
 use crate::GpuContext;
 use cubecl::prelude::*;
 
-/// Result of [`marsaglia_cos_sin_phi`]: the sampled azimuthal `(cos, sin)`
+/// Result of [`marsaglia_cos_sin_phi()`]: the sampled azimuthal `(cos, sin)`
 /// and the advanced 64-bit PCG state.
 #[derive(CubeType)]
 pub struct MarsagliaPhi {
@@ -69,7 +69,7 @@ pub fn marsaglia_cos_sin_phi(state_in: u64) -> MarsagliaPhi {
 /// production CPU's azimuth draw schedule (`scatter.rs` ->
 /// `rotate_direction_fast`, a single `TAU * next_xi` uniform), so the
 /// per-history matched stream stays in lockstep past the first collision.
-/// It replaces the variable-draw [`marsaglia_cos_sin_phi`]
+/// It replaces the variable-draw [`marsaglia_cos_sin_phi()`]
 /// on the transport azimuth. The `#[cube]` kernel calls this (cos/sin via the
 /// `cos_f64`/`sin_f64` polyfills); the CPU twin in `transport/shared.rs` inlines
 /// std libm `cos`/`sin` so it matches the production CPU bit-for-bit (kernel vs
@@ -86,7 +86,7 @@ pub fn azimuth_cos_sin_phi(state_in: u64) -> MarsagliaPhi {
     }
 }
 
-/// CPU twin of [`marsaglia_cos_sin_phi`] (same draws, same rejection, same
+/// CPU twin of [`marsaglia_cos_sin_phi()`] (same draws, same rejection, same
 /// 8-attempt cap and `(1, 0)` fallback). Returns `(cos_phi, sin_phi, state)`.
 pub fn marsaglia_cos_sin_phi_cpu(state_in: u64) -> (f64, f64, u64) {
     let mut state = state_in;
@@ -130,7 +130,7 @@ fn marsaglia_phi_kernel(
     out_state[ABSOLUTE_POS] = m.state;
 }
 
-/// Run [`marsaglia_cos_sin_phi`] on the GPU for each seed; returns
+/// Run [`marsaglia_cos_sin_phi()`] on the GPU for each seed; returns
 /// `(cos_phi, sin_phi, advanced_state)` per seed. For test/validation use.
 // Output buffers are sized by element count (one per seed), not by the seeds
 // slice's byte size, so `size_of_val(seeds)` would be wrong here.

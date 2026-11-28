@@ -130,8 +130,8 @@ impl PyDoseCoefficients {
 ///     dose_tally = yamc.Tally(scores=['flux'], dose_coefficients=('neutron', 'AP'))
 ///
 /// References:
-///     - ICRP Publication 74: https://doi.org/10.1016/S0146-6453(96)90010-X
-///     - ICRP Publication 116: https://doi.org/10.1016/j.icrp.2011.10.001
+///     - ICRP Publication 74: <https://doi.org/10.1016/S0146-6453(96)90010-X>
+///     - ICRP Publication 116: <https://doi.org/10.1016/j.icrp.2011.10.001>
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (particle, geometry=None, data_source=None, dose_quantity="effective"))]

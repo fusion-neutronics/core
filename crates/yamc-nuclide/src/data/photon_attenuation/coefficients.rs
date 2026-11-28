@@ -62,7 +62,7 @@ impl CoefficientTable {
         Self { energy, value }
     }
 
-    /// The tabulated energies [eV], ascending.
+    /// The tabulated energies (eV), ascending.
     pub fn energy(&self) -> &[f64] {
         &self.energy
     }
@@ -72,17 +72,17 @@ impl CoefficientTable {
         &self.value
     }
 
-    /// Lowest tabulated energy [eV].
+    /// Lowest tabulated energy (eV).
     pub fn min_energy(&self) -> f64 {
         self.energy[0]
     }
 
-    /// Highest tabulated energy [eV].
+    /// Highest tabulated energy (eV).
     pub fn max_energy(&self) -> f64 {
         self.energy[self.energy.len() - 1]
     }
 
-    /// The coefficient at `energy` [eV], log-log interpolated.
+    /// The coefficient at `energy` (eV), log-log interpolated.
     pub fn interpolate(&self, energy: f64) -> f64 {
         if energy <= self.min_energy() {
             return self.value[0];

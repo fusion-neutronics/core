@@ -7,8 +7,8 @@
 //!
 //! Two consumers register the same classes:
 //!
-//! * the `yani` wheel, whose `_core` is [`_core`] below, built with the
-//!   `extension-module` feature; and
+//! * the `yani` wheel, whose `_core` is the `_core` function below, built
+//!   with the `extension-module` feature; and
 //! * the `yamc` wheel, whose own `#[pymodule]` calls [`register_classes`] and
 //!   then re-homes the classes' `__module__` onto `yamc._core`.
 //!
@@ -21,6 +21,11 @@
     clippy::format_in_format_args,
     clippy::manual_range_contains
 )]
+// Most doc comments here are Python docstrings, rendered by mkdocstrings and
+// copied into the .pyi stubs. In them `list[float]` is a type, not an
+// intra-doc link, and text indented under a section such as `Returns:` or
+// `Examples:` is not a Rust code block.
+#![allow(rustdoc::broken_intra_doc_links, rustdoc::invalid_rust_codeblocks)]
 
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;

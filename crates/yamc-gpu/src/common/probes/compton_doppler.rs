@@ -139,7 +139,7 @@ pub fn dop_profile_cdf_at(
     c
 }
 
-/// Inverse of [`dop_profile_cdf_at`]: the `pz >= 0` at which the half-profile
+/// Inverse of [`dop_profile_cdf_at()`]: the `pz >= 0` at which the half-profile
 /// integral reaches `c`. Piecewise-linear inversion inside the grid, in the
 /// rationalised form that stays conditioned when the local slope is small
 /// (Kaltiaisenaho Eq. 3.126), and the log-linear tail past it (Eq. 3.123).

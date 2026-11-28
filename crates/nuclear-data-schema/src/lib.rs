@@ -16,9 +16,9 @@
 //!
 //! # Layout
 //!
-//! - [`neutron`] -- `{nuclide}.arrow/`
-//! - [`photon`] -- `{element}.arrow/`
-//! - [`transmutation`] -- `transmutation_{library}.arrow/<subsection>/`
+//! - `neutron` -- `{nuclide}.arrow/`
+//! - `photon` -- `{element}.arrow/`
+//! - `transmutation` -- `transmutation_{library}.arrow/<subsection>/`
 //! - thermal scattering -- `thermal/{name}.arrow/`: [`thermal`],
 //!   [`thermal_inelastic`], [`thermal_elastic`] and [`thermal_sab`]
 

@@ -60,6 +60,8 @@
 //! hashes are taken from the file on disk, the same bytes that are published,
 //! so they are right for any file this indexes, including one this build did
 //! not write.
+//!
+//! [`LoadScope::activation`]: yamc_nuclide::LoadScope::activation
 
 use std::collections::BTreeMap;
 use std::error::Error;

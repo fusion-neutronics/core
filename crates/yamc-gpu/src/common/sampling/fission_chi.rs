@@ -43,7 +43,7 @@ pub struct FissionChiDraw {
 ///
 /// Rows are laid out per struck nuclide by `NuclideSelectInputs::chi_slab_meta`:
 /// one prompt row per fission channel plus one delayed row;
-/// [`select_fission_chi_rows`] picks them.
+/// [`select_fission_chi_rows()`] picks them.
 /// `e_in` is the incident neutron energy. `watt_a` / `watt_b` are the material's
 /// Watt parameters (the fall-through law). The fission chi table is tight CSR:
 /// `fission_eout_ae_offset[chi_row]` is the row's first
@@ -400,7 +400,7 @@ pub fn select_fission_chi_rows(
 /// delayed spectrum first.
 ///
 /// `prompt_row` and `delayed_row` are the event's chi rows from
-/// [`select_fission_chi_rows`]. `beta` is the material's delayed fraction
+/// [`select_fission_chi_rows()`]. `beta` is the material's delayed fraction
 /// `nu_d(E) / nu_t(E)` at the incident energy. The count of progeny already comes
 /// from nu_TOTAL, so what the delayed groups add is that a `beta` share of them
 /// are born from the (much softer) delayed spectrum instead of the prompt one.

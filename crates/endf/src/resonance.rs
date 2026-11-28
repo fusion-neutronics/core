@@ -954,7 +954,7 @@ struct RmlGroup {
 /// A channel of another pair is taken at its own centre-of-mass energy,
 /// `E_c = E M_B/(M_A + M_B) + Q`, and is closed below its threshold. A
 /// charged pair's penetrability is the Coulomb one, `rho / (F^2 + G^2)` (see
-/// [`crate::coulomb`]); a neutral one's is the hard-sphere one; a pair with
+/// `crate::coulomb`); a neutral one's is the hard-sphere one; a pair with
 /// PNT <= 0 (fission) takes 1. Its phase cancels in `|U_cc'|^2`. At a
 /// resonance a channel's penetrability is taken at `|E_r - threshold|`, and
 /// as 1 where it is zero, as NJOY's SAMMY routines take it. Fission adds to
@@ -1967,7 +1967,7 @@ impl UnresolvedAverages {
 
     /// The average cross sections at `energy` (eV): computed at the nodes of
     /// the evaluator's energy grid and interpolated between them by its INT,
-    /// except in a panel [`WIDE`] or wider, and beyond the grid, where they
+    /// except in a panel `WIDE` or wider, and beyond the grid, where they
     /// are computed from interpolated parameters.
     pub fn cross_sections(&self, energy: f64) -> CrossSections {
         let n = &self.nodes;
