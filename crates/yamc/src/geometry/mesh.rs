@@ -572,7 +572,7 @@ impl MeshGeometry {
     /// The cell containing `point`, asking `hint` (the cell the particle was
     /// last in) first. A point in no volume, inside the mesh's bounding box or
     /// outside it, is in the implicit complement: leaving the geometry is
-    /// found along the flight ([`MeshGeometry::distance_to_exit`]).
+    /// found along the flight (`MeshGeometry::distance_to_exit`).
     ///
     /// `None` for a point that is not a number, and for one the mesh cannot
     /// place: no volume is known to contain it and one that might cannot say,

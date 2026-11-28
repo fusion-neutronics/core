@@ -6,17 +6,17 @@
 //! here depends on the engine, the geometry, or the Python bindings.
 //!
 //! Modules:
-//! - [`bank`] -- per-history secondary-particle stack
-//! - [`interaction`] -- direction rotation, target-velocity sampling,
+//! - [`util::bank`] -- per-history secondary-particle stack
+//! - [`neutron::interaction`] -- direction rotation, target-velocity sampling,
 //!   fission-neutron sampling, the `SecondaryNeutrons` smallvec type
-//! - [`scatter`] -- elastic kinematics on a sampled angle
-//! - [`inelastic`] -- inelastic kinematics dispatching on a sampled reaction
-//!   product table
-//! - [`bremsstrahlung`] -- thick-target bremsstrahlung tabulation and
+//! - [`neutron::scatter`] -- elastic kinematics on a sampled angle
+//! - [`neutron::inelastic`] -- inelastic kinematics dispatching on a sampled
+//!   reaction product table
+//! - [`photon::bremsstrahlung`] -- thick-target bremsstrahlung tabulation and
 //!   photon sampling for charged secondaries
-//! - [`photon_production`] -- secondary photon sampling for (n,γ) and
+//! - [`photon::photon_production`] -- secondary photon sampling for (n,γ) and
 //!   similar reactions that publish a photon-product table
-//! - [`decay_photon_production`] -- D1S decay-photon sampling from
+//! - [`photon::decay_photon_production`] -- D1S decay-photon sampling from
 //!   activation chains
 //!
 //! Decay-chain enumeration, Bateman activity evolution, activity / decay heat

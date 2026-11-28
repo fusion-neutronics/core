@@ -16,7 +16,7 @@
 //!
 //! cubecl-spirv emits no valid f64 `cbrt` on the AMD/RADV path (see
 //! `polyfills`), so Cardano's formula for a resolvent cubic with one
-//! real root takes its cube root from [`cbrt_f64`], a product of
+//! real root takes its cube root from [`cbrt_f64()`], a product of
 //! repeated square roots refined by Newton. The three-real-root case is
 //! Newton from a bound on both sides, as in `yamc-geo`. The paper's own
 //! Newton polish of `phi0` follows, so the two solvers agree to
@@ -631,7 +631,7 @@ fn finite_cpu(x: f64) -> bool {
     ((x.to_bits() >> 52) & 0x7FF) != 0x7FF
 }
 
-/// CPU twin of [`cbrt_f64`].
+/// CPU twin of [`cbrt_f64()`].
 pub fn cbrt_f64_cpu(y: f64) -> f64 {
     if y <= 0.0 {
         return 0.0;
@@ -846,7 +846,7 @@ fn newton_refine_cpu(a: f64, b: f64, c: f64, d: f64, x: &mut [f64; 4]) {
     }
 }
 
-/// CPU twin of [`quartic_factors`].
+/// CPU twin of [`quartic_factors()`].
 pub fn quartic_factors_cpu(a_in: f64, b_in: f64, c_in: f64, d_in: f64) -> QuarticFactorsCpu {
     let (mut a, mut b, mut c, mut d) = (a_in, b_in, c_in, d_in);
     let mut scale = 1.0;
@@ -977,7 +977,7 @@ pub fn quartic_factors_cpu(a_in: f64, b_in: f64, c_in: f64, d_in: f64) -> Quarti
     }
 }
 
-/// CPU twin of [`quadratic_root_max`].
+/// CPU twin of [`quadratic_root_max()`].
 pub fn quadratic_root_max_cpu(alpha: f64, beta: f64) -> f64 {
     let disc = alpha * alpha - 4.0 * beta;
     if disc < 0.0 {
@@ -989,7 +989,7 @@ pub fn quadratic_root_max_cpu(alpha: f64, beta: f64) -> f64 {
     }
 }
 
-/// CPU twin of [`quadratic_root_min`].
+/// CPU twin of [`quadratic_root_min()`].
 pub fn quadratic_root_min_cpu(beta: f64, x_max: f64) -> f64 {
     if x_max != 0.0 {
         beta / x_max

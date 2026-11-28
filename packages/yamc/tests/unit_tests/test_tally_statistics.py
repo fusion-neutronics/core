@@ -14,7 +14,7 @@ import pytest
 import yamc
 
 
-def _build_model(particles=5000, score_void=False):
+def _build_model(particles=5000, score_void=False, tally=None):
     inner = yamc.Sphere(x0=0, y0=0, z0=0, radius=1.0)
     outer = yamc.Sphere(x0=0, y0=0, z0=0, radius=200.0, boundary="vacuum")
     breeder = yamc.Material(
@@ -29,7 +29,7 @@ def _build_model(particles=5000, score_void=False):
     source = yamc.NeutronSource(
         energy=yamc.sources.fusion_neutron_spectrum(20000.0), position=(0, 0, 0)
     )
-    tally = yamc.Tally(
+    tally = tally or yamc.Tally(
         name="tbr", cells=void if score_void else cell, scores=["H3-production"]
     )
     model = yamc.Model(
@@ -62,6 +62,20 @@ def test_aggregate_reliability_scalars_are_sane():
     assert math.isfinite(r.aggregate_kurtosis)
     assert r.aggregate_tail_slope >= 0.0
 
+
+
+def test_aggregate_fom_follows_the_per_history_total():
+    """The aggregate figure of merit is that of the tally total, so on a mesh
+    tally it follows the total's relative error, which keeps the correlation
+    between bins that one history scores together. Per-bin errors summed as if
+    the bins were independent put it three to four times too high."""
+    mesh = yamc.RegularRectangularMesh(
+        lower_left=[-60, -60, -60], upper_right=[60, 60, 60], shape=[6, 6, 6]
+    )
+    model, run_kwargs = _build_model(tally=yamc.Tally(name="flux", mesh=mesh, scores=["flux"]))
+    r = model.simulate_transport(**run_kwargs)["flux"]
+    expected = 1.0 / (r.aggregate_relative_error**2 * r.elapsed_secs)
+    assert r.aggregate_figure_of_merit == pytest.approx(expected, rel=1e-9)
 
 def test_statistical_checks_verdict():
     c = _tbr_result().statistical_checks

@@ -275,7 +275,7 @@ pub struct FastXSGrid {
     /// This separates n_gamma from other absorption (n,p), (n,alpha), etc.
     pub xs_ngamma: F64Buffer,
     /// Pre-computed photon production cross-section at each energy point.
-    /// photon_prod[i] = SUM over reactions { SUM over photon products { reaction_xs[i] * yield(E[i]) } }
+    /// `photon_prod[i] = SUM over reactions { SUM over photon products { reaction_xs[i] * yield(E[i]) } }`
     pub photon_prod: F64Buffer,
     /// MT numbers of photon-producing reactions, parallel to `photon_rxn_reactions`.
     pub photon_rxn_mt_numbers: Vec<i32>,
@@ -981,7 +981,7 @@ pub fn is_scattering_mt(mt: i32) -> bool {
 /// MT 18 = total fission, MT 19 = first-chance, MT 20 = second-chance,
 /// MT 21 = third-chance, MT 38 = fourth-chance fission
 ///
-/// Tests membership of [`crate::reaction_product::energy::FISSION_CHI_MTS`],
+/// Tests membership of `crate::reaction_product::energy::FISSION_CHI_MTS`,
 /// which is the one definition of the set, so this predicate and the per-channel
 /// chi cache cannot come to disagree about which MTs are fission.
 #[inline]

@@ -3,7 +3,7 @@
 //!
 //! Bracket the incident energy between two `km_energy_grid` points,
 //! stochastically pick one bracketing distribution (via the shared
-//! [`pick_energy_bracket`](crate::common::sampling::energy_bracket::pick_energy_bracket)),
+//! [`pick_energy_bracket`](crate::common::sampling::energy_bracket::pick_energy_bracket())),
 //! invert the chosen slice's outgoing-energy CDF (histogram / discrete-prefix
 //! or LinLin quadratic), stretch the result into the incident-energy
 //! interpolated bounds, then sample `mu` from the Kalbach-Mann angular formula
@@ -26,8 +26,8 @@
 //!
 //! The mu formula needs `sinh(a)`, `exp(+/-a)`, and `ln`. There is no GPU
 //! `sinh` polyfill, so -- exactly as the inline kernel did -- `sinh(a)` is
-//! formed from `(exp(a) - exp(-a)) / 2` using the [`exp_f64`] polyfill, and
-//! the `arcsinh`/log-form mu uses [`ln_f64`]. Because `e_out` and `mu` flow
+//! formed from `(exp(a) - exp(-a)) / 2` using the [`exp_f64()`] polyfill, and
+//! the `arcsinh`/log-form mu uses [`ln_f64()`]. Because `e_out` and `mu` flow
 //! through the `exp`/`ln` polyfills and one `sqrt`, the kernel is not
 //! bit-exact against the `flat` sampler for those: the parity test
 //! uses ~1e-9 relative for `e_out` and ~1e-9 absolute for `mu`, while the PCG
@@ -38,7 +38,7 @@ use crate::common::pcg32::expand_seed;
 use crate::common::polyfills::{exp_f64, ln_f64};
 use cubecl::prelude::*;
 
-/// Result of [`sample_kalbach_mann`]: the sampled outgoing energy (apply only
+/// Result of [`sample_kalbach_mann()`]: the sampled outgoing energy (apply only
 /// when `e_valid == 1`), the sampled scattering cosine `mu` (apply only when
 /// `mu_valid == 1`), and the advanced PCG-32 state.
 ///

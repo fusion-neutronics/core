@@ -79,7 +79,7 @@ pub struct TransmuteStep {
 /// for `(n,n')`, which has no chain total of its own. And MT=5, which is the
 /// `(n,X)` total where the chain carries that reaction and is read for every
 /// parent so the share whose residuals it does not model can be reported (see
-/// [`crate::branching_rule::measure_unmodelled_mt5`]).
+/// `crate::branching_rule::measure_unmodelled_mt5`).
 pub fn activation_mts(
     chain: &HashMap<String, yani::ChainNuclide>,
     branch: &BranchTable,
@@ -4823,6 +4823,8 @@ fn refine_chain(
 
 /// What the coupled tally measured beside the partials, per list, for the
 /// guards and the report (see [`TransmutationTallies::get_branching_diagnostics`]).
+///
+/// [`TransmutationTallies::get_branching_diagnostics`]: crate::TransmutationTallies::get_branching_diagnostics
 #[derive(Clone, Debug, Default)]
 pub struct CoupledDiagnostics {
     /// `parent -> kind -> (clipped, held)` production rates, on the footing of
@@ -4834,7 +4836,7 @@ pub struct CoupledDiagnostics {
     pub mt5: HashMap<String, f64>,
     /// The tallied material's composition, atoms per barn-cm, which the
     /// unmodelled MT=5 warning weighs parents by (see
-    /// [`crate::branching_rule::unmodelled_mt5_warning`]). Empty emits no
+    /// `crate::branching_rule::unmodelled_mt5_warning`). Empty emits no
     /// warning; [`CoupledDiagnostics::with_material`] fills it.
     pub densities: HashMap<String, f64>,
     /// Where each of the material's nuclides' cross sections came from, for
@@ -4937,7 +4939,7 @@ fn coupled_list_rates(
 /// a state's share of its reaction's transport total for every list on one of
 /// the material's own nuclides, and the `(n,n')` partials folded from the
 /// union-grid flux moments for every other chain parent. What remains is what
-/// the multigroup fold does with its folded lists ([`fold_branching_into_chain`]),
+/// the multigroup fold does with its folded lists (`fold_branching_into_chain`),
 /// with the tallied totals in place of the collapsed ones.
 ///
 /// `diagnostics` carries the clipped and held production, which the nominal

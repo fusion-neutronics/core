@@ -82,7 +82,7 @@ pub const DECAY_COUNT_MASK: u32 = (1u32 << DECAY_SPECTRUM_SHIFT) - 1;
 #[derive(Debug, Clone, Default)]
 pub struct MaterialDecayTable {
     /// Aggregate decay photon-production macro XS on the shared grid (length
-    /// `n_grid`). `photon_prod[g] == sum over this material's channels of
+    /// `n_grid`). `photon_prod[g]` == sum over this material's channels of
     /// `ch_xs[ch][g]`.
     pub photon_prod: Vec<f64>,
     /// Per-channel macroscopic weighted reaction XS rows (`n_grid` each),
@@ -99,7 +99,7 @@ pub struct MaterialDecayTable {
     /// band factor for that channel, as the CPU `sample_decay_photons` does.
     /// One per channel.
     pub ch_channel_key: Vec<u32>,
-    /// Per-channel spectrum energies [eV], concatenated channel-major, laid
+    /// Per-channel spectrum energies (eV), concatenated channel-major, laid
     /// out as the module docs describe. Channel `c` starts at `ch_e_base[c]`.
     pub ch_energies: Vec<f64>,
     /// Per-channel cumulative intensity CDF, and for a continuum its
@@ -170,7 +170,7 @@ pub struct DecayPhotonInputs {
     /// concatenated. Channel `c` (global) reads `ch_e_meta[c*2]` /
     /// `ch_e_meta[c*2 + 1]`.
     pub ch_e_meta: Vec<u32>,
-    /// Per-channel spectrum energies [eV], concatenated.
+    /// Per-channel spectrum energies (eV), concatenated.
     pub ch_energies: Vec<f64>,
     /// Per-channel cumulative intensity CDF and continuum densities,
     /// concatenated, parallel to `ch_energies`.

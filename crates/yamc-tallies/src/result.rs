@@ -719,27 +719,29 @@ impl TallyResult {
             })
             .collect();
 
-        // Aggregate: use the bin-summed mean and std-error (mirrors
-        // `Tally::total_mean` / `total_std`). For a scalar tally this
-        // equals the only bin's FOM; for a mesh tally it's the FOM of
-        // the integrated total response.
-        let total_mean: f64 = self.mean.iter().sum();
-        // Bin scores are independent across batches for the score
-        // patterns used here, so var(total) = sum_over_bins(var_of_mean).
-        // We derive var-of-mean from relative_error and mean:
-        // var_of_mean = (rel_err × mean)².
-        let var_total: f64 = self
-            .mean
-            .iter()
-            .zip(self.relative_error.iter())
-            .map(|(&m, &re)| {
-                let std = re * m.abs();
-                std * std
-            })
-            .sum();
-        let total_std = var_total.sqrt();
-        self.aggregate_figure_of_merit = if total_mean.abs() > 0.0 && total_std > 0.0 {
-            let rel_total = total_std / total_mean.abs();
+        // Aggregate: the FOM of the tally total, from the relative error of the
+        // per-history total, which keeps the correlation between bins that one
+        // history scores together. Summing the per-bin variances as if the bins
+        // were independent overstated it three to four times on a mesh tally.
+        // Results without the per-history total (MPI runs, results read back
+        // from Arrow) still fall back to that sum.
+        let rel_total = if self.agg.n >= 2 {
+            self.aggregate_relative_error()
+        } else {
+            let total_mean: f64 = self.mean.iter().sum();
+            let var_total: f64 = self
+                .mean
+                .iter()
+                .zip(self.relative_error.iter())
+                .map(|(&m, &re)| (re * m.abs()).powi(2))
+                .sum();
+            if total_mean.abs() > 0.0 {
+                var_total.sqrt() / total_mean.abs()
+            } else {
+                0.0
+            }
+        };
+        self.aggregate_figure_of_merit = if rel_total > 0.0 && rel_total.is_finite() {
             1.0 / (rel_total * rel_total * elapsed_secs)
         } else {
             0.0
@@ -1301,8 +1303,8 @@ mod tests {
     }
 
     /// `with_fom(elapsed)` populates `figure_of_merit` per bin to
-    /// `1 / (rel_err² × elapsed)` and `aggregate_figure_of_merit`
-    /// using the integrated total mean / total std-error.
+    /// `1 / (rel_err² × elapsed)`, and, for a result without the per-history
+    /// total, `aggregate_figure_of_merit` from the summed per-bin variances.
     #[test]
     fn with_fom_computes_standard_definition() {
         let mut tally = Tally::new();
@@ -1339,6 +1341,39 @@ mod tests {
             "aggregate FOM {} vs expected {}",
             result.aggregate_figure_of_merit,
             expected_aggregate
+        );
+    }
+
+    /// With the per-history total recorded, the aggregate FOM comes from its
+    /// relative error, not from per-bin variances summed as if the bins were
+    /// independent: two bins that one history scores together have a total
+    /// whose variance is larger than the sum.
+    #[test]
+    fn with_fom_aggregate_uses_the_per_history_total() {
+        let mut tally = Tally::new();
+        tally.scores = vec![Score::Flux(FluxScore)];
+        tally.reset_accumulation();
+        let mut result = Arc::new(tally).finalize();
+        result.mean = vec![1.0, 4.0];
+        result.relative_error = vec![0.1, 0.05];
+        // 100 histories whose total has mean 5 and variance of the mean 0.09
+        // (std error 0.3, above the 0.2236 of independent bins).
+        result.agg = crate::welford::AggMoments {
+            n: 100,
+            mean: 5.0,
+            m2: 0.09 * 99.0 * 100.0,
+            m3: 0.0,
+            m4: 0.0,
+        };
+        let elapsed = 4.0;
+        let result = result.with_fom(elapsed);
+        let rel = result.aggregate_relative_error();
+        assert!((rel - 0.06).abs() < 1e-12);
+        let expected = 1.0 / (rel * rel * elapsed);
+        assert!(
+            (result.aggregate_figure_of_merit - expected).abs() < 1e-9 * expected,
+            "aggregate FOM {} vs {expected}",
+            result.aggregate_figure_of_merit
         );
     }
 

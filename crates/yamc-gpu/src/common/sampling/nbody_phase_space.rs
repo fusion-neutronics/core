@@ -35,7 +35,7 @@
 use crate::common::polyfills::{cos_f64, ln_f64};
 use cubecl::prelude::*;
 
-/// Result of [`sample_nbody_phase_space`]: the sampled outgoing energy (apply
+/// Result of [`sample_nbody_phase_space()`]: the sampled outgoing energy (apply
 /// only when `e_valid == 1`), the isotropic scattering cosine `mu` (apply only
 /// when `mu_valid == 1`), and the advanced PCG-32 state.
 ///

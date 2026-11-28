@@ -6,7 +6,7 @@
 //! reads and nothing more. It needs no NJOY, so unlike the transport side it
 //! can run from a bare `pip install`.
 //!
-//! Written against [`endf::Chain`] rather than [`yani`]'s own chain types, for
+//! Written against [`endf::Chain`] rather than `yani`'s own chain types, for
 //! two reasons that are not stylistic:
 //!
 //! * `endf::chain::ReactionPath` carries `q_value`, which the yani types do
@@ -170,7 +170,7 @@ pub struct SourceRow {
     pub normalization: (f64, f64),
     /// Per line, in the units of `intensities`. `None` on a `tabular` row.
     pub intensity_uncertainties: Option<Vec<f64>>,
-    /// Per line dER [eV]. `None` on a `tabular` row.
+    /// Per line dER (eV). `None` on a `tabular` row.
     pub energy_uncertainties: Option<Vec<f64>>,
     /// The spectrum's stated covariance, where it has one.
     pub covariance: Option<endf::SpectrumCovariance>,

@@ -18,6 +18,9 @@
 //! where `n_discrete` points of a continuous spectrum are sampled as discrete
 //! lines and the real lines are smeared, which is a plausible-looking spectrum
 //! with the wrong shape.
+//!
+//! [`Discrete`]: endf::univariate::Discrete
+//! [`Tabular`]: endf::univariate::Tabular
 
 use endf::univariate::{Interpolation, Univariate};
 

@@ -1,8 +1,8 @@
 //! Survival-biasing (implicit-capture) runtime parameters for the neutron
 //! transport kernel.
 //!
-//! Mirrors the gate-flag idiom of [`super::CoupledPhotonInputs`] /
-//! [`super::DecayPhotonInputs`]: a single small buffer carries a runtime
+//! Mirrors the gate-flag idiom of `CoupledPhotonInputs` /
+//! `DecayPhotonInputs`: a single small buffer carries a runtime
 //! enable flag plus the weight parameters, so the kernel stays
 //! byte-identical to today's analog run when the flag is `0` (the
 //! reaction-selection block then takes the same analog absorption-kill

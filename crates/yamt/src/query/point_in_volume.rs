@@ -52,7 +52,7 @@ const PARITY_MIN_T: [f64; 2] = [0.0, RAY_MIN_T];
 /// Fires a ray from the point and counts surface crossings: odd is inside,
 /// even outside. A ray that grazes a facet, or runs through or within
 /// round-off of an edge or vertex, cannot be counted, and the next direction
-/// is tried (see [`PARITY_MIN_T`] for a point on an edge or vertex). Outside
+/// is tried (see `PARITY_MIN_T` for a point on an edge or vertex). Outside
 /// when no direction can be counted.
 pub fn point_in_volume(
     surface_bvh: &Bvh,
@@ -90,7 +90,7 @@ pub fn point_in_volume(
 /// volume, `+1` outward and `-1` inward). Parity and facing disagree near a
 /// folded or flipped facet, or where the ray slips through a crack, so that
 /// direction is passed over too. When no direction gives a consistent answer
-/// (on either pass of [`PARITY_MIN_T`]) the point cannot be placed in or out
+/// (on either pass of `PARITY_MIN_T`) the point cannot be placed in or out
 /// of the volume, and the caller is told so instead of being told it is
 /// outside.
 pub fn point_in_volume_checked(

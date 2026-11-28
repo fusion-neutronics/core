@@ -3,12 +3,12 @@
 //!
 //! Bracket the incident energy between two `corr_energy_grid` points,
 //! stochastically pick one bracketing distribution (via the shared
-//! [`pick_energy_bracket`](crate::common::sampling::energy_bracket::pick_energy_bracket)),
+//! [`pick_energy_bracket`](crate::common::sampling::energy_bracket::pick_energy_bracket())),
 //! invert the chosen slice's outgoing-energy CDF, then stretch the result into
 //! the incident-energy-interpolated bounds. This is the E_out half of the
 //! kernel's `eout_kind == EOUT_KIND_CORRELATED (2)` branch; the matching `mu`
 //! sample is a per-`(E_in, E_out)` angular sub-table that the caller draws with
-//! the shared [`invert_angle_cdf`](crate::common::sampling::angle_cdf_invert::invert_angle_cdf),
+//! the shared [`invert_angle_cdf`](crate::common::sampling::angle_cdf_invert::invert_angle_cdf()),
 //! keyed by the `mu_idx_off` this sampler returns. Splitting the law here keeps
 //! both shared CDF inverters single-sourced while still preserving the exact
 //! `(E_out CDF draw, then mu draw)` RNG order at the call site.
@@ -30,7 +30,7 @@
 use crate::neutron::xs::constants::ANGLE_INTERP_LINLIN;
 use cubecl::prelude::*;
 
-/// Result of [`sample_correlated_eout`]: the sampled outgoing energy, the flat
+/// Result of [`sample_correlated_eout()`]: the sampled outgoing energy, the flat
 /// offset into the `corr_mu_*` buffers' index dimension for the matching
 /// angular sub-table (`x_off + j`, valid only when `valid == 1`), a `valid`
 /// flag (`1` when the chosen E_in slice had >= 2 outgoing points and both

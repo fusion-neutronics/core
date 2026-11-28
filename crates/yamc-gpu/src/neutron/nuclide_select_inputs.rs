@@ -9,18 +9,18 @@
 //! large per-collision energy loss is averaged away against oxygen.
 //!
 //! This struct bundles the three buffers the kernel needs into a single launch
-//! parameter (the [`super::CoupledPhotonInputs`] idiom), so adding the feature
+//! parameter (the `CoupledPhotonInputs` idiom), so adding the feature
 //! costs one public API argument and a fixed handful of kernel storage-buffer
 //! bindings:
 //!
-//! - [`Self::nuc_macro_total`] -- per-(material, nuclide) macroscopic total xs
-//!   on the shared grid, flat `[n_slab x n_grid]` where
+//! - [`NuclideSelectInputs::nuc_macro_total`] -- per-(material, nuclide)
+//!   macroscopic total xs on the shared grid, flat `[n_slab x n_grid]` where
 //!   `n_slab = sum_mat n_nuclides(mat)`. This is the per-collision selection
 //!   weight table (cumulative-sum walk against the collision-energy interpolant)
 //!   and is built by [`crate::extract_per_nuclide_macro_total_xs`] per material,
 //!   concatenated material-major.
-//! - [`Self::nuc_awr`] -- per-(material, nuclide) AWR, flat `[n_slab]`.
-//! - [`Self::mat_nuclide_meta`] -- stride-2 `[offset, count]` per material:
+//! - [`NuclideSelectInputs::nuc_awr`] -- per-(material, nuclide) AWR, flat `[n_slab]`.
+//! - [`NuclideSelectInputs::mat_nuclide_meta`] -- stride-2 `[offset, count]` per material:
 //!   `mat_nuclide_meta[mat*2]` is the slab base of the material's first nuclide
 //!   row, `mat_nuclide_meta[mat*2 + 1]` is its nuclide count.
 //!
@@ -29,7 +29,7 @@
 //! When a material has exactly one nuclide (`count == 1`) the kernel and the CPU
 //! twin SKIP the selection draw entirely -- the nuclide is trivially the only
 //! one, so no extra random is consumed and the RNG stream is byte-identical to
-//! a kernel without nuclide selection. [`Self::single_nuclide`] builds the
+//! a kernel without nuclide selection. [`NuclideSelectInputs::single_nuclide`] builds the
 //! degenerate one-nuclide-per-material layout used by every fixture / caller that
 //! does not thread real per-nuclide data; with it, selection is a no-op and the
 //! results are bit-for-bit those of a single-nuclide kernel.

@@ -3534,6 +3534,15 @@ class Model:
             ``variance_reduction=[ww]``; pass a returned list straight through as
             ``variance_reduction=windows``.
         """
+    def weight_window_warnings(self) -> builtins.list[builtins.str]:
+        r"""
+        Problems with the model's weight windows that show before any transport,
+        as the messages a run prints as warnings: windows that sit more than ten
+        times below or above the source weight where most source particles are
+        born, energy bins that miss most source particles, and a weight floor
+        above some lower bounds. An empty list when there is nothing to say;
+        ``ValueError`` when a run would refuse the model.
+        """
     def estimate_density_reduction(self, generator: WeightWindowGeneratorDeGVR) -> tuple[builtins.float, builtins.float]:
         r"""
         Estimate the auto DeGVR density-reduction factor N and the optical depth
@@ -6216,7 +6225,11 @@ class TallyResult:
     @property
     def aggregate_figure_of_merit(self) -> builtins.float:
         r"""
-        Tally-level scalar figure of merit of the integrated response.
+        Figure of merit of the tally total, ``1 / (aggregate_relative_error**2
+        * elapsed_secs)``, so it keeps the correlation between bins that one
+        history scores together. Results without the per-history total (MPI
+        runs, results read back with ``from_arrow``) sum the per-bin variances
+        instead, which overstates it for a mesh tally.
         """
     @property
     def aggregate_mean(self) -> builtins.float:

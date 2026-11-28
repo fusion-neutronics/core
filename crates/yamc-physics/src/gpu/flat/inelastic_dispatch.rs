@@ -96,7 +96,7 @@ pub const EOUT_KIND_MAXWELL: u32 = 6;
 /// so the slot data lives in the parallel `watt_*` buffers.
 ///
 /// Sampler: draw `w` from a Maxwell with parameter `a` (3 RNG
-/// draws), draw `r4` uniform on [0,1] for the correction, build
+/// draws), draw `r4` uniform on `[0,1]` for the correction, build
 /// `E = w + a²b/4 + (2 r4 - 1) · sqrt(a²b · w)`, retry until
 /// `E ≤ E_in - u`. Bit-matches `sample_watt_spectrum_params` in
 /// `yamc-nuclide::sampling`.

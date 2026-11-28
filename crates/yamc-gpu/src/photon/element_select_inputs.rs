@@ -16,13 +16,13 @@
 //! per ELEMENT (concatenated material-major) and this table both weights the
 //! selection draw and maps a material to its element slab range.
 //!
-//! - [`Self::elem_macro_total`] -- per-(element, energy) macroscopic total xs
-//!   on the shared grid, flat `[n_slab x n_grid]` where
+//! - [`PhotonElementSelectInputs::elem_macro_total`] -- per-(element, energy)
+//!   macroscopic total xs on the shared grid, flat `[n_slab x n_grid]` where
 //!   `n_slab = sum_mat n_elements(mat)`. This is the per-collision selection
 //!   weight table (cumulative-sum walk against the collision-energy
 //!   interpolant), element-major within a material and concatenated
 //!   material-major.
-//! - [`Self::mat_elem_meta`] -- stride-2 `[offset, count]` per material:
+//! - [`PhotonElementSelectInputs::mat_elem_meta`] -- stride-2 `[offset, count]` per material:
 //!   `mat_elem_meta[mat*2]` is the element-slab base of the material's first
 //!   element row, `mat_elem_meta[mat*2 + 1]` is its element count.
 //!
@@ -35,6 +35,9 @@
 //! slab index then equals `offset`, which is that material's only element, so
 //! the form-factor / relaxation lookups are unchanged. Every single-element
 //! material in the verification suite is therefore bit-identical.
+//!
+//! [`PhotonElementSelectInputs::elem_macro_total`]: crate::photon::element_select_inputs::PhotonElementSelectInputs::elem_macro_total
+//! [`PhotonElementSelectInputs::mat_elem_meta`]: crate::photon::element_select_inputs::PhotonElementSelectInputs::mat_elem_meta
 
 /// Packed per-collision element-selection inputs (see module docs). Built once
 /// per launch and passed by reference into the host launcher and the CPU twin.

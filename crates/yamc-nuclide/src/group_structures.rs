@@ -70,7 +70,7 @@ pub const CCFE_24_PHOTON: [f64; 25] = [
 ///
 /// A 709-group neutron structure (710 boundaries) spanning 1e-5 eV to 1 GeV,
 /// from the UKAEA CCFE fusion activation group set (matches OpenMC's
-/// `CCFE-709`). See https://fispact.ukaea.uk/wiki/CCFE-709_group_structure
+/// `CCFE-709`). See <https://fispact.ukaea.uk/wiki/CCFE-709_group_structure>
 ///
 /// Energy range: 1.0e-5 eV to 1.0e9 eV
 // These are tabulated energy boundaries (eV); some happen to land near math

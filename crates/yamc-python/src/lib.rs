@@ -7,6 +7,11 @@
     clippy::format_in_format_args,
     clippy::manual_range_contains
 )]
+// Most doc comments here are Python docstrings, rendered by mkdocstrings and
+// copied into the .pyi stubs. In them `list[float]` is a type, not an
+// intra-doc link, and text indented under a section such as `Returns:` or
+// `Examples:` is not a Rust code block.
+#![allow(rustdoc::broken_intra_doc_links, rustdoc::invalid_rust_codeblocks)]
 
 use pyo3::prelude::*;
 use pyo3::pymodule;

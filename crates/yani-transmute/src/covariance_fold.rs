@@ -32,7 +32,7 @@
 //! A channel whose covariance the tape derives from other reactions (an NC
 //! block with LTY=0) is folded the same way, through the reactions it names:
 //! its rate is a sum of theirs over the block's energy range, so `r_i` becomes
-//! a sum of their partial rates, each against their own blocks. See [`Term`].
+//! a sum of their partial rates, each against their own blocks. See `Term`.
 //!
 //! # What the rate actually is
 //!
@@ -180,7 +180,7 @@ pub struct Coverage {
     /// Per nuclide, its NC blocks (a covariance derived from other reactions)
     /// that could not be derived, not consumed.
     ///
-    /// An LTY=0 block is derived (see [`Term`]) unless it names a reaction the
+    /// An LTY=0 block is derived (see `Term`) unless it names a reaction the
     /// evaluation has no cross section for, or one whose own derivation leads
     /// back to it, or it sits in a cross-reaction subsection, which ENDF-102
     /// 33.3.2 a.3 does not allow, or its list of reactions is empty or does
@@ -352,9 +352,9 @@ pub struct Coverage {
     /// the SUM of its components and none for each of them. Two uses of it are
     /// exact, and the fold makes both. A lump with one component is that
     /// component, and its blocks are read as the component's
-    /// ([`single_component_lumps`]). A lump an LTY=0 block names is folded
+    /// (`single_component_lumps`). A lump an LTY=0 block names is folded
     /// through that derivation, with its cross section built as the sum of
-    /// its components' ([`lump_cross_sections`]): ENDF/B-VIII.1 and TENDL-2017
+    /// its components' (`lump_cross_sections`): ENDF/B-VIII.1 and TENDL-2017
     /// U235 and U238 state MT 4 only as MT 51 plus MT 851, the sum of MT 52 to
     /// 91. Anywhere else, giving the sum's covariance to one component, or
     /// splitting it among several, would need an assumption the evaluation
@@ -2556,6 +2556,8 @@ fn fold_nuclide(
 /// ([`CrossMaterial::applied`]), which are counted apart from those it does
 /// not. Each nuclide is folded on its own either way, since such a block
 /// correlates two nuclides and changes neither one's covariance.
+///
+/// [`CrossMaterial::applied`]: crate::cross_material::CrossMaterial::applied
 pub fn fold_rate_covariance(
     material: &Material,
     chain: &std::collections::HashMap<String, ChainNuclide>,
@@ -2788,7 +2790,7 @@ pub struct Projection {
 /// reach through this evaluation, not only those one spectrum's pruned chain
 /// reaches, so the field, and with it a replica's draw, is the same whichever
 /// spectra and materials read it. Blocks are consumed under exactly
-/// [`fold_nuclide`]'s rules.
+/// `fold_nuclide`'s rules.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CellField {
     pub relative_cells: Vec<Cell>,
@@ -2816,7 +2818,7 @@ pub struct DamageDeposits {
     /// damage energy are not activation channels, so an activation load does
     /// not hold them.
     pub nuclide: std::sync::Arc<yamc_nuclide::Nuclide>,
-    /// Per non-redundant partial, its damage energy per reaction [eV] on the
+    /// Per non-redundant partial, its damage energy per reaction \[eV\] on the
     /// nuclide's grid at that temperature
     /// ([`yamc_nuclide::deposit::deposits`]).
     pub deposits: BTreeMap<i32, Vec<f64>>,
@@ -3003,7 +3005,7 @@ pub enum Read {
 /// Over `range`, an LTY=0 block states `σ_MT = Σ c_i σ_MTi` (ENDF-102
 /// 33.2.2.1), so a draw that moves each `σ_MTi` by `δσ_MTi` moves `σ_MT` by
 /// `Σ c_i δσ_MTi`. This is one such `c_i δσ_MTi`, expanded as the fold
-/// expands it ([`channel_terms`]): a named reaction derived in its turn
+/// expands it (`channel_terms`): a named reaction derived in its turn
 /// contributes its own named reactions, with the coefficients multiplied and
 /// the ranges intersected. ENDF/B-VIII.1 Pb208 elastic above 1.5 MeV is
 /// `σ_1 - σ_4 - σ_16 - σ_102`, and has no cells of its own there.

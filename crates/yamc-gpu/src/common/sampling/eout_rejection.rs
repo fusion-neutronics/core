@@ -171,7 +171,7 @@ pub fn watt_rejection_draw(watt_a_val: f64, a2b: f64, cap_e: f64, state_in: u64)
     }
 }
 
-/// Result of [`watt_fission_draw`]: the (un-clamped) outgoing energy and the
+/// Result of [`watt_fission_draw()`]: the (un-clamped) outgoing energy and the
 /// advanced PCG-32 state. The fission-spectrum Watt fallback is a SINGLE
 /// unconditional draw (no rejection loop and no `w > 0` guard), so there is no
 /// `accepted` flag; the caller applies the `<= 0 -> 1e-6` floor.
@@ -277,8 +277,8 @@ pub fn interp_on_grid(
     out
 }
 
-/// Evaporation (Law 9) at a known `theta`: up to [`MAX_ATTEMPTS`]
-/// [`evaporation_rejection_draw`]s below the cap `E_in - u`. No draws when
+/// Evaporation (Law 9) at a known `theta`: up to `MAX_ATTEMPTS`
+/// [`evaporation_rejection_draw`](evaporation_rejection_draw())s below the cap `E_in - u`. No draws when
 /// `theta <= 0` or `e_in <= u`.
 #[cube]
 pub fn evaporation_rejection(theta_val: f64, e_in: f64, u: f64, state_in: u64) -> LawSample {
@@ -310,8 +310,8 @@ pub fn evaporation_rejection(theta_val: f64, e_in: f64, u: f64, state_in: u64) -
     }
 }
 
-/// Maxwell (Law 7) at a known `theta`: up to [`MAX_ATTEMPTS`]
-/// [`maxwell_rejection_draw`]s below the cap `E_in - u`. No draws when
+/// Maxwell (Law 7) at a known `theta`: up to `MAX_ATTEMPTS`
+/// [`maxwell_rejection_draw`](maxwell_rejection_draw())s below the cap `E_in - u`. No draws when
 /// `theta <= 0` or `e_in <= u`.
 #[cube]
 pub fn maxwell_rejection(theta_val: f64, e_in: f64, u: f64, state_in: u64) -> LawSample {
@@ -342,8 +342,8 @@ pub fn maxwell_rejection(theta_val: f64, e_in: f64, u: f64, state_in: u64) -> La
     }
 }
 
-/// Watt (Law 11, inelastic) at known `a`, `b`: up to [`MAX_ATTEMPTS`]
-/// [`watt_rejection_draw`]s below the cap `E_in - u`. No draws when `a <= 0`
+/// Watt (Law 11, inelastic) at known `a`, `b`: up to `MAX_ATTEMPTS`
+/// [`watt_rejection_draw`](watt_rejection_draw())s below the cap `E_in - u`. No draws when `a <= 0`
 /// or `e_in <= u`.
 #[cube]
 pub fn watt_rejection(a_val: f64, b_val: f64, e_in: f64, u: f64, state_in: u64) -> LawSample {
@@ -377,7 +377,7 @@ pub fn watt_rejection(a_val: f64, b_val: f64, e_in: f64, u: f64, state_in: u64) 
 
 /// `yamc_physics::gpu::flat::evaporation::sample_evaporation` on the GPU:
 /// `theta(E_in)` from the `n`-point grid at `grid[g_off]` and the theta row at
-/// `theta[theta_off]`, then [`evaporation_rejection`]. Requires `n >= 1`.
+/// `theta[theta_off]`, then [`evaporation_rejection()`]. Requires `n >= 1`.
 #[cube]
 #[allow(clippy::too_many_arguments)]
 pub fn sample_evaporation_law(
@@ -396,7 +396,7 @@ pub fn sample_evaporation_law(
 
 /// `yamc_physics::gpu::flat::maxwell::sample_maxwell` on the GPU: `theta(E_in)`
 /// from the `n`-point grid and theta row both at offset `g_off`, then
-/// [`maxwell_rejection`]. Requires `n >= 1`.
+/// [`maxwell_rejection()`]. Requires `n >= 1`.
 #[cube]
 pub fn sample_maxwell_law(
     e_in: f64,
@@ -413,7 +413,7 @@ pub fn sample_maxwell_law(
 
 /// `yamc_physics::gpu::flat::watt::sample_watt_inelastic` on the GPU: `a(E_in)`
 /// and `b(E_in)` from the `n`-point grid at offset `g_off` and the interleaved
-/// `ab` buffer (`a` at `2 * i`, `b` at `2 * i + 1`), then [`watt_rejection`].
+/// `ab` buffer (`a` at `2 * i`, `b` at `2 * i + 1`), then [`watt_rejection()`].
 /// Requires `n >= 1`.
 #[cube]
 pub fn sample_watt_law(
@@ -445,7 +445,7 @@ fn cpu_draw_uniform(state_in: u64) -> (f64, u64) {
     ((rand as f64 + 1.0) * (1.0 / 4_294_967_297.0), state)
 }
 
-/// CPU twin of [`watt_fission_draw`]. Returns `(e_out, state)`.
+/// CPU twin of [`watt_fission_draw()`]. Returns `(e_out, state)`.
 pub fn watt_fission_draw_cpu(watt_a: f64, watt_b: f64, state_in: u64) -> (f64, u64) {
     let (xw1, state) = cpu_draw_uniform(state_in);
     let (xw2, state) = cpu_draw_uniform(state);

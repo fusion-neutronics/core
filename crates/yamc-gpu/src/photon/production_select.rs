@@ -37,6 +37,9 @@
 //! selection walk takes the collision bracket `[idx_lo, idx_hi]` and the
 //! linear-E factor `frac`, and both samplers are wired into the production
 //! neutron kernel so emitted photons append to the device particle bank (P4).
+//!
+//! [`sample_photon_product`]: crate::photon::production_select::sample_photon_product()
+//! [`sample_photon_count`]: crate::photon::production_select::sample_photon_count()
 
 use crate::GpuContext;
 use cubecl::prelude::*;
@@ -215,7 +218,7 @@ pub fn band_channel_factor(
 /// weight is the rxn-xs * yield product linearly interpolated in the
 /// collision bracket `[idx_lo, idx_hi]` (factor `frac`), times, when a band
 /// fired (`band == 1`), the band factor of the product's nuclide and channel
-/// ([`band_channel_factor`]), as the CPU `sample_photon_product` weights a
+/// ([`band_channel_factor()`]), as the CPU `sample_photon_product` weights a
 /// product by `CollisionChannels::factor`. Factors are recomputed once per
 /// nuclide: a material's products are nuclide-major.
 #[cube]
@@ -317,11 +320,11 @@ pub fn photon_product_total(
 }
 
 /// `#[cube]` photon-product selection walk: see [`sample_photon_product_cpu`]
-/// for the contract. `total` and `last_pos` are [`photon_product_total`] of
+/// for the contract. `total` and `last_pos` are [`photon_product_total()`] of
 /// the same collision, computed once per collision rather than per photon.
-/// Takes `seed` by value and makes ONE [`draw_uniform`] draw; returns the
+/// Takes `seed` by value and makes ONE [`draw_uniform()`] draw; returns the
 /// selected PRODUCT index (GLOBAL). The weights, band factors included, are
-/// those [`photon_product_total`] summed.
+/// those [`photon_product_total()`] summed.
 #[cube]
 #[allow(clippy::too_many_arguments)]
 pub fn sample_photon_product(
@@ -591,7 +594,7 @@ pub fn sample_photon_count_cpu(photon_prod_g: f64, total_g: f64, seed: u64) -> u
 }
 
 /// `#[cube]` photon-count sampler: see [`sample_photon_count_cpu`]. Takes
-/// `seed` by value and makes ONE [`draw_uniform`] draw; returns the photon
+/// `seed` by value and makes ONE [`draw_uniform()`] draw; returns the photon
 /// count.
 #[cube]
 pub fn sample_photon_count(photon_prod_g: f64, total_g: f64, seed: u64) -> u32 {

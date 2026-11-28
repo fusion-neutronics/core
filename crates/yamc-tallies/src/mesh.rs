@@ -362,7 +362,7 @@ impl RegularRectangularMesh {
         }
     }
 
-    /// Materialised version of [`bins_crossed_iter`]. Retained for backwards
+    /// Materialised version of [`Self::bins_crossed_iter`]. Retained for backwards
     /// compatibility and for tests that want a `Vec`. Hot-path code should
     /// use the iterator form directly to avoid the heap allocation.
     pub fn bins_crossed(

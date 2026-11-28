@@ -392,8 +392,8 @@ pub(crate) const FLUX_STREAM: u32 = 0xF10D_5EED;
 /// Rates with no per-group terms are passed through unchanged, which is what a
 /// nuclide whose cross sections were never collapsed against this spectrum
 /// looks like. A rate the branching overlay makes, an `(n,n')` isomer's, is
-/// not a group average and has none here: [`perturb_lists`] moves it, and
-/// [`rates_without_terms`] names any rate neither covers.
+/// not a group average and has none here: `perturb_lists` moves it, and
+/// `rates_without_terms` names any rate neither covers.
 pub fn perturb_rates(
     rates: &ReactionRates,
     per_group: &PerGroupRates,

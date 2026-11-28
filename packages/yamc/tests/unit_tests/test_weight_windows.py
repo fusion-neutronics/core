@@ -292,6 +292,43 @@ def test_weight_window_stats():
     assert s["split_events"] == 0
 
 
+@requires_data
+def test_weight_window_warnings():
+    """Windows that cannot work as set are caught before any transport."""
+    mesh = yamc.RegularRectangularMesh(
+        lower_left=[-20, -20, 0], upper_right=[20, 20, 40], shape=[1, 1, 8]
+    )
+    mat = yamc.Material(composition={"Al27": 1.0}, density=2.7, temperature=294)
+    mat.read_nuclear_data({"Al27": str(AL27)})
+    cyl = yamc.Cylinder(axis="z", radius=20.0, boundary="vacuum")
+    z0 = yamc.Plane(axis="z", offset=0.0, boundary="vacuum")
+    z1 = yamc.Plane(axis="z", offset=40.0, boundary="vacuum")
+    cell = yamc.Cell(name="rod", region=cyl.below & z0.above & z1.below, material=mat)
+    geom = yamc.Geometry([cell])
+    src = yamc.NeutronSource(position=(0, 0, 0.5), energy=yamc.sources.Discrete([1.0e6], [1.0]))
+    tally = yamc.Tally(scores=["flux"], name="flux", mesh=mesh, particle="neutron")
+    good = [0.3 / 1.6**i for i in range(8)]  # falling about as the flux does
+
+    def warnings(**ww):
+        windows = [yamc.WeightWindowBounds(mesh=mesh, **ww)] if ww else []
+        model = yamc.Model(geometry=geom, source=src, tallies=[tally], variance_reduction=windows)
+        return " ".join(model.weight_window_warnings())
+
+    assert warnings() == ""
+    assert warnings(lower_bounds=good) == ""
+    assert "below the source weight" in warnings(lower_bounds=[x * 1e-3 for x in good])
+    assert "above the source weight" in warnings(lower_bounds=[x * 1e3 for x in good])
+    assert "energy bins end" in warnings(lower_bounds=good, energy_bins=[1e-5, 1e5])
+    assert "energy bins start" in warnings(lower_bounds=good, energy_bins=[2e6, 2e7])
+    assert "weight_floor" in warnings(lower_bounds=good, weight_floor=1e-1)
+
+    # Non-finite bounds and a window with no width are refused outright.
+    with pytest.raises(ValueError, match="finite"):
+        yamc.WeightWindowBounds(mesh=mesh, lower_bounds=[math.nan] + good[1:])
+    with pytest.raises(ValueError, match="above"):
+        yamc.WeightWindowBounds(mesh=mesh, lower_bounds=good, upper_bounds=good)
+
+
 def _degvr_rod_model(**generator_kwargs):
     """Small Al27 rod + a DeGVR generator, shared by the stop-condition tests."""
     mesh = yamc.RegularRectangularMesh(

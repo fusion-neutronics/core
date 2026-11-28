@@ -9,7 +9,7 @@ pub struct GeoMeshVolume {
     pub cell_id: i32,
     pub material_id: i32,
     pub material_name: Option<String>,
-    /// Pre-expanded triangle vertex coordinates: each entry is [[x0,y0,z0],[x1,y1,z1],[x2,y2,z2]]
+    /// Pre-expanded triangle vertex coordinates: each entry is `[[x0,y0,z0],[x1,y1,z1],[x2,y2,z2]]`
     pub triangles: Vec<[[f64; 3]; 3]>,
     /// Where volumes overlap, a point belongs to the highest rank (the
     /// overlaps recorded for a mesh made without imprinting); 0 otherwise.

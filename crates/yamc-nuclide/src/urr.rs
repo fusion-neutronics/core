@@ -88,7 +88,7 @@ pub struct UrrData {
 
     /// Cumulative probability distribution values
     /// Shape: [n_energy, n_cdf]
-    /// Stored as Vec<Vec<f64>> where outer vec is energy, inner is CDF values
+    /// Stored as `Vec<Vec<f64>>` where outer vec is energy, inner is CDF values
     pub cdf_values: Vec<Vec<f64>>,
 
     /// Cross-section values corresponding to CDF points
@@ -241,7 +241,7 @@ impl UrrData {
     }
 
     /// Find the energy grid index below the given energy
-    /// Returns index i such that energy[i] <= e < energy[i+1]
+    /// Returns index i such that `energy[i] <= e < energy[i+1]`
     pub fn find_energy_index(&self, e: f64) -> usize {
         if self.energy.is_empty() {
             return 0;

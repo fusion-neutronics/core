@@ -589,7 +589,7 @@ pub(crate) fn transmutation_sections(subsection: &str) -> &'static [(&'static st
 ///
 /// - Keyword (e.g. `"endf-b8.1"`): the subsection folder of the library's
 ///   current release, `transmutation/{subsection}.arrow/`, downloaded and
-///   verified into the cache (see [`super::release_cache`]). A library whose
+///   verified into the cache (see `super::release_cache`). A library whose
 ///   release does not publish the subsection is refused with a message listing
 ///   the subsections it does publish.
 /// - Anything else is a local path: a release folder's
@@ -675,7 +675,7 @@ fn refuse_shadowed_keyword(source: &str) -> Result<(), String> {
 ///
 /// A raw URL has no release manifest, so nothing here is verified against
 /// one: this is the path for a self-hosted unversioned tree. A library keyword
-/// goes through [`super::release_cache`] instead, which verifies every file.
+/// goes through `super::release_cache` instead, which verifies every file.
 /// The cache folder is `<cache root>/<Name>.arrow`.
 #[cfg(feature = "download")]
 pub fn download_and_cache(
@@ -2056,7 +2056,7 @@ fn download_sections(
 ///
 /// `None` means the platform resolved no home directory, which is a machine
 /// with no cache location rather than a machine with an empty cache. Callers
-/// that need a path say what that means for them: [`get_cache_dir`] reports it
+/// that need a path say what that means for them: `get_cache_dir` reports it
 /// as an error, and the tests treat it as a failure rather than as absent data.
 pub fn cache_root() -> Option<PathBuf> {
     if let Some(root) = CACHE_ROOT_FOR_TESTS

@@ -184,6 +184,16 @@ windows = yamc.WeightWindowBounds(
 )
 ```
 
+## Checks before a run
+
+Windows that cannot work as set are caught before any transport. A bound that
+is not finite, or an upper bound that is not above its lower bound, is refused
+when the windows are built. A run then warns, before transporting anything,
+when the windows where most source particles are born sit more than ten times
+below or above the source weight, when the energy bins miss most source
+particles, or when ``weight_floor`` is above some lower bounds.
+``model.weight_window_warnings()`` returns the same messages without running.
+
 ## What the windows did
 
 A run with windows reports what they did: how often they split, rouletted and
@@ -316,7 +326,9 @@ activation path runs twice at reduced density).
 
 - With or without windows the tally means agree within statistics;
   only the variance (and the run cost) differ. Judge the benefit by coverage and
-  the per-tally relative error in the deep region, or the per-tally FOM.
+  the per-bin relative error or ``figure_of_merit`` in the deep region. The
+  ``aggregate_figure_of_merit`` measures the tally total, which the bins near
+  the source dominate.
 - Windows help most under exponential attenuation (thick shields, many decades
   of flux drop), where analog cannot reach at all. For pure void streaming (an air duct),
   analog already fills the domain and the gain is smaller.

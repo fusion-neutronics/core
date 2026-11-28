@@ -12,6 +12,8 @@
 //! The two cannot be bit-identical (the GPU uses the `ln_f64` / `exp_f64`
 //! polyfills and `exp(ln(x)/a)` where the CPU uses `std` `ln`/`exp` and
 //! `powf`), but they agree to well within Monte-Carlo noise.
+//!
+//! [`ttb_photon_energy`]: crate::photon::ttb_energy::ttb_photon_energy()
 
 use crate::common::polyfills::{exp_f64, ln_f64};
 use crate::GpuContext;
@@ -54,7 +56,7 @@ fn ttb_energy_kernel(inputs: &[f64], out: &mut [f64]) {
     );
 }
 
-/// Run [`ttb_photon_energy`] on the GPU for each stride-6 input tuple
+/// Run [`ttb_photon_energy()`] on the GPU for each stride-6 input tuple
 /// (`[c, w_l_log, w_r_log, p_l, p_r, c_l]`). For test/validation use.
 pub fn run_ttb_photon_energy(ctx: &GpuContext, inputs: &[f64]) -> Vec<f64> {
     assert!(inputs.len().is_multiple_of(6));

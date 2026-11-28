@@ -114,7 +114,7 @@ pub struct StateFacts {
     /// stated energy (zero for an excited level, or negative).
     pub level_energy_difference: Option<f64>,
     /// The level's excitation energy as the level matching reads it (see
-    /// [`endf::radionuclide_production::RadionuclideState::excitation_energy`]):
+    /// [`RadionuclideProduction::excitation_energy`]):
     /// what a run matches a level written as evaluated against.
     pub match_energy: Option<f64>,
     /// The evaluation's own MF=3 for `mt`, as stated. `None` when the file
@@ -1647,7 +1647,7 @@ pub fn extract_branching(
 /// on the nodes the two grids share and the tape's own law between its points,
 /// not a copy of MF=3: an item is null where MF=3 is not tabulated, where a
 /// log law meets a zero, and on a single node where MF=3 alone jumps (see
-/// [`sampled_on`]), and the whole entry is null where the file has no MF=3
+/// `sampled_on`), and the whole entry is null where the file has no MF=3
 /// section for the MT. `level_energy` is MF=8's ELFS as the tape gives it
 /// where `lmf` is not null, and QM - QI of the MF=9/10 subsection where it is
 /// (see [`StateFacts::level_energy`]): for an excited level a zero means the

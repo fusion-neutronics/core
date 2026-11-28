@@ -843,7 +843,7 @@ pub struct Nuclide {
     /// Where `decay_energy` came from: [`DECAY_ENERGY_EVALUATED`] for an
     /// evaluated decay scheme, [`DECAY_ENERGY_PLACEHOLDER`] for the Q/3
     /// stand-in some libraries write for nuclides nobody has evaluated (see
-    /// [`crate::decay::placeholder_mean_energies`]), or `filled:<library>`
+    /// [`Decay::placeholder_mean_energies`]), or `filled:<library>`
     /// after [`Chain::fill_placeholder_decay_energies`] replaced a placeholder
     /// from another library. `None` for a stable nuclide, which has no decay
     /// energy to source.

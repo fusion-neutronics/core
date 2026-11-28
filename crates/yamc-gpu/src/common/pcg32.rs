@@ -43,10 +43,10 @@ pub fn expand_seed(seed: u32) -> u64 {
 /// CPU's LIFO stack and this queue's FIFO agree history for history.
 ///
 /// A 32-bit finaliser (two `u32` multiplies), not the 64-bit splitmix64 of
-/// [`expand_seed`]: 64-bit multiplies are emulated on the GPU and this runs per
+/// [`expand_seed()`]: 64-bit multiplies are emulated on the GPU and this runs per
 /// secondary created.
 ///
-/// KERNEL-ONLY, like [`expand_seed`]: plain `+`/`*` wrap on the GPU but
+/// KERNEL-ONLY, like [`expand_seed()`]: plain `+`/`*` wrap on the GPU but
 /// overflow-panic on the host in debug builds. Host code must call the wrapping
 /// `crate::common::rng::secondary_seed` re-export.
 #[cube]
@@ -64,7 +64,7 @@ pub fn secondary_seed(parent_seed: u32, ordinal: u32) -> u32 {
 /// `let d = pcg_next(state); state = d.state; let r = d.rand;`.
 ///
 /// It deliberately does NOT take `&mut u64`: cubecl's `&mut` bindings alias
-/// live state inside a kernel (see the note on [`pcg32_kernel`]), so the
+/// live state inside a kernel (see the note on `pcg32_kernel`), so the
 /// output permutation would read the *advanced* state. Value-in / struct-out
 /// sidesteps that -- the same pattern the eout-sampler extraction uses, and
 /// `gpu_pcg_next_matches_cpu` pins it bit-for-bit on hardware.
@@ -120,14 +120,14 @@ pub fn draw_uniform(state: u64) -> UniformDraw {
     }
 }
 
-/// CPU twin of [`pcg_next`] (wrapping 64-bit arithmetic). Returns `(rand, state)`.
+/// CPU twin of [`pcg_next()`] (wrapping 64-bit arithmetic). Returns `(rand, state)`.
 pub fn pcg_next_cpu(state: u64) -> (u32, u64) {
     let rand = yamc_rng::pcg_xsh_rr(state);
     let new_state = state.wrapping_mul(PCG_MULT).wrapping_add(PCG_INCR);
     (rand, new_state)
 }
 
-/// CPU twin of [`draw_uniform`]. Returns `(xi, state)`.
+/// CPU twin of [`draw_uniform()`]. Returns `(xi, state)`.
 pub fn draw_uniform_cpu(state: u64) -> (f64, u64) {
     let (rand, new_state) = pcg_next_cpu(state);
     ((rand as f64 + 1.0) * (1.0 / 4_294_967_297.0), new_state)
@@ -144,7 +144,7 @@ fn draw_uniform_kernel(seeds: &[u32], out_xi: &mut [f64], out_state: &mut [u64])
     out_state[ABSOLUTE_POS] = d.state;
 }
 
-/// Run [`draw_uniform`] on the GPU for each seed; returns `(xi, advanced_state)`
+/// Run [`draw_uniform()`] on the GPU for each seed; returns `(xi, advanced_state)`
 /// per seed. For test/validation use.
 // The output buffers are sized by element count (one entry per seed), not by
 // the `seeds` slice's byte size, so `size_of_val(seeds)` would be wrong here.
@@ -181,7 +181,7 @@ fn secondary_seed_kernel(parents: &[u32], ordinals: &[u32], out: &mut [u32]) {
     out[ABSOLUTE_POS] = secondary_seed(parents[ABSOLUTE_POS], ordinals[ABSOLUTE_POS]);
 }
 
-/// Run [`secondary_seed`] on the GPU for each `(parent, ordinal)` pair. For
+/// Run [`secondary_seed()`] on the GPU for each `(parent, ordinal)` pair. For
 /// test/validation use.
 // The output buffer is sized by element count (one entry per pair), not by the
 // `parents` slice's byte size, so `size_of_val` would be wrong here.

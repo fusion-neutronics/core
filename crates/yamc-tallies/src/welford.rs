@@ -9,7 +9,7 @@
 //! 1. [`WelfordWorkerState::new`] allocates a per-worker (n_touched,
 //!    mean, M2) array per tally plus an empty sparse scratch hash map.
 //! 2. During a history, scoring writes contributions to
-//!    [`WelfordTallyWorker::add_contribution`] which sums them into
+//!    [`WelfordWorkerState::add_contribution`] which sums them into
 //!    `scratch_map: FxHashMap<bin_idx, value>` -- only the bins
 //!    actually touched in the current history are kept resident.
 //! 3. [`WelfordWorkerState::finish_history`] is called at the end of

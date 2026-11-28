@@ -1277,7 +1277,7 @@ pub fn extract_per_nuclide_macro_total_xs(
 }
 
 /// Per-nuclide elastic (MT 2) angular distribution pool for one material. Where
-/// [`GpuNuclideXs::elastic_angle_*`] carries a single material-blended slot
+/// `GpuNuclideXs::elastic_angle_*` carries a single material-blended slot
 /// (first nuclide with MT 2 data), this carries one slot per nuclide so the
 /// transport can sample the SELECTED nuclide's elastic CM cosine. All buffers
 /// are `[n_nuclides × …]`, nuclide-major in the same order as the input
