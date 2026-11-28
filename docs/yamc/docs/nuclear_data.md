@@ -256,10 +256,12 @@ yamc.neutron_cross_section_data = "fendl-3.2d"
 yamc.photon_cross_section_data = "endf-b8.1"
 ```
 
-There are six recognized keywords: ``endf-b8.1``, ``jeff-4.0``, ``jendl-5.0``,
-``tendl-2025``, ``tendl-2017`` and ``fendl-3.2d``.
+There are six recognized keywords: [``endf-b8.1``][cite-endf-b8.1], [``jeff-4.0``][cite-jeff-4.0], [``jendl-5.0``][cite-jendl-5.0],
+[``tendl-2025``][cite-tendl-2025], [``tendl-2017``][cite-tendl-2017] and [``fendl-3.2d``][cite-fendl-3.2d].
 [Nuclear data libraries](nuclear_data_libraries.md) has what each one publishes,
-how big each one is, and which can serve as a photon source.
+how big each one is, which can serve as a photon source, and
+[what to cite](nuclear_data_libraries.md#cite-the-nuclear-data-you-use) when you
+use it: each library's evaluators ask to be cited wherever their data is used.
 
 TENDL has no decay or fission-yield evaluations. Take ``decay``/``fission_yields``
 from a library that has them while sourcing ``reactions`` and/or ``branching``
@@ -420,17 +422,17 @@ evaluated), builds the transmutation chain, reads every folder back through the
 reader a simulation uses, and writes each particle's ``index.json`` and then the
 manifest.
 
-The libraries are ``"endf-b8.1"``, ``"jeff-4.0"``, ``"jendl-5.0"``,
-``"tendl-2025"``, ``"tendl-2017"``, ``"fendl-3.2d"`` and ``"irdff-ii"``. Each is
+The libraries are [``"endf-b8.1"``][cite-endf-b8.1], [``"jeff-4.0"``][cite-jeff-4.0], [``"jendl-5.0"``][cite-jendl-5.0],
+[``"tendl-2025"``][cite-tendl-2025], [``"tendl-2017"``][cite-tendl-2017], [``"fendl-3.2d"``][cite-fendl-3.2d] and [``"irdff-ii"``][cite-irdff-ii]. Each is
 built from its own evaluations only, never with another library's data:
 
 | keyword | particles | transmutation parts |
 | --- | --- | --- |
-| ``endf-b8.1``, ``jendl-5.0`` | neutron, photon | decay, reactions, fission_yields, branching |
-| ``jeff-4.0`` | neutron | decay, reactions, fission_yields, branching |
-| ``tendl-2025``, ``tendl-2017`` | neutron, photonuclear | reactions, branching |
-| ``fendl-3.2d`` | neutron, photon | reactions, branching |
-| ``irdff-ii`` | none | branching |
+| [``endf-b8.1``][cite-endf-b8.1], [``jendl-5.0``][cite-jendl-5.0] | neutron, photon | decay, reactions, fission_yields, branching |
+| [``jeff-4.0``][cite-jeff-4.0] | neutron | decay, reactions, fission_yields, branching |
+| [``tendl-2025``][cite-tendl-2025], [``tendl-2017``][cite-tendl-2017] | neutron, photonuclear | reactions, branching |
+| [``fendl-3.2d``][cite-fendl-3.2d] | neutron, photon | reactions, branching |
+| [``irdff-ii``][cite-irdff-ii] | none | branching |
 
 A library without decay data of its own (TENDL, FENDL, IRDFF-II) writes each
 excited product level of its branching as the evaluation gives it, and a run

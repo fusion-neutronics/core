@@ -12,14 +12,17 @@ yamc.neutron_cross_section_data = "endf-b8.1"
 yamc.photon_cross_section_data = "endf-b8.1"
 ```
 
-| keyword | what it is |
-|---------|-------------------------------------------------------------------|
-| ``endf-b8.1`` | ENDF/B-VIII.1. |
-| ``jeff-4.0`` | JEFF-4.0. |
-| ``jendl-5.0`` | JENDL-5. |
-| ``tendl-2025`` | TENDL-2025. The widest isotope coverage of the six, but it has no hydrogen or helium, and its lithium has a tritium production problem: see [Hydrogen and helium in TENDL-2025](#hydrogen-and-helium-in-tendl-2025) and [Lithium in TENDL-2025](#lithium-in-tendl-2025). |
-| ``tendl-2017`` | TENDL-2017, for comparing a result against the older release. |
-| ``fendl-3.2d`` | FENDL-3.2d. Cross sections, plus ``reactions`` and ``branching`` subsections. |
+| keyword | what it is | cite |
+|---------|-------------------------------------------------------------------|---------|
+| [``endf-b8.1``][cite-endf-b8.1] | ENDF/B-VIII.1. | [Nobre et al. 2026](#cite-endf-b8-1) |
+| [``jeff-4.0``][cite-jeff-4.0] | JEFF-4.0. | [JEFF-4.0 data sets](#cite-jeff-4-0) |
+| [``jendl-5.0``][cite-jendl-5.0] | JENDL-5. | [Iwamoto et al. 2023](#cite-jendl-5-0) |
+| [``tendl-2025``][cite-tendl-2025] | TENDL-2025. The widest isotope coverage of the six, but it has no hydrogen or helium, and its lithium has a tritium production problem: see [Hydrogen and helium in TENDL-2025](#hydrogen-and-helium-in-tendl-2025) and [Lithium in TENDL-2025](#lithium-in-tendl-2025). | [Koning and Rochman 2012; Koning et al. 2019](#cite-tendl) |
+| [``tendl-2017``][cite-tendl-2017] | TENDL-2017, for comparing a result against the older release. | [Koning and Rochman 2012; Koning et al. 2019](#cite-tendl) |
+| [``fendl-3.2d``][cite-fendl-3.2d] | FENDL-3.2d. Cross sections, plus ``reactions`` and ``branching`` subsections. | [Schnabel et al. 2024](#cite-fendl-3-2d) |
+
+The evaluators who made these libraries ask to be cited wherever their data is
+used: see [Cite the nuclear data you use](#cite-the-nuclear-data-you-use).
 
 Every setting also takes a path instead of a keyword, including a folder that
 holds a whole library laid out as a release, which serves every setting at once
@@ -33,6 +36,8 @@ when left alone, is in [Nuclear data settings](nuclear_data.md#nuclear-data-sett
 Each library can also be built locally from its evaluated sources with
 ``yamc.generate_library``, into such a folder (see
 [Building a library yourself](nuclear_data.md#building-a-library-yourself)).
+
+--8<-- "cite-nuclear-data.md"
 
 ## Asking yamc what a library holds
 
@@ -76,12 +81,12 @@ Hover a column heading for what it holds; the list under the table says the same
 
 | library | <abbr title="neutron_cross_section_data and photon_cross_section_data: the cross sections transport samples collisions from. The neutron ones are also folded with the spectrum into transmutation reaction rates, so they decide how fast each reaction runs. The only cross sections a calculation uses.">cross sections</abbr> | <abbr title="transmutation_decay_data: half-lives, decay modes, decay energies and decay photon lines. Decides how the inventory decays and the photon source of a shutdown dose run.">``decay``</abbr> | <abbr title="transmutation_reactions: the network of which reaction on which nuclide makes which activation product, with its Q. Holds no cross sections. Decides which products can be made at all.">``reactions``</abbr> | <abbr title="transmutation_fission_yields: which fission products a fission makes, and how many. Only read when something fissions.">``fission_yields``</abbr> | <abbr title="transmutation_branch_ratios: how a reaction's product splits between ground and metastable states, against incident energy.">``branching``</abbr> |
 | --- | --- | :---: | :---: | :---: | :---: |
-| ``endf-b8.1`` | neutron + photoatomic | yes | yes | yes | yes |
-| ``jeff-4.0`` | neutron | yes | yes | yes | yes |
-| ``jendl-5.0`` | neutron + photoatomic | yes | yes | yes | yes |
-| ``fendl-3.2d`` | neutron + photoatomic | -- | yes | -- | yes |
-| ``tendl-2025`` | neutron + photonuclear (next release, data only) | -- | yes | -- | yes |
-| ``tendl-2017`` | neutron + photonuclear (next release, data only) | -- | yes | -- | yes |
+| [``endf-b8.1``][cite-endf-b8.1] | neutron + photoatomic | yes | yes | yes | yes |
+| [``jeff-4.0``][cite-jeff-4.0] | neutron | yes | yes | yes | yes |
+| [``jendl-5.0``][cite-jendl-5.0] | neutron + photoatomic | yes | yes | yes | yes |
+| [``fendl-3.2d``][cite-fendl-3.2d] | neutron + photoatomic | -- | yes | -- | yes |
+| [``tendl-2025``][cite-tendl-2025] | neutron + photonuclear (next release, data only) | -- | yes | -- | yes |
+| [``tendl-2017``][cite-tendl-2017] | neutron + photonuclear (next release, data only) | -- | yes | -- | yes |
 
 - **cross sections**: neutron data per nuclide, set by
   ``neutron_cross_section_data``, and photoatomic data per element, set by
@@ -108,10 +113,10 @@ transport run does. The four remaining columns are the transmutation subsections
 each set independently through its own ``yamc.transmutation_*`` setting. A library
 with no subsections still works for transport, it just cannot supply a chain.
 
-TENDL has neutron and photonuclear evaluations, but no decay or fission-yield evaluations. Take
+[TENDL][cite-tendl] has neutron and photonuclear evaluations, but no decay or fission-yield evaluations. Take
 those from a library that has them and source ``reactions`` and ``branching`` from
-TENDL, whose parent coverage is far wider. FENDL-3.2d publishes the same two
-subsections, built against ENDF/B-VIII.1 decay data; its ``branching`` is the
+TENDL, whose parent coverage is far wider. [FENDL-3.2d][cite-fendl-3.2d] publishes the same two
+subsections, built against [ENDF/B-VIII.1][cite-endf-b8.1] decay data; its ``branching`` is the
 reason to use it, since 54 of its evaluations carry isomer production (MF=9 or
 MF=10), 15 of them with MF=40 covariances. Pointing a
 transmutation part at a library that does not provide it fails immediately with a
@@ -141,13 +146,13 @@ water = yamc.Material(composition={"H1": 2.0, "O16": 1.0}, density=1.0)
 
 Only three libraries provide photoatomic data for photon transport:
 
-- ``endf-b8.1`` and ``jendl-5.0`` publish the photoatomic and atomic-relaxation
+- [``endf-b8.1``][cite-endf-b8.1] and [``jendl-5.0``][cite-jendl-5.0] publish the photoatomic and atomic-relaxation
   pair a coupled run needs. JENDL-5's is EPICS2017 adopted by JAEA, so it is the
   same data ENDF/B-VIII.1 carries.
-- ``fendl-3.2d`` publishes photoatomic cross sections with no atomic relaxation,
+- [``fendl-3.2d``][cite-fendl-3.2d] publishes photoatomic cross sections with no atomic relaxation,
   so absorption emits no fluorescence or Auger electrons; the loader warns
   about missing relaxation where it matters.
-- ``jeff-4.0`` and both TENDL releases publish no photoatomic data at all. JEFF's
+- [``jeff-4.0``][cite-jeff-4.0] and both [TENDL][cite-tendl] releases publish no photoatomic data at all. JEFF's
   photon sublibrary is photonuclear, which is a different quantity.
 
 There is no implicit switch to another photon library. A photon run with
@@ -161,7 +166,7 @@ over the global selection.
 
 ### Photonuclear data in the next TENDL release
 
-The next TENDL-2025 and TENDL-2017 regeneration adds the gamma evaluations from
+The next [TENDL-2025][cite-tendl-2025] and [TENDL-2017][cite-tendl-2017] regeneration adds the gamma evaluations from
 ``TENDL-g.tgz``. These are per-nuclide photonuclear reactions, not the
 per-element photoatomic interactions above. Release ``2026-10-12.1`` does not
 contain this new output; it becomes available only after the regenerated
@@ -190,12 +195,12 @@ publish the category, rather than publishing an empty one.
 
 | library | neutron | photoatomic elements | reaction edges | branching channels | decay nuclides | covariance |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| ``endf-b8.1`` | 557 | 100 | 12,444 | 917 | 3,820 | 48% |
-| ``jeff-4.0`` | 593 | -- | 81,045 | 8,362 | 3,851 | 99% |
-| ``jendl-5.0`` | 795 | 100 | 145,117 | 5,397 | 4,070 | 13% |
-| ``fendl-3.2d`` | 192 | 61 | 27,814 | 652 | -- | 35% |
-| ``tendl-2025`` | 2,848 | -- | 415,154 | 40,934 | -- | 100% |
-| ``tendl-2017`` | 2,801 | -- | 417,434 | 41,185 | -- | 100% |
+| [``endf-b8.1``][cite-endf-b8.1] | 557 | 100 | 12,444 | 917 | 3,820 | 48% |
+| [``jeff-4.0``][cite-jeff-4.0] | 593 | -- | 81,045 | 8,362 | 3,851 | 99% |
+| [``jendl-5.0``][cite-jendl-5.0] | 795 | 100 | 145,117 | 5,397 | 4,070 | 13% |
+| [``fendl-3.2d``][cite-fendl-3.2d] | 192 | 61 | 27,814 | 652 | -- | 35% |
+| [``tendl-2025``][cite-tendl-2025] | 2,848 | -- | 415,154 | 40,934 | -- | 100% |
+| [``tendl-2017``][cite-tendl-2017] | 2,801 | -- | 417,434 | 41,185 | -- | 100% |
 
 ``neutron`` and ``photoatomic elements`` are evaluations, one per nuclide and one per element.
 ``reaction edges`` is how many ``(parent, reaction, product)`` triples the network
@@ -213,8 +218,8 @@ ENDF/B-VIII.1 ``decay`` and ``fission_yields`` beside it is the usual arrangemen
 
 The percentage counts evaluations that carry cross-section covariance, which is
 not the same as covariance landing where a given run needs it. Depth varies as
-much as presence: JENDL-5 carries covariance for 13% of its evaluations, and its
-Fe56 covers 56 channels against ENDF/B-VIII.1's 7.
+much as presence: [JENDL-5][cite-jendl-5.0] carries covariance for 13% of its evaluations, and its
+Fe56 covers 56 channels against [ENDF/B-VIII.1][cite-endf-b8.1]'s 7.
 
 Six covariance families reach the converted data, and three of them are sampled.
 The cross sections' MF=33 is drawn by the ``cross_sections`` source.
@@ -259,17 +264,17 @@ nuclear-data uncertainty run holds at nominal.
 ### Energy range
 
 Every library reaches past 20 MeV for at least some evaluations, and only
-TENDL-2025 takes every evaluation to the same ceiling. Counting evaluations by
+[TENDL-2025][cite-tendl-2025] takes every evaluation to the same ceiling. Counting evaluations by
 the ceiling they were converted to:
 
 | library | ceiling |
 | --- | --- |
-| ``endf-b8.1`` | 452 at 20 MeV, 34 at 150, 34 at 200, 28 at 30, rest at 28 to 65 |
-| ``jeff-4.0`` | 491 at 200 MeV, 65 at 20, 16 at 150, 10 at 30, rest at 60 to 90 |
-| ``jendl-5.0`` | 579 at 200 MeV, 216 at 20 |
-| ``fendl-3.2d`` | 109 at 200 MeV, 72 at 150, 11 at 60 to 65, none at 20 |
-| ``tendl-2025`` | 200 MeV throughout |
-| ``tendl-2017`` | 2,780 at 200 MeV, 14 at 20, 4 at 150, 2 at 30, 1 at 60 |
+| [``endf-b8.1``][cite-endf-b8.1] | 452 at 20 MeV, 34 at 150, 34 at 200, 28 at 30, rest at 28 to 65 |
+| [``jeff-4.0``][cite-jeff-4.0] | 491 at 200 MeV, 65 at 20, 16 at 150, 10 at 30, rest at 60 to 90 |
+| [``jendl-5.0``][cite-jendl-5.0] | 579 at 200 MeV, 216 at 20 |
+| [``fendl-3.2d``][cite-fendl-3.2d] | 109 at 200 MeV, 72 at 150, 11 at 60 to 65, none at 20 |
+| [``tendl-2025``][cite-tendl-2025] | 200 MeV throughout |
+| [``tendl-2017``][cite-tendl-2017] | 2,780 at 200 MeV, 14 at 20, 4 at 150, 2 at 30, 1 at 60 |
 
 ENDF/B-VIII.1 is the only one that is mostly a 20 MeV library, and even its Fe56
 and W186 reach 150 MeV. For a high-energy source, check the ceiling of the
@@ -296,8 +301,8 @@ The first is placeholder mean decay energies. A nuclide whose decay scheme
 nobody has evaluated still gets a decay file, with a third of each beta or
 electron-capture branch's Q booked to the light particles and a third to the
 photons. For an electron-capture emitter that is meaningless, since the
-neutrino carries almost all of Q: ENDF/B-VIII.1 books Sn111 at 1.63 MeV per
-decay against the 0.69 MeV JENDL-5 evaluates from its decay scheme. The counts
+neutrino carries almost all of Q: [ENDF/B-VIII.1][cite-endf-b8.1] books Sn111 at 1.63 MeV per
+decay against the 0.69 MeV [JENDL-5][cite-jendl-5.0] evaluates from its decay scheme. The counts
 are 1144 records for `endf-b8.1`, 1529 for `jeff-4.0` and 375 for
 `jendl-5.0`. They are exotic nuclides, but early decay heat is carried by
 exactly the short-lived products that tend to be unevaluated. Every one is
@@ -318,7 +323,7 @@ list is short.
 
 ### Lithium in TENDL-2025
 
-TENDL-2025's Li6 and Li7 produce no tritium below 30 MeV. For a breeder
+[TENDL-2025][cite-tendl-2025]'s Li6 and Li7 produce no tritium below 30 MeV. For a breeder
 blanket, a lithium-bearing shield, or anything else where lithium's reactions
 matter, use another library.
 
@@ -338,12 +343,12 @@ source at its centre, 100,000 histories, yamc 0.16.0 on release
 
 | library | tritium (TBR) | from Li6 | from Li7 | absorption |
 | --- | ---: | ---: | ---: | ---: |
-| ``endf-b8.1`` | 1.2169 +/- 0.0021 | 0.4624 | 0.7546 | 0.4788 |
-| ``jeff-4.0`` | 1.2164 +/- 0.0021 | 0.4617 | 0.7547 | 0.4781 |
-| ``tendl-2017`` | 1.2164 +/- 0.0021 | 0.4617 | 0.7547 | 0.4781 |
-| ``fendl-3.2d`` | 1.2157 +/- 0.0021 | 0.4610 | 0.7548 | 0.4774 |
-| ``jendl-5.0`` | 1.2120 +/- 0.0020 | 0.4750 | 0.7370 | 0.4925 |
-| ``tendl-2025`` | 0 | 0 | 0 | 0.0000054 |
+| [``endf-b8.1``][cite-endf-b8.1] | 1.2169 +/- 0.0021 | 0.4624 | 0.7546 | 0.4788 |
+| [``jeff-4.0``][cite-jeff-4.0] | 1.2164 +/- 0.0021 | 0.4617 | 0.7547 | 0.4781 |
+| [``tendl-2017``][cite-tendl-2017] | 1.2164 +/- 0.0021 | 0.4617 | 0.7547 | 0.4781 |
+| [``fendl-3.2d``][cite-fendl-3.2d] | 1.2157 +/- 0.0021 | 0.4610 | 0.7548 | 0.4774 |
+| [``jendl-5.0``][cite-jendl-5.0] | 1.2120 +/- 0.0020 | 0.4750 | 0.7370 | 0.4925 |
+| [``tendl-2025``][cite-tendl-2025] | 0 | 0 | 0 | 0.0000054 |
 
 The tritium tally is not the only thing that changes. With no (n,t) and next to
 no capture (Li6's is 1.5e-10 b at thermal, against 0.0385 b in ENDF/B-VIII.1),
@@ -364,7 +369,7 @@ or replace these two evaluations.
 
 ### Hydrogen and helium in TENDL-2025
 
-TENDL-2025 has no hydrogen or helium. Its neutron archive, ``TENDL-n.tgz``,
+[TENDL-2025][cite-tendl-2025] has no hydrogen or helium. Its neutron archive, ``TENDL-n.tgz``,
 holds 2850 evaluations and none of them is H1, H2, H3, He3 or He4, so a
 material containing either element (water, polyethylene, a hydride, a helium
 coolant) cannot be modelled on ``tendl-2025``. This is a gap in the library as

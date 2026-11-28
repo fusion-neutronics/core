@@ -79,6 +79,12 @@ pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
 /// them under `particles`.
 pub const PARTICLES: [&str; 4] = ["neutron", "photon", "photonuclear", "thermal"];
 
+/// `<origin>/<keyword>/<release>/NOTICE.md`: who made the library, what to
+/// cite, the terms it is redistributed under, and what the conversion changed,
+/// so that the credit travels with every copy of the release. Published when
+/// the release folder has one.
+pub const NOTICE: &str = "NOTICE.md";
+
 /// The folder of a release that holds the transmutation chain's subsections.
 const TRANSMUTATION: &str = "transmutation";
 
@@ -208,6 +214,24 @@ pub struct DataRelease {
     /// keyed by its keyword or release folder.
     #[serde(default)]
     pub library: String,
+    /// What to cite for the library's data, in the order its makers list it
+    /// (see [`super::credits`]). Empty for a library the table there does not
+    /// know, such as one a user converted under a name of their own.
+    #[serde(default)]
+    pub citations: Vec<Citation>,
+    /// The terms the library's data is redistributed under, as its makers
+    /// state them. Empty where the citations are.
+    #[serde(default)]
+    pub terms: String,
+}
+
+/// A work to cite for the data a run read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Citation {
+    /// Authors, title, journal or publisher, volume, pages and year.
+    pub reference: String,
+    /// Its DOI, without the `https://doi.org/` prefix.
+    pub doi: String,
 }
 
 /// A parsed manifest with its files indexed by path.
@@ -549,8 +573,8 @@ fn index(manifest: Manifest, manifest_sha256: String) -> Result<Release, String>
 ///
 /// It lists every file the release publishes, with its size and sha256: each
 /// file in the `<Name>.arrow/` folders under the [`PARTICLES`] folders and
-/// `transmutation/`, and a particle's `index.json`. Nothing else in `dir` is
-/// part of the release, so the manifest itself, and the `.build/` folder a
+/// `transmutation/`, a particle's `index.json`, and the release's [`NOTICE`].
+/// Nothing else in `dir` is part of the release, so the manifest itself, and the `.build/` folder a
 /// local build keeps its sources and scratch in, are not listed.
 ///
 /// The bytes are those `build_manifest` and `write_manifest` in the publishing
@@ -776,6 +800,11 @@ fn release_files(dir: &Path) -> Result<BTreeMap<String, PathBuf>, String> {
         if any && top != TRANSMUTATION && index.is_file() {
             files.insert(format!("{top}/index.json"), index);
         }
+    }
+    // Only beside data: a folder with nothing else to publish is not a release.
+    let notice = dir.join(NOTICE);
+    if !files.is_empty() && notice.is_file() {
+        files.insert(NOTICE.to_string(), notice);
     }
     Ok(files)
 }
@@ -1528,6 +1557,23 @@ mod tests {
         let written = std::fs::read_to_string(dir.join(MANIFEST)).unwrap();
         assert_eq!(written, RELEASE_MANIFEST_PY);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A release's `NOTICE.md` is published with its data, never on its own.
+    #[test]
+    fn the_notice_is_published_with_the_data() {
+        let mut files: Vec<(&str, &[u8])> = TREE.to_vec();
+        files.push((NOTICE, b"# a notice\n"));
+        let dir = folder("notice", &files);
+        let written = write_tree_manifest(&dir).unwrap();
+        assert_eq!(written.file(NOTICE).map(|f| f.bytes), Some(11));
+        assert!(verify_folder(&dir).unwrap().ok());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let alone = folder("notice-alone", &[(NOTICE, b"# a notice\n")]);
+        let err = write_tree_manifest(&alone).unwrap_err();
+        assert!(err.contains("nothing to publish"), "{err}");
+        let _ = std::fs::remove_dir_all(&alone);
     }
 
     #[test]

@@ -116,6 +116,18 @@ markdown_extensions:
   # def_list renders the "term / : definition" lists the nuclear_data_to_arrow
   # pages use; without it they come out as stray colons.
   - def_list
+  # The nuclear data citations are shared with the yani docs, from ../shared:
+  # cite-nuclear-data.md is the section the libraries page includes, and
+  # citation-links.md defines a reference link per library ([cite-endf-b8.1]
+  # and so on, with the citation as hover text), appended to every page so
+  # any page can link a library's name to its reference. attr_list gives the
+  # citation headings their fixed anchors; details folds the BibTeX block.
+  - attr_list
+  - pymdownx.details
+  - pymdownx.snippets:
+      base_path: [../shared]
+      auto_append: [citation-links.md]
+      check_paths: true
   - pymdownx.superfences:
       custom_fences:
         # ```mermaid fences, which the converter's format diagrams use.

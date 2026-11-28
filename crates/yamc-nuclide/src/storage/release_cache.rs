@@ -171,6 +171,8 @@ impl CachedRelease {
             converters: self.release.manifest.converters.clone(),
             locally_processed: false,
             library: String::new(),
+            citations: super::credits::citations(&self.release.manifest.keyword),
+            terms: super::credits::terms(&self.release.manifest.keyword),
         }
     }
 }

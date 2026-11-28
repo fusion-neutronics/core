@@ -19,7 +19,8 @@
 //!
 //! Then the sources are fetched, unpacked and identified, the evaluations are
 //! converted, the chain is built, the gates run, each particle gets its
-//! `index.json`, and the manifest is written last. A folder with a manifest
+//! `index.json`, the release gets its `NOTICE.md` (who made the library and
+//! what to cite), and the manifest is written last. A folder with a manifest
 //! is a complete release: the manifest of an earlier run is removed when a
 //! run starts, and none is written when a gate fails.
 
@@ -35,7 +36,7 @@ use yamc_nuclide::storage::release;
 use crate::convert::{self, Particle};
 use crate::recipe::{self, Part, Recipe, Sublibrary};
 use crate::sources::{self, Search};
-use crate::{chain, extract, gates, identify, index};
+use crate::{chain, extract, gates, identify, index, notice};
 
 /// The temperatures neutron data is processed at by default, in Kelvin. The
 /// 0 K grid is kept beside them.
@@ -200,6 +201,7 @@ pub fn generate(request: &Request) -> Result<Report, String> {
     for particle in &particles {
         index::write(root, *particle, recipe.keyword)?;
     }
+    notice::write(root, &scoped, &parts, &release, &converter)?;
 
     let provenance = provenance(request, &parts, temperatures, &fetched, njoy.as_deref());
     let written = release::write_manifest(
